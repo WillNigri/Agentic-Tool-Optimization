@@ -15,7 +15,8 @@
       "Bash(git commit:*)",
       "Bash(export PATH=\"/Users/guilhermenigri/.cargo/bin:$PATH\")",
       "Bash(npm install:*)",
-      "Bash(npx tauri:*)"
+      "Bash(npx tauri:*)",
+      "Bash(gh api:*)"
     ]
   }
 }
