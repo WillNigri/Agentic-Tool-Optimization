@@ -13,12 +13,15 @@ import * as mock from './mock-data';
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
-// Check if cloud API is reachable (cached)
+// Check if cloud API is reachable (cached, fast fail)
 let cloudAvailable: boolean | null = null;
 async function isCloudAvailable(): Promise<boolean> {
   if (cloudAvailable !== null) return cloudAvailable;
   try {
-    const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(2000) });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    const res = await fetch(`${API_BASE}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
     cloudAvailable = res.ok;
   } catch {
     cloudAvailable = false;

@@ -10,9 +10,10 @@ export default function SkillsManager() {
   const [search, setSearch] = useState("");
   const queryClient = useQueryClient();
 
-  const { data: skills = [], isLoading } = useQuery({
+  const { data: skills = [], isLoading, error } = useQuery({
     queryKey: ["skills"],
     queryFn: getSkills,
+    retry: false,
   });
 
   const toggle = useMutation({
@@ -29,6 +30,21 @@ export default function SkillsManager() {
 
   if (isLoading) {
     return <LoadingSkeleton />;
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="section-title mb-1">{t('skills.title')}</h2>
+          <p className="text-cs-muted text-sm">{t('skills.subtitle')}</p>
+        </div>
+        <div className="card text-center py-8">
+          <p className="text-cs-danger text-sm mb-2">{t('common.error')}</p>
+          <p className="text-cs-muted text-xs">{String(error)}</p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -108,7 +124,7 @@ function SkillGroup({
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <span className="text-xs text-cs-muted">
-                {t('skills.tokens', { count: formatNumber(skill.tokenCount) })}
+                {formatNumber(skill.tokenCount)} tokens
               </span>
               <button
                 onClick={() => onToggle(skill.id, !skill.enabled)}
