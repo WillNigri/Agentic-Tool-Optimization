@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build core packages
+        run: |
+          npm run build -w packages/core
+          npm run build -w packages/db
+
+      - name: Build MCP server
+        run: npm run build -w services/mcp-server
+
+      - name: Type check desktop frontend
+        working-directory: apps/desktop
+        run: npx tsc --noEmit
+
+  check-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev
+
+      - name: Check Rust
+        working-directory: apps/desktop/src-tauri
+        run: cargo check
