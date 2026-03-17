@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:agenticsearchoptimization.ai)",
+      "Bash(cp frontend/src/components/*.tsx apps/desktop/src/components/)",
+      "Bash(cp frontend/src/hooks/*.ts apps/desktop/src/hooks/)",
+      "Bash(cp frontend/src/lib/*.ts apps/desktop/src/lib/)",
+      "Bash(cp frontend/src/pages/*.tsx apps/desktop/src/pages/)",
+      "Bash(cp frontend/src/i18n/locales/*.json apps/desktop/src/i18n/locales/)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

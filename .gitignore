@@ -1,0 +1,13 @@
+node_modules/
+dist/
+target/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+.turbo/
+
+# Tauri build artifacts
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

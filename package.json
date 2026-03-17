@@ -1,0 +1,23 @@
+{
+  "name": "ato",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentic Tool Optimization — the control panel for AI coding tools",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:desktop": "npm run tauri:dev -w apps/desktop",
+    "build:desktop": "npm run tauri:build -w apps/desktop",
+    "dev:mcp": "npm run dev -w services/mcp-server",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "eslint . --ext .ts,.tsx",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
