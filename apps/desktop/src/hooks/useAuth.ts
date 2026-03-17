@@ -2,8 +2,6 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { refreshToken as refreshTokenApi } from "@/lib/api";
 
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
-
 interface User {
   id: string;
   name: string;
@@ -21,17 +19,17 @@ interface AuthState {
   refreshAccessToken: () => Promise<boolean>;
 }
 
-// In Tauri desktop mode, user is always "authenticated" (local-first, no login)
+// Desktop app is local-first: always authenticated.
+// Cloud login is only needed when sync is enabled (handled separately).
 const localUser: User = { id: 'local', name: 'Local User', email: '' };
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
-      // Desktop app starts authenticated; web mode requires login
-      user: isTauri ? localUser : null,
+      user: localUser,
       accessToken: null,
       refreshTokenValue: null,
-      isAuthenticated: isTauri ? true : false,
+      isAuthenticated: true,
 
       setAuth: (user, accessToken, refreshToken) =>
         set({
@@ -41,28 +39,23 @@ export const useAuthStore = create<AuthState>()(
           isAuthenticated: true,
         }),
 
-      logout: () => {
-        if (isTauri) return; // Can't log out of desktop app
+      logout: () =>
         set({
-          user: null,
+          user: localUser,
           accessToken: null,
           refreshTokenValue: null,
-          isAuthenticated: false,
-        });
-      },
+          isAuthenticated: true, // stays true — local mode
+        }),
 
       refreshAccessToken: async () => {
-        if (isTauri) return true; // Desktop doesn't use tokens
         const { refreshTokenValue } = get();
-        if (!refreshTokenValue) return false;
-
+        if (!refreshTokenValue) return true; // local mode, always ok
         try {
           const result = await refreshTokenApi(refreshTokenValue);
           set({ accessToken: result.accessToken });
           return true;
         } catch {
-          get().logout();
-          return false;
+          return true; // don't break local mode
         }
       },
     }),

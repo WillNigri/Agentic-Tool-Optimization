@@ -9,7 +9,13 @@
       "Bash(cp frontend/src/pages/*.tsx apps/desktop/src/pages/)",
       "Bash(cp frontend/src/i18n/locales/*.json apps/desktop/src/i18n/locales/)",
       "Bash(git branch:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(npm run:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(export PATH=\"/Users/guilhermenigri/.cargo/bin:$PATH\")",
+      "Bash(npm install:*)",
+      "Bash(npx tauri:*)"
     ]
   }
 }
