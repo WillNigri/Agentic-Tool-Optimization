@@ -1,13 +1,23 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store } from "lucide-react";
+import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe } from "lucide-react";
 import { getSkills, toggleSkill, type Skill } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
 import { analyzeSkillConflicts, type SkillConflict } from "@/lib/skill-similarity";
 import SkillDetailPanel from "./SkillDetailPanel";
 import CreateSkillModal from "./CreateSkillModal";
 import MarketplaceGrid from "./MarketplaceGrid";
+
+const RUNTIME_FILTERS = [
+  { id: "all" as const, label: "All", icon: null },
+  { id: "claude" as const, label: "Claude", icon: Terminal, color: "#f97316" },
+  { id: "codex" as const, label: "Codex", icon: Cpu, color: "#22c55e" },
+  { id: "openclaw" as const, label: "OpenClaw", icon: Server, color: "#06b6d4" },
+  { id: "hermes" as const, label: "Hermes", icon: Globe, color: "#a855f7" },
+] as const;
+
+type RuntimeFilter = typeof RUNTIME_FILTERS[number]["id"];
 
 const SCOPE_ORDER = ["enterprise", "personal", "project", "plugin"] as const;
 
@@ -23,6 +33,7 @@ type SkillsTab = "my-skills" | "marketplace";
 export default function SkillsManager() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<SkillsTab>("my-skills");
+  const [runtimeFilter, setRuntimeFilter] = useState<RuntimeFilter>("all");
   const [search, setSearch] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -40,9 +51,20 @@ export default function SkillsManager() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["skills"] }),
   });
 
-  const filtered = skills.filter((s) =>
-    s.name.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = skills.filter((s) => {
+    const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase());
+    const matchesRuntime = runtimeFilter === "all" || s.runtime === runtimeFilter;
+    return matchesSearch && matchesRuntime;
+  });
+
+  // Get unique runtimes that have skills (for showing runtime counts)
+  const runtimeCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const s of skills) {
+      counts[s.runtime] = (counts[s.runtime] || 0) + 1;
+    }
+    return counts;
+  }, [skills]);
 
   const groupedSkills = SCOPE_ORDER.map((scope) => ({
     scope,
@@ -119,6 +141,37 @@ export default function SkillsManager() {
           <MarketplaceGrid />
         ) : (
           <>
+            {/* Runtime filter */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {RUNTIME_FILTERS.map((rf) => {
+                const count = rf.id === "all" ? skills.length : (runtimeCounts[rf.id] || 0);
+                const Icon = rf.icon;
+                // Skip runtimes with 0 skills (except "all")
+                if (rf.id !== "all" && count === 0) return null;
+                return (
+                  <button
+                    key={rf.id}
+                    onClick={() => setRuntimeFilter(rf.id)}
+                    className={cn(
+                      "flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-full border transition-colors",
+                      runtimeFilter === rf.id
+                        ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
+                        : "border-cs-border text-cs-muted hover:text-cs-text"
+                    )}
+                    style={
+                      runtimeFilter === rf.id && rf.id !== "all"
+                        ? { borderColor: `${rf.color}66`, background: `${rf.color}18`, color: rf.color }
+                        : undefined
+                    }
+                  >
+                    {Icon && <Icon size={11} />}
+                    {rf.label}
+                    <span className="text-[9px] opacity-60">({count})</span>
+                  </button>
+                );
+              })}
+            </div>
+
             {/* Priority legend */}
             <PriorityIndicator />
 

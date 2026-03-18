@@ -34,6 +34,7 @@ export interface LocalSkill {
   description: string;
   filePath: string;
   scope: SkillScope;
+  runtime: 'claude' | 'codex' | 'openclaw' | 'hermes';
   tokenCount: number;
   enabled: boolean;
   contentHash: string;
