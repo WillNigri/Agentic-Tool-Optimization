@@ -1,108 +1,123 @@
 // ---------------------------------------------------------------------------
-// Convert skills with multi-step workflows into visual automation flows
+// Auto-detect automation flows from skill content by parsing Step/Phase headers
 // ---------------------------------------------------------------------------
 
 import type { Workflow, FlowNode, FlowEdge } from "@/components/automation/types";
-import type { LocalSkill } from "@/lib/tauri-api";
+import type { SkillDetail } from "@/lib/tauri-api";
 
 interface ParsedStep {
   label: string;
   description: string;
-  type: FlowNode["type"];
-  service?: string;
+  original: string; // raw header text
 }
 
 /**
- * Known gstack-style workflow skills and their step breakdowns.
- * These map skill names to their multi-step automation flows.
+ * Parse a SKILL.md's content for sequential steps or phases.
+ * Detects patterns like:
+ *   ## Step 0: Detect base branch
+ *   ## Phase 1: Root Cause Investigation
+ *   ## Step 3.5: Pre-Landing Review
  */
-const KNOWN_WORKFLOWS: Record<string, ParsedStep[]> = {
-  ship: [
-    { label: "Detect Base Branch", description: "Find and merge the base branch", type: "process" },
-    { label: "Run Tests", description: "Execute test suite", type: "action" },
-    { label: "Review Diff", description: "Review all changes against base", type: "decision" },
-    { label: "Bump VERSION", description: "Increment version number", type: "process" },
-    { label: "Update CHANGELOG", description: "Update changelog with changes", type: "process" },
-    { label: "Commit & Push", description: "Commit all changes and push to remote", type: "action" },
-    { label: "Create PR", description: "Create a pull request", type: "service", service: "github" },
-  ],
-  qa: [
-    { label: "Start QA Session", description: "Initialize browser and QA tier", type: "trigger" },
-    { label: "Test User Flows", description: "Systematically test application pages", type: "action" },
-    { label: "Find Bugs", description: "Identify visual, functional, and logic bugs", type: "process" },
-    { label: "Severity Check", description: "Classify bugs by severity tier", type: "decision" },
-    { label: "Fix Bug", description: "Fix bug in source code", type: "action" },
-    { label: "Commit Fix", description: "Atomic commit for each fix", type: "process" },
-    { label: "Re-verify", description: "Verify fix with before/after screenshots", type: "action" },
-    { label: "Health Report", description: "Produce ship-readiness summary", type: "output" },
-  ],
-  review: [
-    { label: "Fetch Diff", description: "Get changed files from PR", type: "trigger", service: "github" },
-    { label: "SQL Safety", description: "Check for SQL injection risks", type: "decision" },
-    { label: "Trust Boundaries", description: "Check LLM trust boundary violations", type: "decision" },
-    { label: "Side Effects", description: "Check conditional side effects", type: "decision" },
-    { label: "Structural Issues", description: "Check for structural code problems", type: "process" },
-    { label: "Post Review", description: "Write review comment on PR", type: "output" },
-  ],
-  "design-review": [
-    { label: "Browse Site", description: "Open and navigate the live site", type: "trigger" },
-    { label: "Visual Audit", description: "Check spacing, hierarchy, consistency", type: "process" },
-    { label: "AI Slop Detection", description: "Find generic AI-generated patterns", type: "decision" },
-    { label: "Fix Issues", description: "Fix visual issues in source code", type: "action" },
-    { label: "Before/After", description: "Take comparison screenshots", type: "process" },
-    { label: "Commit Fix", description: "Atomic commit per visual fix", type: "action" },
-  ],
-  "plan-ceo-review": [
-    { label: "Read Plan", description: "Read and understand the current plan", type: "trigger" },
-    { label: "Challenge Premises", description: "Question assumptions and scope", type: "process" },
-    { label: "Mode Selection", description: "Scope expansion / hold / reduction", type: "decision" },
-    { label: "10-Star Product", description: "Propose the ideal product vision", type: "action" },
-    { label: "Updated Plan", description: "Deliver revised plan", type: "output" },
-  ],
-  "plan-eng-review": [
-    { label: "Read Plan", description: "Read the execution plan", type: "trigger" },
-    { label: "Architecture Review", description: "Review data flow and architecture", type: "process" },
-    { label: "Edge Cases", description: "Identify unhandled edge cases", type: "decision" },
-    { label: "Test Coverage", description: "Review test strategy", type: "process" },
-    { label: "Performance Check", description: "Check for performance issues", type: "decision" },
-    { label: "Locked Plan", description: "Deliver locked-in execution plan", type: "output" },
-  ],
-  retro: [
-    { label: "Analyze Commits", description: "Read commit history for the period", type: "trigger" },
-    { label: "Work Patterns", description: "Analyze coding patterns and velocity", type: "process" },
-    { label: "Per-Person Breakdown", description: "Break down contributions per team member", type: "process" },
-    { label: "Quality Metrics", description: "Assess code quality trends", type: "decision" },
-    { label: "Retro Report", description: "Generate retrospective document", type: "output" },
-  ],
-  "document-release": [
-    { label: "Read Diff", description: "Read all changes since last release", type: "trigger" },
-    { label: "Read Docs", description: "Read all project documentation", type: "process" },
-    { label: "Update README", description: "Sync README with shipped changes", type: "action" },
-    { label: "Update ARCHITECTURE", description: "Update architecture docs", type: "action" },
-    { label: "Update CHANGELOG", description: "Polish changelog entries", type: "action" },
-    { label: "Bump VERSION", description: "Optionally bump version number", type: "process" },
-  ],
-};
+function parseStepsFromContent(content: string): ParsedStep[] {
+  const steps: ParsedStep[] = [];
+  const lines = content.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    // Match "## Step N: Title" or "## Phase N: Title" (with optional sub-numbers like 3.5)
+    const stepMatch = line.match(/^#{1,3}\s+(?:Step|Phase)\s+[\d.]+(?:\s*[:—–-]\s*(.+))?$/i);
+    if (stepMatch) {
+      const title = stepMatch[1]?.trim() || line.replace(/^#{1,3}\s+/, "");
+
+      // Skip boilerplate headers
+      if (title.toLowerCase() === "steps to reproduce") continue;
+      if (title.toLowerCase().startsWith("steps to")) continue;
+
+      // Get the first non-empty line after the header as description
+      let desc = "";
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const nextLine = lines[j].trim();
+        if (nextLine && !nextLine.startsWith("#") && !nextLine.startsWith("```")) {
+          // Clean markdown formatting
+          desc = nextLine
+            .replace(/^\d+\.\s*/, "")
+            .replace(/\*\*/g, "")
+            .replace(/^[-*]\s*/, "")
+            .slice(0, 100);
+          break;
+        }
+      }
+
+      steps.push({
+        label: title,
+        description: desc,
+        original: line,
+      });
+    }
+  }
+
+  return steps;
+}
 
 /**
- * Convert a skill to a visual workflow if it has known automation steps.
+ * Infer node type from step label/description.
  */
-export function skillToWorkflow(skill: LocalSkill): Workflow | null {
-  const steps = KNOWN_WORKFLOWS[skill.name];
-  if (!steps) return null;
+function inferNodeType(label: string, _desc: string, index: number, total: number): FlowNode["type"] {
+  const lower = label.toLowerCase();
 
-  const nodes: FlowNode[] = steps.map((step, i) => ({
-    id: `${skill.name}-step-${i}`,
-    label: step.label,
-    description: step.description,
-    type: step.type,
-    service: step.service,
-    runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
-    x: 50 + i * 230,
-    y: 180,
-    stats: { executions: 0, errors: 0, avgTimeMs: 0 },
-    status: "idle",
-  }));
+  if (index === 0) return "trigger";
+  if (index === total - 1) {
+    if (lower.includes("report") || lower.includes("output") || lower.includes("commit") || lower.includes("push")) return "output";
+  }
+
+  if (lower.includes("check") || lower.includes("review") || lower.includes("verify") || lower.includes("audit") || lower.includes("triage") || lower.includes("gate")) return "decision";
+  if (lower.includes("fix") || lower.includes("run") || lower.includes("test") || lower.includes("execute") || lower.includes("implement")) return "action";
+  if (lower.includes("create pr") || lower.includes("github") || lower.includes("push")) return "service";
+
+  return "process";
+}
+
+/**
+ * Infer service from step label.
+ */
+function inferService(label: string): string | undefined {
+  const lower = label.toLowerCase();
+  if (lower.includes("pr") || lower.includes("github") || lower.includes("branch") || lower.includes("push") || lower.includes("diff")) return "github";
+  if (lower.includes("slack") || lower.includes("notify")) return "slack";
+  return undefined;
+}
+
+/**
+ * Convert a skill with its full content to a visual workflow.
+ * Returns null if the skill has no detectable steps/phases.
+ */
+export function skillToWorkflow(skill: SkillDetail): Workflow | null {
+  const steps = parseStepsFromContent(skill.content);
+
+  // Need at least 2 steps to form a flow
+  if (steps.length < 2) return null;
+
+  // Cap at 12 steps for visual clarity (skip sub-steps like 3.25, 3.5)
+  const mainSteps = steps.length > 12
+    ? steps.filter((_, i) => i % Math.ceil(steps.length / 12) === 0 || i === steps.length - 1).slice(0, 12)
+    : steps;
+
+  const nodes: FlowNode[] = mainSteps.map((step, i) => {
+    const nodeType = inferNodeType(step.label, step.description, i, mainSteps.length);
+    return {
+      id: `${skill.id}-step-${i}`,
+      label: step.label,
+      description: step.description,
+      type: nodeType,
+      service: inferService(step.label),
+      runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
+      x: 50 + i * 230,
+      y: 180,
+      stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+      status: "idle",
+    };
+  });
 
   const edges: FlowEdge[] = [];
   for (let i = 0; i < nodes.length - 1; i++) {
@@ -114,9 +129,9 @@ export function skillToWorkflow(skill: LocalSkill): Workflow | null {
   }
 
   return {
-    id: `skill-${skill.name}`,
+    id: `skill-${skill.id}`,
     name: `/${skill.name}`,
-    description: skill.description,
+    description: skill.description.split("\n")[0].trim(),
     enabled: skill.enabled,
     runCount: 0,
     errorCount: 0,
@@ -126,9 +141,10 @@ export function skillToWorkflow(skill: LocalSkill): Workflow | null {
 }
 
 /**
- * Generate workflows from all skills that have known automation patterns.
+ * Generate workflows from all skills that have detectable automation steps.
+ * Requires full SkillDetail (with content) for each skill.
  */
-export function generateWorkflowsFromSkills(skills: LocalSkill[]): Workflow[] {
+export function generateWorkflowsFromSkills(skills: SkillDetail[]): Workflow[] {
   return skills
     .map(skillToWorkflow)
     .filter((w): w is Workflow => w !== null);

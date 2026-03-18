@@ -12,8 +12,9 @@ import NodeConfigPanel from "./automation/NodeConfigPanel";
 import FlowCanvas from "./automation/FlowCanvas";
 import ExecutionOverlay from "./automation/ExecutionOverlay";
 import { promptAgent, saveWorkflow as persistWorkflow } from "@/lib/tauri-api";
-import { getSkills } from "@/lib/api";
+import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
+import type { SkillDetail } from "@/lib/tauri-api";
 
 export default function AutomationFlow() {
   const { t } = useTranslation();
@@ -33,6 +34,7 @@ export default function AutomationFlow() {
   } = useAutomationStore();
 
   // Load skill-based workflows (gstack etc.) on mount
+  // Fetch skill list, then load details for each to parse automation steps
   const { data: skills = [] } = useQuery({
     queryKey: ["skills"],
     queryFn: getSkills,
@@ -40,11 +42,17 @@ export default function AutomationFlow() {
 
   useEffect(() => {
     if (skills.length > 0 && workflows.length === 0) {
-      const skillWorkflows = generateWorkflowsFromSkills(skills);
-      if (skillWorkflows.length > 0) {
-        const store = useAutomationStore.getState();
-        store.loadWorkflows(skillWorkflows);
-      }
+      // Fetch full content for each skill to detect automation steps
+      Promise.all(
+        skills.map((s) => getSkillDetail(s.id).catch(() => null))
+      ).then((details) => {
+        const validDetails = details.filter((d): d is SkillDetail => d !== null);
+        const skillWorkflows = generateWorkflowsFromSkills(validDetails);
+        if (skillWorkflows.length > 0) {
+          const store = useAutomationStore.getState();
+          store.loadWorkflows(skillWorkflows);
+        }
+      });
     }
   }, [skills, workflows.length]);
 
