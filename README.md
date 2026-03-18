@@ -24,7 +24,7 @@ Full two-way communication with all runtimes. Auto-detects installed CLIs, verif
 ### Skills Manager
 - **Per-runtime tabs** — filter by Claude / Codex / OpenClaw / Hermes
 - Reads real files from each runtime's skill directories
-- Recursive scanning (supports gstack-style nested directories)
+- Recursive scanning (handles nested skill directories)
 - Drag-and-drop priority ordering within scope groups
 - Conflict detection when skill descriptions overlap
 - Create, edit, delete skills — writes to correct runtime directory
@@ -40,8 +40,7 @@ Full two-way communication with all runtimes. Auto-detects installed CLIs, verif
 - Auto-improve: AI rewrites skills with diff preview
 
 ### Automation Builder
-- **Auto-detects flows from installed skills** — parses `## Step` and `## Phase` headers
-- Works with gstack (`/ship`, `/qa`, `/review`, `/design-review`, etc.) and any skill pack
+- **Auto-detects flows from installed skills** — parses `## Step` and `## Phase` headers from any skill pack
 - Per-node runtime selection — mix Claude + Codex in one workflow
 - Visual drag-and-drop editor with decision branching
 - Run button dispatches to correct runtime
