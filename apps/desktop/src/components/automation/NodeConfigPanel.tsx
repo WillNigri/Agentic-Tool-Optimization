@@ -1,9 +1,16 @@
 import { useTranslation } from "react-i18next";
-import { Trash2, Globe, Activity } from "lucide-react";
+import { Trash2, Globe, Activity, Terminal, Cpu, Server } from "lucide-react";
 import { CONFIG_PANEL_W, TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./constants";
 import { SERVICE_ACTIONS } from "./service-catalog";
 import { useAutomationStore } from "@/stores/useAutomationStore";
-import type { FlowNode } from "./types";
+import type { FlowNode, AgentRuntime } from "./types";
+
+const RUNTIMES: { id: AgentRuntime; label: string; color: string; Icon: typeof Terminal }[] = [
+  { id: "claude", label: "Claude", color: "#f97316", Icon: Terminal },
+  { id: "codex", label: "Codex", color: "#22c55e", Icon: Cpu },
+  { id: "openclaw", label: "OpenClaw", color: "#06b6d4", Icon: Server },
+  { id: "hermes", label: "Hermes", color: "#a855f7", Icon: Globe },
+];
 
 interface NodeConfigPanelProps {
   node: FlowNode;
@@ -178,6 +185,33 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
             )}
           </div>
         ))}
+
+        {/* Runtime selector for action/process nodes */}
+        {(node.type === "action" || node.type === "process") && (
+          <div className="mb-3">
+            <label className="block text-[10px] text-[#8888a0] uppercase tracking-wider mb-1 font-medium">
+              Runtime
+            </label>
+            <div className="grid grid-cols-2 gap-1.5">
+              {RUNTIMES.map(({ id, label, color, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => updateNode(node.id, { runtime: id })}
+                  className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] font-medium rounded-md border transition-colors"
+                  style={
+                    (node.runtime || "claude") === id
+                      ? { borderColor: `${color}66`, background: `${color}18`, color }
+                      : { borderColor: "#2a2a3a", color: "#8888a0" }
+                  }
+                >
+                  <Icon size={12} />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Condition field for decision nodes */}
         {node.type === "decision" && (

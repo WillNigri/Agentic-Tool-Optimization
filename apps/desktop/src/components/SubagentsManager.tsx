@@ -12,8 +12,12 @@ import {
   Link2,
   ChevronRight,
   Cpu,
+  Terminal,
+  Server,
+  Globe,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { AgentRuntime, OpenClawConfig, CodexConfig, HermesConfig } from "@/components/cron/types";
 
 // ---------------------------------------------------------------------------
 // Types & mock data
@@ -24,6 +28,8 @@ interface Subagent {
   name: string;
   description: string;
   type: "general-purpose" | "Explore" | "Plan" | "custom";
+  runtime: AgentRuntime;
+  runtimeConfig?: OpenClawConfig | CodexConfig | HermesConfig;
   skills: string[];
   allowedTools: string[];
   model?: string;
@@ -43,6 +49,7 @@ const AVAILABLE_SKILLS = [
 ];
 
 const AGENT_TYPES: Subagent["type"][] = ["general-purpose", "Explore", "Plan", "custom"];
+const RUNTIMES: AgentRuntime[] = ["claude", "codex", "openclaw", "hermes"];
 
 const MOCK_SUBAGENTS: Subagent[] = [
   {
@@ -50,6 +57,7 @@ const MOCK_SUBAGENTS: Subagent[] = [
     name: "code-reviewer",
     description: "Reviews code changes for quality, consistency, and adherence to project conventions.",
     type: "general-purpose",
+    runtime: "claude",
     skills: ["code-review", "project-conventions"],
     allowedTools: ["Read", "Grep", "Glob"],
     enabled: true,
@@ -59,6 +67,7 @@ const MOCK_SUBAGENTS: Subagent[] = [
     name: "ts-architect",
     description: "Plans TypeScript architecture decisions, module boundaries, and type structures.",
     type: "Plan",
+    runtime: "claude",
     skills: ["typescript-expert"],
     allowedTools: ["Read", "Write", "Bash", "Glob"],
     model: "claude-sonnet-4-5",
@@ -69,6 +78,8 @@ const MOCK_SUBAGENTS: Subagent[] = [
     name: "codebase-explorer",
     description: "Navigates and summarises large codebases to answer structural questions.",
     type: "Explore",
+    runtime: "codex",
+    runtimeConfig: { apiKeyPath: "~/.config/codex/api-key" } as CodexConfig,
     skills: [],
     allowedTools: ["Read", "Grep", "Glob"],
     enabled: true,
@@ -78,9 +89,11 @@ const MOCK_SUBAGENTS: Subagent[] = [
     name: "deploy-helper",
     description: "Assists with CI/CD pipelines, deployment scripts, and release workflows.",
     type: "custom",
+    runtime: "openclaw",
+    runtimeConfig: { sshHost: "dev.internal", sshPort: 22, sshUser: "deploy" } as OpenClawConfig,
     skills: ["api-guidelines"],
     allowedTools: ["Read", "Bash"],
-    instructions: "Focus on CI/CD pipelines and deployment automation. Always validate environment variables before running scripts. Prefer non-destructive dry-run flags when available.",
+    instructions: "Focus on CI/CD pipelines and deployment automation. Always validate environment variables before running scripts.",
     enabled: false,
   },
 ];
@@ -103,6 +116,20 @@ const TYPE_COLOR: Record<Subagent["type"], string> = {
   custom: "border-rose-500/40 bg-rose-500/10 text-rose-400",
 };
 
+const RUNTIME_COLOR: Record<AgentRuntime, string> = {
+  claude: "border-orange-500/40 bg-orange-500/10 text-orange-400",
+  codex: "border-green-500/40 bg-green-500/10 text-green-400",
+  openclaw: "border-cyan-500/40 bg-cyan-500/10 text-cyan-400",
+  hermes: "border-purple-500/40 bg-purple-500/10 text-purple-400",
+};
+
+const RUNTIME_ICON: Record<AgentRuntime, typeof Bot> = {
+  claude: Terminal,
+  codex: Cpu,
+  openclaw: Server,
+  hermes: Globe,
+};
+
 function TypeBadge({ type }: { type: Subagent["type"] }) {
   const Icon = TYPE_ICON[type];
   return (
@@ -115,6 +142,180 @@ function TypeBadge({ type }: { type: Subagent["type"] }) {
       <Icon size={12} />
       {type}
     </span>
+  );
+}
+
+function RuntimeBadge({ runtime }: { runtime: AgentRuntime }) {
+  const Icon = RUNTIME_ICON[runtime];
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full border",
+        RUNTIME_COLOR[runtime]
+      )}
+    >
+      <Icon size={12} />
+      {runtime}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Config Fields
+// ---------------------------------------------------------------------------
+
+function RuntimeConfigFields({
+  runtime,
+  config,
+  onChange,
+}: {
+  runtime: AgentRuntime;
+  config?: OpenClawConfig | CodexConfig | HermesConfig;
+  onChange: (config: OpenClawConfig | CodexConfig | HermesConfig) => void;
+}) {
+  const { t } = useTranslation();
+
+  if (runtime === "claude") return null;
+
+  if (runtime === "openclaw") {
+    const oc = (config as OpenClawConfig) || { sshHost: "", sshPort: 22 };
+    return (
+      <div className="space-y-2 p-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5">
+        <p className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wider">
+          OpenClaw SSH Config
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.sshHost")}</label>
+            <input
+              type="text"
+              className="input text-xs"
+              placeholder="host.example.com"
+              value={oc.sshHost || ""}
+              onChange={(e) => onChange({ ...oc, sshHost: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.sshPort")}</label>
+            <input
+              type="number"
+              className="input text-xs"
+              placeholder="22"
+              value={oc.sshPort || 22}
+              onChange={(e) => onChange({ ...oc, sshPort: parseInt(e.target.value) || 22 })}
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.sshUser")}</label>
+            <input
+              type="text"
+              className="input text-xs"
+              placeholder="root"
+              value={oc.sshUser || ""}
+              onChange={(e) => onChange({ ...oc, sshUser: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.sshKeyPath")}</label>
+            <input
+              type="text"
+              className="input text-xs"
+              placeholder="~/.ssh/id_rsa"
+              value={oc.sshKeyPath || ""}
+              onChange={(e) => onChange({ ...oc, sshKeyPath: e.target.value })}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (runtime === "codex") {
+    const cx = (config as CodexConfig) || {};
+    return (
+      <div className="p-3 rounded-lg border border-green-500/20 bg-green-500/5">
+        <p className="text-[10px] font-semibold text-green-400 uppercase tracking-wider mb-2">
+          Codex Config
+        </p>
+        <div>
+          <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.apiKeyPath")}</label>
+          <input
+            type="text"
+            className="input text-xs"
+            placeholder="~/.config/codex/api-key"
+            value={cx.apiKeyPath || ""}
+            onChange={(e) => onChange({ apiKeyPath: e.target.value })}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (runtime === "hermes") {
+    const hm = (config as HermesConfig) || {};
+    return (
+      <div className="p-3 rounded-lg border border-purple-500/20 bg-purple-500/5">
+        <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-2">
+          Hermes Config
+        </p>
+        <div>
+          <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.endpoint")}</label>
+          <input
+            type="text"
+            className="input text-xs"
+            placeholder="http://localhost:8080"
+            value={hm.endpoint || ""}
+            onChange={(e) => onChange({ endpoint: e.target.value })}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Selector (4 colored buttons)
+// ---------------------------------------------------------------------------
+
+function RuntimeSelector({
+  value,
+  onChange,
+}: {
+  value: AgentRuntime;
+  onChange: (runtime: AgentRuntime) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div>
+      <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
+        {t("subagents.runtime")}
+      </label>
+      <div className="grid grid-cols-4 gap-2">
+        {RUNTIMES.map((rt) => {
+          const Icon = RUNTIME_ICON[rt];
+          return (
+            <button
+              key={rt}
+              type="button"
+              onClick={() => onChange(rt)}
+              className={cn(
+                "flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium rounded-lg border transition-colors",
+                value === rt
+                  ? RUNTIME_COLOR[rt]
+                  : "border-cs-border text-cs-muted hover:text-cs-text"
+              )}
+            >
+              <Icon size={14} />
+              {t(`subagents.runtimes.${rt}`)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -191,7 +392,7 @@ export default function SubagentsManager() {
               <div className="flex items-start justify-between gap-4">
                 {/* Left content */}
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span
                       className={cn(
                         "w-2 h-2 rounded-full shrink-0",
@@ -200,6 +401,7 @@ export default function SubagentsManager() {
                     />
                     <p className="text-sm font-medium truncate">{sa.name}</p>
                     <TypeBadge type={sa.type} />
+                    <RuntimeBadge runtime={sa.runtime} />
                     {sa.model && (
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono rounded border border-cs-border text-cs-muted">
                         <Cpu size={10} />
@@ -350,10 +552,11 @@ function SubagentDetailPanel({
         {/* Header */}
         <div className="flex items-start justify-between p-4 border-b border-cs-border">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Bot size={18} className="text-cs-accent shrink-0" />
               <h3 className="text-lg font-semibold truncate">{subagent.name}</h3>
               <TypeBadge type={subagent.type} />
+              <RuntimeBadge runtime={draft.runtime} />
             </div>
             {subagent.model && (
               <p className="text-xs text-cs-muted font-mono mt-1 flex items-center gap-1">
@@ -385,19 +588,33 @@ function SubagentDetailPanel({
             />
           </div>
 
+          {/* Runtime selector */}
+          <RuntimeSelector
+            value={draft.runtime}
+            onChange={(runtime) =>
+              setDraft((d) => ({ ...d, runtime, runtimeConfig: undefined }))
+            }
+          />
+
+          {/* Runtime config fields */}
+          <RuntimeConfigFields
+            runtime={draft.runtime}
+            config={draft.runtimeConfig}
+            onChange={(config) => setDraft((d) => ({ ...d, runtimeConfig: config }))}
+          />
+
           {/* Assigned Skills — prominent section */}
           <div className="rounded-lg border border-cs-accent/30 bg-cs-accent/5 p-4">
             <div className="flex items-center gap-2 mb-3">
               <Link2 size={16} className="text-cs-accent" />
               <h4 className="text-sm font-semibold text-cs-accent uppercase tracking-wider">
-                {t("subagents.assignedSkills")}
+                {t("subagents.skills")}
               </h4>
             </div>
             <p className="text-xs text-cs-muted mb-3">
-              {t("subagents.assignedSkillsHint")}
+              {t("subagents.skillsHint")}
             </p>
 
-            {/* Visual connector */}
             <div className="space-y-2">
               {AVAILABLE_SKILLS.map((skill) => {
                 const assigned = draft.skills.includes(skill);
@@ -463,7 +680,7 @@ function SubagentDetailPanel({
           {/* Model override */}
           <div>
             <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
-              {t("subagents.modelOverride")}
+              {t("subagents.model")}
             </label>
             <select
               className="input"
@@ -475,7 +692,7 @@ function SubagentDetailPanel({
                 }))
               }
             >
-              <option value="">{t("subagents.defaultModel")}</option>
+              <option value="">{t("subagents.anyModel")}</option>
               {AVAILABLE_MODELS.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -487,7 +704,7 @@ function SubagentDetailPanel({
           {/* Custom instructions */}
           <div>
             <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
-              {t("subagents.customInstructions")}
+              {t("subagents.instructions")}
             </label>
             <textarea
               className="w-full h-32 p-3 bg-cs-bg border border-cs-border rounded-lg text-sm font-mono text-cs-text resize-y focus:outline-none focus:border-cs-accent"
@@ -538,6 +755,8 @@ function CreateSubagentModal({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [type, setType] = useState<Subagent["type"]>("general-purpose");
+  const [runtime, setRuntime] = useState<AgentRuntime>("claude");
+  const [runtimeConfig, setRuntimeConfig] = useState<OpenClawConfig | CodexConfig | HermesConfig | undefined>();
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [model, setModel] = useState("");
@@ -564,6 +783,8 @@ function CreateSubagentModal({
       name: name.trim(),
       description: description.trim(),
       type,
+      runtime,
+      runtimeConfig,
       skills: selectedSkills,
       allowedTools: selectedTools,
       model: model || undefined,
@@ -640,6 +861,22 @@ function CreateSubagentModal({
               </div>
             </div>
 
+            {/* Runtime selector */}
+            <RuntimeSelector
+              value={runtime}
+              onChange={(rt) => {
+                setRuntime(rt);
+                setRuntimeConfig(undefined);
+              }}
+            />
+
+            {/* Runtime config */}
+            <RuntimeConfigFields
+              runtime={runtime}
+              config={runtimeConfig}
+              onChange={setRuntimeConfig}
+            />
+
             {/* Description */}
             <div>
               <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
@@ -650,7 +887,6 @@ function CreateSubagentModal({
                 className="input"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder={t("subagents.descriptionPlaceholder")}
               />
             </div>
 
@@ -659,7 +895,7 @@ function CreateSubagentModal({
               <div className="flex items-center gap-2 mb-2">
                 <Link2 size={14} className="text-cs-accent" />
                 <label className="text-xs font-semibold text-cs-accent uppercase tracking-wider">
-                  {t("subagents.assignedSkills")}
+                  {t("subagents.skills")}
                 </label>
               </div>
               <div className="space-y-1.5">
@@ -721,14 +957,14 @@ function CreateSubagentModal({
             {/* Model */}
             <div>
               <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
-                {t("subagents.modelOverride")}
+                {t("subagents.model")}
               </label>
               <select
                 className="input"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
               >
-                <option value="">{t("subagents.defaultModel")}</option>
+                <option value="">{t("subagents.anyModel")}</option>
                 {AVAILABLE_MODELS.map((m) => (
                   <option key={m} value={m}>
                     {m}
@@ -740,7 +976,7 @@ function CreateSubagentModal({
             {/* Custom instructions */}
             <div>
               <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
-                {t("subagents.customInstructions")}
+                {t("subagents.instructions")}
               </label>
               <textarea
                 className="w-full h-32 p-3 bg-cs-bg border border-cs-border rounded-lg text-sm font-mono text-cs-text resize-y focus:outline-none focus:border-cs-accent"

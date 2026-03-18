@@ -10,7 +10,7 @@ import NodePalette from "./automation/NodePalette";
 import NodeConfigPanel from "./automation/NodeConfigPanel";
 import FlowCanvas from "./automation/FlowCanvas";
 import ExecutionOverlay from "./automation/ExecutionOverlay";
-import { promptClaude, saveWorkflow as persistWorkflow, loadWorkflows } from "@/lib/tauri-api";
+import { promptAgent, saveWorkflow as persistWorkflow, loadWorkflows } from "@/lib/tauri-api";
 
 export default function AutomationFlow() {
   const { t } = useTranslation();
@@ -57,7 +57,10 @@ export default function AutomationFlow() {
     }
 
     try {
-      const response = await promptClaude(prompt);
+      // Use the dominant runtime from action nodes, fallback to claude
+      const actionNodes = workflow.nodes.filter((n) => n.type === "action" || n.type === "process");
+      const runtime = actionNodes.find((n) => n.runtime)?.runtime || "claude";
+      const response = await promptAgent(runtime, prompt);
 
       // Parse step markers from response
       const lines = response.split("\n");
