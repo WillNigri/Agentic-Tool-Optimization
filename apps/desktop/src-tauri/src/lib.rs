@@ -1,63 +1,137 @@
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
-// ── Types ──────────────────────────────────────────────────────────────────
+// ── Types matching frontend expectations ─────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Skill {
+#[serde(rename_all = "camelCase")]
+pub struct LocalSkill {
+    pub id: String,
     pub name: String,
-    pub path: String,
+    pub description: String,
+    pub file_path: String,
+    pub scope: String,       // "enterprise" | "personal" | "project" | "plugin"
+    pub token_count: u64,
+    pub enabled: bool,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDetail {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub file_path: String,
+    pub scope: String,
+    pub token_count: u64,
+    pub enabled: bool,
+    pub content_hash: String,
     pub content: String,
+    pub frontmatter: serde_json::Value,
+    pub has_scripts: bool,
+    pub has_references: bool,
+    pub has_assets: bool,
+    pub scripts: Vec<String>,
+    pub references: Vec<String>,
+    pub assets: Vec<String>,
+    pub is_directory: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalConfig {
-    pub settings_path: String,
-    pub settings: serde_json::Value,
-    pub projects: Vec<String>,
+#[serde(rename_all = "camelCase")]
+pub struct ContextBreakdown {
+    pub total_tokens: u64,
+    pub limit: u64,
+    pub categories: Vec<ContextCategory>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UsageEntry {
-    pub timestamp: String,
-    pub model: String,
+pub struct ContextCategory {
+    pub name: String,
+    pub tokens: u64,
+    pub color: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMcpServer {
+    pub id: String,
+    pub name: String,
+    pub transport: String,
+    pub status: String,
+    pub tool_count: u64,
+    pub command: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub today: UsagePeriod,
+    pub week: UsagePeriod,
+    pub month: UsagePeriod,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsagePeriod {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub cost_usd: f64,
-    pub session_id: String,
+    pub cost_cents: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ContextEstimate {
-    pub total_files: usize,
-    pub total_bytes: u64,
-    pub estimated_tokens: u64,
+#[serde(rename_all = "camelCase")]
+pub struct DailyUsage {
+    pub date: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BurnRate {
+    pub tokens_per_hour: u64,
+    pub cost_per_hour: f64,
+    pub estimated_hours_to_limit: Option<f64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConfigFile {
+    pub path: String,
+    pub exists: bool,
+    pub scope: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyncStatus {
     pub enabled: bool,
-    pub last_synced: Option<String>,
+    #[serde(rename = "lastSyncAt")]
+    pub last_sync_at: Option<String>,
+    #[serde(rename = "cloudUrl")]
+    pub cloud_url: Option<String>,
 }
 
-// ── Database ───────────────────────────────────────────────────────────────
+// ── Database ─────────────────────────────────────────────────────────────
 
 pub struct DbState(pub Mutex<Connection>);
 
 fn get_db_path() -> PathBuf {
-    let mut path = dirs_fallback();
+    let mut path = home_dir();
     path.push(".ato");
     fs::create_dir_all(&path).ok();
     path.push("local.db");
     path
 }
 
-/// Fallback for home directory detection without the `dirs` crate.
-fn dirs_fallback() -> PathBuf {
+fn home_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home)
     } else if let Ok(profile) = std::env::var("USERPROFILE") {
@@ -67,10 +141,6 @@ fn dirs_fallback() -> PathBuf {
     }
 }
 
-fn home_dir() -> PathBuf {
-    dirs_fallback()
-}
-
 fn init_database(conn: &Connection) {
     conn.execute_batch(
         "
@@ -78,29 +148,16 @@ fn init_database(conn: &Connection) {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS usage_cache (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp     TEXT NOT NULL,
-            model         TEXT NOT NULL DEFAULT '',
-            input_tokens  INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0,
-            cost_usd      REAL NOT NULL DEFAULT 0.0,
-            session_id    TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS skills_cache (
-            name    TEXT PRIMARY KEY,
-            path    TEXT NOT NULL,
-            content TEXT NOT NULL,
-            updated TEXT NOT NULL DEFAULT (datetime('now'))
+        CREATE TABLE IF NOT EXISTS skill_toggles (
+            file_path TEXT PRIMARY KEY,
+            enabled   INTEGER NOT NULL DEFAULT 1
         );
         ",
     )
     .expect("Failed to initialize database tables");
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────
 
 fn claude_home() -> PathBuf {
     home_dir().join(".claude")
@@ -110,264 +167,495 @@ fn read_file_lossy(path: &PathBuf) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-fn collect_skills_from(dir: &PathBuf) -> Vec<Skill> {
+/// Estimate tokens from byte count (~4 bytes per token for English)
+fn estimate_tokens(bytes: u64) -> u64 {
+    bytes / 4
+}
+
+/// Simple hash of content for change detection
+fn content_hash(content: &str) -> String {
+    let mut hash: u64 = 5381;
+    for byte in content.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+    }
+    format!("{:x}", hash)
+}
+
+/// Parse YAML-like frontmatter from markdown content
+fn parse_frontmatter(content: &str) -> (serde_json::Value, String) {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        let desc = content.lines()
+            .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        return (serde_json::json!({"description": desc}), content.to_string());
+    }
+
+    let after_first = &trimmed[3..];
+    if let Some(end_idx) = after_first.find("\n---") {
+        let fm_str = &after_first[..end_idx].trim();
+        let body = &after_first[end_idx + 4..];
+
+        let mut fm = serde_json::Map::new();
+        for line in fm_str.lines() {
+            if let Some(colon_pos) = line.find(':') {
+                let key = line[..colon_pos].trim().to_string();
+                let value = line[colon_pos + 1..].trim().to_string();
+                // Handle boolean
+                if value == "true" {
+                    fm.insert(key, serde_json::Value::Bool(true));
+                } else if value == "false" {
+                    fm.insert(key, serde_json::Value::Bool(false));
+                } else {
+                    fm.insert(key, serde_json::Value::String(value));
+                }
+            }
+        }
+
+        // Parse allowed-tools into array
+        if let Some(tools_val) = fm.get("allowed-tools").cloned() {
+            if let Some(tools_str) = tools_val.as_str() {
+                let tools: Vec<serde_json::Value> = tools_str
+                    .split(',')
+                    .map(|t| serde_json::Value::String(t.trim().to_string()))
+                    .filter(|v| v.as_str().map_or(false, |s| !s.is_empty()))
+                    .collect();
+                fm.insert("allowedTools".to_string(), serde_json::Value::Array(tools));
+            }
+        }
+
+        (serde_json::Value::Object(fm), body.to_string())
+    } else {
+        (serde_json::json!({}), content.to_string())
+    }
+}
+
+/// Collect skills from a directory, supporting both single files and SKILL.md directories
+fn collect_skills(dir: &PathBuf, scope: &str, db: &Connection) -> Vec<LocalSkill> {
     let mut skills = Vec::new();
+    if !dir.exists() {
+        return skills;
+    }
+
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                let name = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                let content = read_file_lossy(&path).unwrap_or_default();
-                skills.push(Skill {
-                    name,
-                    path: path.to_string_lossy().to_string(),
-                    content,
-                });
+            let name;
+            let content;
+            let file_path_str;
+            let is_dir;
+
+            if path.is_dir() {
+                // Directory skill — look for SKILL.md
+                let skill_md = path.join("SKILL.md");
+                if !skill_md.exists() {
+                    continue;
+                }
+                name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                content = read_file_lossy(&skill_md).unwrap_or_default();
+                file_path_str = format!("{}/", path.to_string_lossy());
+                is_dir = true;
+            } else if path.extension().map_or(false, |ext| ext == "md") {
+                name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                content = read_file_lossy(&path).unwrap_or_default();
+                file_path_str = path.to_string_lossy().to_string();
+                is_dir = false;
+            } else {
+                continue;
             }
+
+            let (fm, _body) = parse_frontmatter(&content);
+            let description = fm.get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let hash = content_hash(&content);
+            let tokens = estimate_tokens(content.len() as u64);
+
+            // Check toggle state from DB
+            let enabled: bool = db
+                .query_row(
+                    "SELECT enabled FROM skill_toggles WHERE file_path = ?1",
+                    params![&file_path_str],
+                    |row| row.get(0),
+                )
+                .unwrap_or(true); // Default enabled
+
+            let id = content_hash(&file_path_str);
+
+            skills.push(LocalSkill {
+                id,
+                name,
+                description,
+                file_path: file_path_str,
+                scope: scope.to_string(),
+                token_count: tokens,
+                enabled,
+                content_hash: hash,
+            });
         }
     }
+
     skills
 }
 
-// ── Tauri Commands ─────────────────────────────────────────────────────────
+fn list_subdir_files(dir: &PathBuf, subdir: &str) -> (bool, Vec<String>) {
+    let path = dir.join(subdir);
+    if !path.exists() || !path.is_dir() {
+        return (false, Vec::new());
+    }
+    let files: Vec<String> = fs::read_dir(&path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    (true, files)
+}
+
+// ── Tauri Commands ───────────────────────────────────────────────────────
 
 #[tauri::command]
-fn get_local_skills() -> Result<Vec<Skill>, String> {
+fn get_local_skills(db: State<'_, DbState>) -> Result<Vec<LocalSkill>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut skills = Vec::new();
 
-    // Global skills: ~/.claude/skills/
-    let global_skills_dir = claude_home().join("skills");
-    skills.extend(collect_skills_from(&global_skills_dir));
+    // Personal skills: ~/.claude/skills/
+    let personal_dir = claude_home().join("skills");
+    skills.extend(collect_skills(&personal_dir, "personal", &conn));
 
-    // Project-local skills: .claude/skills/ (cwd)
-    let local_skills_dir = PathBuf::from(".claude").join("skills");
-    skills.extend(collect_skills_from(&local_skills_dir));
+    // Project skills: .claude/skills/ (cwd)
+    let project_dir = PathBuf::from(".claude").join("skills");
+    skills.extend(collect_skills(&project_dir, "project", &conn));
+
+    // Enterprise skills: /etc/claude/skills/ (if exists)
+    let enterprise_dir = PathBuf::from("/etc/claude/skills");
+    skills.extend(collect_skills(&enterprise_dir, "enterprise", &conn));
+
+    // Plugin skills: ~/.claude/plugins/*/skills/
+    let plugins_dir = claude_home().join("plugins");
+    if plugins_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&plugins_dir) {
+            for entry in entries.flatten() {
+                let plugin_skills = entry.path().join("skills");
+                if plugin_skills.exists() {
+                    skills.extend(collect_skills(&plugin_skills, "plugin", &conn));
+                }
+            }
+        }
+    }
 
     Ok(skills)
 }
 
 #[tauri::command]
-fn get_local_config() -> Result<LocalConfig, String> {
-    let claude_dir = claude_home();
+fn get_skill_detail(db: State<'_, DbState>, id: String) -> Result<SkillDetail, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    // Try reading the main settings file (~/.claude/settings.json or ~/.claude.json)
-    let settings_candidates = vec![
-        claude_dir.join("settings.json"),
-        home_dir().join(".claude.json"),
-    ];
+    // Find the skill by scanning all directories
+    let all_skills = {
+        let mut s = Vec::new();
+        let personal_dir = claude_home().join("skills");
+        s.extend(collect_skills(&personal_dir, "personal", &conn));
+        let project_dir = PathBuf::from(".claude").join("skills");
+        s.extend(collect_skills(&project_dir, "project", &conn));
+        let enterprise_dir = PathBuf::from("/etc/claude/skills");
+        s.extend(collect_skills(&enterprise_dir, "enterprise", &conn));
+        s
+    };
 
-    let mut settings_path = String::new();
-    let mut settings = serde_json::Value::Null;
+    let skill = all_skills.iter().find(|s| s.id == id)
+        .ok_or_else(|| format!("Skill not found: {}", id))?;
 
-    for candidate in &settings_candidates {
-        if let Some(content) = read_file_lossy(&candidate) {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-                settings_path = candidate.to_string_lossy().to_string();
-                settings = parsed;
-                break;
-            }
-        }
-    }
+    let is_directory = skill.file_path.ends_with('/');
+    let base_path = PathBuf::from(&skill.file_path);
 
-    // Discover project directories by scanning ~/.claude/projects/
-    let mut projects = Vec::new();
-    let projects_dir = claude_dir.join("projects");
-    if let Ok(entries) = fs::read_dir(&projects_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                projects.push(entry.file_name().to_string_lossy().to_string());
-            }
-        }
-    }
+    let content = if is_directory {
+        read_file_lossy(&base_path.join("SKILL.md")).unwrap_or_default()
+    } else {
+        read_file_lossy(&PathBuf::from(&skill.file_path)).unwrap_or_default()
+    };
 
-    Ok(LocalConfig {
-        settings_path,
-        settings,
-        projects,
+    let (frontmatter, _body) = parse_frontmatter(&content);
+
+    let (has_scripts, scripts) = if is_directory { list_subdir_files(&base_path, "scripts") } else { (false, vec![]) };
+    let (has_references, references) = if is_directory { list_subdir_files(&base_path, "references") } else { (false, vec![]) };
+    let (has_assets, assets) = if is_directory { list_subdir_files(&base_path, "assets") } else { (false, vec![]) };
+
+    Ok(SkillDetail {
+        id: skill.id.clone(),
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        file_path: skill.file_path.clone(),
+        scope: skill.scope.clone(),
+        token_count: skill.token_count,
+        enabled: skill.enabled,
+        content_hash: skill.content_hash.clone(),
+        content,
+        frontmatter,
+        has_scripts,
+        has_references,
+        has_assets,
+        scripts,
+        references,
+        assets,
+        is_directory,
     })
 }
 
 #[tauri::command]
-fn get_local_usage() -> Result<Vec<UsageEntry>, String> {
-    let logs_dir = claude_home().join("logs");
-    let mut entries = Vec::new();
-
-    if !logs_dir.exists() {
-        return Ok(entries);
-    }
-
-    let mut log_files: Vec<PathBuf> = Vec::new();
-    if let Ok(dir_entries) = fs::read_dir(&logs_dir) {
-        for entry in dir_entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "jsonl") {
-                log_files.push(path);
-            }
-        }
-    }
-
-    // Sort by name (typically date-based) descending, take recent files
-    log_files.sort();
-    log_files.reverse();
-    let recent_files = &log_files[..log_files.len().min(30)];
-
-    for file_path in recent_files {
-        if let Some(content) = read_file_lossy(file_path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
-                    let entry = UsageEntry {
-                        timestamp: obj
-                            .get("timestamp")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        model: obj
-                            .get("model")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        input_tokens: obj
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        output_tokens: obj
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        cost_usd: obj
-                            .get("cost_usd")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0),
-                        session_id: obj
-                            .get("session_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    };
-                    entries.push(entry);
-                }
-            }
-        }
-    }
-
-    Ok(entries)
+fn toggle_local_skill(db: State<'_, DbState>, file_path: String, enabled: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO skill_toggles (file_path, enabled) VALUES (?1, ?2)
+         ON CONFLICT(file_path) DO UPDATE SET enabled = excluded.enabled",
+        params![file_path, enabled as i32],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
-fn get_context_estimate() -> Result<ContextEstimate, String> {
-    let claude_dir = claude_home();
-    let mut total_files: usize = 0;
-    let mut total_bytes: u64 = 0;
+fn get_context_estimate() -> Result<ContextBreakdown, String> {
+    let mut categories = Vec::new();
+    let mut total: u64 = 0;
 
-    // Estimate based on files that Claude typically loads into context
-    let scan_dirs = vec![
-        claude_dir.join("skills"),
-        PathBuf::from(".claude").join("skills"),
-    ];
+    // System prompts (estimated)
+    let system_tokens: u64 = 28000;
+    categories.push(ContextCategory { name: "System Prompts".into(), tokens: system_tokens, color: "#FF4466".into() });
+    total += system_tokens;
 
-    let config_files = vec![
-        claude_dir.join("settings.json"),
-        home_dir().join(".claude.json"),
-        PathBuf::from("CLAUDE.md"),
-        PathBuf::from(".claude/CLAUDE.md"),
-    ];
-
-    for dir in &scan_dirs {
+    // Skills
+    let personal_dir = claude_home().join("skills");
+    let project_dir = PathBuf::from(".claude").join("skills");
+    let mut skill_bytes: u64 = 0;
+    for dir in [&personal_dir, &project_dir] {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Ok(meta) = fs::metadata(&path) {
-                        total_files += 1;
-                        total_bytes += meta.len();
-                    }
+                let p = entry.path();
+                if p.is_file() {
+                    skill_bytes += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                } else if p.is_dir() {
+                    let sm = p.join("SKILL.md");
+                    skill_bytes += fs::metadata(&sm).map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    let skill_tokens = estimate_tokens(skill_bytes);
+    categories.push(ContextCategory { name: format!("Skills"), tokens: skill_tokens, color: "#00FFB2".into() });
+    total += skill_tokens;
+
+    // CLAUDE.md
+    let claude_md = PathBuf::from("CLAUDE.md");
+    let claude_md_tokens = fs::metadata(&claude_md)
+        .map(|m| estimate_tokens(m.len()))
+        .unwrap_or(0);
+    categories.push(ContextCategory { name: "CLAUDE.md".into(), tokens: claude_md_tokens, color: "#FFB800".into() });
+    total += claude_md_tokens;
+
+    // MCP schemas (estimated based on config)
+    let settings_path = claude_home().join("settings.json");
+    let mcp_tokens: u64 = if settings_path.exists() {
+        if let Some(content) = read_file_lossy(&settings_path) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                let server_count = parsed.get("mcpServers")
+                    .and_then(|v| v.as_object())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                (server_count as u64) * 2500 // ~2500 tokens per MCP server schema
+            } else { 0 }
+        } else { 0 }
+    } else { 0 };
+    categories.push(ContextCategory { name: "MCP Schemas".into(), tokens: mcp_tokens, color: "#3b82f6".into() });
+    total += mcp_tokens;
+
+    // Conversation (estimated from recent session)
+    let conv_tokens: u64 = 15000; // rough estimate
+    categories.push(ContextCategory { name: "Conversation".into(), tokens: conv_tokens, color: "#a78bfa".into() });
+    total += conv_tokens;
+
+    Ok(ContextBreakdown {
+        total_tokens: total,
+        limit: 200000,
+        categories,
+    })
+}
+
+#[tauri::command]
+fn get_local_config() -> Result<Vec<LocalMcpServer>, String> {
+    let mut servers = Vec::new();
+
+    // Read MCP servers from ~/.claude/settings.json
+    let settings_path = claude_home().join("settings.json");
+    if let Some(content) = read_file_lossy(&settings_path) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(mcp_servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+                for (name, config) in mcp_servers {
+                    let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let url = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let transport = if url.is_some() { "http" } else { "stdio" };
+
+                    servers.push(LocalMcpServer {
+                        id: content_hash(name),
+                        name: name.clone(),
+                        transport: transport.to_string(),
+                        status: "running".to_string(), // We can't check live status without connecting
+                        tool_count: 0,
+                        command,
+                        url,
+                    });
                 }
             }
         }
     }
 
-    for file in &config_files {
-        if let Ok(meta) = fs::metadata(file) {
-            if meta.is_file() {
-                total_files += 1;
-                total_bytes += meta.len();
+    // Also check project-level .claude/settings.json
+    let project_settings = PathBuf::from(".claude").join("settings.json");
+    if let Some(content) = read_file_lossy(&project_settings) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(mcp_servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+                for (name, config) in mcp_servers {
+                    let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let url = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let transport = if url.is_some() { "http" } else { "stdio" };
+
+                    servers.push(LocalMcpServer {
+                        id: content_hash(&format!("project-{}", name)),
+                        name: name.clone(),
+                        transport: transport.to_string(),
+                        status: "running".to_string(),
+                        tool_count: 0,
+                        command,
+                        url,
+                    });
+                }
             }
         }
     }
 
-    // Rough estimate: ~4 bytes per token for English text
-    let estimated_tokens = total_bytes / 4;
+    Ok(servers)
+}
 
-    Ok(ContextEstimate {
-        total_files,
-        total_bytes,
-        estimated_tokens,
+#[tauri::command]
+fn get_local_usage() -> Result<UsageSummary, String> {
+    // Return zeros — real usage tracking would parse Claude's session logs
+    Ok(UsageSummary {
+        today: UsagePeriod { input_tokens: 0, output_tokens: 0, cost_cents: 0 },
+        week: UsagePeriod { input_tokens: 0, output_tokens: 0, cost_cents: 0 },
+        month: UsagePeriod { input_tokens: 0, output_tokens: 0, cost_cents: 0 },
     })
+}
+
+#[tauri::command]
+fn get_daily_usage(_days: u32) -> Result<Vec<DailyUsage>, String> {
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+fn get_burn_rate() -> Result<BurnRate, String> {
+    Ok(BurnRate {
+        tokens_per_hour: 0,
+        cost_per_hour: 0.0,
+        estimated_hours_to_limit: None,
+        limit: Some(200000),
+    })
+}
+
+#[tauri::command]
+fn get_config_files() -> Result<Vec<ConfigFile>, String> {
+    let home = home_dir();
+    let claude = claude_home();
+
+    let files = vec![
+        ("~/.claude.json", home.join(".claude.json"), "Global config"),
+        ("~/.claude/settings.json", claude.join("settings.json"), "Global settings"),
+        ("~/.claude/settings.local.json", claude.join("settings.local.json"), "Local settings"),
+        ("~/.claude/skills/", claude.join("skills"), "Personal skills"),
+        (".claude/settings.json", PathBuf::from(".claude/settings.json"), "Project settings"),
+        (".claude/skills/", PathBuf::from(".claude/skills"), "Project skills"),
+        ("CLAUDE.md", PathBuf::from("CLAUDE.md"), "Project context"),
+    ];
+
+    Ok(files.iter().map(|(display, path, scope)| {
+        ConfigFile {
+            path: display.to_string(),
+            exists: path.exists(),
+            scope: scope.to_string(),
+        }
+    }).collect())
 }
 
 #[tauri::command]
 fn get_sync_status(db: State<'_, DbState>) -> Result<SyncStatus, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-
     let enabled: bool = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'sync_enabled'",
-            [],
-            |row| {
-                let val: String = row.get(0)?;
-                Ok(val == "true")
-            },
-        )
+        .query_row("SELECT value FROM settings WHERE key = 'sync_enabled'", [], |row| {
+            let val: String = row.get(0)?;
+            Ok(val == "true")
+        })
         .unwrap_or(false);
 
-    let last_synced: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'last_synced'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    Ok(SyncStatus {
-        enabled,
-        last_synced,
-    })
+    Ok(SyncStatus { enabled, last_sync_at: None, cloud_url: None })
 }
 
 #[tauri::command]
-fn set_sync_enabled(db: State<'_, DbState>, enabled: bool) -> Result<SyncStatus, String> {
+fn set_sync_enabled(db: State<'_, DbState>, enabled: bool, cloud_url: Option<String>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('sync_enabled', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![if enabled { "true" } else { "false" }],
-    )
-    .map_err(|e| e.to_string())?;
-
-    let last_synced: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'last_synced'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    Ok(SyncStatus {
-        enabled,
-        last_synced,
-    })
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
-// ── App Entry ──────────────────────────────────────────────────────────────
+#[tauri::command]
+fn restart_mcp_server(name: String) -> Result<(), String> {
+    // Placeholder — would need to actually restart the process
+    Ok(())
+}
+
+#[tauri::command]
+fn update_skill(id: String, content: String) -> Result<(), String> {
+    // Find the skill file and write content back
+    // For now scan all skill dirs to find the matching ID
+    let dirs = vec![
+        claude_home().join("skills"),
+        PathBuf::from(".claude").join("skills"),
+    ];
+
+    for dir in dirs {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_path_str = if path.is_dir() {
+                    format!("{}/", path.to_string_lossy())
+                } else {
+                    path.to_string_lossy().to_string()
+                };
+
+                if content_hash(&file_path_str) == id {
+                    let write_path = if path.is_dir() {
+                        path.join("SKILL.md")
+                    } else {
+                        path
+                    };
+                    fs::write(&write_path, &content).map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(format!("Skill not found: {}", id))
+}
+
+// ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
     let db_path = get_db_path();
@@ -381,11 +669,18 @@ pub fn run() {
         .manage(DbState(Mutex::new(conn)))
         .invoke_handler(tauri::generate_handler![
             get_local_skills,
+            get_skill_detail,
+            toggle_local_skill,
+            get_context_estimate,
             get_local_config,
             get_local_usage,
-            get_context_estimate,
+            get_daily_usage,
+            get_burn_rate,
+            get_config_files,
             get_sync_status,
             set_sync_enabled,
+            restart_mcp_server,
+            update_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
