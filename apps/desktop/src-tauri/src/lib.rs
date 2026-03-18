@@ -1118,8 +1118,11 @@ async fn prompt_claude(prompt: String) -> Result<String, String> {
     })?;
 
     // Run claude with --print flag (non-interactive, uses subscription)
+    // Use the user's full PATH so claude can find node, npm, etc.
+    let user_path = get_user_path();
     let output = Command::new(&claude_path)
         .args(["--print", &prompt])
+        .env("PATH", &user_path)
         .output()
         .map_err(|e| format!("Failed to run claude: {}", e))?;
 
@@ -1226,11 +1229,48 @@ pub struct DetectedRuntime {
     pub path: Option<String>,
 }
 
-/// Search for a CLI binary by name, checking common install paths + `which`.
+/// Get the user's full shell PATH (Tauri apps launch with minimal env)
+fn get_user_path() -> String {
+    // Try to get PATH from user's shell
+    if let Ok(output) = std::process::Command::new("/bin/zsh")
+        .args(["-l", "-c", "echo $PATH"])
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    if let Ok(output) = std::process::Command::new("/bin/bash")
+        .args(["-l", "-c", "echo $PATH"])
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    std::env::var("PATH").unwrap_or_default()
+}
+
+/// Search for a CLI binary by name, checking common install paths + user shell + npx cache.
 fn which_cli(name: &str) -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
 
-    // Check common install locations
+    // 1. Check user-configured override first (highest priority)
+    let override_path = home_dir().join(".ato").join(format!("{}-path", name));
+    if let Some(custom) = read_file_lossy(&override_path) {
+        let trimmed = custom.trim().to_string();
+        if !trimmed.is_empty() && std::path::Path::new(&trimmed).exists() {
+            return Some(trimmed);
+        }
+    }
+
+    // 2. Check common install locations
     let candidates: Vec<String> = vec![
         format!("/usr/local/bin/{}", name),
         format!("/opt/homebrew/bin/{}", name),
@@ -1246,17 +1286,26 @@ fn which_cli(name: &str) -> Option<String> {
         }
     }
 
-    // Check user-configured override from settings
-    let override_path = home_dir().join(".ato").join(format!("{}-path", name));
-    if let Some(custom) = read_file_lossy(&override_path) {
-        let trimmed = custom.trim().to_string();
-        if !trimmed.is_empty() && std::path::Path::new(&trimmed).exists() {
-            return Some(trimmed);
+    // 3. Search npx cache directories (where `npx @anthropic-ai/claude-code` installs)
+    let npx_cache = PathBuf::from(&home).join(".npm/_npx");
+    if npx_cache.exists() {
+        if let Ok(entries) = fs::read_dir(&npx_cache) {
+            for entry in entries.flatten() {
+                let bin_path = entry.path().join("node_modules").join(".bin").join(name);
+                if bin_path.exists() {
+                    return Some(bin_path.to_string_lossy().to_string());
+                }
+            }
         }
     }
 
-    // Fall back to `which`
-    if let Ok(output) = std::process::Command::new("which").arg(name).output() {
+    // 4. Use `which` from the user's full shell PATH (not Tauri's minimal env)
+    let user_path = get_user_path();
+    if let Ok(output) = std::process::Command::new("which")
+        .arg(name)
+        .env("PATH", &user_path)
+        .output()
+    {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
@@ -1311,6 +1360,9 @@ fn detect_agent_runtimes() -> Result<Vec<DetectedRuntime>, String> {
 async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -> Result<String, String> {
     use std::process::Command;
 
+    // Use the user's full shell PATH so CLIs can find node, npm, etc.
+    let user_path = get_user_path();
+
     match runtime.as_str() {
         "claude" => {
             let claude_path = which_claude().ok_or_else(|| {
@@ -1318,6 +1370,7 @@ async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -
             })?;
             let output = Command::new(&claude_path)
                 .args(["--print", &prompt])
+                .env("PATH", &user_path)
                 .output()
                 .map_err(|e| format!("Failed to run claude: {}", e))?;
             if output.status.success() {
@@ -1332,6 +1385,7 @@ async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -
             })?;
             let output = Command::new(&codex_path)
                 .args(["--print", &prompt])
+                .env("PATH", &user_path)
                 .output()
                 .map_err(|e| format!("Failed to run codex: {}", e))?;
             if output.status.success() {
@@ -1341,7 +1395,6 @@ async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -
             }
         }
         "openclaw" => {
-            // Parse SSH config from the config JSON
             let ssh_config: serde_json::Value = config
                 .as_deref()
                 .and_then(|c| serde_json::from_str(c).ok())
@@ -1352,6 +1405,7 @@ async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -
             let key_path = ssh_config.get("sshKeyPath").and_then(|v| v.as_str());
 
             let mut cmd = Command::new("ssh");
+            cmd.env("PATH", &user_path);
             if let Some(key) = key_path {
                 cmd.args(["-i", key]);
             }
@@ -1375,6 +1429,7 @@ async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -
             })?;
             let output = Command::new(&hermes_path)
                 .args(["--execute", &prompt])
+                .env("PATH", &user_path)
                 .output()
                 .map_err(|e| format!("Failed to run hermes: {}", e))?;
             if output.status.success() {
@@ -1741,36 +1796,9 @@ fn get_agent_logs(runtime: Option<String>, limit: Option<u32>) -> Result<Vec<ser
 }
 
 fn which_claude() -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let npm_global = format!("{}/.npm-global/bin/claude", home);
-    let user_bin = format!("{}/bin/claude", home);
-    let nvm_path = format!("{}/.nvm/versions/node/*/bin/claude", home);
-
-    let candidates = vec![
-        "/usr/local/bin/claude",
-        "/opt/homebrew/bin/claude",
-        npm_global.as_str(),
-        user_bin.as_str(),
-        nvm_path.as_str(),
-    ];
-
-    for path in &candidates {
-        if std::path::Path::new(path).exists() {
-            return Some(path.to_string());
-        }
-    }
-
-    // Try `which claude` as fallback
-    if let Ok(output) = std::process::Command::new("which").arg("claude").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
+    // which_cli now handles all the search logic including npx cache
+    // and user shell PATH. No need for a separate function.
+    which_cli("claude")
 }
 
 // ── App Entry ────────────────────────────────────────────────────────────
