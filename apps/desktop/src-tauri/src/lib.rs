@@ -1,6 +1,5 @@
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -253,8 +252,6 @@ fn collect_skills(dir: &PathBuf, scope: &str, db: &Connection) -> Vec<LocalSkill
             let name;
             let content;
             let file_path_str;
-            let is_dir;
-
             if path.is_dir() {
                 // Directory skill — look for SKILL.md
                 let skill_md = path.join("SKILL.md");
@@ -264,12 +261,10 @@ fn collect_skills(dir: &PathBuf, scope: &str, db: &Connection) -> Vec<LocalSkill
                 name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 content = read_file_lossy(&skill_md).unwrap_or_default();
                 file_path_str = format!("{}/", path.to_string_lossy());
-                is_dir = true;
             } else if path.extension().map_or(false, |ext| ext == "md") {
                 name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
                 content = read_file_lossy(&path).unwrap_or_default();
                 file_path_str = path.to_string_lossy().to_string();
-                is_dir = false;
             } else {
                 continue;
             }
@@ -612,7 +607,7 @@ fn get_sync_status(db: State<'_, DbState>) -> Result<SyncStatus, String> {
 }
 
 #[tauri::command]
-fn set_sync_enabled(db: State<'_, DbState>, enabled: bool, cloud_url: Option<String>) -> Result<(), String> {
+fn set_sync_enabled(db: State<'_, DbState>, enabled: bool, _cloud_url: Option<String>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('sync_enabled', ?1)
@@ -623,7 +618,7 @@ fn set_sync_enabled(db: State<'_, DbState>, enabled: bool, cloud_url: Option<Str
 }
 
 #[tauri::command]
-fn restart_mcp_server(name: String) -> Result<(), String> {
+fn restart_mcp_server(_name: String) -> Result<(), String> {
     // Placeholder — would need to actually restart the process
     Ok(())
 }
@@ -1250,16 +1245,17 @@ fn get_agent_logs(runtime: Option<String>, limit: Option<u32>) -> Result<Vec<ser
 }
 
 fn which_claude() -> Option<String> {
-    // Check common installation paths
+    let home = std::env::var("HOME").unwrap_or_default();
+    let npm_global = format!("{}/.npm-global/bin/claude", home);
+    let user_bin = format!("{}/bin/claude", home);
+    let nvm_path = format!("{}/.nvm/versions/node/*/bin/claude", home);
+
     let candidates = vec![
-        // Global npm installs
         "/usr/local/bin/claude",
         "/opt/homebrew/bin/claude",
-        // User npm installs
-        &format!("{}/.npm-global/bin/claude", std::env::var("HOME").unwrap_or_default()),
-        &format!("{}/bin/claude", std::env::var("HOME").unwrap_or_default()),
-        // NVM paths
-        &format!("{}/.nvm/versions/node/*/bin/claude", std::env::var("HOME").unwrap_or_default()),
+        npm_global.as_str(),
+        user_bin.as_str(),
+        nvm_path.as_str(),
     ];
 
     for path in &candidates {
