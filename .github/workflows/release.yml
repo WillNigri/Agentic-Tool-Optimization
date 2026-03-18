@@ -9,50 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
-    outputs:
-      release_id: ${{ steps.create.outputs.id }}
-      tag: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create GitHub Release
-        id: create
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: ATO ${{ github.ref_name }}
-          body: |
-            ## ATO (Agentic Tool Optimization) ${{ github.ref_name }}
-
-            The control panel for AI coding tools.
-
-            ### Downloads
-            | Platform | File |
-            |----------|------|
-            | macOS (Apple Silicon) | `ATO_*_aarch64.dmg` |
-            | macOS (Intel) | `ATO_*_x64.dmg` |
-            | Windows | `ATO_*_x64-setup.exe` |
-            | Linux (AppImage) | `ATO_*_amd64.AppImage` |
-            | Linux (deb) | `ATO_*_amd64.deb` |
-
-            ### What's included
-            - Desktop app with offline-first SQLite storage
-            - Context visualizer, skills manager, usage analytics, MCP dashboard
-            - MCP server for Claude Code integration
-            - i18n: English, Portuguese, Spanish
-
-            ### Install MCP Server (no desktop app needed)
-            ```bash
-            npx ato-mcp
-            ```
-          draft: false
-          prerelease: false
-
   build-desktop:
-    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -106,16 +63,35 @@ jobs:
           npm run build -w packages/db
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/desktop
-          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseName: ATO ${{ github.ref_name }}
+          releaseBody: |
+            ## ATO (Agentic Tool Optimization) ${{ github.ref_name }}
+
+            The control panel for AI coding tools.
+
+            ### What's included
+            - Desktop app with offline-first SQLite storage
+            - Skills manager with 4-scope hierarchy, conflict analyzer, Anthropic best practices
+            - Subagents manager with skill access
+            - Hooks manager for Claude Code events
+            - N8N-style automation flow diagram with external MCP service integrations
+            - Context visualizer with dependencies and permissions views
+            - MCP server dashboard with tool inspection
+            - File viewer for CLAUDE.md and config files
+            - MCP prompt bar for in-app queries
+            - Usage analytics with burn rate tracking
+            - i18n: English, Portuguese, Spanish
+          releaseDraft: false
+          prerelease: false
           args: --target ${{ matrix.target }}
 
   publish-mcp:
-    needs: create-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
