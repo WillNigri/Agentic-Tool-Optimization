@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { promptAgent } from "@/lib/tauri-api";
 import type { AgentRuntime } from "@/components/cron/types";
 
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
 interface Message {
   id: string;

@@ -5,15 +5,17 @@
 
 // Tauri invoke is available at runtime in the desktop app
 // In dev/web mode, we fall back to HTTP API calls
-const isTauri = '__TAURI__' in window;
+const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (isTauri) {
+  // Always try the Tauri import — it will succeed in the desktop app
+  // even if __TAURI__ global isn't set yet at module load time
+  try {
     const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
-    return tauriInvoke<T>(cmd, args);
+    return await tauriInvoke<T>(cmd, args);
+  } catch {
+    throw new Error(`Tauri not available for command: ${cmd}`);
   }
-  // Fallback to HTTP API for web/dev mode
-  throw new Error(`Tauri not available for command: ${cmd}`);
 }
 
 // ---- Context ----

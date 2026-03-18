@@ -10,7 +10,7 @@
 import * as tauriApi from './tauri-api';
 import * as mock from './mock-data';
 
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
 // Check if cloud API is reachable (cached, fast fail)

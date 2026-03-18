@@ -21,6 +21,7 @@
     ]
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "ATO",
