@@ -1,47 +1,49 @@
-# ATO - Product Requirements Document (Updated)
+# ATO - Product Requirements Document
 
 ## Vision Statement
 
-ATO (Agentic Tool Optimization) is an open-source desktop dashboard and MCP server that makes Claude Code's hidden internals visible and manageable. It's "the control panel for AI coding tools" — giving developers real-time visibility into context consumption, skills hierarchy, MCP connections, and usage analytics.
+ATO (Agentic Tool Optimization) is the **multi-LLM control panel** for AI coding tools. One desktop dashboard to manage **Claude Code**, **Codex**, **OpenClaw**, and **Hermes** — skills, subagents, automation workflows, cron scheduling, and context visualization across all runtimes with full two-way communication.
 
-**Target Users**: Technical developers who use Claude Code daily and want to optimize their workflow, understand what's consuming their context window, and manage skills/MCP servers without editing JSON files manually.
+**Target Users**: Developers who use one or more AI coding agents and want a unified dashboard to manage skills, monitor context consumption, create automations, schedule agent tasks, and control everything from one place — instead of editing config files manually for each tool.
 
-**Business Model**: Open source (MIT) desktop app + optional cloud sync for teams (freemium SaaS hosted on Railway via agenticsearchoptimization.ai).
+**Business Model**: Open-core. MIT-licensed desktop app + optional Pro subscription for real-time monitoring, cloud sync, and team features (closed source, separate repo).
 
 > Note: "ATO" is the short name; "Agentic Tool Optimization" is the full name.
 
 ---
 
-## Architecture (Implemented)
+## Architecture
 
-### Hybrid Desktop + Cloud
+### Desktop-First, Multi-Runtime
 
 ```
 ATO/
 ├── apps/
-│   └── desktop/            # Tauri 2.x (Rust + React) — offline-first
-│       ├── src-tauri/      # Rust backend: SQLite, file watcher, commands
-│       └── src/            # React frontend: dashboard UI
-├── services/               # Cloud sync backend (Railway)
-│   ├── api-gateway/        # Express proxy (port 3000), JWT auth, rate limit
-│   ├── auth/               # Registration, login, bcrypt + JWT
-│   ├── skills/             # Skills CRUD + filesystem scan
-│   ├── analytics/          # Token tracking, burn rate, cost projections
-│   ├── mcp-monitor/        # MCP server health monitoring
-│   └── mcp-server/         # Standalone MCP server (stdio) for Claude Code
+│   └── desktop/                # Tauri 2.x (Rust + React) — offline-first
+│       ├── src-tauri/          # Rust backend: SQLite, multi-runtime CLI dispatch,
+│       │                       #   file watcher, skill scanning, context estimation
+│       └── src/                # React frontend: dashboard UI
+│           ├── components/     # UI components (Skills, Cron, Automation, etc.)
+│           │   ├── automation/ # Visual workflow builder
+│           │   └── cron/       # Cron monitoring + calendar
+│           ├── stores/         # Zustand state (automation, cron)
+│           ├── lib/            # API layer, cron utils, skill-to-workflow parser
+│           └── i18n/           # EN, PT, ES translations
+├── services/
+│   └── mcp-server/             # Standalone MCP server (stdio) — 8 tools
 ├── packages/
-│   ├── core/               # Shared types, token utils, config paths (no I/O)
-│   ├── db/                 # Database abstraction: SQLite + PostgreSQL
-│   └── shared/             # Cloud-specific auth/validation helpers
-├── database/migrations/    # PostgreSQL schema
-├── Dockerfile              # Railway single-container deployment
-└── docker-compose.yml      # Local dev PostgreSQL
+│   ├── core/                   # Shared types, token utils, config paths (no I/O)
+│   └── db/                     # Database abstraction (SQLite for desktop)
+└── .github/workflows/          # CI: multi-platform release builds
 ```
 
 ### Data Flow
 
-1. **Desktop (default, offline)**: Tauri reads `~/.claude/` files via `notify` crate file watcher → stores in local SQLite via `rusqlite` → renders in React UI
-2. **Cloud sync (opt-in)**: User enables sync in Settings → desktop pushes data to Railway microservices → PostgreSQL → accessible across devices/team
+1. **Desktop (default, offline)**: Tauri reads config files from all runtime directories (`~/.claude/`, `~/.codex/`, `~/.openclaw/`, `~/.hermes/`) → stores in local SQLite → renders in React UI
+2. **CLI dispatch**: User actions route through `promptAgent(runtime, prompt)` → dispatches to correct CLI (`claude --print`, `codex --print`, SSH `openclaw exec`, `hermes --execute`)
+3. **Inbound status**: `queryAgentStatus(runtime)` checks health, version, auth for each runtime
+4. **Execution logging**: All agent calls auto-logged to `~/.ato/agent-logs.jsonl`
+5. **MCP bridge**: Standalone MCP server exposes ATO data to any MCP client
 
 ### Tech Stack
 
@@ -50,180 +52,249 @@ ATO/
 | Desktop Runtime | Tauri 2.x (Rust backend, ~5MB installer) |
 | Desktop DB | SQLite via rusqlite (local, offline) |
 | Desktop Frontend | React 18 + Vite + TailwindCSS |
-| Cloud Backend | Node.js 20 + Express + TypeScript |
-| Cloud DB | PostgreSQL 16 (Railway) |
-| Auth | bcrypt (12 rounds) + JWT (access + refresh tokens) |
-| MCP Server | @modelcontextprotocol/sdk (stdio transport) |
-| i18n | react-i18next (English, Portuguese, Spanish) |
 | State Management | Zustand |
 | Charts | Recharts |
-| Deployment | Railway (cloud), Tauri builds (desktop) |
+| MCP Server | @modelcontextprotocol/sdk (stdio transport) |
+| i18n | react-i18next (English, Portuguese, Spanish) |
+| CI/CD | GitHub Actions (4-platform builds) |
+| Data Fetching | TanStack React Query |
 
 ---
 
-## Security (Implemented)
+## Supported Runtimes
 
-- **Passwords**: bcrypt with 12 rounds. NEVER stored as plain text. NEVER returned in API responses.
-- **Tokens**: JWT access tokens (15min) + refresh tokens (7 days). Refresh tokens hashed before DB storage.
-- **SQL**: All queries parameterized. No string interpolation in SQL ever.
-- **Input Validation**: All inputs validated with zod schemas before processing.
-- **Desktop**: Local-first. No network calls unless sync explicitly enabled by user.
-- **API Gateway**: Rate limiting (100 req/15min), CORS, helmet security headers.
-- **Secrets**: All credentials via environment variables, never committed.
+| Runtime | Provider | Outbound | Inbound | Skill Dirs | Config |
+|---------|----------|----------|---------|------------|--------|
+| **Claude** | Anthropic | `claude --print` | MCP + auth check | `~/.claude/skills/`, `.claude/skills/` | `~/.claude/settings.json`, `CLAUDE.md` |
+| **Codex** | OpenAI | `codex --print` | version + API key | `~/.codex/skills/`, `.agents/skills/` | `~/.codex/config.toml`, `AGENTS.md` |
+| **OpenClaw** | OpenClaw | SSH `exec` | SSH version + status | `~/.openclaw/skills/`, workspace | `~/.openclaw/openclaw.json`, `SOUL.md` |
+| **Hermes** | NousResearch | `hermes --execute` | version + endpoint | `~/.hermes/skills/` (categories) | `~/.hermes/config.yaml`, `SOUL.md` |
+
+### Runtime Detection
+
+ATO auto-detects installed CLIs by searching:
+1. User-configured path override (`~/.ato/{runtime}-path`)
+2. Common install paths (`/usr/local/bin`, `/opt/homebrew/bin`, `~/.npm-global/bin`, etc.)
+3. npx cache (`~/.npm/_npx/**/node_modules/.bin/`)
+4. User's full shell PATH (spawns login shell to get real PATH)
+
+Falls back to manual path input in Setup Wizard when auto-detect fails.
 
 ---
 
-## Feature Specifications (Implemented)
+## Security
 
-### F1: Context Visualizer (P0 - Implemented)
+- **Local-first**: No network calls unless cloud sync explicitly enabled
+- **Parameterized SQL**: All queries use parameterized statements
+- **Input validation**: Zod schemas on all boundaries
+- **SSH for OpenClaw**: Key-based auth (paths only, no key contents stored)
+- **No secrets in repo**: .env files gitignored, no hardcoded credentials
+- **Shell PATH isolation**: Tauri apps get user's full PATH via login shell
 
-Real-time breakdown of Claude Code's context window:
-- Overall progress bar with color shifts at 75% (yellow) and 90% (red)
-- Category breakdown chart (system prompts, skills, MCP schemas, CLAUDE.md, conversation, file reads)
-- Token estimates from local file sizes
-- Desktop: reads files directly via Tauri commands
-- Cloud: ingested via analytics service
+---
 
-### F2: Skills Manager (P0 - Implemented)
+## Feature Specifications
 
-Visual management of Claude Code skills:
-- Lists skills from `~/.claude/skills/` (personal) and `.claude/skills/` (project)
-- Parses YAML frontmatter from SKILL.md files
-- Token count estimation per skill
-- One-click enable/disable (renames file with `.disabled` extension)
-- Search and filter
-- Conflict detection via keyword overlap (Jaccard similarity >30%)
+### F1: Setup Wizard (First Launch)
 
-### F3: Usage Analytics (P0 - Implemented)
+4-step onboarding flow:
+1. **Welcome** — introduces ATO as multi-LLM control panel
+2. **Connect Runtimes** — toggle on/off each runtime, auto-detect CLIs, runtime-specific config (SSH for OpenClaw, API key for Codex, endpoint for Hermes), manual path fallback
+3. **Verify** — parallel health check all enabled runtimes (version, auth, connectivity)
+4. **Done** — summary + what's next
 
-Token consumption and cost tracking:
+Persisted to `localStorage`. Runs only on first launch.
+
+### F2: Skills Manager
+
+Per-runtime skill management:
+- **Runtime filter tabs**: All / Claude / Codex / OpenClaw / Hermes (with skill counts)
+- **Scope hierarchy**: Enterprise > Personal > Project > Plugin (Claude), Personal > Project (Codex/OpenClaw), Personal (Hermes)
+- **Recursive scanning**: Handles nested directories (gstack-style `skills/gstack/qa/SKILL.md`)
+- **Drag-and-drop priority**: Reorder skills within scope groups (persisted to localStorage)
+- **Conflict detection**: Keyword overlap analysis (Jaccard similarity >30%)
+- **Frontmatter editor**: All Claude Code fields (`user-invocable`, `allowed-tools`, `model`, `context: fork`)
+- **Create/Edit/Delete**: Writes to correct runtime directory based on selected runtime + scope
+- **AI-powered creation**: "Generate with AI" section — describe what you want, pick runtime, AI writes SKILL.md
+- **In-app approval dialog**: When agent generates a skill file, shows yellow approval banner with preview, scope selector, "Approve & Save" button
+- **Auto-improve**: Send skill to its own runtime for rewrite, diff preview, Apply/Discard
+- **Share/Publish**: Private sharing via link, publish to marketplace
+
+### F3: Skills Marketplace
+
+Community skill catalog:
+- 9 categories: library-reference, product-verification, data-fetching, business-process, code-scaffolding, code-quality, ci-cd, runbooks, infra-ops
+- Search, category filter, install counts, ratings
+- One-click install to `~/.{runtime}/skills/`
+- Publish your skills with category/tags metadata
+
+### F4: Context Visualizer
+
+Per-runtime context breakdown:
+- **Runtime tabs**: Claude / Codex / OpenClaw / Hermes
+- **"Not connected"** state for uninstalled runtimes
+- **Always-loaded items** counted in total: system prompts, CLAUDE.md/AGENTS.md/SOUL.md, MCP schemas, conversation
+- **Skills shown as "on-demand"**: NOT counted in total (loaded only when triggered)
+- **Color warnings** at 75% (yellow) and 90% (red)
+- **Dependencies tab**: Runtime-specific file paths and token counts
+- **Permissions tab**: Runtime-specific tool permissions (Claude: Read/Write/Bash/etc., Codex: shell/file_read/etc.)
+
+### F5: Automation Builder
+
+Visual workflow editor with auto-detection:
+- **Auto-generates flows from skill content**: Parses `## Step N:` and `## Phase N:` headers from SKILL.md files (works with gstack, custom skills, any skill pack)
+- **Per-node runtime selection**: Mix Claude + Codex in the same workflow
+- **Service integrations**: GitHub, Slack, Gmail, Postgres, Notion, Linear
+- **Decision nodes**: Conditional branching
+- **Prompt serialization**: Converts workflow to structured prompt with `@runtime` per step
+- **Run button**: Dispatches to correct runtime via `promptAgent()`
+
+### F6: Subagents Manager
+
+Create and manage subagents with runtime selection:
+- **Runtime selector**: 4 colored buttons (Claude/Codex/OpenClaw/Hermes)
+- **Runtime-specific config**: OpenClaw SSH fields, Codex API key, Hermes endpoint
+- **RuntimeBadge** on cards for quick identification
+- Assign skills, allowed tools, model override, custom instructions
+
+### F7: Cron Monitor
+
+Scheduled agent job management:
+- **List view**: Job cards with schedule, runtime badge, status, 7-day timeline
+- **Calendar view**: Google Calendar-style monthly grid with color-coded execution status
+  - Green = success (click to see output)
+  - Red = failed (click to see error details)
+  - Gray = scheduled for future
+- **Create/Edit**: Cron expression with live validation + human-readable preview
+- **Manual trigger**: "Run Now" button
+- **Auto-retry**: Retry failed executions
+- **Smart failure detection**: Silent failures, chronic warnings, alert dedup
+- **Alert banner**: Unacknowledged alerts shown at top with dismiss button
+- **Sidebar badge**: Red pulse dot when alerts exist
+
+### F8: Hooks Manager
+
+Shell commands on Claude Code events:
+- Events: PreToolUse, PostToolUse, Notification, Stop, SubagentStop
+- Configure: command, matcher (regex/exact), timeout, scope (global/project)
+- Starts clean (no mock data)
+
+### F9: MCP Server
+
+Standalone MCP server with 8 tools:
+- `get_context_usage` — Context window breakdown
+- `list_skills` / `toggle_skill` — Manage skills
+- `get_usage_stats` — Token/cost analytics from JSONL logs
+- `get_mcp_status` — MCP server configuration
+- `get_runtime_status` — Health check for any runtime
+- `get_all_runtime_statuses` — Health check all runtimes at once
+- `get_agent_logs` — Execution logs (filterable by runtime)
+
+### F10: Prompt Bar
+
+Persistent chat input at bottom of every page:
+- **Runtime selector dropdown**: Claude / Codex / OpenClaw / Hermes
+- **Stateless execution**: Each call uses `--print` mode (no session persistence)
+- **Skill detection**: When response contains SKILL.md content, shows approval dialog
+- **Auto-instruction**: Skill requests prepend "return content only, no file writes"
+- **Response shows runtime badge**: Which agent responded
+- **Send button color** matches selected runtime
+
+### F11: Configuration
+
+Unified view of config files across all runtimes:
+- Claude: settings.json, settings.local.json, CLAUDE.md, skills/
+- Codex: config.toml, AGENTS.md, skills/
+- OpenClaw: openclaw.json, AGENTS.md, SOUL.md, TOOLS.md, skills/
+- Hermes: config.yaml, SOUL.md, skills/, memories/
+- Shows exists/missing status for each file
+
+### F12: Usage Analytics
+
+Token consumption tracking:
 - Today/week/month summary cards
-- Burn rate calculation (tokens/hour, cost/hour)
-- Time-to-limit estimation
-- 30-day usage chart (input + output tokens)
-- Parses Claude Code JSONL logs from `~/.claude/logs/`
-- Stored in SQLite (desktop) or PostgreSQL (cloud)
+- Burn rate (tokens/hour, cost/hour)
+- 30-day usage chart
+- Parses Claude Code JSONL logs
 
-### F4: MCP Status Dashboard (P1 - Implemented)
-
-MCP server connection monitoring:
-- Lists all configured MCP servers from `~/.claude.json` and `.claude/settings.json`
-- Status indicators (green=connected, red=error, yellow=warning)
-- Transport type, tool count display
-- Restart/reconnect buttons
-
-### F5: Config Editor (P1 - Implemented)
-
-Unified view of Claude Code configuration:
-- Lists all config file locations with exists/missing status
-- Global vs project scope indication
-- Read-only view (editing planned for Phase 2)
-
-### F6: MCP Server for Claude Code (P0 - Implemented)
-
-Standalone MCP server exposable directly to Claude Code:
-- Transport: stdio
-- Tools: `get_context_usage`, `list_skills`, `toggle_skill`, `get_usage_stats`, `get_mcp_status`
-- Install: `npx ato-mcp`
-
-### F7: Cloud Sync (P2 - Architecture Implemented)
-
-Optional sync to Railway backend:
-- Toggle in Settings: OFF = pure local, ON = syncs to cloud
-- GitHub OAuth login (planned)
-- Team skill sharing (planned)
-- Cross-device usage dashboards (planned)
-- Self-hostable backend via Docker
-
-### F8: i18n (Implemented)
+### F13: i18n
 
 Full internationalization:
 - English (en), Portuguese (pt), Spanish (es)
-- All UI strings via react-i18next translation keys
+- All UI strings via react-i18next
 - Language switcher in sidebar
-- Persisted to localStorage
 
 ---
 
-## Design System (Implemented)
+## Design System
 
 - **Theme**: Dark (#0a0a0f background, #16161e cards, #2a2a3a borders)
-- **Accent**: Cyan/mint (#00FFB2) for primary actions, active states, highlights
-- **Typography**: Inter for UI, JetBrains Mono for code/numbers
-- **Status colors**: Green (#00FFB2) connected, Red (#FF4466) error, Yellow (#FFB800) warning
-- **Components**: Cards with subtle borders, toggle switches, progress bars, status dots
-- **Inspired by**: CodeAuto (sidebar + workflow), ASO_ (dark + cyan/mint aesthetic)
+- **Accent**: Cyan/mint (#00FFB2) for primary actions
+- **Runtime colors**: Claude (#f97316 orange), Codex (#22c55e green), OpenClaw (#06b6d4 cyan), Hermes (#a855f7 purple)
+- **Typography**: System font for UI, monospace for code/paths
+- **Status**: Green=healthy, Red=failed, Yellow=warning, Gray=paused
 
 ---
 
-## Deployment (Implemented)
+## Deployment
 
 ### Desktop
-- Tauri builds for macOS, Windows, Linux (~5MB installer)
+- Tauri builds for macOS (Apple Silicon + Intel), Windows, Linux
+- GitHub Actions CI: auto-builds on version tag push
 - `npm run dev:desktop` for development
-- `npm run build:desktop` for distribution
+- `npx tauri build` for production
 
-### Cloud (Railway)
-- Single Dockerfile running all microservices behind API gateway
-- PostgreSQL addon on Railway
-- Health check at `/api/health`
-- Configured via `railway.json`
-
-### ASO Integration
-- ATO listed as a tool in the ASO directory (agenticsearchoptimization.ai)
-- Category: Observability
-- Includes llms.txt for agent discovery
-- Hosted at `ato.agenticsearchoptimization.ai` (subdomain)
+### MCP Server
+- `npm run dev:mcp` for development
+- `npx ato-mcp` for standalone use
 
 ---
 
-## Database Schema
+## Data Storage
 
-### PostgreSQL (Cloud) — `database/migrations/001_initial_schema.sql`
-- `users` — id, email, password_hash (bcrypt), name, timestamps
-- `refresh_tokens` — id, user_id, token_hash, expires_at, revoked_at
-- `sessions` — id, user_id, token counts, cost, model, metadata
-- `usage_records` — id, user_id, timestamp, model, input/output/cache tokens, cost
-- `skills` — id, user_id, name, file_path, source, content, token_count, enabled, content_hash
-- `mcp_servers` — id, user_id, name, transport, command, status, tool_count
-- Auto-updating `updated_at` triggers
+| Data | Location |
+|------|----------|
+| Skills (Claude) | `~/.claude/skills/`, `.claude/skills/` |
+| Skills (Codex) | `~/.codex/skills/`, `.agents/skills/` |
+| Skills (OpenClaw) | `~/.openclaw/skills/` |
+| Skills (Hermes) | `~/.hermes/skills/` |
+| Workflows | `~/.ato/workflows/*.json` |
+| Cron jobs | `~/.ato/cron-jobs.json` |
+| Agent logs | `~/.ato/agent-logs.jsonl` |
+| Runtime paths | `~/.ato/{runtime}-path` |
+| Database | `~/.ato/local.db` (SQLite) |
+| Setup state | `localStorage (ato-setup)` |
 
-### SQLite (Desktop) — `packages/db/src/sqlite.ts`
-- Same schema adapted for SQLite syntax
-- Additional `settings` table (key-value store for sync config, language, etc.)
-- `userId` always 'local' for desktop use
-- WAL journal mode for performance
+---
+
+## Open Source vs Pro
+
+### Open Source (MIT, this repo)
+All platform features: Skills Manager, Marketplace, Multi-Agent Runtime, Subagents, Automation Builder, Cron Scheduling, Context Visualizer, Hooks, MCP Server, Config, i18n, Setup Wizard, Prompt Bar.
+
+### Pro (Closed Source, Paid)
+- Real-time cron health monitoring dashboard
+- Silent failure detection + push notifications
+- Usage analytics across all runtimes (cloud aggregation)
+- Cloud sync (skills, workflows, cron jobs across machines)
+- Team workspaces with access controls
+- SLA tracking for scheduled jobs
+- Slack/email alert integration
 
 ---
 
 ## Success Metrics
 
-### MVP Success Criteria
-- [x] Installs and runs on macOS (Tauri desktop)
-- [x] Offline-first with local SQLite
-- [x] Scans and displays skills from `~/.claude/skills/`
-- [x] Parses Claude Code logs for usage analytics
-- [x] MCP server integration via stdio
-- [x] i18n for EN, PT, ES
-- [x] Cloud sync architecture ready (Railway)
-- [ ] < 5MB installer size (Tauri target)
-- [ ] < 50MB memory usage at idle
-
-### Growth Metrics (Post-Launch)
-- GitHub stars (target: 1,000 in first month)
-- Desktop downloads
-- MCP server installations
-- Cloud sync signups
-- ASO directory listing traffic
-
----
-
-## File Count Summary
-
-| Area | Files | Lines of Code |
-|------|-------|---------------|
-| Desktop (Tauri + React) | 37 | ~2,500 |
-| Cloud Services | 24 | ~1,800 |
-| Packages (core/db/shared) | 18 | ~2,200 |
-| Config/Deploy | 14 | ~500 |
-| **Total** | **93** | **~6,000** |
+### v0.3.0 Criteria (Achieved)
+- [x] Multi-LLM platform (Claude, Codex, OpenClaw, Hermes)
+- [x] Two-way communication with all runtimes
+- [x] Skills Marketplace with AI-powered creation
+- [x] Cron Monitor with calendar view
+- [x] Auto-detect automation flows from skill content
+- [x] Per-runtime context visualization
+- [x] Setup wizard for first-time configuration
+- [x] In-app approval dialog for file writes
+- [x] No mock data in production
+- [x] gstack compatibility (recursive skill scanning)
+- [x] GitHub Actions multi-platform builds
+- [x] i18n (EN, PT, ES)
