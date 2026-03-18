@@ -108,6 +108,29 @@ function generateMockExecutions(): CronExecution[] {
       const isFailed = job.id === "cron-db-backup" && day < 3;
       const durationMs = 1000 + Math.random() * 10000;
 
+      const successOutputs: Record<string, string[]> = {
+        "cron-daily-briefing": [
+          "Summarized 12 PRs and 34 Slack messages. 3 items need attention: PR #421 (breaking API change), #security-alerts channel (2 new CVEs), standup thread (blocker from @alex).",
+          "Quiet night. 4 PRs (all approved), 8 Slack messages (no action items). Team standup summary posted to #general.",
+          "Summarized 7 PRs and 19 Slack messages. 1 action item: PR #398 needs review before EOD. Posted digest to #daily-brief.",
+        ],
+        "cron-db-backup": [
+          "Backup completed. Size: 2.4GB (within 5% of yesterday's 2.3GB). Checksum verified. Uploaded to S3 bucket ato-backups/2026-03-18.",
+          "Backup completed. Size: 2.5GB. All tables verified. Retention policy applied: deleted backups older than 30 days (removed 2 files).",
+        ],
+        "cron-pr-review": [
+          "Reviewed 3 open PRs:\n- PR #445: 2 suggestions (naming, test coverage) → commented\n- PR #442: LGTM, approved\n- PR #440: 1 security concern (SQL injection risk in user input) → requested changes",
+          "Reviewed 1 open PR:\n- PR #447: Clean refactor, no issues found → approved",
+          "No open PRs requiring review. All caught up.",
+        ],
+        "cron-dep-audit": [
+          "npm audit complete. 0 critical, 0 high, 2 moderate vulnerabilities found.\n- lodash@4.17.20: prototype pollution (moderate) → update available\n- axios@0.21.1: SSRF (moderate) → update available\nRecommendation: run `npm audit fix`",
+        ],
+      };
+
+      const jobOutputs = successOutputs[job.id] || ["Completed successfully"];
+      const output = jobOutputs[day % jobOutputs.length];
+
       executions.push({
         id: `exec-${job.id}-${day}`,
         jobId: job.id,
@@ -115,8 +138,8 @@ function generateMockExecutions(): CronExecution[] {
         finishedAt: new Date(startedAt.getTime() + durationMs).toISOString(),
         durationMs: Math.round(durationMs),
         status: isFailed ? "failed" : "success",
-        output: isFailed ? undefined : "Completed successfully",
-        error: isFailed ? "Backup verification failed: size mismatch" : undefined,
+        output: isFailed ? undefined : output,
+        error: isFailed ? "Backup verification failed: expected size ~2.4GB but got 1.1GB. Possible incomplete dump. Last successful backup: 3 days ago. Check pg_dump logs at /var/log/postgres/backup.log" : undefined,
       });
     }
   }

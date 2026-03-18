@@ -328,6 +328,22 @@
       "prompt": "Prompt del Agente",
       "promptPlaceholder": "Que debe hacer el agente en cada ejecucion?",
       "invalidCron": "Expresion cron invalida"
+    },
+    "calendar": {
+      "today": "Hoy",
+      "more": "mas",
+      "success": "Exitoso",
+      "failed": "Fallido",
+      "scheduled": "Programado",
+      "executionSuccess": "Ejecucion Exitosa",
+      "executionFailed": "Ejecucion Fallida",
+      "jobName": "Tarea",
+      "startedAt": "Inicio",
+      "proFeature": "Monitoreo en tiempo real disponible en Pro"
+    },
+    "views": {
+      "list": "Lista",
+      "calendar": "Calendario"
     }
   },
   "hooks": {

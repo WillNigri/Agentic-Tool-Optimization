@@ -477,6 +477,22 @@
       "prompt": "Agent Prompt",
       "promptPlaceholder": "What should the agent do on each run?",
       "invalidCron": "Invalid cron expression"
+    },
+    "calendar": {
+      "today": "Today",
+      "more": "more",
+      "success": "Success",
+      "failed": "Failed",
+      "scheduled": "Scheduled",
+      "executionSuccess": "Execution Succeeded",
+      "executionFailed": "Execution Failed",
+      "jobName": "Job",
+      "startedAt": "Started",
+      "proFeature": "Real-time monitoring available in Pro"
+    },
+    "views": {
+      "list": "List",
+      "calendar": "Calendar"
     }
   },
   "common": {

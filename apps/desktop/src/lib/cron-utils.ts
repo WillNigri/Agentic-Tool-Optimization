@@ -152,6 +152,21 @@ export function validateCron(expression: string): string | null {
 }
 
 /**
+ * Check if a cron expression would fire on a given date (ignoring time).
+ * Used by the calendar view to show which jobs run on which days.
+ */
+export function matchesCronDate(expression: string, date: Date): boolean {
+  const parsed = parseCron(expression);
+  if (!parsed) return false;
+
+  return (
+    matchesField(parsed.dayOfMonth, date.getDate()) &&
+    matchesField(parsed.month, date.getMonth() + 1) &&
+    matchesField(parsed.dayOfWeek, date.getDay())
+  );
+}
+
+/**
  * Calculate the next run time from a cron expression (simplified).
  * For accurate scheduling, a proper cron library should be used.
  * This provides a rough estimate for display purposes.
