@@ -13,6 +13,7 @@ interface AuthState {
   accessToken: string | null;
   refreshTokenValue: string | null;
   isAuthenticated: boolean;
+  isCloudUser: boolean;
 
   setAuth: (user: User, accessToken: string, refreshToken: string) => void;
   logout: () => void;
@@ -30,6 +31,7 @@ export const useAuthStore = create<AuthState>()(
       accessToken: null,
       refreshTokenValue: null,
       isAuthenticated: true,
+      isCloudUser: false,
 
       setAuth: (user, accessToken, refreshToken) =>
         set({
@@ -37,6 +39,7 @@ export const useAuthStore = create<AuthState>()(
           accessToken,
           refreshTokenValue: refreshToken,
           isAuthenticated: true,
+          isCloudUser: true,
         }),
 
       logout: () =>
@@ -45,6 +48,7 @@ export const useAuthStore = create<AuthState>()(
           accessToken: null,
           refreshTokenValue: null,
           isAuthenticated: true, // stays true — local mode
+          isCloudUser: false,
         }),
 
       refreshAccessToken: async () => {

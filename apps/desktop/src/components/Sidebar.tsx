@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Layers,
   Sparkles,
@@ -9,11 +10,14 @@ import {
   Webhook,
   Workflow,
   Clock,
+  Crown,
+  User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
 import { useCronStore } from "@/stores/useCronStore";
+import LoginModal from "./LoginModal";
 
 export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "config";
 
@@ -45,6 +49,8 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
   const logout = useAuthStore((s) => s.logout);
   const user = useAuthStore((s) => s.user);
   const cronAlertCount = useCronStore((s) => s.getActiveAlertCount());
+  const isCloudUser = useAuthStore((s) => s.isCloudUser);
+  const [showLogin, setShowLogin] = useState(false);
 
   function changeLanguage(lang: string) {
     i18n.changeLanguage(lang);
@@ -103,15 +109,40 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
         </div>
       </div>
 
-      <div className="p-2 border-t border-cs-border">
-        <button
-          onClick={logout}
-          className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm text-cs-muted hover:text-cs-danger hover:bg-cs-danger/10 transition-colors"
-        >
-          <LogOut size={18} />
-          {t("nav.logout")}
-        </button>
+      <div className="p-2 border-t border-cs-border space-y-1">
+        {isCloudUser ? (
+          <>
+            <div className="flex items-center gap-2 px-3 py-2">
+              <div className="w-7 h-7 rounded-full bg-cs-accent/10 border border-cs-accent/30 flex items-center justify-center">
+                <User size={14} className="text-cs-accent" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-medium truncate">{user?.name || user?.email}</p>
+                <p className="text-[10px] text-cs-accent flex items-center gap-1">
+                  <Crown size={9} /> Pro
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={logout}
+              className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm text-cs-muted hover:text-cs-danger hover:bg-cs-danger/10 transition-colors"
+            >
+              <LogOut size={18} />
+              {t("nav.logout")}
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => setShowLogin(true)}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm text-cs-accent hover:bg-cs-accent/10 transition-colors"
+          >
+            <Crown size={18} />
+            Sign in for Pro
+          </button>
+        )}
       </div>
+
+      {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
     </aside>
   );
 }
