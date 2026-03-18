@@ -4,6 +4,7 @@ import { Send, Bot, X, Loader2, ChevronUp, ChevronDown, Sparkles, Terminal, Aler
 import { cn } from "@/lib/utils";
 import { promptAgent } from "@/lib/tauri-api";
 import type { AgentRuntime } from "@/components/cron/types";
+import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
@@ -13,6 +14,8 @@ interface Message {
   content: string;
   timestamp: Date;
   runtime?: AgentRuntime;
+  /** Extracted skill data for approval */
+  pendingSkill?: { content: string; name: string; path: string } | null;
 }
 
 const RUNTIME_OPTIONS: { id: AgentRuntime; label: string; icon: typeof Terminal; color: string }[] = [
@@ -69,16 +72,27 @@ export default function PromptBar() {
     try {
       let response: string;
       if (isTauri) {
-        response = await promptAgent(runtime, userMsg.content);
+        // Detect if user is asking to create/modify a skill or file
+        const lower = userMsg.content.toLowerCase();
+        const isSkillRequest = lower.includes("skill") || lower.includes("create") || lower.includes("write");
+        // If skill-related, prepend instruction to return content only (no file writes)
+        const prompt = isSkillRequest
+          ? `IMPORTANT: You are running in --print mode without file write permissions. Do NOT attempt to create files or ask for permissions. Instead, return the complete file content in a markdown code block so the user can review and save it through the app. If asked to create a skill, return the full SKILL.md content with YAML frontmatter (name, description, allowed-tools) in a \`\`\`markdown code block.\n\nUser request: ${userMsg.content}`
+          : userMsg.content;
+        response = await promptAgent(runtime, prompt);
       } else {
         response = simulateMock(userMsg.content);
       }
+      // Check if response contains a skill file that needs approval
+      const pendingSkill = extractSkillFromResponse(response);
+
       setMessages((prev) => [...prev, {
         id: String(Date.now()),
         role: "assistant",
         content: response,
         timestamp: new Date(),
         runtime,
+        pendingSkill,
       }]);
     } catch (err) {
       setMessages((prev) => [...prev, {
@@ -160,6 +174,30 @@ export default function PromptBar() {
                     <p className="text-[9px] text-cs-muted mt-1">
                       {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </p>
+
+                    {/* Approval dialog for skill creation */}
+                    {msg.pendingSkill && (
+                      <ApprovalDialog
+                        content={msg.pendingSkill.content}
+                        filePath={msg.pendingSkill.path}
+                        skillName={msg.pendingSkill.name}
+                        runtime={msg.runtime || "claude"}
+                        onApprove={() => {
+                          setMessages((prev) =>
+                            prev.map((m) =>
+                              m.id === msg.id ? { ...m, pendingSkill: null } : m
+                            )
+                          );
+                        }}
+                        onDeny={() => {
+                          setMessages((prev) =>
+                            prev.map((m) =>
+                              m.id === msg.id ? { ...m, pendingSkill: null } : m
+                            )
+                          );
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               );
