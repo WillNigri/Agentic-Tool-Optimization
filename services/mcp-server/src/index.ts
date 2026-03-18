@@ -6,6 +6,7 @@ import { registerContextTools } from "./tools/context.js";
 import { registerSkillsTools } from "./tools/skills.js";
 import { registerUsageTools } from "./tools/usage.js";
 import { registerMcpTools } from "./tools/mcp.js";
+import { registerRuntimeTools } from "./tools/runtimes.js";
 
 const server = new McpServer({
   name: "ato",
@@ -16,6 +17,7 @@ registerContextTools(server);
 registerSkillsTools(server);
 registerUsageTools(server);
 registerMcpTools(server);
+registerRuntimeTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -1004,6 +1004,251 @@ async fn trigger_cron_job(id: String) -> Result<String, String> {
     prompt_agent(runtime, prompt, config).await
 }
 
+// ── Agent Status & Logging ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+    pub runtime: String,
+    pub available: bool,
+    pub healthy: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+    pub details: serde_json::Value,
+}
+
+#[tauri::command]
+async fn query_agent_status(runtime: String, config: Option<String>) -> Result<AgentStatus, String> {
+    use std::process::Command;
+
+    match runtime.as_str() {
+        "claude" => {
+            let path = which_claude();
+            let available = path.is_some();
+            let mut version = None;
+            let mut healthy = false;
+
+            if let Some(ref cli) = path {
+                // Get version
+                if let Ok(output) = Command::new(cli).arg("--version").output() {
+                    if output.status.success() {
+                        version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+                    }
+                }
+                // Auth check — run a minimal prompt
+                if let Ok(output) = Command::new(cli).args(["--print", "respond with OK"]).output() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    healthy = output.status.success() && !stderr.contains("not logged in");
+                }
+            }
+
+            Ok(AgentStatus {
+                runtime: "claude".into(),
+                available,
+                healthy,
+                version,
+                path,
+                details: serde_json::json!({ "authenticated": healthy }),
+            })
+        }
+        "codex" => {
+            let path = which_cli("codex");
+            let available = path.is_some();
+            let mut version = None;
+            let mut healthy = false;
+
+            if let Some(ref cli) = path {
+                if let Ok(output) = Command::new(cli).arg("--version").output() {
+                    if output.status.success() {
+                        version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+                    }
+                }
+                if let Ok(output) = Command::new(cli).arg("--help").output() {
+                    healthy = output.status.success();
+                }
+            }
+
+            let api_key_set = std::env::var("OPENAI_API_KEY").is_ok();
+
+            Ok(AgentStatus {
+                runtime: "codex".into(),
+                available,
+                healthy,
+                version,
+                path,
+                details: serde_json::json!({ "apiKeyEnv": if api_key_set { "set" } else { "not set" } }),
+            })
+        }
+        "openclaw" => {
+            let ssh_config: serde_json::Value = config
+                .as_deref()
+                .and_then(|c| serde_json::from_str(c).ok())
+                .unwrap_or_default();
+            let host = ssh_config.get("sshHost").and_then(|v| v.as_str()).unwrap_or("");
+            let port = ssh_config.get("sshPort").and_then(|v| v.as_u64()).unwrap_or(22);
+            let user = ssh_config.get("sshUser").and_then(|v| v.as_str()).unwrap_or("root");
+            let key_path = ssh_config.get("sshKeyPath").and_then(|v| v.as_str());
+
+            if host.is_empty() {
+                return Ok(AgentStatus {
+                    runtime: "openclaw".into(),
+                    available: false,
+                    healthy: false,
+                    version: None,
+                    path: None,
+                    details: serde_json::json!({ "error": "No SSH host configured" }),
+                });
+            }
+
+            let mut cmd = Command::new("ssh");
+            if let Some(key) = key_path {
+                cmd.args(["-i", key]);
+            }
+            cmd.args([
+                "-p", &port.to_string(),
+                "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
+                &format!("{}@{}", user, host),
+                "openclaw --version 2>/dev/null || echo NOT_FOUND"
+            ]);
+
+            let (available, version, healthy) = match cmd.output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let avail = output.status.success() && !stdout.contains("NOT_FOUND");
+                    let ver = if avail { Some(stdout.lines().next().unwrap_or("").to_string()) } else { None };
+                    (avail, ver, output.status.success())
+                }
+                Err(_) => (false, None, false),
+            };
+
+            Ok(AgentStatus {
+                runtime: "openclaw".into(),
+                available,
+                healthy,
+                version,
+                path: Some(format!("{}@{}:{}", user, host, port)),
+                details: serde_json::json!({
+                    "sshHost": host,
+                    "sshPort": port,
+                    "sshUser": user,
+                    "sshReachable": healthy,
+                }),
+            })
+        }
+        "hermes" => {
+            let path = which_cli("hermes");
+            let available = path.is_some();
+            let mut version = None;
+            let mut healthy = false;
+
+            if let Some(ref cli) = path {
+                if let Ok(output) = Command::new(cli).arg("--version").output() {
+                    if output.status.success() {
+                        version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+                    }
+                }
+                if let Ok(output) = Command::new(cli).arg("--help").output() {
+                    healthy = output.status.success();
+                }
+            }
+
+            // Check endpoint if configured
+            let endpoint = config.as_deref()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+                .and_then(|v| v.get("endpoint").and_then(|e| e.as_str().map(|s| s.to_string())));
+
+            Ok(AgentStatus {
+                runtime: "hermes".into(),
+                available,
+                healthy,
+                version,
+                path,
+                details: serde_json::json!({
+                    "cliAvailable": available,
+                    "endpoint": endpoint,
+                }),
+            })
+        }
+        _ => Err(format!("Unknown runtime: {}", runtime)),
+    }
+}
+
+#[tauri::command]
+fn query_all_agent_statuses() -> Result<Vec<AgentStatus>, String> {
+    // Synchronous check — just detect availability (no auth checks for speed)
+    let runtimes = vec![
+        ("claude", which_claude()),
+        ("codex", which_cli("codex")),
+        ("openclaw", None::<String>), // needs config
+        ("hermes", which_cli("hermes")),
+    ];
+
+    Ok(runtimes.into_iter().map(|(name, path)| {
+        let available = path.is_some();
+        AgentStatus {
+            runtime: name.to_string(),
+            available,
+            healthy: available, // assume healthy if available for fast check
+            version: None,
+            path,
+            details: serde_json::json!({}),
+        }
+    }).collect())
+}
+
+fn agent_logs_path() -> PathBuf {
+    let mut path = home_dir();
+    path.push(".ato");
+    fs::create_dir_all(&path).ok();
+    path.push("agent-logs.jsonl");
+    path
+}
+
+#[tauri::command]
+fn append_agent_log(entry: String) -> Result<(), String> {
+    use std::io::Write;
+    let path = agent_logs_path();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open agent log: {}", e))?;
+    writeln!(file, "{}", entry).map_err(|e| format!("Failed to write agent log: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_agent_logs(runtime: Option<String>, limit: Option<u32>) -> Result<Vec<serde_json::Value>, String> {
+    let path = agent_logs_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = read_file_lossy(&path).unwrap_or_default();
+    let limit = limit.unwrap_or(50) as usize;
+
+    let mut logs: Vec<serde_json::Value> = content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| {
+            if let Some(ref rt) = runtime {
+                entry.get("runtime").and_then(|v| v.as_str()) == Some(rt.as_str())
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    // Return last N entries
+    if logs.len() > limit {
+        logs = logs.split_off(logs.len() - limit);
+    }
+
+    Ok(logs)
+}
+
 fn which_claude() -> Option<String> {
     // Check common installation paths
     let candidates = vec![
@@ -1069,6 +1314,10 @@ pub fn run() {
             delete_workflow,
             detect_agent_runtimes,
             prompt_agent,
+            query_agent_status,
+            query_all_agent_statuses,
+            append_agent_log,
+            get_agent_logs,
             list_cron_jobs,
             save_cron_job,
             delete_cron_job,

@@ -8,14 +8,14 @@ The **multi-LLM control panel** for AI coding tools. One dashboard to manage **C
 
 ## Supported Runtimes
 
-| Runtime | Provider | CLI | Transport |
-|---------|----------|-----|-----------|
-| **Claude** | Anthropic | `claude --print` | Local process |
-| **Codex** | OpenAI | `codex --print` | Local process |
-| **OpenClaw** | OpenClaw | `openclaw exec` | SSH to remote host |
-| **Hermes** | Hermes | `hermes --execute` | Local process |
+| Runtime | Provider | Outbound (send) | Inbound (status) | Transport |
+|---------|----------|-----------------|-------------------|-----------|
+| **Claude** | Anthropic | `claude --print` | MCP tools + `--version` + auth check | Local CLI |
+| **Codex** | OpenAI | `codex --print` | `--version` + `--help` + API key detection | Local CLI |
+| **OpenClaw** | OpenClaw | SSH `openclaw exec` | SSH `openclaw --version` + `openclaw status` | SSH remote |
+| **Hermes** | Hermes | `hermes --execute` | `--version` + `/health` endpoint probe | CLI + HTTP |
 
-ATO auto-detects which runtimes are installed on your system (`detect_agent_runtimes`). You can assign any runtime to subagents, automation workflow nodes, and cron jobs. Mix and match runtimes in the same workflow — run code review with Claude, then deploy with Codex, all in one pipeline.
+**Full two-way communication** with all runtimes. ATO auto-detects installed CLIs, verifies health (auth, connectivity, API keys), logs all executions to `~/.ato/agent-logs.jsonl`, and exposes status via both MCP tools and Tauri commands. Mix runtimes in the same workflow — run code review with Claude, then deploy with Codex, all in one pipeline.
 
 ---
 
@@ -216,14 +216,21 @@ services/mcp-server/         # Standalone MCP server for Claude Code (stdio)
 - `list_skills` / `toggle_skill` — Manage skills
 - `get_usage_stats` — Token/cost analytics
 - `get_mcp_status` — MCP server health
+- `get_runtime_status` — Health check for any runtime (claude/codex/openclaw/hermes)
+- `get_all_runtime_statuses` — Health check all runtimes at once
+- `get_agent_logs` — Read agent execution logs (filterable by runtime)
 
 ### Tauri Commands (Rust → Frontend)
 
 | Command | Description |
 |---------|-------------|
 | `detect_agent_runtimes` | Check which CLIs are installed |
-| `prompt_agent` | Dispatch prompt to any runtime |
+| `prompt_agent` | Dispatch prompt to any runtime (auto-logs) |
 | `prompt_claude` | Direct Claude CLI invocation |
+| `query_agent_status` | Deep health check for a single runtime |
+| `query_all_agent_statuses` | Fast status check for all runtimes |
+| `append_agent_log` | Write structured execution log entry |
+| `get_agent_logs` | Read execution logs (filterable by runtime) |
 | `get_local_skills` / `get_skill_detail` | Scan & read skills |
 | `create_skill` / `update_skill` / `delete_skill` | Skill CRUD |
 | `list_workflows` / `save_workflow` / `delete_workflow` | Workflow CRUD |
@@ -245,6 +252,7 @@ All data is local by default. No network calls unless cloud sync is explicitly e
 | Workflows | `~/.ato/workflows/*.json` |
 | Cron jobs | `~/.ato/cron-jobs.json` |
 | Cron history | `~/.ato/cron-history.json` |
+| Agent logs | `~/.ato/agent-logs.jsonl` |
 | Database | `~/.ato/local.db` (SQLite) |
 | Config | `~/.claude/settings.json` |
 

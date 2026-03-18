@@ -270,13 +270,137 @@ export async function promptAgent(
   prompt: string,
   config?: RuntimeConfig
 ): Promise<string> {
+  const startTime = Date.now();
   try {
-    return await invoke<string>('prompt_agent', { runtime, prompt, config: config ? JSON.stringify(config) : null });
-  } catch {
-    if (runtime === 'claude') {
-      return promptClaude(prompt);
+    let result: string;
+    try {
+      result = await invoke<string>('prompt_agent', { runtime, prompt, config: config ? JSON.stringify(config) : null });
+    } catch {
+      if (runtime === 'claude') {
+        result = await promptClaude(prompt);
+      } else {
+        throw new Error(`Runtime "${runtime}" is not available`);
+      }
     }
-    throw new Error(`Runtime "${runtime}" is not available`);
+
+    // Log successful execution
+    appendAgentLog({
+      timestamp: new Date().toISOString(),
+      runtime,
+      level: 'info',
+      message: `Execution completed (${prompt.slice(0, 80)}...)`,
+      durationMs: Date.now() - startTime,
+    }).catch(() => {});
+
+    return result;
+  } catch (err) {
+    // Log failed execution
+    appendAgentLog({
+      timestamp: new Date().toISOString(),
+      runtime,
+      level: 'error',
+      message: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - startTime,
+    }).catch(() => {});
+
+    throw err;
+  }
+}
+
+// ---- Agent Status (Inbound / Two-Way) ----
+
+export interface AgentStatus {
+  runtime: string;
+  available: boolean;
+  healthy: boolean;
+  version: string | null;
+  path: string | null;
+  details: Record<string, unknown>;
+}
+
+export interface AgentLogEntry {
+  timestamp: string;
+  runtime: AgentRuntime;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  jobId?: string;
+  durationMs?: number;
+}
+
+/**
+ * Deep health check for a single runtime.
+ * Checks CLI availability, version, authentication, and connectivity.
+ */
+export async function queryAgentStatus(
+  runtime: AgentRuntime,
+  config?: RuntimeConfig
+): Promise<AgentStatus> {
+  try {
+    return await invoke<AgentStatus>('query_agent_status', {
+      runtime,
+      config: config ? JSON.stringify(config) : null,
+    });
+  } catch {
+    return {
+      runtime,
+      available: false,
+      healthy: false,
+      version: null,
+      path: null,
+      details: { error: 'Tauri not available' },
+    };
+  }
+}
+
+/**
+ * Fast status check for all runtimes (no auth verification).
+ */
+export async function queryAllAgentStatuses(): Promise<AgentStatus[]> {
+  try {
+    return await invoke<AgentStatus[]>('query_all_agent_statuses');
+  } catch {
+    return [
+      { runtime: 'claude', available: false, healthy: false, version: null, path: null, details: {} },
+      { runtime: 'codex', available: false, healthy: false, version: null, path: null, details: {} },
+      { runtime: 'openclaw', available: false, healthy: false, version: null, path: null, details: {} },
+      { runtime: 'hermes', available: false, healthy: false, version: null, path: null, details: {} },
+    ];
+  }
+}
+
+/**
+ * Append a structured log entry for agent execution tracking.
+ */
+export async function appendAgentLog(entry: AgentLogEntry): Promise<void> {
+  try {
+    await invoke('append_agent_log', { entry: JSON.stringify(entry) });
+  } catch {
+    // Fallback: localStorage
+    const logs = JSON.parse(localStorage.getItem('ato-agent-logs') || '[]');
+    logs.push(entry);
+    // Keep last 500
+    if (logs.length > 500) logs.splice(0, logs.length - 500);
+    localStorage.setItem('ato-agent-logs', JSON.stringify(logs));
+  }
+}
+
+/**
+ * Read agent execution logs, optionally filtered by runtime.
+ */
+export async function getAgentLogs(
+  runtime?: AgentRuntime,
+  limit = 50
+): Promise<AgentLogEntry[]> {
+  try {
+    return await invoke<AgentLogEntry[]>('get_agent_logs', {
+      runtime: runtime || null,
+      limit,
+    });
+  } catch {
+    const raw = localStorage.getItem('ato-agent-logs');
+    const all: AgentLogEntry[] = raw ? JSON.parse(raw) : [];
+    const filtered = runtime ? all.filter((e) => e.runtime === runtime) : all;
+    return filtered.slice(-limit);
   }
 }
 

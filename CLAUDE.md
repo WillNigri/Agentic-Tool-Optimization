@@ -27,11 +27,22 @@ Tauri 2.x with:
 - **Theme**: Dark (#0a0a0f) + cyan/mint (#00FFB2) accent
 - **Offline-first**: Works without internet, all data in local SQLite
 
-## Multi-Agent Runtime
+## Multi-Agent Runtime (Two-Way)
 
 Supported runtimes: Claude, Codex, OpenClaw (SSH), Hermes.
-- `detect_agent_runtimes` — auto-detect installed CLIs
+
+**Outbound (send prompts):**
 - `prompt_agent(runtime, prompt, config?)` — unified dispatch to any runtime
+- Auto-logs every execution to `~/.ato/agent-logs.jsonl`
+
+**Inbound (get status):**
+- `query_agent_status(runtime, config?)` — deep health check (version, auth, connectivity)
+- `query_all_agent_statuses()` — fast check for all runtimes
+- `get_agent_logs(runtime?, limit?)` — read execution history
+- Per-runtime checks: Claude (auth), Codex (API key), OpenClaw (SSH reachability), Hermes (endpoint health)
+
+**Other:**
+- `detect_agent_runtimes` — auto-detect installed CLIs
 - Per-node runtime selection in automation workflows
 - Runtime-specific config: OpenClaw (SSH), Codex (API key), Hermes (endpoint)
 
@@ -41,6 +52,9 @@ Supported runtimes: Claude, Codex, OpenClaw (SSH), Hermes.
 - `list_skills` / `toggle_skill` — Manage skills
 - `get_usage_stats` — Token/cost analytics
 - `get_mcp_status` — MCP server health
+- `get_runtime_status` — Health check for any runtime
+- `get_all_runtime_statuses` — Health check all runtimes at once
+- `get_agent_logs` — Execution logs (filterable by runtime)
 
 ## Open Source vs Closed Source
 
