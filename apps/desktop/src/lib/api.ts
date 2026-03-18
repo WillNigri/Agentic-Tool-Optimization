@@ -11,7 +11,7 @@ import * as tauriApi from './tauri-api';
 import * as mock from './mock-data';
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+const API_BASE = import.meta.env.VITE_API_URL || 'https://api.agentictool.ai/api';
 
 // Check if cloud API is reachable (cached, fast fail)
 let cloudAvailable: boolean | null = null;
