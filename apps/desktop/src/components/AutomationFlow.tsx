@@ -1,5 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { X, Globe, Activity, Workflow } from "lucide-react";
 import { TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./automation/constants";
@@ -11,6 +12,8 @@ import NodeConfigPanel from "./automation/NodeConfigPanel";
 import FlowCanvas from "./automation/FlowCanvas";
 import ExecutionOverlay from "./automation/ExecutionOverlay";
 import { promptAgent, saveWorkflow as persistWorkflow } from "@/lib/tauri-api";
+import { getSkills } from "@/lib/api";
+import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
 
 export default function AutomationFlow() {
   const { t } = useTranslation();
@@ -28,6 +31,22 @@ export default function AutomationFlow() {
     execution,
     workflows,
   } = useAutomationStore();
+
+  // Load skill-based workflows (gstack etc.) on mount
+  const { data: skills = [] } = useQuery({
+    queryKey: ["skills"],
+    queryFn: getSkills,
+  });
+
+  useEffect(() => {
+    if (skills.length > 0 && workflows.length === 0) {
+      const skillWorkflows = generateWorkflowsFromSkills(skills);
+      if (skillWorkflows.length > 0) {
+        const store = useAutomationStore.getState();
+        store.loadWorkflows(skillWorkflows);
+      }
+    }
+  }, [skills, workflows.length]);
 
   const workflow = getActiveWorkflow();
   const selectedNode = workflow.nodes.find((n) => n.id === selectedNodeId) || null;
