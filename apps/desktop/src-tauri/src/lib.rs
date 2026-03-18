@@ -357,35 +357,100 @@ fn get_local_skills(db: State<'_, DbState>) -> Result<Vec<LocalSkill>, String> {
         }
     }
 
-    // ── Codex skills ──
-    // Personal: ~/.codex/skills/ or ~/.codex/instructions/
-    let codex_home = home_dir().join(".codex");
-    let codex_skills = codex_home.join("skills");
-    skills.extend(collect_skills(&codex_skills, "personal", "codex", &conn));
-    let codex_instructions = codex_home.join("instructions");
-    skills.extend(collect_skills(&codex_instructions, "personal", "codex", &conn));
-
+    // ── Codex skills (OpenAI) ──
+    // CODEX_HOME defaults to ~/.codex
+    let codex_home_str = std::env::var("CODEX_HOME").unwrap_or_else(|_| {
+        home_dir().join(".codex").to_string_lossy().to_string()
+    });
+    let codex_home = PathBuf::from(&codex_home_str);
+    // Personal: ~/.codex/skills/**/SKILL.md
+    skills.extend(collect_skills(&codex_home.join("skills"), "personal", "codex", &conn));
+    // Project: .agents/skills/ (Codex convention)
+    skills.extend(collect_skills(&PathBuf::from(".agents").join("skills"), "project", "codex", &conn));
     // Project: .codex/skills/
-    let codex_project = PathBuf::from(".codex").join("skills");
-    skills.extend(collect_skills(&codex_project, "project", "codex", &conn));
+    skills.extend(collect_skills(&PathBuf::from(".codex").join("skills"), "project", "codex", &conn));
 
     // ── OpenClaw skills ──
+    // OPENCLAW_HOME env or defaults to ~/.openclaw
+    let openclaw_home_str = std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| {
+        home_dir().join(".openclaw").to_string_lossy().to_string()
+    });
+    let openclaw_home = PathBuf::from(&openclaw_home_str);
     // Personal: ~/.openclaw/skills/
-    let openclaw_skills = home_dir().join(".openclaw").join("skills");
-    skills.extend(collect_skills(&openclaw_skills, "personal", "openclaw", &conn));
+    skills.extend(collect_skills(&openclaw_home.join("skills"), "personal", "openclaw", &conn));
+    // Workspace: ~/.openclaw/workspace/skills/
+    skills.extend(collect_skills(&openclaw_home.join("workspace").join("skills"), "personal", "openclaw", &conn));
+    // Workspace config files as pseudo-skills (AGENTS.md, SOUL.md)
+    let oc_workspace = openclaw_home.join("workspace");
+    if oc_workspace.exists() {
+        for fname in ["AGENTS.md", "SOUL.md", "TOOLS.md"] {
+            let fpath = oc_workspace.join(fname);
+            if fpath.exists() {
+                if let Some(content) = read_file_lossy(&fpath) {
+                    let (fm, _) = parse_frontmatter(&content);
+                    let desc = fm.get("description").and_then(|v| v.as_str()).unwrap_or("OpenClaw workspace config").to_string();
+                    let hash = content_hash(&content);
+                    let fp_str = fpath.to_string_lossy().to_string();
+                    let enabled: bool = conn.query_row(
+                        "SELECT enabled FROM skill_toggles WHERE file_path = ?1",
+                        params![&fp_str], |row| row.get(0),
+                    ).unwrap_or(true);
+                    skills.push(LocalSkill {
+                        id: content_hash(&fp_str),
+                        name: fname.replace(".md", "").to_string(),
+                        description: desc,
+                        file_path: fp_str,
+                        scope: "personal".to_string(),
+                        runtime: "openclaw".to_string(),
+                        token_count: estimate_tokens(content.len() as u64),
+                        enabled,
+                        content_hash: hash,
+                    });
+                }
+            }
+        }
+    }
 
-    // Project: .openclaw/skills/
-    let openclaw_project = PathBuf::from(".openclaw").join("skills");
-    skills.extend(collect_skills(&openclaw_project, "project", "openclaw", &conn));
-
-    // ── Hermes skills ──
-    // Personal: ~/.hermes/skills/
-    let hermes_skills = home_dir().join(".hermes").join("skills");
-    skills.extend(collect_skills(&hermes_skills, "personal", "hermes", &conn));
-
-    // Project: .hermes/skills/
-    let hermes_project = PathBuf::from(".hermes").join("skills");
-    skills.extend(collect_skills(&hermes_project, "project", "hermes", &conn));
+    // ── Hermes skills (NousResearch) ──
+    // ~/.hermes/skills/ with category subdirectories
+    let hermes_home = home_dir().join(".hermes");
+    let hermes_skills_dir = hermes_home.join("skills");
+    skills.extend(collect_skills(&hermes_skills_dir, "personal", "hermes", &conn));
+    // Also scan category subdirectories: ~/.hermes/skills/mlops/, ~/.hermes/skills/devops/, etc.
+    if hermes_skills_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&hermes_skills_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Category directory — scan for skills inside
+                    skills.extend(collect_skills(&path, "personal", "hermes", &conn));
+                }
+            }
+        }
+    }
+    // Hermes memories as pseudo-skills (SOUL.md)
+    let hermes_soul = hermes_home.join("SOUL.md");
+    if hermes_soul.exists() {
+        if let Some(content) = read_file_lossy(&hermes_soul) {
+            let hash = content_hash(&content);
+            let fp_str = hermes_soul.to_string_lossy().to_string();
+            let enabled: bool = conn.query_row(
+                "SELECT enabled FROM skill_toggles WHERE file_path = ?1",
+                params![&fp_str], |row| row.get(0),
+            ).unwrap_or(true);
+            skills.push(LocalSkill {
+                id: content_hash(&fp_str),
+                name: "SOUL".to_string(),
+                description: "Hermes persona and identity".to_string(),
+                file_path: fp_str,
+                scope: "personal".to_string(),
+                runtime: "hermes".to_string(),
+                token_count: estimate_tokens(content.len() as u64),
+                enabled,
+                content_hash: hash,
+            });
+        }
+    }
 
     Ok(skills)
 }
@@ -394,25 +459,34 @@ fn get_local_skills(db: State<'_, DbState>) -> Result<Vec<LocalSkill>, String> {
 fn get_skill_detail(db: State<'_, DbState>, id: String) -> Result<SkillDetail, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    // Find the skill by scanning all directories (all runtimes)
-    let all_skills = {
-        let mut s = Vec::new();
-        // Claude
-        s.extend(collect_skills(&claude_home().join("skills"), "personal", "claude", &conn));
-        s.extend(collect_skills(&PathBuf::from(".claude").join("skills"), "project", "claude", &conn));
-        s.extend(collect_skills(&PathBuf::from("/etc/claude/skills"), "enterprise", "claude", &conn));
-        // Codex
-        s.extend(collect_skills(&home_dir().join(".codex").join("skills"), "personal", "codex", &conn));
-        s.extend(collect_skills(&home_dir().join(".codex").join("instructions"), "personal", "codex", &conn));
-        s.extend(collect_skills(&PathBuf::from(".codex").join("skills"), "project", "codex", &conn));
-        // OpenClaw
-        s.extend(collect_skills(&home_dir().join(".openclaw").join("skills"), "personal", "openclaw", &conn));
-        s.extend(collect_skills(&PathBuf::from(".openclaw").join("skills"), "project", "openclaw", &conn));
-        // Hermes
-        s.extend(collect_skills(&home_dir().join(".hermes").join("skills"), "personal", "hermes", &conn));
-        s.extend(collect_skills(&PathBuf::from(".hermes").join("skills"), "project", "hermes", &conn));
-        s
-    };
+    // Scan all directories — just scan Claude dirs for detail lookup since
+    // the skill ID will only match one location regardless
+    let mut all_skills = Vec::new();
+    // Claude
+    all_skills.extend(collect_skills(&claude_home().join("skills"), "personal", "claude", &conn));
+    all_skills.extend(collect_skills(&PathBuf::from(".claude").join("skills"), "project", "claude", &conn));
+    all_skills.extend(collect_skills(&PathBuf::from("/etc/claude/skills"), "enterprise", "claude", &conn));
+    // Codex
+    let codex_home = PathBuf::from(std::env::var("CODEX_HOME").unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
+    all_skills.extend(collect_skills(&codex_home.join("skills"), "personal", "codex", &conn));
+    all_skills.extend(collect_skills(&PathBuf::from(".agents").join("skills"), "project", "codex", &conn));
+    all_skills.extend(collect_skills(&PathBuf::from(".codex").join("skills"), "project", "codex", &conn));
+    // OpenClaw
+    let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+    all_skills.extend(collect_skills(&oc_home.join("skills"), "personal", "openclaw", &conn));
+    all_skills.extend(collect_skills(&oc_home.join("workspace").join("skills"), "personal", "openclaw", &conn));
+    // Hermes
+    let hermes_skills = home_dir().join(".hermes").join("skills");
+    all_skills.extend(collect_skills(&hermes_skills, "personal", "hermes", &conn));
+    if hermes_skills.exists() {
+        if let Ok(entries) = fs::read_dir(&hermes_skills) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    all_skills.extend(collect_skills(&entry.path(), "personal", "hermes", &conn));
+                }
+            }
+        }
+    }
 
     let skill = all_skills.iter().find(|s| s.id == id)
         .ok_or_else(|| format!("Skill not found: {}", id))?;
