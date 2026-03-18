@@ -113,7 +113,7 @@ const INITIAL_HOOKS: Hook[] = [
 
 export default function HooksManager() {
   const { t } = useTranslation();
-  const [hooks, setHooks] = useState<Hook[]>(INITIAL_HOOKS);
+  const [hooks, setHooks] = useState<Hook[]>([]);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<Hook | null>(null);

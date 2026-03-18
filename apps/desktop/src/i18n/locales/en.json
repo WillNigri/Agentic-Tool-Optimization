@@ -178,6 +178,7 @@
     "scope": "Scope",
     "global": "Global",
     "projectScope": "Project",
+    "search": "Search hooks...",
     "noHooks": "No hooks configured",
     "events": {
       "PreToolUse": "Pre Tool Use",

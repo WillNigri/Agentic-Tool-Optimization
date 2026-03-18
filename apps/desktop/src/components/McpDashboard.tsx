@@ -11,49 +11,8 @@ const STATUS_COLORS: Record<McpServer["status"], string> = {
   error: "bg-cs-danger",
 };
 
-// Mock tool details for each MCP server
-const MOCK_SERVER_TOOLS: Record<string, { name: string; description: string }[]> = {
-  "1": [
-    { name: "read_file", description: "Read contents of a file" },
-    { name: "write_file", description: "Write content to a file" },
-    { name: "list_directory", description: "List directory contents" },
-    { name: "create_directory", description: "Create a new directory" },
-    { name: "move_file", description: "Move or rename a file" },
-    { name: "delete_file", description: "Delete a file" },
-    { name: "get_file_info", description: "Get file metadata" },
-    { name: "search_files", description: "Search for files by pattern" },
-    { name: "read_multiple_files", description: "Read multiple files at once" },
-    { name: "edit_file", description: "Apply edits to a file" },
-    { name: "copy_file", description: "Copy a file" },
-    { name: "get_directory_tree", description: "Get recursive directory tree" },
-  ],
-  "2": [
-    { name: "create_issue", description: "Create a GitHub issue" },
-    { name: "list_issues", description: "List repository issues" },
-    { name: "create_pull_request", description: "Create a pull request" },
-    { name: "get_pull_request", description: "Get PR details" },
-    { name: "list_commits", description: "List recent commits" },
-    { name: "search_code", description: "Search code in repository" },
-    { name: "get_file_contents", description: "Get file from GitHub" },
-    { name: "create_branch", description: "Create a new branch" },
-  ],
-  "3": [],
-  "4": [
-    { name: "query", description: "Execute SQL query" },
-    { name: "list_tables", description: "List database tables" },
-    { name: "describe_table", description: "Get table schema" },
-    { name: "insert_row", description: "Insert a row" },
-    { name: "update_rows", description: "Update rows" },
-    { name: "delete_rows", description: "Delete rows" },
-  ],
-};
-
-const MOCK_SERVER_DETAILS: Record<string, { env: Record<string, string>; configPath: string; permissions: string[] }> = {
-  "1": { env: { "MCP_FS_ROOT": "/Users/dev/projects" }, configPath: "~/.claude/settings.json", permissions: ["read", "write", "list"] },
-  "2": { env: { "GITHUB_TOKEN": "ghp_***...***" }, configPath: "~/.claude/settings.json", permissions: ["read", "write"] },
-  "3": { env: { "SLACK_WEBHOOK": "https://hooks.slack.com/..." }, configPath: "~/.claude/settings.json", permissions: ["read"] },
-  "4": { env: { "DATABASE_URL": "postgresql://localhost:5432/dev" }, configPath: ".claude/settings.json", permissions: ["read", "write"] },
-};
+// Tool details are read from real config — no mock data
+// Tools and env/permissions would come from actually connecting to MCP servers
 
 export default function McpDashboard() {
   const { t } = useTranslation();
@@ -72,8 +31,8 @@ export default function McpDashboard() {
   });
 
   const selectedServer = servers.find((s) => s.id === selectedId);
-  const selectedTools = selectedId ? MOCK_SERVER_TOOLS[selectedId] || [] : [];
-  const selectedDetails = selectedId ? MOCK_SERVER_DETAILS[selectedId] : null;
+  const selectedTools: { name: string; description: string }[] = [];
+  const selectedDetails: { env: Record<string, string>; configPath: string; permissions: string[] } | null = null;
 
   if (isLoading) {
     return <LoadingSkeleton />;

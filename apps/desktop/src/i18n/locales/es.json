@@ -366,6 +366,7 @@
     "scope": "Alcance",
     "global": "Global",
     "projectScope": "Proyecto",
+    "search": "Buscar hooks...",
     "noHooks": "Ningun hook configurado",
     "events": {
       "PreToolUse": "Pre Uso de Herramienta",

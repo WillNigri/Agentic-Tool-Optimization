@@ -59,16 +59,27 @@ const RUNTIME_DEPENDENCIES: Record<AgentRuntime, { name: string; path: string; t
   ],
 };
 
-const MOCK_PERMISSIONS = [
-  { tool: "Read", scope: "global", status: "allowed" as const },
-  { tool: "Write", scope: "project", status: "allowed" as const },
-  { tool: "Edit", scope: "project", status: "allowed" as const },
-  { tool: "Bash", scope: "project", status: "ask" as const },
-  { tool: "Grep", scope: "global", status: "allowed" as const },
-  { tool: "Glob", scope: "global", status: "allowed" as const },
-  { tool: "WebFetch", scope: "global", status: "denied" as const },
-  { tool: "Agent", scope: "project", status: "allowed" as const },
-];
+// Permissions vary by runtime — only Claude has the full tool permission system
+const RUNTIME_PERMISSIONS: Record<AgentRuntime, { tool: string; scope: string; status: "allowed" | "ask" | "denied" }[]> = {
+  claude: [
+    { tool: "Read", scope: "global", status: "allowed" },
+    { tool: "Write", scope: "project", status: "allowed" },
+    { tool: "Edit", scope: "project", status: "allowed" },
+    { tool: "Bash", scope: "project", status: "ask" },
+    { tool: "Grep", scope: "global", status: "allowed" },
+    { tool: "Glob", scope: "global", status: "allowed" },
+    { tool: "WebFetch", scope: "global", status: "denied" },
+    { tool: "Agent", scope: "project", status: "allowed" },
+  ],
+  codex: [
+    { tool: "shell", scope: "sandbox", status: "allowed" },
+    { tool: "file_read", scope: "sandbox", status: "allowed" },
+    { tool: "file_write", scope: "sandbox", status: "allowed" },
+    { tool: "browser", scope: "sandbox", status: "denied" },
+  ],
+  openclaw: [],
+  hermes: [],
+};
 
 const DEP_TYPE_COLORS = {
   system: "#FF4466",
@@ -372,7 +383,7 @@ export default function ContextVisualizer() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {MOCK_PERMISSIONS.map((perm) => (
+            {RUNTIME_PERMISSIONS[activeRuntime].map((perm) => (
               <div key={perm.tool} className="card flex items-center gap-3 !py-3">
                 <div className={cn(
                   "w-8 h-8 rounded-lg flex items-center justify-center text-xs font-mono font-bold shrink-0",
