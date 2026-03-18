@@ -1,0 +1,15 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the ATO desktop app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-exists",
+    "fs:scope-home"
+  ]
+}

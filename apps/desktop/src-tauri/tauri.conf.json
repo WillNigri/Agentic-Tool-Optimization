@@ -38,8 +38,6 @@
   "plugins": {
     "shell": {
       "open": true
-    },
-    "fs": {},
-    "dialog": {}
+    }
   }
 }
