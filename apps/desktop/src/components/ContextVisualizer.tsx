@@ -25,18 +25,39 @@ const RUNTIME_TABS: { id: AgentRuntime; label: string; icon: typeof Terminal; co
   { id: "hermes", label: "Hermes", icon: Globe, color: "#a855f7" },
 ];
 
-// Mock dependency and permission data for the detail view
-const MOCK_DEPENDENCIES = [
-  { name: "CLAUDE.md", path: "CLAUDE.md", tokens: 2100, type: "config" as const, loaded: true },
-  { name: "System Prompt", path: "(built-in)", tokens: 28450, type: "system" as const, loaded: true },
-  { name: "typescript-expert", path: "~/.claude/skills/ts-expert/", tokens: 2340, type: "skill" as const, loaded: true },
-  { name: "code-review", path: "~/.claude/skills/code-review.md", tokens: 1890, type: "skill" as const, loaded: true },
-  { name: "project-conventions", path: ".claude/skills/conventions.md", tokens: 3200, type: "skill" as const, loaded: true },
-  { name: "api-guidelines", path: ".claude/skills/api.md", tokens: 1200, type: "skill" as const, loaded: true },
-  { name: "filesystem MCP", path: "npx @anthropic/mcp-filesystem", tokens: 3400, type: "mcp" as const, loaded: true },
-  { name: "github MCP", path: "npx github-mcp-server", tokens: 2800, type: "mcp" as const, loaded: true },
-  { name: "postgres MCP", path: "npx @anthropic/mcp-postgres", tokens: 2000, type: "mcp" as const, loaded: true },
-];
+// Runtime-specific dependency examples for the detail view
+type DepType = "system" | "config" | "skill" | "mcp";
+const RUNTIME_DEPENDENCIES: Record<AgentRuntime, { name: string; path: string; tokens: number; type: DepType; loaded: boolean }[]> = {
+  claude: [
+    { name: "CLAUDE.md", path: "CLAUDE.md", tokens: 2100, type: "config", loaded: true },
+    { name: "System Prompt", path: "(built-in)", tokens: 28450, type: "system", loaded: true },
+    { name: "~/.claude/skills/", path: "~/.claude/skills/", tokens: 5430, type: "skill", loaded: true },
+    { name: ".claude/skills/", path: ".claude/skills/", tokens: 4400, type: "skill", loaded: true },
+    { name: "MCP Schemas", path: "~/.claude/settings.json", tokens: 5000, type: "mcp", loaded: true },
+  ],
+  codex: [
+    { name: "AGENTS.md", path: "AGENTS.md", tokens: 1800, type: "config", loaded: true },
+    { name: "System Prompt", path: "(built-in)", tokens: 20000, type: "system", loaded: true },
+    { name: "~/.codex/skills/", path: "~/.codex/skills/", tokens: 3200, type: "skill", loaded: true },
+    { name: "config.toml", path: "~/.codex/config.toml", tokens: 400, type: "config", loaded: true },
+  ],
+  openclaw: [
+    { name: "AGENTS.md", path: "~/.openclaw/workspace/AGENTS.md", tokens: 3500, type: "config", loaded: true },
+    { name: "SOUL.md", path: "~/.openclaw/workspace/SOUL.md", tokens: 1200, type: "config", loaded: true },
+    { name: "TOOLS.md", path: "~/.openclaw/workspace/TOOLS.md", tokens: 800, type: "config", loaded: true },
+    { name: "System Prompt", path: "(built-in)", tokens: 15000, type: "system", loaded: true },
+    { name: "Skills", path: "~/.openclaw/skills/", tokens: 4000, type: "skill", loaded: true },
+    { name: "Memory", path: "~/.openclaw/workspace/memory/", tokens: 2000, type: "mcp", loaded: true },
+  ],
+  hermes: [
+    { name: "SOUL.md", path: "~/.hermes/SOUL.md", tokens: 1500, type: "config", loaded: true },
+    { name: "System Prompt", path: "(built-in)", tokens: 12000, type: "system", loaded: true },
+    { name: "Skills", path: "~/.hermes/skills/", tokens: 3800, type: "skill", loaded: true },
+    { name: "MEMORY.md", path: "~/.hermes/memories/MEMORY.md", tokens: 800, type: "mcp", loaded: true },
+    { name: "USER.md", path: "~/.hermes/memories/USER.md", tokens: 500, type: "mcp", loaded: true },
+    { name: "config.yaml", path: "~/.hermes/config.yaml", tokens: 300, type: "config", loaded: true },
+  ],
+};
 
 const MOCK_PERMISSIONS = [
   { tool: "Read", scope: "global", status: "allowed" as const },
@@ -277,7 +298,7 @@ export default function ContextVisualizer() {
             </div>
           </div>
 
-          {MOCK_DEPENDENCIES.map((dep) => {
+          {RUNTIME_DEPENDENCIES[activeRuntime].map((dep) => {
             const isClickable = dep.path !== "(built-in)" && !dep.path.startsWith("npx ");
             return (
               <div
@@ -313,7 +334,7 @@ export default function ContextVisualizer() {
 
           <div className="card !p-3 border-dashed">
             <p className="text-xs text-cs-muted text-center">
-              {t('context.totalDeps', { count: MOCK_DEPENDENCIES.length, tokens: formatNumber(MOCK_DEPENDENCIES.reduce((s, d) => s + d.tokens, 0)) })}
+              {t('context.totalDeps', { count: RUNTIME_DEPENDENCIES[activeRuntime].length, tokens: formatNumber(RUNTIME_DEPENDENCIES[activeRuntime].reduce((s, d) => s + d.tokens, 0)) })}
             </p>
           </div>
         </div>

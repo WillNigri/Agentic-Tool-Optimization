@@ -10,12 +10,25 @@ import type { AgentRuntime } from "@/components/cron/types";
 const AVAILABLE_TOOLS = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Agent"];
 const AVAILABLE_MODELS = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"];
 
-const SCOPE_OPTIONS: { value: SkillScope; path: string }[] = [
-  { value: "enterprise", path: "/etc/claude/skills/" },
-  { value: "personal", path: "~/.claude/skills/" },
-  { value: "project", path: ".claude/skills/" },
-  { value: "plugin", path: "~/.claude/plugins/" },
-];
+const SCOPE_PATHS: Record<AgentRuntime, { value: SkillScope; path: string }[]> = {
+  claude: [
+    { value: "enterprise", path: "/etc/claude/skills/" },
+    { value: "personal", path: "~/.claude/skills/" },
+    { value: "project", path: ".claude/skills/" },
+    { value: "plugin", path: "~/.claude/plugins/" },
+  ],
+  codex: [
+    { value: "personal", path: "~/.codex/skills/" },
+    { value: "project", path: ".codex/skills/" },
+  ],
+  openclaw: [
+    { value: "personal", path: "~/.openclaw/skills/" },
+    { value: "project", path: "~/.openclaw/workspace/skills/" },
+  ],
+  hermes: [
+    { value: "personal", path: "~/.hermes/skills/" },
+  ],
+};
 
 interface CreateSkillModalProps {
   onClose: () => void;
@@ -104,6 +117,35 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
           </div>
 
           <form onSubmit={handleSubmit} className="p-4 space-y-4">
+            {/* Runtime selector */}
+            <div>
+              <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
+                {t("subagents.runtime")}
+              </label>
+              <div className="grid grid-cols-4 gap-2">
+                {([
+                  { id: "claude" as AgentRuntime, label: "Claude", color: "#f97316" },
+                  { id: "codex" as AgentRuntime, label: "Codex", color: "#22c55e" },
+                  { id: "openclaw" as AgentRuntime, label: "OpenClaw", color: "#06b6d4" },
+                  { id: "hermes" as AgentRuntime, label: "Hermes", color: "#a855f7" },
+                ]).map((rt) => (
+                  <button
+                    key={rt.id}
+                    type="button"
+                    onClick={() => { setAiRuntime(rt.id); setScope("personal"); }}
+                    className="flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium rounded-lg border transition-colors"
+                    style={
+                      aiRuntime === rt.id
+                        ? { borderColor: `${rt.color}66`, background: `${rt.color}18`, color: rt.color }
+                        : { borderColor: "var(--cs-border)", color: "var(--cs-muted)" }
+                    }
+                  >
+                    {rt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Name */}
             <div>
               <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
@@ -139,7 +181,7 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
                 {t("skills.source")}
               </label>
               <div className="grid grid-cols-2 gap-2">
-                {SCOPE_OPTIONS.map((opt) => (
+                {(SCOPE_PATHS[aiRuntime] || SCOPE_PATHS.claude).map((opt) => (
                   <button
                     key={opt.value}
                     type="button"

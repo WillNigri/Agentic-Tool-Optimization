@@ -771,49 +771,48 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
 fn get_local_config() -> Result<Vec<LocalMcpServer>, String> {
     let mut servers = Vec::new();
 
-    // Read MCP servers from ~/.claude/settings.json
-    let settings_path = claude_home().join("settings.json");
-    if let Some(content) = read_file_lossy(&settings_path) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(mcp_servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
-                for (name, config) in mcp_servers {
-                    let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let url = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let transport = if url.is_some() { "http" } else { "stdio" };
+    // Scan config files from ALL runtimes for MCP server definitions
+    let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
+        .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
+    let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
 
-                    servers.push(LocalMcpServer {
-                        id: content_hash(name),
-                        name: name.clone(),
-                        transport: transport.to_string(),
-                        status: "running".to_string(), // We can't check live status without connecting
-                        tool_count: 0,
-                        command,
-                        url,
-                    });
-                }
-            }
-        }
-    }
+    let config_paths: Vec<(PathBuf, &str)> = vec![
+        // Claude
+        (claude_home().join("settings.json"), "claude"),
+        (PathBuf::from(".claude").join("settings.json"), "claude-project"),
+        // Codex
+        (codex_home.join("config.toml"), "codex"),
+        (PathBuf::from(".codex").join("config.toml"), "codex-project"),
+        // OpenClaw
+        (oc_home.join("openclaw.json"), "openclaw"),
+        // Hermes
+        (home_dir().join(".hermes").join("config.yaml"), "hermes"),
+    ];
 
-    // Also check project-level .claude/settings.json
-    let project_settings = PathBuf::from(".claude").join("settings.json");
-    if let Some(content) = read_file_lossy(&project_settings) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(mcp_servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
-                for (name, config) in mcp_servers {
-                    let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let url = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let transport = if url.is_some() { "http" } else { "stdio" };
+    for (settings_path, source) in &config_paths {
+        if let Some(content) = read_file_lossy(settings_path) {
+            // Try JSON parsing (Claude, OpenClaw)
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                // Check common MCP server config keys
+                for key in ["mcpServers", "mcp_servers"] {
+                    if let Some(mcp_servers) = parsed.get(key).and_then(|v| v.as_object()) {
+                        for (name, config) in mcp_servers {
+                            let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            let url_val = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            let transport = if url_val.is_some() { "http" } else { "stdio" };
 
-                    servers.push(LocalMcpServer {
-                        id: content_hash(&format!("project-{}", name)),
-                        name: name.clone(),
-                        transport: transport.to_string(),
-                        status: "running".to_string(),
-                        tool_count: 0,
-                        command,
-                        url,
-                    });
+                            servers.push(LocalMcpServer {
+                                id: content_hash(&format!("{}-{}", source, name)),
+                                name: format!("{} ({})", name, source),
+                                transport: transport.to_string(),
+                                status: "running".to_string(),
+                                tool_count: 0,
+                                command,
+                                url: url_val,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -851,15 +850,37 @@ fn get_burn_rate() -> Result<BurnRate, String> {
 fn get_config_files() -> Result<Vec<ConfigFile>, String> {
     let home = home_dir();
     let claude = claude_home();
+    let codex = PathBuf::from(std::env::var("CODEX_HOME")
+        .unwrap_or_else(|_| home.join(".codex").to_string_lossy().to_string()));
+    let openclaw = PathBuf::from(std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home.join(".openclaw").to_string_lossy().to_string()));
+    let hermes = home.join(".hermes");
 
     let files = vec![
-        ("~/.claude.json", home.join(".claude.json"), "Global config"),
-        ("~/.claude/settings.json", claude.join("settings.json"), "Global settings"),
-        ("~/.claude/settings.local.json", claude.join("settings.local.json"), "Local settings"),
-        ("~/.claude/skills/", claude.join("skills"), "Personal skills"),
-        (".claude/settings.json", PathBuf::from(".claude/settings.json"), "Project settings"),
-        (".claude/skills/", PathBuf::from(".claude/skills"), "Project skills"),
-        ("CLAUDE.md", PathBuf::from("CLAUDE.md"), "Project context"),
+        // Claude
+        ("~/.claude/settings.json", claude.join("settings.json"), "Claude — Global settings"),
+        ("~/.claude/settings.local.json", claude.join("settings.local.json"), "Claude — Local settings"),
+        ("~/.claude/skills/", claude.join("skills"), "Claude — Personal skills"),
+        (".claude/settings.json", PathBuf::from(".claude/settings.json"), "Claude — Project settings"),
+        (".claude/skills/", PathBuf::from(".claude/skills"), "Claude — Project skills"),
+        ("CLAUDE.md", PathBuf::from("CLAUDE.md"), "Claude — Project context"),
+        // Codex
+        ("~/.codex/config.toml", codex.join("config.toml"), "Codex — Global config"),
+        ("~/.codex/AGENTS.md", codex.join("AGENTS.md"), "Codex — Global instructions"),
+        ("~/.codex/skills/", codex.join("skills"), "Codex — Personal skills"),
+        (".codex/config.toml", PathBuf::from(".codex/config.toml"), "Codex — Project config"),
+        ("AGENTS.md", PathBuf::from("AGENTS.md"), "Codex — Project instructions"),
+        // OpenClaw
+        ("~/.openclaw/openclaw.json", openclaw.join("openclaw.json"), "OpenClaw — Config"),
+        ("~/.openclaw/workspace/AGENTS.md", openclaw.join("workspace/AGENTS.md"), "OpenClaw — Agent instructions"),
+        ("~/.openclaw/workspace/SOUL.md", openclaw.join("workspace/SOUL.md"), "OpenClaw — Persona"),
+        ("~/.openclaw/workspace/TOOLS.md", openclaw.join("workspace/TOOLS.md"), "OpenClaw — Tools config"),
+        ("~/.openclaw/skills/", openclaw.join("skills"), "OpenClaw — Skills"),
+        // Hermes
+        ("~/.hermes/config.yaml", hermes.join("config.yaml"), "Hermes — Config"),
+        ("~/.hermes/SOUL.md", hermes.join("SOUL.md"), "Hermes — Persona"),
+        ("~/.hermes/skills/", hermes.join("skills"), "Hermes — Skills"),
+        ("~/.hermes/memories/MEMORY.md", hermes.join("memories/MEMORY.md"), "Hermes — Memory"),
     ];
 
     Ok(files.iter().map(|(display, path, scope)| {
@@ -903,11 +924,26 @@ fn restart_mcp_server(_name: String) -> Result<(), String> {
 
 #[tauri::command]
 fn update_skill(id: String, content: String) -> Result<(), String> {
-    // Find the skill file and write content back
-    // For now scan all skill dirs to find the matching ID
+    // Scan ALL runtime directories to find the matching skill by ID
+    let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
+        .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
+    let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+
     let dirs = vec![
+        // Claude
         claude_home().join("skills"),
         PathBuf::from(".claude").join("skills"),
+        PathBuf::from("/etc/claude/skills"),
+        // Codex
+        codex_home.join("skills"),
+        PathBuf::from(".agents").join("skills"),
+        PathBuf::from(".codex").join("skills"),
+        // OpenClaw
+        oc_home.join("skills"),
+        oc_home.join("workspace").join("skills"),
+        // Hermes
+        home_dir().join(".hermes").join("skills"),
     ];
 
     for dir in dirs {
