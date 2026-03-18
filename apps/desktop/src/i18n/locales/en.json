@@ -151,7 +151,12 @@
       "directoryHint": "Creates a folder with scripts/, references/, and assets/ subdirectories",
       "descriptionPlaceholder": "What does this skill do?",
       "anyModel": "Any model"
-    }
+    },
+    "tabs": {
+      "mySkills": "My Skills",
+      "marketplace": "Marketplace"
+    },
+    "dragHint": "Drag to reorder priority within scope"
   },
   "hooks": {
     "title": "Hooks",
@@ -359,11 +364,6 @@
       "apply": "Apply Changes",
       "discard": "Discard"
     }
-  },
-  "skills.dragHint": "Drag to reorder priority within scope",
-  "skills.tabs": {
-    "mySkills": "My Skills",
-    "marketplace": "Marketplace"
   },
   "subagents": {
     "title": "Subagents",

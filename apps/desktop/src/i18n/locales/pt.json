@@ -151,7 +151,12 @@
       "directoryHint": "Cria uma pasta com subdiretorios scripts/, references/ e assets/",
       "descriptionPlaceholder": "O que essa skill faz?",
       "anyModel": "Qualquer modelo"
-    }
+    },
+    "tabs": {
+      "mySkills": "Minhas Skills",
+      "marketplace": "Marketplace"
+    },
+    "dragHint": "Arraste para reordenar prioridade dentro do escopo"
   },
   "marketplace": {
     "title": "Marketplace de Skills",
@@ -210,11 +215,6 @@
       "apply": "Aplicar Alteracoes",
       "discard": "Descartar"
     }
-  },
-  "skills.dragHint": "Arraste para reordenar prioridade dentro do escopo",
-  "skills.tabs": {
-    "mySkills": "Minhas Skills",
-    "marketplace": "Marketplace"
   },
   "subagents": {
     "title": "Subagentes",

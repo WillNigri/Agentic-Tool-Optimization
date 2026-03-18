@@ -10,7 +10,7 @@ import NodePalette from "./automation/NodePalette";
 import NodeConfigPanel from "./automation/NodeConfigPanel";
 import FlowCanvas from "./automation/FlowCanvas";
 import ExecutionOverlay from "./automation/ExecutionOverlay";
-import { promptAgent, saveWorkflow as persistWorkflow, loadWorkflows } from "@/lib/tauri-api";
+import { promptAgent, saveWorkflow as persistWorkflow } from "@/lib/tauri-api";
 
 export default function AutomationFlow() {
   const { t } = useTranslation();
