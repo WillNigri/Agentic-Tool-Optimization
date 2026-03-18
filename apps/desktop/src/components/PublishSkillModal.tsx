@@ -58,10 +58,10 @@ export default function PublishSkillModal({ skillId, skillName, onClose }: Publi
               <div className="text-center py-6">
                 <Upload size={32} className="text-cs-accent mx-auto mb-3" />
                 <p className="text-sm font-medium text-cs-text mb-1">
-                  "{skillName}" published!
+                  {t("marketplace.publishModal.published", { skillName })}
                 </p>
                 <p className="text-xs text-cs-muted">
-                  Your skill is now available in the marketplace.
+                  {t("marketplace.publishModal.publishedDetail")}
                 </p>
               </div>
             ) : (
@@ -69,7 +69,7 @@ export default function PublishSkillModal({ skillId, skillName, onClose }: Publi
                 {/* Skill name (read-only) */}
                 <div>
                   <label className="text-xs font-medium text-cs-muted uppercase tracking-wider block mb-1">
-                    Skill
+                    {t("marketplace.publishModal.skill")}
                   </label>
                   <p className="text-sm font-medium text-cs-text bg-cs-bg rounded-lg p-2.5 border border-cs-border">
                     {skillName}

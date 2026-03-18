@@ -55,7 +55,7 @@ export default function ExecutionTimeline({ executions, days = 7 }: ExecutionTim
         <div
           key={cell.date}
           className={cn("w-3.5 h-3.5 rounded-sm", STATUS_BG[cell.status])}
-          title={`${cell.date}: ${cell.status === "none" ? "no execution" : cell.status}`}
+          title={`${cell.date}: ${cell.status}`}
         />
       ))}
     </div>

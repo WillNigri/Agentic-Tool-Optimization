@@ -51,9 +51,10 @@ export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
   const successRate = completedExecs.length > 0
     ? Math.round((successCount / completedExecs.length) * 100)
     : 0;
-  const avgDuration = completedExecs.length > 0
+  const execsWithDuration = completedExecs.filter((e) => e.durationMs != null && e.durationMs > 0);
+  const avgDuration = execsWithDuration.length > 0
     ? Math.round(
-        completedExecs.reduce((sum, e) => sum + (e.durationMs || 0), 0) / completedExecs.length
+        execsWithDuration.reduce((sum, e) => sum + (e.durationMs || 0), 0) / execsWithDuration.length
       )
     : 0;
 
@@ -227,7 +228,7 @@ export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
                 : "border-cs-accent/30 text-cs-accent hover:bg-cs-accent/10"
             )}
           >
-            {job.enabled ? "Pause" : "Resume"}
+            {job.enabled ? t("cron.job.pause") : t("cron.job.resume")}
           </button>
           <div className="flex-1" />
           <button

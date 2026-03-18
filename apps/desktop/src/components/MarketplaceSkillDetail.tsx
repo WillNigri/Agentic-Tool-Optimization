@@ -49,12 +49,12 @@ export default function MarketplaceSkillDetail({
             <div className="flex items-center gap-1.5 text-sm">
               <Download size={14} className="text-cs-muted" />
               <span className="font-medium">{skill.installs.toLocaleString()}</span>
-              <span className="text-cs-muted text-xs">installs</span>
+              <span className="text-cs-muted text-xs">{t("marketplace.skillDetail.installs")}</span>
             </div>
             <div className="flex items-center gap-1.5 text-sm">
               <Star size={14} className="text-yellow-400" />
               <span className="font-medium">{skill.rating}</span>
-              <span className="text-cs-muted text-xs">/ 5</span>
+              <span className="text-cs-muted text-xs">{t("marketplace.skillDetail.ratingOf")}</span>
             </div>
             <span className="px-2.5 py-0.5 text-[11px] font-medium rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-400">
               {categoryLabel}
@@ -64,7 +64,7 @@ export default function MarketplaceSkillDetail({
           {/* Description */}
           <div>
             <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-1">
-              Description
+              {t("marketplace.skillDetail.description")}
             </h4>
             <p className="text-sm text-cs-text">{skill.description}</p>
           </div>
@@ -72,7 +72,7 @@ export default function MarketplaceSkillDetail({
           {/* Tags */}
           <div>
             <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-2">
-              Tags
+              {t("marketplace.skillDetail.tags")}
             </h4>
             <div className="flex flex-wrap gap-1.5">
               {skill.tags.map((tag) => (
@@ -90,7 +90,7 @@ export default function MarketplaceSkillDetail({
           {/* Content preview */}
           <div>
             <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-1">
-              Skill Content
+              {t("marketplace.skillDetail.skillContent")}
             </h4>
             <pre className="w-full p-3 bg-cs-bg border border-cs-border rounded-lg text-sm font-mono text-cs-text whitespace-pre-wrap overflow-x-auto max-h-80 overflow-y-auto">
               {skill.content}
@@ -99,8 +99,8 @@ export default function MarketplaceSkillDetail({
 
           {/* Dates */}
           <div className="flex items-center gap-4 text-[11px] text-cs-muted">
-            <span>Created: {skill.createdAt}</span>
-            <span>Updated: {skill.updatedAt}</span>
+            <span>{t("marketplace.skillDetail.created")}: {skill.createdAt}</span>
+            <span>{t("marketplace.skillDetail.updated")}: {skill.updatedAt}</span>
           </div>
         </div>
 

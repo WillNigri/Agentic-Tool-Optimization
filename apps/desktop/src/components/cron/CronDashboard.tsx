@@ -111,9 +111,17 @@ export default function CronDashboard() {
         </div>
 
         {filteredJobs.length === 0 && (
-          <p className="text-cs-muted text-sm text-center py-8">
-            {searchQuery ? t("common.noResults") : t("cron.noJobs")}
-          </p>
+          <div className="text-center py-12">
+            <div className="w-12 h-12 rounded-full bg-cs-border/30 flex items-center justify-center mx-auto mb-3">
+              <Search size={20} className="text-cs-muted/50" />
+            </div>
+            <p className="text-cs-muted text-sm mb-1">
+              {searchQuery ? t("common.noResults") : t("cron.noJobs")}
+            </p>
+            {!searchQuery && (
+              <p className="text-cs-muted/60 text-xs">{t("cron.noJobsHint")}</p>
+            )}
+          </div>
         )}
       </div>
 

@@ -206,6 +206,9 @@
       "service": "Service",
       "action": "Action",
       "condition": "Condition",
+      "conditionPlaceholder": "e.g. If security issues found...",
+      "runtime": "Runtime",
+      "selectOption": "-- select --",
       "deleteNode": "Delete Node",
       "confirmDelete": "Delete this node?",
       "confirmDeleteWorkflow": "Delete this workflow?",
@@ -325,11 +328,23 @@
     "allCategories": "All Categories",
     "publishModal": {
       "title": "Publish Skill",
+      "skill": "Skill",
       "category": "Category",
       "tags": "Tags",
       "tagsHint": "Comma-separated tags",
       "preview": "Preview",
-      "publishing": "Publishing..."
+      "publishing": "Publishing...",
+      "published": "\"{{skillName}}\" published!",
+      "publishedDetail": "Your skill is now available in the marketplace."
+    },
+    "skillDetail": {
+      "description": "Description",
+      "tags": "Tags",
+      "skillContent": "Skill Content",
+      "created": "Created",
+      "updated": "Updated",
+      "installs": "installs",
+      "ratingOf": "/ 5"
     },
     "share": {
       "title": "Share Skill",
@@ -377,8 +392,12 @@
       "sshUser": "SSH User",
       "sshKeyPath": "SSH Key Path",
       "apiKeyPath": "API Key Path",
-      "endpoint": "Endpoint"
+      "endpoint": "Endpoint",
+      "openclawTitle": "OpenClaw SSH Config",
+      "codexTitle": "Codex Config",
+      "hermesTitle": "Hermes Config"
     },
+    "namePlaceholder": "my-subagent",
     "skills": "Assigned Skills",
     "skillsHint": "Skills this subagent can access and use",
     "noSkills": "No skills assigned",
@@ -424,6 +443,8 @@
       "runNow": "Run Now",
       "running": "Running...",
       "retry": "Retry",
+      "pause": "Pause",
+      "resume": "Resume",
       "edit": "Edit",
       "delete": "Delete",
       "confirmDelete": "Delete this cron job?",

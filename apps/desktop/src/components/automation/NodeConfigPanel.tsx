@@ -118,7 +118,7 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
               onChange={(e) => setService(e.target.value)}
               className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
             >
-              <option value="">-- select --</option>
+              <option value="">{t("automation.builder.selectOption", "-- select --")}</option>
               {availableServices.map((s) => (
                 <option key={s} value={s}>{s}</option>
               ))}
@@ -137,7 +137,7 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
               onChange={(e) => setAction(e.target.value)}
               className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
             >
-              <option value="">-- select --</option>
+              <option value="">{t("automation.builder.selectOption", "-- select --")}</option>
               {actions.map((a) => (
                 <option key={a.id} value={a.id}>{a.label}</option>
               ))}
@@ -169,7 +169,7 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
                 onChange={(e) => setParam(param.key, e.target.value)}
                 className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
               >
-                <option value="">-- select --</option>
+                <option value="">{t("automation.builder.selectOption", "-- select --")}</option>
                 {param.options?.map((opt) => (
                   <option key={opt} value={opt}>{opt}</option>
                 ))}
@@ -190,7 +190,7 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
         {(node.type === "action" || node.type === "process") && (
           <div className="mb-3">
             <label className="block text-[10px] text-[#8888a0] uppercase tracking-wider mb-1 font-medium">
-              Runtime
+              {t("automation.builder.runtime", "Runtime")}
             </label>
             <div className="grid grid-cols-2 gap-1.5">
               {RUNTIMES.map(({ id, label, color, Icon }) => (
@@ -222,7 +222,7 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
             <textarea
               value={node.config?.condition || ""}
               onChange={(e) => setCondition(e.target.value)}
-              placeholder="e.g. If security issues found..."
+              placeholder={t("automation.builder.conditionPlaceholder", "e.g. If security issues found...")}
               rows={3}
               className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors resize-none font-mono"
             />

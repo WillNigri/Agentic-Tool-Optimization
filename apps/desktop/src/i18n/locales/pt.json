@@ -179,11 +179,23 @@
     "allCategories": "Todas as Categorias",
     "publishModal": {
       "title": "Publicar Skill",
+      "skill": "Skill",
       "category": "Categoria",
       "tags": "Tags",
       "tagsHint": "Tags separadas por virgula",
       "preview": "Pre-visualizar",
-      "publishing": "Publicando..."
+      "publishing": "Publicando...",
+      "published": "\"{{skillName}}\" publicado!",
+      "publishedDetail": "Sua skill esta disponivel no marketplace."
+    },
+    "skillDetail": {
+      "description": "Descricao",
+      "tags": "Tags",
+      "skillContent": "Conteudo da Skill",
+      "created": "Criado",
+      "updated": "Atualizado",
+      "installs": "instalacoes",
+      "ratingOf": "/ 5"
     },
     "share": {
       "title": "Compartilhar Skill",
@@ -231,8 +243,12 @@
       "sshUser": "Usuario SSH",
       "sshKeyPath": "Caminho da Chave SSH",
       "apiKeyPath": "Caminho da Chave API",
-      "endpoint": "Endpoint"
+      "endpoint": "Endpoint",
+      "openclawTitle": "Config SSH OpenClaw",
+      "codexTitle": "Config Codex",
+      "hermesTitle": "Config Hermes"
     },
+    "namePlaceholder": "meu-subagente",
     "skills": "Skills Atribuidas",
     "skillsHint": "Skills que este subagente pode acessar e usar",
     "noSkills": "Nenhuma skill atribuida",
@@ -278,6 +294,8 @@
       "runNow": "Executar Agora",
       "running": "Executando...",
       "retry": "Tentar novamente",
+      "pause": "Pausar",
+      "resume": "Retomar",
       "edit": "Editar",
       "delete": "Excluir",
       "confirmDelete": "Excluir esta tarefa cron?",

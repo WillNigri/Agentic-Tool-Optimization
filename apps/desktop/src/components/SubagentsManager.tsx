@@ -182,7 +182,7 @@ function RuntimeConfigFields({
     return (
       <div className="space-y-2 p-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5">
         <p className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wider">
-          OpenClaw SSH Config
+          {t("subagents.runtimeConfig.openclawTitle")}
         </p>
         <div className="grid grid-cols-2 gap-2">
           <div>
@@ -237,7 +237,7 @@ function RuntimeConfigFields({
     return (
       <div className="p-3 rounded-lg border border-green-500/20 bg-green-500/5">
         <p className="text-[10px] font-semibold text-green-400 uppercase tracking-wider mb-2">
-          Codex Config
+          {t("subagents.runtimeConfig.codexTitle")}
         </p>
         <div>
           <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.apiKeyPath")}</label>
@@ -258,7 +258,7 @@ function RuntimeConfigFields({
     return (
       <div className="p-3 rounded-lg border border-purple-500/20 bg-purple-500/5">
         <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-2">
-          Hermes Config
+          {t("subagents.runtimeConfig.hermesTitle")}
         </p>
         <div>
           <label className="block text-[10px] text-cs-muted mb-0.5">{t("subagents.runtimeConfig.endpoint")}</label>
@@ -828,7 +828,7 @@ function CreateSubagentModal({
                 className="input"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="my-subagent"
+                placeholder={t("subagents.namePlaceholder")}
                 required
               />
             </div>
