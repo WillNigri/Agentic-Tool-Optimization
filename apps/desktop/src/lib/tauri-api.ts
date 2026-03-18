@@ -45,6 +45,7 @@ export interface LocalSkill {
   filePath: string;
   scope: SkillScope;
   runtime: 'claude' | 'codex' | 'openclaw' | 'hermes';
+  project: string | null; // project name for project-scoped skills
   tokenCount: number;
   enabled: boolean;
   contentHash: string;
