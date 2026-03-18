@@ -87,6 +87,7 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
       name: name.trim(),
       description: description.trim(),
       scope,
+      runtime: aiRuntime,
       content: fullContent,
       allowedTools: selectedTools.length > 0 ? selectedTools : undefined,
       model: model || undefined,

@@ -77,6 +77,7 @@ export interface CreateSkillData {
   name: string;
   description: string;
   scope: SkillScope;
+  runtime: 'claude' | 'codex' | 'openclaw' | 'hermes';
   content: string;
   allowedTools?: string[];
   model?: string;
@@ -100,7 +101,7 @@ export async function updateSkill(id: string, content: string): Promise<void> {
 }
 
 export async function createSkill(data: CreateSkillData): Promise<SkillDetail> {
-  return invoke<SkillDetail>('create_skill', { data });
+  return invoke<SkillDetail>('create_skill', { data: JSON.stringify(data) });
 }
 
 export async function deleteSkill(id: string): Promise<void> {

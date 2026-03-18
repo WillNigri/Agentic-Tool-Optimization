@@ -922,6 +922,142 @@ fn restart_mcp_server(_name: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the skill directory for a given runtime + scope
+fn skill_dir_for_runtime(runtime: &str, scope: &str) -> PathBuf {
+    match (runtime, scope) {
+        // Claude
+        ("claude", "enterprise") => PathBuf::from("/etc/claude/skills"),
+        ("claude", "personal") => claude_home().join("skills"),
+        ("claude", "project") => PathBuf::from(".claude").join("skills"),
+        ("claude", "plugin") => claude_home().join("plugins"),
+        // Codex
+        ("codex", "personal") => {
+            let home = std::env::var("CODEX_HOME")
+                .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string());
+            PathBuf::from(home).join("skills")
+        }
+        ("codex", "project") => PathBuf::from(".codex").join("skills"),
+        // OpenClaw
+        ("openclaw", "personal") => {
+            let home = std::env::var("OPENCLAW_HOME")
+                .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string());
+            PathBuf::from(home).join("skills")
+        }
+        ("openclaw", "project") => {
+            let home = std::env::var("OPENCLAW_HOME")
+                .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string());
+            PathBuf::from(home).join("workspace").join("skills")
+        }
+        // Hermes
+        ("hermes", _) => home_dir().join(".hermes").join("skills"),
+        // Fallback
+        (_, "personal") => claude_home().join("skills"),
+        (_, "project") => PathBuf::from(".claude").join("skills"),
+        _ => claude_home().join("skills"),
+    }
+}
+
+#[tauri::command]
+fn create_skill(data: String) -> Result<SkillDetail, String> {
+    let parsed: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| format!("Invalid skill data: {}", e))?;
+
+    let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string();
+    let description = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let scope = parsed.get("scope").and_then(|v| v.as_str()).unwrap_or("personal");
+    let runtime = parsed.get("runtime").and_then(|v| v.as_str()).unwrap_or("claude");
+    let content = parsed.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let is_directory = parsed.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let skills_dir = skill_dir_for_runtime(runtime, scope);
+    fs::create_dir_all(&skills_dir).map_err(|e| format!("Failed to create skills directory: {}", e))?;
+
+    let (file_path, file_path_str) = if is_directory {
+        let dir_path = skills_dir.join(&name);
+        fs::create_dir_all(&dir_path).map_err(|e| format!("Failed to create skill directory: {}", e))?;
+        // Create subdirectories
+        fs::create_dir_all(dir_path.join("scripts")).ok();
+        fs::create_dir_all(dir_path.join("references")).ok();
+        fs::create_dir_all(dir_path.join("assets")).ok();
+        let skill_md = dir_path.join("SKILL.md");
+        let fp_str = format!("{}/", dir_path.to_string_lossy());
+        (skill_md, fp_str)
+    } else {
+        let file = skills_dir.join(format!("{}.md", name));
+        let fp_str = file.to_string_lossy().to_string();
+        (file, fp_str)
+    };
+
+    fs::write(&file_path, &content).map_err(|e| format!("Failed to write skill: {}", e))?;
+
+    let (frontmatter, _) = parse_frontmatter(&content);
+    let hash = content_hash(&content);
+
+    Ok(SkillDetail {
+        id: content_hash(&file_path_str),
+        name,
+        description,
+        file_path: file_path_str,
+        scope: scope.to_string(),
+        runtime: runtime.to_string(),
+        token_count: estimate_tokens(content.len() as u64),
+        enabled: true,
+        content_hash: hash,
+        content,
+        frontmatter,
+        has_scripts: is_directory,
+        has_references: is_directory,
+        has_assets: is_directory,
+        scripts: vec![],
+        references: vec![],
+        assets: vec![],
+        is_directory,
+    })
+}
+
+#[tauri::command]
+fn delete_skill(id: String) -> Result<(), String> {
+    // Scan ALL runtime directories to find the skill
+    let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
+        .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
+    let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+
+    let dirs = vec![
+        claude_home().join("skills"),
+        PathBuf::from(".claude").join("skills"),
+        codex_home.join("skills"),
+        PathBuf::from(".codex").join("skills"),
+        oc_home.join("skills"),
+        oc_home.join("workspace").join("skills"),
+        home_dir().join(".hermes").join("skills"),
+    ];
+
+    for dir in dirs {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_path_str = if path.is_dir() {
+                    format!("{}/", path.to_string_lossy())
+                } else {
+                    path.to_string_lossy().to_string()
+                };
+
+                if content_hash(&file_path_str) == id {
+                    if path.is_dir() {
+                        fs::remove_dir_all(&path).map_err(|e| format!("Failed to delete skill directory: {}", e))?;
+                    } else {
+                        fs::remove_file(&path).map_err(|e| format!("Failed to delete skill file: {}", e))?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(format!("Skill not found: {}", id))
+}
+
 #[tauri::command]
 fn update_skill(id: String, content: String) -> Result<(), String> {
     // Scan ALL runtime directories to find the matching skill by ID
@@ -1663,7 +1799,9 @@ pub fn run() {
             get_sync_status,
             set_sync_enabled,
             restart_mcp_server,
+            create_skill,
             update_skill,
+            delete_skill,
             prompt_claude,
             list_workflows,
             save_workflow,
