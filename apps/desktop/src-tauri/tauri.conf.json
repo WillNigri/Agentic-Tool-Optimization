@@ -9,6 +9,10 @@
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
+  "bundle": {
+    "targets": ["dmg", "app", "nsis", "appimage", "deb"],
+    "active": true
+  },
   "app": {
     "windows": [
       {
