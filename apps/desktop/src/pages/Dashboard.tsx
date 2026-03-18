@@ -10,6 +10,7 @@ import HooksManager from "@/components/HooksManager";
 import AutomationFlow from "@/components/AutomationFlow";
 import CronDashboard from "@/components/cron/CronDashboard";
 import PromptBar from "@/components/PromptBar";
+import SetupWizard from "@/components/SetupWizard";
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
@@ -23,12 +24,28 @@ const PANELS: Record<Section, React.ComponentType> = {
   config: ConfigEditor,
 };
 
+function isSetupComplete(): boolean {
+  const setup = localStorage.getItem("ato-setup");
+  if (!setup) return false;
+  try {
+    const data = JSON.parse(setup);
+    return !!data.completedAt;
+  } catch {
+    return false;
+  }
+}
+
 export default function Dashboard() {
   const [section, setSection] = useState<Section>("context");
+  const [showSetup, setShowSetup] = useState(!isSetupComplete());
   const Panel = PANELS[section];
 
   // Automation flow needs full width with no padding
   const isFullWidth = section === "automation";
+
+  if (showSetup) {
+    return <SetupWizard onComplete={() => setShowSetup(false)} />;
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">
