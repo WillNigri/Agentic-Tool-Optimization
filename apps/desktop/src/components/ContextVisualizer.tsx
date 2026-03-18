@@ -12,10 +12,18 @@ import {
   Pie,
 } from "recharts";
 import { useTranslation } from "react-i18next";
-import { getContextBreakdown } from "@/lib/api";
+import { getContextBreakdown, getContextForRuntime } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
-import { ChevronRight, AlertTriangle, Shield, FolderTree, FileText, BarChart3, ExternalLink } from "lucide-react";
+import { ChevronRight, AlertTriangle, Shield, FolderTree, FileText, BarChart3, ExternalLink, Terminal, Cpu, Server, Globe } from "lucide-react";
 import FileViewer from "./FileViewer";
+import type { AgentRuntime } from "@/components/cron/types";
+
+const RUNTIME_TABS: { id: AgentRuntime; label: string; icon: typeof Terminal; color: string }[] = [
+  { id: "claude", label: "Claude", icon: Terminal, color: "#f97316" },
+  { id: "codex", label: "Codex", icon: Cpu, color: "#22c55e" },
+  { id: "openclaw", label: "OpenClaw", icon: Server, color: "#06b6d4" },
+  { id: "hermes", label: "Hermes", icon: Globe, color: "#a855f7" },
+];
 
 // Mock dependency and permission data for the detail view
 const MOCK_DEPENDENCIES = [
@@ -54,9 +62,11 @@ export default function ContextVisualizer() {
   const { t } = useTranslation();
   const [detailView, setDetailView] = useState<DetailView>("chart");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
+  const [activeRuntime, setActiveRuntime] = useState<AgentRuntime>("claude");
+
   const { data, isLoading } = useQuery({
-    queryKey: ["context-breakdown"],
-    queryFn: getContextBreakdown,
+    queryKey: ["context-breakdown", activeRuntime],
+    queryFn: () => getContextForRuntime(activeRuntime),
   });
 
   if (isLoading) {
@@ -86,6 +96,33 @@ export default function ContextVisualizer() {
         <p className="text-cs-muted text-sm">
           {t('context.subtitle')}
         </p>
+      </div>
+
+      {/* Runtime tabs */}
+      <div className="flex items-center gap-1.5">
+        {RUNTIME_TABS.map((rt) => {
+          const Icon = rt.icon;
+          return (
+            <button
+              key={rt.id}
+              onClick={() => setActiveRuntime(rt.id)}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border transition-colors",
+                activeRuntime === rt.id
+                  ? "text-white"
+                  : "border-cs-border text-cs-muted hover:text-cs-text"
+              )}
+              style={
+                activeRuntime === rt.id
+                  ? { borderColor: `${rt.color}66`, background: `${rt.color}20`, color: rt.color }
+                  : undefined
+              }
+            >
+              <Icon size={14} />
+              {rt.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Overall progress */}

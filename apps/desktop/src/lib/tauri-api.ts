@@ -25,6 +25,14 @@ export async function getContextBreakdown() {
   }>('get_context_estimate');
 }
 
+export async function getContextForRuntime(runtime: AgentRuntime) {
+  return invoke<{
+    totalTokens: number;
+    limit: number;
+    categories: Array<{ name: string; tokens: number; color: string }>;
+  }>('get_context_for_runtime', { runtime });
+}
+
 // ---- Skills ----
 export type SkillScope = 'enterprise' | 'personal' | 'project' | 'plugin';
 

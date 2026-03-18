@@ -606,6 +606,167 @@ fn get_context_estimate() -> Result<ContextBreakdown, String> {
     })
 }
 
+/// Estimate byte size of all .md files in a directory (recursively one level)
+fn dir_skill_bytes(dir: &PathBuf) -> u64 {
+    let mut bytes: u64 = 0;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.extension().map_or(false, |e| e == "md") {
+                bytes += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            } else if p.is_dir() {
+                let sm = p.join("SKILL.md");
+                bytes += fs::metadata(&sm).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    bytes
+}
+
+fn file_tokens(path: &PathBuf) -> u64 {
+    fs::metadata(path).map(|m| estimate_tokens(m.len())).unwrap_or(0)
+}
+
+#[tauri::command]
+fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> {
+    let mut categories = Vec::new();
+    let mut total: u64 = 0;
+
+    match runtime.as_str() {
+        "claude" => {
+            // System prompts
+            let sys: u64 = 28000;
+            categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
+            total += sys;
+            // Skills
+            let skill_bytes = dir_skill_bytes(&claude_home().join("skills"))
+                + dir_skill_bytes(&PathBuf::from(".claude").join("skills"));
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
+            total += st;
+            // CLAUDE.md
+            let cm = file_tokens(&PathBuf::from("CLAUDE.md"));
+            categories.push(ContextCategory { name: "CLAUDE.md".into(), tokens: cm, color: "#FFB800".into() });
+            total += cm;
+            // MCP schemas
+            let settings_path = claude_home().join("settings.json");
+            let mcp: u64 = read_file_lossy(&settings_path)
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                .and_then(|v| v.get("mcpServers").and_then(|s| s.as_object()).map(|m| m.len() as u64 * 2500))
+                .unwrap_or(0);
+            categories.push(ContextCategory { name: "MCP Schemas".into(), tokens: mcp, color: "#3b82f6".into() });
+            total += mcp;
+            // Conversation
+            categories.push(ContextCategory { name: "Conversation".into(), tokens: 15000, color: "#a78bfa".into() });
+            total += 15000;
+
+            Ok(ContextBreakdown { total_tokens: total, limit: 200000, categories })
+        }
+        "codex" => {
+            let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
+                .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
+            // System prompts
+            let sys: u64 = 20000;
+            categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
+            total += sys;
+            // Skills
+            let skill_bytes = dir_skill_bytes(&codex_home.join("skills"))
+                + dir_skill_bytes(&PathBuf::from(".agents").join("skills"))
+                + dir_skill_bytes(&PathBuf::from(".codex").join("skills"));
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
+            total += st;
+            // AGENTS.md
+            let agents_md = file_tokens(&PathBuf::from("AGENTS.md"))
+                + file_tokens(&codex_home.join("AGENTS.md"));
+            categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents_md, color: "#FFB800".into() });
+            total += agents_md;
+            // config.toml
+            let cfg = file_tokens(&codex_home.join("config.toml"));
+            categories.push(ContextCategory { name: "config.toml".into(), tokens: cfg, color: "#3b82f6".into() });
+            total += cfg;
+            // Conversation
+            categories.push(ContextCategory { name: "Conversation".into(), tokens: 12000, color: "#a78bfa".into() });
+            total += 12000;
+
+            Ok(ContextBreakdown { total_tokens: total, limit: 192000, categories })
+        }
+        "openclaw" => {
+            let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+                .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+            let ws = oc_home.join("workspace");
+            // System prompts
+            let sys: u64 = 15000;
+            categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
+            total += sys;
+            // AGENTS.md
+            let agents = file_tokens(&ws.join("AGENTS.md"));
+            categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents, color: "#FFB800".into() });
+            total += agents;
+            // SOUL.md
+            let soul = file_tokens(&ws.join("SOUL.md"));
+            categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
+            total += soul;
+            // TOOLS.md
+            let tools = file_tokens(&ws.join("TOOLS.md"));
+            categories.push(ContextCategory { name: "TOOLS.md".into(), tokens: tools, color: "#06b6d4".into() });
+            total += tools;
+            // Skills
+            let skill_bytes = dir_skill_bytes(&oc_home.join("skills"))
+                + dir_skill_bytes(&ws.join("skills"));
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
+            total += st;
+            // Memory
+            let mem_dir = ws.join("memory");
+            let mem_bytes = dir_skill_bytes(&mem_dir);
+            let mem = estimate_tokens(mem_bytes);
+            categories.push(ContextCategory { name: "Memory".into(), tokens: mem, color: "#a78bfa".into() });
+            total += mem;
+
+            Ok(ContextBreakdown { total_tokens: total, limit: 200000, categories })
+        }
+        "hermes" => {
+            let hermes_home = home_dir().join(".hermes");
+            // System prompts
+            let sys: u64 = 12000;
+            categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
+            total += sys;
+            // SOUL.md
+            let soul = file_tokens(&hermes_home.join("SOUL.md"));
+            categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
+            total += soul;
+            // Skills (with category subdirs)
+            let skills_dir = hermes_home.join("skills");
+            let mut skill_bytes = dir_skill_bytes(&skills_dir);
+            if skills_dir.exists() {
+                if let Ok(entries) = fs::read_dir(&skills_dir) {
+                    for entry in entries.flatten() {
+                        if entry.path().is_dir() {
+                            skill_bytes += dir_skill_bytes(&entry.path());
+                        }
+                    }
+                }
+            }
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
+            total += st;
+            // Memory
+            let mem_bytes = file_tokens(&hermes_home.join("memories").join("MEMORY.md"))
+                + file_tokens(&hermes_home.join("memories").join("USER.md"));
+            categories.push(ContextCategory { name: "Memory".into(), tokens: mem_bytes, color: "#a78bfa".into() });
+            total += mem_bytes;
+            // Config
+            let cfg = file_tokens(&hermes_home.join("config.yaml"));
+            categories.push(ContextCategory { name: "config.yaml".into(), tokens: cfg, color: "#3b82f6".into() });
+            total += cfg;
+
+            Ok(ContextBreakdown { total_tokens: total, limit: 128000, categories })
+        }
+        _ => get_context_estimate(),
+    }
+}
+
 #[tauri::command]
 fn get_local_config() -> Result<Vec<LocalMcpServer>, String> {
     let mut servers = Vec::new();
@@ -1457,6 +1618,7 @@ pub fn run() {
             get_skill_detail,
             toggle_local_skill,
             get_context_estimate,
+            get_context_for_runtime,
             get_local_config,
             get_local_usage,
             get_daily_usage,

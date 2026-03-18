@@ -97,6 +97,11 @@ export async function getContextBreakdown(): Promise<ContextBreakdown> {
   return mock.mockContextBreakdown;
 }
 
+export async function getContextForRuntime(runtime: tauriApi.AgentRuntime): Promise<ContextBreakdown> {
+  if (isTauri) return tauriApi.getContextForRuntime(runtime);
+  return getContextBreakdown(); // fallback
+}
+
 // ---- Skills ----
 
 export type Skill = tauriApi.LocalSkill;
