@@ -241,70 +241,84 @@ fn parse_frontmatter(content: &str) -> (serde_json::Value, String) {
     }
 }
 
-/// Collect skills from a directory, supporting both single files and SKILL.md directories
+/// Collect skills from a directory, supporting single files, SKILL.md directories,
+/// symlinks (gstack-style), and nested subdirectories (one level deep).
 fn collect_skills(dir: &PathBuf, scope: &str, runtime: &str, db: &Connection) -> Vec<LocalSkill> {
     let mut skills = Vec::new();
     if !dir.exists() {
         return skills;
     }
 
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name;
-            let content;
-            let file_path_str;
-            if path.is_dir() {
-                // Directory skill — look for SKILL.md
-                let skill_md = path.join("SKILL.md");
-                if !skill_md.exists() {
-                    continue;
-                }
+    collect_skills_inner(dir, scope, runtime, db, &mut skills, 0);
+    skills
+}
+
+fn collect_skills_inner(dir: &PathBuf, scope: &str, runtime: &str, db: &Connection, skills: &mut Vec<LocalSkill>, depth: u32) {
+    // Limit recursion to 2 levels (handles gstack's ~/.claude/skills/gstack/*/SKILL.md)
+    if depth > 2 { return; }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name;
+        let content;
+        let file_path_str;
+
+        if path.is_dir() {
+            // Directory skill — look for SKILL.md
+            let skill_md = path.join("SKILL.md");
+            if skill_md.exists() {
                 name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 content = read_file_lossy(&skill_md).unwrap_or_default();
                 file_path_str = format!("{}/", path.to_string_lossy());
-            } else if path.extension().map_or(false, |ext| ext == "md") {
-                name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                content = read_file_lossy(&path).unwrap_or_default();
-                file_path_str = path.to_string_lossy().to_string();
             } else {
+                // No SKILL.md — recurse into subdirectory (handles gstack/ nested dirs)
+                collect_skills_inner(&path, scope, runtime, db, skills, depth + 1);
                 continue;
             }
-
-            let (fm, _body) = parse_frontmatter(&content);
-            let description = fm.get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let hash = content_hash(&content);
-            let tokens = estimate_tokens(content.len() as u64);
-
-            // Check toggle state from DB
-            let enabled: bool = db
-                .query_row(
-                    "SELECT enabled FROM skill_toggles WHERE file_path = ?1",
-                    params![&file_path_str],
-                    |row| row.get(0),
-                )
-                .unwrap_or(true); // Default enabled
-
-            let id = content_hash(&file_path_str);
-
-            skills.push(LocalSkill {
-                id,
-                name,
-                description,
-                file_path: file_path_str,
-                scope: scope.to_string(),
-                runtime: runtime.to_string(),
-                token_count: tokens,
-                enabled,
-                content_hash: hash,
-            });
+        } else if path.extension().map_or(false, |ext| ext == "md") {
+            name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            content = read_file_lossy(&path).unwrap_or_default();
+            file_path_str = path.to_string_lossy().to_string();
+        } else {
+            continue;
         }
-    }
 
-    skills
+        let (fm, _body) = parse_frontmatter(&content);
+        let description = fm.get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let hash = content_hash(&content);
+        let tokens = estimate_tokens(content.len() as u64);
+
+        // Check toggle state from DB
+        let enabled: bool = db
+            .query_row(
+                "SELECT enabled FROM skill_toggles WHERE file_path = ?1",
+                params![&file_path_str],
+                |row| row.get(0),
+            )
+            .unwrap_or(true); // Default enabled
+
+        let id = content_hash(&file_path_str);
+
+        skills.push(LocalSkill {
+            id,
+            name,
+            description,
+            file_path: file_path_str,
+            scope: scope.to_string(),
+            runtime: runtime.to_string(),
+            token_count: tokens,
+            enabled,
+            content_hash: hash,
+        });
+    }
 }
 
 fn list_subdir_files(dir: &PathBuf, subdir: &str) -> (bool, Vec<String>) {
