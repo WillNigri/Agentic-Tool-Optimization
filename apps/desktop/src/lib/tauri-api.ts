@@ -26,23 +26,76 @@ export async function getContextBreakdown() {
 }
 
 // ---- Skills ----
+export type SkillScope = 'enterprise' | 'personal' | 'project' | 'plugin';
+
 export interface LocalSkill {
   id: string;
   name: string;
   description: string;
   filePath: string;
-  scope: 'personal' | 'project';
+  scope: SkillScope;
   tokenCount: number;
   enabled: boolean;
   contentHash: string;
+}
+
+export interface SkillDetail extends LocalSkill {
+  content: string;
+  frontmatter: {
+    name: string;
+    description: string;
+    'argument-hint'?: string;
+    'allowed-tools'?: string;          // comma-separated: "Read, Write, Bash(npm run *)"
+    'disable-model-invocation'?: boolean;
+    'user-invocable'?: boolean;
+    model?: string;
+    context?: 'fork';
+    agent?: string;                    // subagent type when context=fork
+    // Legacy parsed convenience field
+    allowedTools?: string[];
+    [key: string]: unknown;
+  };
+  hasScripts: boolean;
+  hasReferences: boolean;
+  hasAssets: boolean;
+  scripts: string[];
+  references: string[];
+  assets: string[];
+  isDirectory: boolean;
+}
+
+export interface CreateSkillData {
+  name: string;
+  description: string;
+  scope: SkillScope;
+  content: string;
+  allowedTools?: string[];
+  model?: string;
+  isDirectory: boolean;
 }
 
 export async function getSkills(): Promise<LocalSkill[]> {
   return invoke<LocalSkill[]>('get_local_skills');
 }
 
+export async function getSkillDetail(id: string): Promise<SkillDetail> {
+  return invoke<SkillDetail>('get_skill_detail', { id });
+}
+
 export async function toggleSkill(filePath: string, enabled: boolean): Promise<void> {
   return invoke('toggle_local_skill', { filePath, enabled });
+}
+
+export async function updateSkill(id: string, content: string): Promise<void> {
+  return invoke('update_skill', { id, content });
+}
+
+export async function createSkill(data: CreateSkillData): Promise<SkillDetail> {
+  return invoke<SkillDetail>('create_skill', { data });
+}
+
+export async function deleteSkill(id: string): Promise<void> {
+  return invoke('delete_skill', { id });
 }
 
 // ---- Usage ----

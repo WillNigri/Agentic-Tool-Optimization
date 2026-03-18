@@ -1,11 +1,14 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { FileCheck, FileX } from "lucide-react";
+import { FileCheck, FileX, ExternalLink } from "lucide-react";
 import { getConfigFiles } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import FileViewer from "./FileViewer";
 
 export default function ConfigEditor() {
   const { t } = useTranslation();
+  const [viewingFile, setViewingFile] = useState<string | null>(null);
   const { data: configs = [], isLoading } = useQuery({
     queryKey: ["config-files"],
     queryFn: getConfigFiles,
@@ -35,7 +38,11 @@ export default function ConfigEditor() {
           {configs.map((config) => (
             <div
               key={config.path}
-              className="card flex items-center gap-3"
+              onClick={() => config.exists && setViewingFile(config.path)}
+              className={cn(
+                "card flex items-center gap-3 transition-colors",
+                config.exists && "cursor-pointer hover:border-cs-accent/30"
+              )}
             >
               {config.exists ? (
                 <FileCheck size={18} className="text-cs-success shrink-0" />
@@ -58,6 +65,7 @@ export default function ConfigEditor() {
                 </div>
                 <p className="text-xs text-cs-muted mt-0.5">{config.scope}</p>
               </div>
+              {config.exists && <ExternalLink size={14} className="text-cs-muted/40 shrink-0" />}
             </div>
           ))}
         </div>
@@ -68,6 +76,10 @@ export default function ConfigEditor() {
           {t('config.subtitle')}
         </p>
       </div>
+
+      {viewingFile && (
+        <FileViewer filePath={viewingFile} onClose={() => setViewingFile(null)} />
+      )}
     </div>
   );
 }

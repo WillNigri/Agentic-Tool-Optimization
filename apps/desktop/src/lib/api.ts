@@ -100,11 +100,21 @@ export async function getContextBreakdown(): Promise<ContextBreakdown> {
 // ---- Skills ----
 
 export type Skill = tauriApi.LocalSkill;
+export type SkillDetail = tauriApi.SkillDetail;
+export type CreateSkillData = tauriApi.CreateSkillData;
 
 export async function getSkills(): Promise<Skill[]> {
   if (isTauri) return tauriApi.getSkills();
   if (await isCloudAvailable()) return fetchApi<Skill[]>('/skills');
   return mock.mockSkills;
+}
+
+export async function getSkillDetail(id: string): Promise<SkillDetail> {
+  if (isTauri) return tauriApi.getSkillDetail(id);
+  if (await isCloudAvailable()) return fetchApi<SkillDetail>(`/skills/${id}`);
+  const detail = mock.mockSkillDetails[id];
+  if (!detail) throw new Error(`Skill not found: ${id}`);
+  return detail;
 }
 
 export async function toggleSkill(id: string, enabled: boolean): Promise<void> {
@@ -116,6 +126,52 @@ export async function toggleSkill(id: string, enabled: boolean): Promise<void> {
   // Mock: update in-place
   const skill = mock.mockSkills.find(s => s.id === id);
   if (skill) skill.enabled = enabled;
+  const detail = mock.mockSkillDetails[id];
+  if (detail) detail.enabled = enabled;
+}
+
+export async function updateSkill(id: string, content: string): Promise<void> {
+  if (isTauri) return tauriApi.updateSkill(id, content);
+  if (await isCloudAvailable()) {
+    await fetchApi(`/skills/${id}`, { method: 'PUT', body: JSON.stringify({ content }) });
+    return;
+  }
+  // Mock: update in-place
+  const detail = mock.mockSkillDetails[id];
+  if (detail) detail.content = content;
+}
+
+export async function createSkill(data: CreateSkillData): Promise<SkillDetail> {
+  if (isTauri) return tauriApi.createSkill(data);
+  if (await isCloudAvailable()) return fetchApi<SkillDetail>('/skills', { method: 'POST', body: JSON.stringify(data) });
+  // Mock: create in-place
+  const id = String(Date.now());
+  const basePath = data.scope === 'personal' ? '~/.claude/skills/' : '.claude/skills/';
+  const filePath = data.isDirectory ? `${basePath}${data.name}/` : `${basePath}${data.name}.md`;
+  const newDetail: SkillDetail = {
+    id, name: data.name, description: data.description, filePath, scope: data.scope,
+    tokenCount: Math.round(data.content.length / 4), enabled: true, contentHash: id,
+    content: data.content,
+    frontmatter: { name: data.name, description: data.description, allowedTools: data.allowedTools, model: data.model },
+    hasScripts: data.isDirectory, hasReferences: data.isDirectory, hasAssets: data.isDirectory,
+    scripts: [], references: [], assets: [],
+    isDirectory: data.isDirectory,
+  };
+  mock.mockSkillDetails[id] = newDetail;
+  mock.mockSkills.push({ id, name: data.name, description: data.description, filePath, scope: data.scope, tokenCount: newDetail.tokenCount, enabled: true, contentHash: id });
+  return newDetail;
+}
+
+export async function deleteSkill(id: string): Promise<void> {
+  if (isTauri) return tauriApi.deleteSkill(id);
+  if (await isCloudAvailable()) {
+    await fetchApi(`/skills/${id}`, { method: 'DELETE' });
+    return;
+  }
+  // Mock: remove in-place
+  const idx = mock.mockSkills.findIndex(s => s.id === id);
+  if (idx !== -1) mock.mockSkills.splice(idx, 1);
+  delete mock.mockSkillDetails[id];
 }
 
 // ---- Usage Analytics ----

@@ -5,10 +5,17 @@ import SkillsManager from "@/components/SkillsManager";
 import UsageAnalytics from "@/components/UsageAnalytics";
 import McpDashboard from "@/components/McpDashboard";
 import ConfigEditor from "@/components/ConfigEditor";
+import SubagentsManager from "@/components/SubagentsManager";
+import HooksManager from "@/components/HooksManager";
+import AutomationFlow from "@/components/AutomationFlow";
+import PromptBar from "@/components/PromptBar";
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
   skills: SkillsManager,
+  subagents: SubagentsManager,
+  hooks: HooksManager,
+  automation: AutomationFlow,
   analytics: UsageAnalytics,
   mcp: McpDashboard,
   config: ConfigEditor,
@@ -18,12 +25,18 @@ export default function Dashboard() {
   const [section, setSection] = useState<Section>("context");
   const Panel = PANELS[section];
 
+  // Automation flow needs full width with no padding
+  const isFullWidth = section === "automation";
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar active={section} onNavigate={setSection} />
-      <main className="flex-1 overflow-y-auto p-6">
-        <Panel />
-      </main>
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <main className={isFullWidth ? "flex-1 overflow-hidden" : "flex-1 overflow-y-auto p-6"}>
+          <Panel />
+        </main>
+        <PromptBar />
+      </div>
     </div>
   );
 }

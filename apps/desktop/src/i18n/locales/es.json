@@ -7,6 +7,9 @@
     "dashboard": "Panel",
     "context": "Contexto",
     "skills": "Skills",
+    "subagents": "Subagentes",
+    "hooks": "Hooks",
+    "automation": "Automatizacion",
     "analytics": "Analiticas",
     "mcp": "Servidores MCP",
     "config": "Configuracion",
@@ -55,7 +58,21 @@
       "approaching": "Acercandose al limite de contexto",
       "high": "Uso alto de contexto",
       "critical": "Critico: contexto casi lleno"
-    }
+    },
+    "views": {
+      "breakdown": "Desglose",
+      "dependencies": "Dependencias",
+      "permissions": "Permisos"
+    },
+    "depInfo": "Todas las fuentes cargadas en la ventana de contexto actual, agrupadas por tipo.",
+    "permInfo": "Permisos de herramientas configurados para esta sesion. Gestionados via settings.json o configuracion del proyecto.",
+    "totalDeps": "{{count}} fuentes cargando {{tokens}} tokens en total",
+    "fileNotFound": "Archivo no disponible en esta sesion"
+  },
+  "prompt": {
+    "placeholder": "Pregunta via MCP — contexto, skills, uso, servidores...",
+    "thinking": "Consultando via MCP...",
+    "clear": "Limpiar historial"
   },
   "skills": {
     "title": "Gestor de Skills",
@@ -82,7 +99,130 @@
     "name": "Nombre de la Skill",
     "description": "Descripcion",
     "content": "Contenido de la Skill (Markdown)",
-    "source": "Ubicacion"
+    "source": "Ubicacion",
+    "scopes": {
+      "enterprise": "Empresa",
+      "personal": "Personal",
+      "project": "Proyecto",
+      "plugin": "Plugin"
+    },
+    "priority": {
+      "title": "Prioridad de Carga",
+      "hint": "Mayor prioridad sobrescribe menor"
+    },
+    "detail": {
+      "allowedTools": "Herramientas Permitidas",
+      "allToolsDefault": "Todas las herramientas (por defecto)",
+      "allowAll": "Permitir todas las herramientas (sin restricciones)",
+      "model": "Modelo",
+      "scripts": "scripts/",
+      "references": "references/",
+      "assets": "assets/",
+      "triggerField": "Disparador",
+      "triggerHint": "Claude usa esta descripcion para decidir cuando cargar esta skill automaticamente. Usa lenguaje claro y rico en palabras clave.",
+      "config": "Configuracion de la Skill",
+      "visibleSlash": "Visible en menu /slash",
+      "hiddenSlash": "Oculto del menu /slash",
+      "manualOnly": "Solo invocacion manual",
+      "autoInvoke": "Claude puede invocar automaticamente",
+      "lines": "lineas",
+      "overLimit": "Sobre el limite recomendado",
+      "overLimitHint": "Anthropic recomienda mantener SKILL.md bajo 500 lineas. Mueve material de referencia detallado a archivos de soporte separados (reference.md, examples.md) y enlazalos desde la skill principal.",
+      "linkedFiles": "Archivos de Soporte Vinculados",
+      "linkedFilesHint": "Archivos referenciados en el contenido de la skill. Claude los carga bajo demanda usando rutas relativas.",
+      "substitutions": "Sustituciones Disponibles"
+    },
+    "conflicts": {
+      "title": "Superposicion de Descripcion Detectada",
+      "hint": "Skills con descripciones similares pueden hacer que Claude invoque la incorrecta. Como las skills no requieren /comandos, una diferenciacion clara en las descripciones es critica.",
+      "high": "alto riesgo",
+      "medium": "riesgo medio",
+      "match": "coincidencia",
+      "similarSkills": "{{count}} skill(s) similar(es) encontrada(s)",
+      "showAll": "Mostrar todos los {{count}} conflictos",
+      "showLess": "Mostrar menos"
+    },
+    "create": {
+      "template": "Plantilla",
+      "singleFile": "Archivo Unico",
+      "directory": "Directorio",
+      "directoryHint": "Crea una carpeta con subdirectorios scripts/, references/ y assets/",
+      "descriptionPlaceholder": "Que hace esta skill?",
+      "anyModel": "Cualquier modelo"
+    }
+  },
+  "subagents": {
+    "title": "Subagentes",
+    "subtitle": "Crea y gestiona subagentes con acceso a skills",
+    "search": "Buscar subagentes...",
+    "createNew": "Nuevo Subagente",
+    "name": "Nombre del Subagente",
+    "description": "Descripcion",
+    "type": "Tipo de Agente",
+    "types": {
+      "general-purpose": "Proposito General",
+      "Explore": "Explorador",
+      "Plan": "Planificador",
+      "custom": "Personalizado"
+    },
+    "skills": "Skills Asignadas",
+    "skillsHint": "Skills que este subagente puede acceder y usar",
+    "noSkills": "Sin skills asignadas",
+    "allowedTools": "Herramientas Permitidas",
+    "model": "Modelo Override",
+    "anyModel": "Por defecto (heredar)",
+    "instructions": "Instrucciones Personalizadas",
+    "instructionsPlaceholder": "Instrucciones adicionales para este subagente...",
+    "noSubagents": "Ningun subagente configurado",
+    "enabled": "Activo",
+    "disabled": "Inactivo",
+    "confirmDelete": "Eliminar este subagente?",
+    "skillAccess": "Acceso a Skills",
+    "addSkill": "Agregar Skill",
+    "removeSkill": "Quitar"
+  },
+  "hooks": {
+    "title": "Hooks",
+    "subtitle": "Comandos shell que se ejecutan en eventos de Claude Code",
+    "createNew": "Nuevo Hook",
+    "name": "Nombre del Hook",
+    "event": "Evento",
+    "command": "Comando",
+    "commandPlaceholder": "Comando shell a ejecutar...",
+    "matcher": "Matcher",
+    "matcherHint": "Filtro de nombre de herramienta (regex o exacto)",
+    "matcherPlaceholder": "ej., Bash, Write, .*",
+    "timeout": "Timeout (ms)",
+    "scope": "Alcance",
+    "global": "Global",
+    "projectScope": "Proyecto",
+    "noHooks": "Ningun hook configurado",
+    "events": {
+      "PreToolUse": "Pre Uso de Herramienta",
+      "PostToolUse": "Post Uso de Herramienta",
+      "Notification": "Notificacion",
+      "Stop": "Parada",
+      "SubagentStop": "Parada de Subagente"
+    },
+    "confirmDelete": "Eliminar este hook?"
+  },
+  "automation": {
+    "title": "Flujo de Automatizacion",
+    "subtitle": "Pipeline visual del procesamiento de solicitudes de Claude Code",
+    "zoomIn": "Acercar",
+    "zoomOut": "Alejar",
+    "resetZoom": "Resetear zoom",
+    "nodeDetails": "Detalles del Nodo",
+    "executions": "Ejecuciones",
+    "errors": "Errores",
+    "avgTime": "Tiempo Promedio",
+    "flowOverview": "Vista del Flujo",
+    "activeNodes": "Nodos Activos",
+    "totalExecutions": "Total de Ejecuciones",
+    "errorRate": "Tasa de Error",
+    "performance": "Vista de Rendimiento",
+    "flowObjectives": "Objetivos del Flujo",
+    "search": "Buscar nodos..."
   },
   "analytics": {
     "title": "Analiticas de Uso",
@@ -138,7 +278,10 @@
     "url": "URL",
     "configSource": "Origen de Configuracion",
     "global": "Global",
-    "projectLevel": "Proyecto"
+    "projectLevel": "Proyecto",
+    "connection": "Conexion",
+    "environment": "Entorno",
+    "permissions": "Permisos"
   },
   "config": {
     "title": "Configuracion",

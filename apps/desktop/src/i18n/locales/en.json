@@ -7,6 +7,9 @@
     "dashboard": "Dashboard",
     "context": "Context",
     "skills": "Skills",
+    "subagents": "Subagents",
+    "hooks": "Hooks",
+    "automation": "Automation",
     "analytics": "Analytics",
     "mcp": "MCP Servers",
     "config": "Configuration",
@@ -55,7 +58,21 @@
       "approaching": "Approaching context limit",
       "high": "High context usage",
       "critical": "Critical: context nearly full"
-    }
+    },
+    "views": {
+      "breakdown": "Breakdown",
+      "dependencies": "Dependencies",
+      "permissions": "Permissions"
+    },
+    "depInfo": "All sources loaded into the current context window, grouped by type.",
+    "permInfo": "Tool permissions configured for this session. Managed via settings.json or project config.",
+    "totalDeps": "{{count}} sources loading {{tokens}} tokens total",
+    "fileNotFound": "File not available in this session"
+  },
+  "prompt": {
+    "placeholder": "Ask via MCP — context, skills, usage, servers...",
+    "thinking": "Querying via MCP...",
+    "clear": "Clear history"
   },
   "skills": {
     "title": "Skills Manager",
@@ -82,7 +99,130 @@
     "name": "Skill Name",
     "description": "Description",
     "content": "Skill Content (Markdown)",
-    "source": "Location"
+    "source": "Location",
+    "scopes": {
+      "enterprise": "Enterprise",
+      "personal": "Personal",
+      "project": "Project",
+      "plugin": "Plugin"
+    },
+    "priority": {
+      "title": "Loading Priority",
+      "hint": "Higher priority overrides lower"
+    },
+    "detail": {
+      "allowedTools": "Allowed Tools",
+      "allToolsDefault": "All tools (default)",
+      "allowAll": "Allow all tools (no restrictions)",
+      "model": "Model",
+      "scripts": "scripts/",
+      "references": "references/",
+      "assets": "assets/",
+      "triggerField": "Trigger",
+      "triggerHint": "Claude uses this description to decide when to auto-load this skill. Use clear, keyword-rich language matching how users naturally ask.",
+      "config": "Skill Configuration",
+      "visibleSlash": "Visible in /slash menu",
+      "hiddenSlash": "Hidden from /slash menu",
+      "manualOnly": "Manual invoke only",
+      "autoInvoke": "Claude can auto-invoke",
+      "lines": "lines",
+      "overLimit": "Over recommended limit",
+      "overLimitHint": "Anthropic recommends keeping SKILL.md under 500 lines. Move detailed reference material to separate support files (reference.md, examples.md) and link them from the main skill.",
+      "linkedFiles": "Linked Support Files",
+      "linkedFilesHint": "Files referenced from skill content. Claude loads these on-demand using relative paths.",
+      "substitutions": "Available Substitutions"
+    },
+    "conflicts": {
+      "title": "Description Overlap Detected",
+      "hint": "Skills with similar descriptions may cause Claude to auto-invoke the wrong one. Since skills don't require /commands, clear differentiation in descriptions is critical.",
+      "high": "high risk",
+      "medium": "medium risk",
+      "match": "match",
+      "similarSkills": "{{count}} similar skill(s) found",
+      "showAll": "Show all {{count}} conflicts",
+      "showLess": "Show less"
+    },
+    "create": {
+      "template": "Template",
+      "singleFile": "Single File",
+      "directory": "Directory",
+      "directoryHint": "Creates a folder with scripts/, references/, and assets/ subdirectories",
+      "descriptionPlaceholder": "What does this skill do?",
+      "anyModel": "Any model"
+    }
+  },
+  "subagents": {
+    "title": "Subagents",
+    "subtitle": "Create and manage subagents with skill access",
+    "search": "Search subagents...",
+    "createNew": "New Subagent",
+    "name": "Subagent Name",
+    "description": "Description",
+    "type": "Agent Type",
+    "types": {
+      "general-purpose": "General Purpose",
+      "Explore": "Explorer",
+      "Plan": "Planner",
+      "custom": "Custom"
+    },
+    "skills": "Assigned Skills",
+    "skillsHint": "Skills this subagent can access and use",
+    "noSkills": "No skills assigned",
+    "allowedTools": "Allowed Tools",
+    "model": "Model Override",
+    "anyModel": "Default (inherit)",
+    "instructions": "Custom Instructions",
+    "instructionsPlaceholder": "Additional instructions for this subagent...",
+    "noSubagents": "No subagents configured",
+    "enabled": "Active",
+    "disabled": "Inactive",
+    "confirmDelete": "Delete this subagent?",
+    "skillAccess": "Skill Access",
+    "addSkill": "Add Skill",
+    "removeSkill": "Remove"
+  },
+  "hooks": {
+    "title": "Hooks",
+    "subtitle": "Shell commands that execute on Claude Code events",
+    "createNew": "New Hook",
+    "name": "Hook Name",
+    "event": "Event",
+    "command": "Command",
+    "commandPlaceholder": "Shell command to execute...",
+    "matcher": "Matcher",
+    "matcherHint": "Tool name filter (regex or exact match)",
+    "matcherPlaceholder": "e.g., Bash, Write, .*",
+    "timeout": "Timeout (ms)",
+    "scope": "Scope",
+    "global": "Global",
+    "projectScope": "Project",
+    "noHooks": "No hooks configured",
+    "events": {
+      "PreToolUse": "Pre Tool Use",
+      "PostToolUse": "Post Tool Use",
+      "Notification": "Notification",
+      "Stop": "Stop",
+      "SubagentStop": "Subagent Stop"
+    },
+    "confirmDelete": "Delete this hook?"
+  },
+  "automation": {
+    "title": "Automation Flow",
+    "subtitle": "Visual pipeline of Claude Code request processing",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "resetZoom": "Reset zoom",
+    "nodeDetails": "Node Details",
+    "executions": "Executions",
+    "errors": "Errors",
+    "avgTime": "Avg Time",
+    "flowOverview": "Flow Overview",
+    "activeNodes": "Active Nodes",
+    "totalExecutions": "Total Executions",
+    "errorRate": "Error Rate",
+    "performance": "Performance Overview",
+    "flowObjectives": "Flow Objectives",
+    "search": "Search nodes..."
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -138,7 +278,10 @@
     "url": "URL",
     "configSource": "Config Source",
     "global": "Global",
-    "projectLevel": "Project"
+    "projectLevel": "Project",
+    "connection": "Connection",
+    "environment": "Environment",
+    "permissions": "Permissions"
   },
   "config": {
     "title": "Configuration",

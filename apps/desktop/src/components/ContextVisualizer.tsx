@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   BarChart,
@@ -7,13 +8,52 @@ import {
   Tooltip,
   ResponsiveContainer,
   Cell,
+  PieChart,
+  Pie,
 } from "recharts";
 import { useTranslation } from "react-i18next";
 import { getContextBreakdown } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
+import { ChevronRight, AlertTriangle, Shield, FolderTree, FileText, BarChart3, ExternalLink } from "lucide-react";
+import FileViewer from "./FileViewer";
+
+// Mock dependency and permission data for the detail view
+const MOCK_DEPENDENCIES = [
+  { name: "CLAUDE.md", path: "CLAUDE.md", tokens: 2100, type: "config" as const, loaded: true },
+  { name: "System Prompt", path: "(built-in)", tokens: 28450, type: "system" as const, loaded: true },
+  { name: "typescript-expert", path: "~/.claude/skills/ts-expert/", tokens: 2340, type: "skill" as const, loaded: true },
+  { name: "code-review", path: "~/.claude/skills/code-review.md", tokens: 1890, type: "skill" as const, loaded: true },
+  { name: "project-conventions", path: ".claude/skills/conventions.md", tokens: 3200, type: "skill" as const, loaded: true },
+  { name: "api-guidelines", path: ".claude/skills/api.md", tokens: 1200, type: "skill" as const, loaded: true },
+  { name: "filesystem MCP", path: "npx @anthropic/mcp-filesystem", tokens: 3400, type: "mcp" as const, loaded: true },
+  { name: "github MCP", path: "npx github-mcp-server", tokens: 2800, type: "mcp" as const, loaded: true },
+  { name: "postgres MCP", path: "npx @anthropic/mcp-postgres", tokens: 2000, type: "mcp" as const, loaded: true },
+];
+
+const MOCK_PERMISSIONS = [
+  { tool: "Read", scope: "global", status: "allowed" as const },
+  { tool: "Write", scope: "project", status: "allowed" as const },
+  { tool: "Edit", scope: "project", status: "allowed" as const },
+  { tool: "Bash", scope: "project", status: "ask" as const },
+  { tool: "Grep", scope: "global", status: "allowed" as const },
+  { tool: "Glob", scope: "global", status: "allowed" as const },
+  { tool: "WebFetch", scope: "global", status: "denied" as const },
+  { tool: "Agent", scope: "project", status: "allowed" as const },
+];
+
+const DEP_TYPE_COLORS = {
+  system: "#FF4466",
+  config: "#FFB800",
+  skill: "#00FFB2",
+  mcp: "#3b82f6",
+};
+
+type DetailView = "chart" | "dependencies" | "permissions";
 
 export default function ContextVisualizer() {
   const { t } = useTranslation();
+  const [detailView, setDetailView] = useState<DetailView>("chart");
+  const [viewingFile, setViewingFile] = useState<string | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ["context-breakdown"],
     queryFn: getContextBreakdown,
@@ -26,8 +66,7 @@ export default function ContextVisualizer() {
   if (!data) {
     return (
       <div className="text-cs-muted text-sm">
-        No context data available. Start a Claude Code session to see context
-        breakdown.
+        No context data available. Start a Claude Code session to see context breakdown.
       </div>
     );
   }
@@ -76,74 +115,223 @@ export default function ContextVisualizer() {
         <p className="text-xs text-cs-muted mt-1">
           {t('context.percentage', { percentage: usagePercent.toFixed(1) })}
         </p>
-      </div>
 
-      {/* Category breakdown chart */}
-      <div className="card">
-        <h3 className="text-sm font-medium text-cs-muted mb-4">
-          {t('context.subtitle')}
-        </h3>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart
-              data={data.categories}
-              layout="vertical"
-              margin={{ left: 20, right: 20, top: 0, bottom: 0 }}
-            >
-              <XAxis
-                type="number"
-                tick={{ fill: "#8888a0", fontSize: 12 }}
-                tickFormatter={formatNumber}
-              />
-              <YAxis
-                type="category"
-                dataKey="name"
-                width={120}
-                tick={{ fill: "#8888a0", fontSize: 12 }}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "#16161e",
-                  border: "1px solid #2a2a3a",
-                  borderRadius: 6,
-                  fontSize: 13,
-                }}
-                labelStyle={{ color: "#e8e8f0" }}
-                formatter={(value: number) => [
-                  t('context.tokens', { count: formatNumber(value) }),
-                  "",
-                ]}
-              />
-              <Bar dataKey="tokens" radius={[0, 4, 4, 0]}>
-                {data.categories.map((cat, i) => (
-                  <Cell key={i} fill={cat.color} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* Category legend cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-        {data.categories.map((cat) => (
-          <div key={cat.name} className="card flex items-center gap-3">
-            <div
-              className="w-3 h-3 rounded-full shrink-0"
-              style={{ backgroundColor: cat.color }}
-            />
-            <div className="min-w-0">
-              <p className="text-sm truncate">{cat.name}</p>
-              <p className="text-xs text-cs-muted">
-                {t('context.tokens', { count: formatNumber(cat.tokens) })}
-              </p>
-            </div>
+        {/* Warning */}
+        {usagePercent >= 75 && (
+          <div className={cn(
+            "mt-3 flex items-center gap-2 px-3 py-2 rounded-lg text-xs",
+            usagePercent >= 90
+              ? "bg-red-500/10 text-red-400 border border-red-500/20"
+              : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
+          )}>
+            <AlertTriangle size={14} />
+            {usagePercent >= 90
+              ? t('context.warnings.critical')
+              : t('context.warnings.high')}
           </div>
+        )}
+      </div>
+
+      {/* View switcher tabs */}
+      <div className="flex gap-1 p-1 bg-cs-bg rounded-lg border border-cs-border">
+        {([
+          { id: "chart" as const, label: t('context.views.breakdown'), icon: BarChart3 },
+          { id: "dependencies" as const, label: t('context.views.dependencies'), icon: FolderTree },
+          { id: "permissions" as const, label: t('context.views.permissions'), icon: Shield },
+        ] as const).map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setDetailView(id)}
+            className={cn(
+              "flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-xs font-medium transition-colors",
+              detailView === id
+                ? "bg-cs-card text-cs-accent"
+                : "text-cs-muted hover:text-cs-text"
+            )}
+          >
+            <Icon size={14} />
+            {label}
+          </button>
         ))}
       </div>
+
+      {/* Chart View */}
+      {detailView === "chart" && (
+        <>
+          <div className="card">
+            <h3 className="text-sm font-medium text-cs-muted mb-4">
+              {t('context.subtitle')}
+            </h3>
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={data.categories}
+                  layout="vertical"
+                  margin={{ left: 20, right: 20, top: 0, bottom: 0 }}
+                >
+                  <XAxis
+                    type="number"
+                    tick={{ fill: "#8888a0", fontSize: 12 }}
+                    tickFormatter={formatNumber}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={120}
+                    tick={{ fill: "#8888a0", fontSize: 12 }}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#16161e",
+                      border: "1px solid #2a2a3a",
+                      borderRadius: 6,
+                      fontSize: 13,
+                    }}
+                    labelStyle={{ color: "#e8e8f0" }}
+                    formatter={(value: number) => [
+                      t('context.tokens', { count: formatNumber(value) }),
+                      "",
+                    ]}
+                  />
+                  <Bar dataKey="tokens" radius={[0, 4, 4, 0]}>
+                    {data.categories.map((cat, i) => (
+                      <Cell key={i} fill={cat.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Category legend cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+            {data.categories.map((cat) => (
+              <div key={cat.name} className="card flex items-center gap-3">
+                <div
+                  className="w-3 h-3 rounded-full shrink-0"
+                  style={{ backgroundColor: cat.color }}
+                />
+                <div className="min-w-0">
+                  <p className="text-sm truncate">{cat.name}</p>
+                  <p className="text-xs text-cs-muted">
+                    {t('context.tokens', { count: formatNumber(cat.tokens) })}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Dependencies View */}
+      {detailView === "dependencies" && (
+        <div className="space-y-3">
+          <div className="card !p-3">
+            <p className="text-xs text-cs-muted mb-2">
+              {t('context.depInfo')}
+            </p>
+            <div className="flex gap-3">
+              {Object.entries(DEP_TYPE_COLORS).map(([type, color]) => (
+                <div key={type} className="flex items-center gap-1.5">
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+                  <span className="text-xs text-cs-muted capitalize">{type}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {MOCK_DEPENDENCIES.map((dep) => {
+            const isClickable = dep.path !== "(built-in)" && !dep.path.startsWith("npx ");
+            return (
+              <div
+                key={dep.name}
+                onClick={() => isClickable && setViewingFile(dep.path)}
+                className={cn(
+                  "card flex items-center gap-3 !py-3 transition-colors",
+                  isClickable && "cursor-pointer hover:border-cs-accent/30"
+                )}
+              >
+                <div
+                  className="w-1 h-8 rounded-full shrink-0"
+                  style={{ backgroundColor: DEP_TYPE_COLORS[dep.type] }}
+                />
+                <FileText size={16} className="text-cs-muted shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{dep.name}</p>
+                  <p className="text-xs text-cs-muted font-mono truncate">{dep.path}</p>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-xs text-cs-muted font-mono">
+                    {formatNumber(dep.tokens)}
+                  </span>
+                  {isClickable && <ExternalLink size={12} className="text-cs-muted/40" />}
+                  <span className={cn(
+                    "w-2 h-2 rounded-full",
+                    dep.loaded ? "bg-green-400" : "bg-cs-muted/40"
+                  )} />
+                </div>
+              </div>
+            );
+          })}
+
+          <div className="card !p-3 border-dashed">
+            <p className="text-xs text-cs-muted text-center">
+              {t('context.totalDeps', { count: MOCK_DEPENDENCIES.length, tokens: formatNumber(MOCK_DEPENDENCIES.reduce((s, d) => s + d.tokens, 0)) })}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Permissions View */}
+      {detailView === "permissions" && (
+        <div className="space-y-2">
+          <div className="card !p-3">
+            <p className="text-xs text-cs-muted">
+              {t('context.permInfo')}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {MOCK_PERMISSIONS.map((perm) => (
+              <div key={perm.tool} className="card flex items-center gap-3 !py-3">
+                <div className={cn(
+                  "w-8 h-8 rounded-lg flex items-center justify-center text-xs font-mono font-bold shrink-0",
+                  perm.status === "allowed"
+                    ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                    : perm.status === "ask"
+                      ? "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
+                      : "bg-red-500/10 text-red-400 border border-red-500/20"
+                )}>
+                  {perm.status === "allowed" ? "\u2713" : perm.status === "ask" ? "?" : "\u2717"}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium font-mono">{perm.tool}</p>
+                  <p className="text-xs text-cs-muted">{perm.scope}</p>
+                </div>
+                <span className={cn(
+                  "text-[10px] font-medium uppercase px-1.5 py-0.5 rounded",
+                  perm.status === "allowed"
+                    ? "bg-green-500/10 text-green-400"
+                    : perm.status === "ask"
+                      ? "bg-yellow-500/10 text-yellow-400"
+                      : "bg-red-500/10 text-red-400"
+                )}>
+                  {perm.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* File viewer slide-over */}
+      {viewingFile && (
+        <FileViewer filePath={viewingFile} onClose={() => setViewingFile(null)} />
+      )}
     </div>
   );
 }
+
 
 function LoadingSkeleton() {
   return (

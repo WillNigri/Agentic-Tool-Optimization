@@ -5,21 +5,27 @@ import {
   Server,
   Settings,
   LogOut,
+  Bot,
+  Webhook,
+  Workflow,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
 
-export type Section = "context" | "skills" | "analytics" | "mcp" | "config";
+export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "analytics" | "mcp" | "config";
 
 interface SidebarProps {
   active: Section;
   onNavigate: (section: Section) => void;
 }
 
-const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers }[] = [
+const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: string }[] = [
   { id: "context", labelKey: "nav.context", icon: Layers },
   { id: "skills", labelKey: "nav.skills", icon: Sparkles },
+  { id: "subagents", labelKey: "nav.subagents", icon: Bot },
+  { id: "hooks", labelKey: "nav.hooks", icon: Webhook },
+  { id: "automation", labelKey: "nav.automation", icon: Workflow },
   { id: "analytics", labelKey: "nav.analytics", icon: BarChart3 },
   { id: "mcp", labelKey: "nav.mcp", icon: Server },
   { id: "config", labelKey: "nav.config", icon: Settings },
@@ -50,7 +56,7 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
         </p>
       </div>
 
-      <nav className="flex-1 py-3 px-2 space-y-0.5">
+      <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           return (
