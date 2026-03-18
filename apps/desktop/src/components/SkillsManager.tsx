@@ -1,12 +1,13 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight } from "lucide-react";
+import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store } from "lucide-react";
 import { getSkills, toggleSkill, type Skill } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
 import { analyzeSkillConflicts, type SkillConflict } from "@/lib/skill-similarity";
 import SkillDetailPanel from "./SkillDetailPanel";
 import CreateSkillModal from "./CreateSkillModal";
+import MarketplaceGrid from "./MarketplaceGrid";
 
 const SCOPE_ORDER = ["enterprise", "personal", "project", "plugin"] as const;
 
@@ -17,8 +18,11 @@ const SCOPE_COLORS: Record<string, { border: string; bg: string; text: string; l
   plugin:     { border: "border-purple-500/40", bg: "bg-purple-500/10", text: "text-purple-400", label: "PLG" },
 };
 
+type SkillsTab = "my-skills" | "marketplace";
+
 export default function SkillsManager() {
   const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<SkillsTab>("my-skills");
   const [search, setSearch] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -84,56 +88,94 @@ export default function SkillsManager() {
           </p>
         </div>
 
-        {/* Priority legend */}
-        <PriorityIndicator />
-
-        {/* Conflict alerts */}
-        {(highConflicts.length > 0 || mediumConflicts.length > 0) && (
-          <ConflictAlerts conflicts={conflicts} onSelectSkill={setSelectedSkillId} />
-        )}
-
-        {/* Search */}
-        <div className="relative">
-          <Search
-            size={16}
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-cs-muted"
-          />
-          <input
-            type="text"
-            className="input pl-9"
-            placeholder={t('skills.search')}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+        {/* Tab bar */}
+        <div className="flex items-center border-b border-cs-border">
+          <button
+            onClick={() => setActiveTab("my-skills")}
+            className={cn(
+              "px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px",
+              activeTab === "my-skills"
+                ? "border-cs-accent text-cs-accent"
+                : "border-transparent text-cs-muted hover:text-cs-text"
+            )}
+          >
+            {t("skills.tabs.mySkills")}
+          </button>
+          <button
+            onClick={() => setActiveTab("marketplace")}
+            className={cn(
+              "flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px",
+              activeTab === "marketplace"
+                ? "border-cs-accent text-cs-accent"
+                : "border-transparent text-cs-muted hover:text-cs-text"
+            )}
+          >
+            <Store size={14} />
+            {t("skills.tabs.marketplace")}
+          </button>
         </div>
 
-        {/* Skill groups by scope */}
-        {groupedSkills.map(({ scope, skills: scopeSkills }) => (
-          <SkillGroup
-            key={scope}
-            scope={scope}
-            title={t(`skills.scopes.${scope}`)}
-            skills={scopeSkills}
-            selectedId={selectedSkillId}
-            onSelect={setSelectedSkillId}
-            onToggle={(id, enabled) => toggle.mutate({ id, enabled })}
-          />
-        ))}
+        {activeTab === "marketplace" ? (
+          <MarketplaceGrid />
+        ) : (
+          <>
+            {/* Priority legend */}
+            <PriorityIndicator />
 
-        {filtered.length === 0 && (
-          <p className="text-cs-muted text-sm text-center py-8">
-            {search ? t('common.noResults') : t('skills.noSkills')}
-          </p>
+            {/* Conflict alerts */}
+            {(highConflicts.length > 0 || mediumConflicts.length > 0) && (
+              <ConflictAlerts conflicts={conflicts} onSelectSkill={setSelectedSkillId} />
+            )}
+
+            {/* Search */}
+            <div className="relative">
+              <Search
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-cs-muted"
+              />
+              <input
+                type="text"
+                className="input pl-9"
+                placeholder={t('skills.search')}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+
+            {/* Drag hint */}
+            <p className="text-[10px] text-cs-muted italic">
+              {t("skills.dragHint")}
+            </p>
+
+            {/* Skill groups by scope */}
+            {groupedSkills.map(({ scope, skills: scopeSkills }) => (
+              <SkillGroup
+                key={scope}
+                scope={scope}
+                title={t(`skills.scopes.${scope}`)}
+                skills={scopeSkills}
+                selectedId={selectedSkillId}
+                onSelect={setSelectedSkillId}
+                onToggle={(id, enabled) => toggle.mutate({ id, enabled })}
+              />
+            ))}
+
+            {filtered.length === 0 && (
+              <p className="text-cs-muted text-sm text-center py-8">
+                {search ? t('common.noResults') : t('skills.noSkills')}
+              </p>
+            )}
+
+            {/* New Skill button */}
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg border border-dashed border-cs-border text-cs-muted hover:text-cs-accent hover:border-cs-accent/40 transition-colors text-sm"
+            >
+              <Plus size={16} />
+              {t('skills.createNew')}
+            </button>
+          </>
         )}
-
-        {/* New Skill button */}
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg border border-dashed border-cs-border text-cs-muted hover:text-cs-accent hover:border-cs-accent/40 transition-colors text-sm"
-        >
-          <Plus size={16} />
-          {t('skills.createNew')}
-        </button>
       </div>
 
       {/* Detail panel */}
@@ -205,9 +247,51 @@ function SkillGroup({
   onSelect: (id: string) => void;
   onToggle: (id: string, enabled: boolean) => void;
 }) {
+  const [orderedSkills, setOrderedSkills] = useState<Skill[] | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
   if (skills.length === 0) return null;
 
   const colors = SCOPE_COLORS[scope] || SCOPE_COLORS.personal;
+  const displaySkills = orderedSkills || skills;
+
+  function handleDragStart(e: React.DragEvent, skillId: string) {
+    e.dataTransfer.setData("text/plain", skillId);
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  function handleDragOver(e: React.DragEvent, skillId: string) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverId(skillId);
+  }
+
+  function handleDrop(e: React.DragEvent, targetId: string) {
+    e.preventDefault();
+    const sourceId = e.dataTransfer.getData("text/plain");
+    if (sourceId === targetId) return;
+
+    const current = orderedSkills || [...skills];
+    const sourceIdx = current.findIndex((s) => s.id === sourceId);
+    const targetIdx = current.findIndex((s) => s.id === targetId);
+    if (sourceIdx === -1 || targetIdx === -1) return;
+
+    const reordered = [...current];
+    const [moved] = reordered.splice(sourceIdx, 1);
+    reordered.splice(targetIdx, 0, moved);
+    setOrderedSkills(reordered);
+
+    // Persist order to localStorage
+    const orderMap = JSON.parse(localStorage.getItem("ato-skill-order") || "{}");
+    orderMap[scope] = reordered.map((s) => s.id);
+    localStorage.setItem("ato-skill-order", JSON.stringify(orderMap));
+
+    setDragOverId(null);
+  }
+
+  function handleDragEnd() {
+    setDragOverId(null);
+  }
 
   return (
     <div>
@@ -224,20 +308,31 @@ function SkillGroup({
         <span className="text-xs text-cs-muted">({skills.length})</span>
       </div>
       <div className="space-y-2">
-        {skills.map((skill) => {
+        {displaySkills.map((skill, index) => {
           const isDir = skill.filePath.endsWith("/");
           return (
             <div
               key={skill.id}
+              draggable
+              onDragStart={(e) => handleDragStart(e, skill.id)}
+              onDragOver={(e) => handleDragOver(e, skill.id)}
+              onDrop={(e) => handleDrop(e, skill.id)}
+              onDragEnd={handleDragEnd}
               onClick={() => onSelect(skill.id)}
               className={cn(
                 "card flex items-center justify-between gap-4 cursor-pointer transition-colors",
                 selectedId === skill.id
                   ? "border-cs-accent/50 bg-cs-accent/5"
-                  : "hover:border-cs-border/80"
+                  : "hover:border-cs-border/80",
+                dragOverId === skill.id && "border-cs-accent/60 bg-cs-accent/10"
               )}
             >
               <div className="min-w-0 flex-1 flex items-start gap-2.5">
+                {/* Drag handle + priority number */}
+                <div className="flex flex-col items-center gap-0.5 shrink-0 mt-0.5 cursor-grab active:cursor-grabbing">
+                  <span className="text-[9px] font-mono text-cs-muted">{index + 1}</span>
+                  <span className="text-cs-muted/40 text-[8px]">&#x2630;</span>
+                </div>
                 {isDir ? (
                   <FolderOpen size={16} className="text-cs-accent shrink-0 mt-0.5" />
                 ) : (

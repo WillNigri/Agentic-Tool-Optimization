@@ -1,11 +1,13 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { X, Pencil, Save, FolderOpen, File, Trash2, AlertTriangle, Info, Link2, ExternalLink, Eye, EyeOff, Bot, Zap } from "lucide-react";
+import { X, Pencil, Save, FolderOpen, File, Trash2, AlertTriangle, Info, Link2, ExternalLink, Eye, EyeOff, Bot, Zap, Share2, Upload, Sparkles } from "lucide-react";
 import { getSkillDetail, getSkills, updateSkill, deleteSkill, type SkillDetail } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ModelTag, StatusTag, TokenTag } from "./SkillMetaTags";
 import { analyzeSkillConflicts, getConflictsForSkill } from "@/lib/skill-similarity";
+import { shareSkill, promptClaude } from "@/lib/tauri-api";
+import PublishSkillModal from "./PublishSkillModal";
 
 // Anthropic official guideline: keep SKILL.md under 500 lines
 const RECOMMENDED_MAX_LINES = 500;
@@ -60,6 +62,10 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
   const [editTools, setEditTools] = useState<string[]>([]);
   const [editAllTools, setEditAllTools] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [autoImproveRunning, setAutoImproveRunning] = useState(false);
+  const [autoImproveDiff, setAutoImproveDiff] = useState<{ old: string; new: string } | null>(null);
 
   const { data: skill, isLoading, error } = useQuery({
     queryKey: ["skill-detail", skillId],
@@ -212,6 +218,90 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
           <TokenTag count={skill.tokenCount} />
           {fm.model && <ModelTag model={fm.model} />}
         </div>
+
+        {/* Action buttons: Share, Publish, Auto-improve */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Share */}
+          <button
+            onClick={async () => {
+              try {
+                const result = await shareSkill(skillId, []);
+                setShareUrl(result.shareUrl);
+                setTimeout(() => setShareUrl(null), 3000);
+              } catch { /* handled */ }
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-cs-border text-cs-muted hover:text-cs-accent hover:border-cs-accent/40 transition-colors"
+          >
+            <Share2 size={12} />
+            {shareUrl ? t("marketplace.share.copied") : t("marketplace.share.title")}
+          </button>
+
+          {/* Publish */}
+          <button
+            onClick={() => setShowPublish(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-cs-border text-cs-muted hover:text-purple-400 hover:border-purple-500/40 transition-colors"
+          >
+            <Upload size={12} />
+            {t("marketplace.publish")}
+          </button>
+
+          {/* Auto-improve */}
+          <button
+            onClick={async () => {
+              if (autoImproveRunning || !skill) return;
+              setAutoImproveRunning(true);
+              try {
+                const prompt = `You are improving a Claude Code skill. Analyze this skill and suggest improvements for clarity, specificity, and effectiveness. Return ONLY the improved skill content (full markdown with frontmatter), nothing else.\n\nCurrent skill:\n\`\`\`\n${skill.content}\n\`\`\``;
+                const improved = await promptClaude(prompt);
+                setAutoImproveDiff({ old: skill.content, new: improved });
+              } catch {
+                // Claude CLI not available
+              } finally {
+                setAutoImproveRunning(false);
+              }
+            }}
+            disabled={autoImproveRunning}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors",
+              autoImproveRunning
+                ? "border-yellow-500/40 text-yellow-400 bg-yellow-500/10"
+                : "border-cs-border text-cs-muted hover:text-yellow-400 hover:border-yellow-500/40"
+            )}
+          >
+            <Sparkles size={12} />
+            {autoImproveRunning ? t("marketplace.autoImprove.running") : t("marketplace.autoImprove.title")}
+          </button>
+        </div>
+
+        {/* Auto-improve diff view */}
+        {autoImproveDiff && (
+          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-3">
+            <h4 className="text-xs font-semibold text-yellow-400 uppercase tracking-wider mb-2">
+              {t("marketplace.autoImprove.diffTitle")}
+            </h4>
+            <pre className="w-full p-3 bg-cs-bg border border-cs-border rounded-lg text-xs font-mono text-cs-text whitespace-pre-wrap max-h-48 overflow-y-auto mb-3">
+              {autoImproveDiff.new}
+            </pre>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  saveMutation.mutate(autoImproveDiff.new);
+                  setAutoImproveDiff(null);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-cs-accent text-cs-bg font-medium hover:bg-cs-accent/90 transition-colors"
+              >
+                <Save size={12} />
+                {t("marketplace.autoImprove.apply")}
+              </button>
+              <button
+                onClick={() => setAutoImproveDiff(null)}
+                className="px-3 py-1.5 text-xs rounded-lg border border-cs-border text-cs-muted hover:text-cs-text transition-colors"
+              >
+                {t("marketplace.autoImprove.discard")}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Description — THE trigger for auto-loading */}
         <div>
@@ -500,6 +590,15 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
           </div>
         )}
       </div>
+
+      {/* Publish modal */}
+      {showPublish && (
+        <PublishSkillModal
+          skillId={skillId}
+          skillName={skill.name}
+          onClose={() => setShowPublish(false)}
+        />
+      )}
     </Panel>
   );
 }
