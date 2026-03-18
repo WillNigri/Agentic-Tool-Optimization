@@ -14,7 +14,8 @@
     "mcp": "Servidores MCP",
     "config": "Configuracao",
     "settings": "Configuracoes",
-    "logout": "Sair"
+    "logout": "Sair",
+    "cron": "Monitor Cron"
   },
   "auth": {
     "login": "Entrar",
@@ -152,6 +153,57 @@
       "anyModel": "Qualquer modelo"
     }
   },
+  "marketplace": {
+    "title": "Marketplace de Skills",
+    "subtitle": "Descubra e instale skills da comunidade",
+    "search": "Buscar no marketplace...",
+    "install": "Instalar",
+    "installed": "Instalado",
+    "installing": "Instalando...",
+    "publish": "Publicar",
+    "rate": "Avaliar",
+    "installs": "{{count}} instalacoes",
+    "rating": "{{rating}} / 5",
+    "author": "por {{author}}",
+    "categories": {
+      "library-reference": "Referencia de Biblioteca",
+      "product-verification": "Verificacao de Produto",
+      "data-fetching": "Busca de Dados",
+      "business-process": "Processo de Negocio",
+      "code-scaffolding": "Scaffolding de Codigo",
+      "code-quality": "Qualidade de Codigo",
+      "ci-cd": "CI/CD",
+      "runbooks": "Runbooks",
+      "infra-ops": "Operacoes de Infra"
+    },
+    "allCategories": "Todas as Categorias",
+    "publishModal": {
+      "title": "Publicar Skill",
+      "category": "Categoria",
+      "tags": "Tags",
+      "tagsHint": "Tags separadas por virgula",
+      "preview": "Pre-visualizar",
+      "publishing": "Publicando..."
+    },
+    "share": {
+      "title": "Compartilhar Skill",
+      "selectUsers": "Selecione usuarios para compartilhar",
+      "shareLink": "Link de Compartilhamento",
+      "copied": "Copiado para a area de transferencia"
+    },
+    "autoImprove": {
+      "title": "Auto-Melhorar",
+      "running": "Executando pesquisa automatica...",
+      "diffTitle": "Alteracoes Sugeridas",
+      "apply": "Aplicar Alteracoes",
+      "discard": "Descartar"
+    }
+  },
+  "skills.dragHint": "Arraste para reordenar prioridade dentro do escopo",
+  "skills.tabs": {
+    "mySkills": "Minhas Skills",
+    "marketplace": "Marketplace"
+  },
   "subagents": {
     "title": "Subagentes",
     "subtitle": "Crie e gerencie subagentes com acesso a skills",
@@ -165,6 +217,21 @@
       "Explore": "Explorador",
       "Plan": "Planejador",
       "custom": "Personalizado"
+    },
+    "runtime": "Runtime",
+    "runtimes": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes"
+    },
+    "runtimeConfig": {
+      "sshHost": "Host SSH",
+      "sshPort": "Porta SSH",
+      "sshUser": "Usuario SSH",
+      "sshKeyPath": "Caminho da Chave SSH",
+      "apiKeyPath": "Caminho da Chave API",
+      "endpoint": "Endpoint"
     },
     "skills": "Skills Atribuidas",
     "skillsHint": "Skills que este subagente pode acessar e usar",
@@ -181,6 +248,69 @@
     "skillAccess": "Acesso a Skills",
     "addSkill": "Adicionar Skill",
     "removeSkill": "Remover"
+  },
+  "cron": {
+    "title": "Monitor Cron",
+    "subtitle": "Monitoramento visual de tarefas agendadas de agentes",
+    "newJob": "Nova Tarefa Cron",
+    "search": "Buscar tarefas cron...",
+    "noJobs": "Nenhuma tarefa cron configurada",
+    "noJobsHint": "Crie uma tarefa cron para agendar tarefas de agentes",
+    "alert": {
+      "title": "{{count}} tarefa(s) precisam de atencao",
+      "silentFailure": "falha silenciosa",
+      "chronicWarning": "alerta cronico",
+      "failed": "falhou",
+      "acknowledge": "Dispensar"
+    },
+    "status": {
+      "healthy": "Saudavel",
+      "failed": "Falhou",
+      "silent-failure": "Falha Silenciosa",
+      "warning": "Alerta",
+      "paused": "Pausado"
+    },
+    "job": {
+      "schedule": "Agendamento",
+      "runtime": "Runtime",
+      "lastRun": "Ultima execucao",
+      "nextRun": "Proxima execucao",
+      "runNow": "Executar Agora",
+      "running": "Executando...",
+      "retry": "Tentar novamente",
+      "edit": "Editar",
+      "delete": "Excluir",
+      "confirmDelete": "Excluir esta tarefa cron?",
+      "linkedWorkflow": "Vinculado: {{name}}",
+      "timeline": "Timeline de 7 dias"
+    },
+    "detail": {
+      "title": "Detalhes da Tarefa",
+      "executionHistory": "Historico de Execucao",
+      "duration": "Duracao",
+      "successRate": "Taxa de Sucesso",
+      "avgDuration": "Duracao Media",
+      "totalRuns": "Total de Execucoes",
+      "output": "Saida",
+      "error": "Erro",
+      "noExecutions": "Sem execucoes ainda"
+    },
+    "create": {
+      "title": "Criar Tarefa Cron",
+      "editTitle": "Editar Tarefa Cron",
+      "name": "Nome da Tarefa",
+      "namePlaceholder": "ex., Briefing Diario",
+      "description": "Descricao",
+      "descriptionPlaceholder": "O que esta tarefa faz?",
+      "schedule": "Expressao Cron",
+      "schedulePlaceholder": "0 7 * * *",
+      "scheduleHint": "minuto hora dia-do-mes mes dia-da-semana",
+      "preview": "Executa: {{schedule}}",
+      "runtime": "Runtime",
+      "prompt": "Prompt do Agente",
+      "promptPlaceholder": "O que o agente deve fazer em cada execucao?",
+      "invalidCron": "Expressao cron invalida"
+    }
   },
   "hooks": {
     "title": "Hooks",
@@ -223,7 +353,37 @@
     "errorRate": "Taxa de Erro",
     "performance": "Visao de Performance",
     "flowObjectives": "Objetivos do Fluxo",
-    "search": "Buscar nos..."
+    "search": "Buscar nos...",
+    "builder": {
+      "palette": "Paleta de Nos",
+      "triggers": "Gatilhos",
+      "services": "Servicos",
+      "actions": "Acoes",
+      "configure": "Configurar No",
+      "label": "Nome",
+      "description": "Descricao",
+      "service": "Servico",
+      "action": "Acao",
+      "condition": "Condicao",
+      "deleteNode": "Excluir No",
+      "confirmDelete": "Excluir este no?",
+      "confirmDeleteWorkflow": "Excluir este workflow?",
+      "viewMode": "Visualizar",
+      "editMode": "Editar",
+      "save": "Salvar",
+      "run": "Executar",
+      "running": "Executando...",
+      "newWorkflow": "Novo Workflow",
+      "create": "Criar",
+      "workflowName": "Nome do workflow...",
+      "emptyState": "Nenhum workflow ainda",
+      "emptyStateHint": "Mude para o modo Editar para criar seu primeiro workflow",
+      "dropHint": "Arraste nos da paleta",
+      "executing": "Executando...",
+      "completed": "Concluido",
+      "failed": "Falhou",
+      "waitingOutput": "Aguardando saida..."
+    }
   },
   "analytics": {
     "title": "Analytics de Uso",

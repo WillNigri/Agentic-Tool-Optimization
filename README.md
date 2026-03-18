@@ -1,69 +1,130 @@
 # ATO — Agentic Tool Optimization
 
-The control panel for AI coding tools. A desktop dashboard and MCP server that gives you full visibility and control over Claude Code's skills, subagents, hooks, automations, context window, MCP servers, and usage analytics.
+The **multi-LLM control panel** for AI coding tools. One dashboard to manage **Claude**, **Codex**, **OpenClaw**, and **Hermes** — skills, subagents, automation workflows, and cron scheduling across all runtimes.
 
 **MIT Licensed** | **Offline-first** | **macOS, Windows, Linux**
 
 ---
 
-## What it does
+## Supported Runtimes
 
-ATO replaces guessing with seeing. Instead of wondering what's loaded in your context, which skills might conflict, or how much you're spending — you get a real-time dashboard.
+| Runtime | Provider | CLI | Transport |
+|---------|----------|-----|-----------|
+| **Claude** | Anthropic | `claude --print` | Local process |
+| **Codex** | OpenAI | `codex --print` | Local process |
+| **OpenClaw** | OpenClaw | `openclaw exec` | SSH to remote host |
+| **Hermes** | Hermes | `hermes --execute` | Local process |
+
+ATO auto-detects which runtimes are installed on your system (`detect_agent_runtimes`). You can assign any runtime to subagents, automation workflow nodes, and cron jobs. Mix and match runtimes in the same workflow — run code review with Claude, then deploy with Codex, all in one pipeline.
+
+---
+
+## Open Source vs Pro
+
+ATO follows an open-core model. The platform, multi-agent runtime, and all local tooling ship MIT. Monitoring, analytics, and cloud sync are closed source (separate repo, paid).
+
+### Open Source (this repo)
+
+| Feature | Description |
+|---------|-------------|
+| **Skills Manager** | 4-scope hierarchy, conflict detection, frontmatter editor, directory skills |
+| **Skills Marketplace** | Browse, install, publish, share community skills across 9 categories |
+| **Multi-Agent Runtime** | Claude, Codex, OpenClaw, Hermes — unified `promptAgent()` dispatch |
+| **Subagents Manager** | Create subagents with runtime selection + runtime-specific config |
+| **Automation Builder** | n8n-style visual workflows with per-node runtime selection |
+| **Cron Scheduling** | Create & trigger cron jobs with any runtime, expression validation |
+| **Context Visualizer** | Real-time context window breakdown with token budget warnings |
+| **Hooks Manager** | Shell commands on Claude Code events (Pre/Post ToolUse, Stop) |
+| **MCP Dashboard** | Monitor MCP server connections, tools, restart |
+| **Configuration** | Unified view of all config files |
+| **i18n** | English, Portuguese, Spanish |
+
+### Pro (closed source, separate repo)
+
+| Feature | Description |
+|---------|-------------|
+| **Cron Health Monitor** | 7-day execution timeline, smart failure detection, alert banners |
+| **Silent Failure Detection** | Catches jobs that should have run but didn't |
+| **Alert System** | Chronic warning detection, dedup, auto-retry |
+| **Usage Analytics** | Token consumption, cost tracking, burn rate across all runtimes |
+| **Cloud Sync** | Sync skills, workflows, cron jobs across machines |
+| **Team Features** | Shared workspaces, access controls, collaboration |
+| **Push Notifications** | Slack/email alerts for cron failures and SLA breaches |
+
+---
+
+## What it does
 
 ### Skills Manager
 - **4-scope hierarchy**: Enterprise > Personal > Project > Plugin — with visual priority arrows
-- **Description conflict analyzer**: Detects skills with overlapping descriptions that could cause Claude to auto-invoke the wrong one (since skills don't require /commands)
+- **Description conflict analyzer**: Detects skills with overlapping descriptions that could cause auto-invocation of the wrong skill
 - **Official Anthropic standards**: 500-line guideline counter, all frontmatter fields (`user-invocable`, `disable-model-invocation`, `argument-hint`, `context: fork`, `allowed-tools`, `model`)
-- **Allowed tools grid**: See all 10 Claude tools at a glance — highlighted if enabled, faded if restricted. Toggle in edit mode
-- **Support file links**: Automatically extracts relative markdown links from skill content, shows referenced files
+- **Allowed tools grid**: See all 10 Claude tools at a glance — highlighted if enabled, faded if restricted
+- **Drag-and-drop priority**: Reorder skills within scope groups to control which skill wins when descriptions overlap
+- **Support file links**: Automatically extracts relative markdown links, shows referenced files
 - **Substitution reference**: `$ARGUMENTS`, `${CLAUDE_SKILL_DIR}`, `${CLAUDE_SESSION_ID}` shown in edit mode
-- **Directory structure**: View scripts/, references/, assets/ subdirectories for directory-based skills
+- **Directory structure**: View scripts/, references/, assets/ subdirectories
+
+### Skills Marketplace
+- **9 categories**: library-reference, product-verification, data-fetching, business-process, code-scaffolding, code-quality, ci-cd, runbooks, infra-ops
+- **Install**: One-click install to `~/.claude/skills/`
+- **Publish**: Share your skills with the community
+- **Private sharing**: Share with specific users via link/JSON
+- **Auto-improve**: Run autoresearch prompt on any skill, review diff, apply or discard
+
+### Multi-Agent Runtime
+- **Unified dispatch**: `promptAgent(runtime, prompt, config?)` routes to the correct CLI
+- **Auto-detection**: `detect_agent_runtimes` checks `which` for each CLI
+- **Runtime-specific config**:
+  - **Claude**: Local CLI, no extra config needed
+  - **Codex**: Optional API key path
+  - **OpenClaw**: SSH host, port, user, key path — executes on remote host
+  - **Hermes**: Optional endpoint URL
 
 ### Subagents Manager
-- Create and manage subagents **with skill access** — the key differentiator from traditional subagents
+- Create subagents with **runtime selection** — assign Claude, Codex, OpenClaw, or Hermes
+- Runtime-specific configuration fields appear based on selection
 - Assign skills, allowed tools, model override, and custom instructions per subagent
 - Agent types: General Purpose, Explorer, Planner, Custom
+- Runtime badge on each card for quick identification
 
-### Hooks Manager
-- Manage shell hooks by event type: PreToolUse, PostToolUse, Notification, Stop, SubagentStop
-- Color-coded by event type for quick scanning
-- Configure command, matcher (regex/exact), timeout, and scope (global/project)
-- Inline expand-to-edit — no modal needed
+### Automation Builder (n8n-style)
+- Visual drag-and-drop workflow editor with SVG bezier connections
+- **Per-node runtime selection**: Mix Claude and Codex in the same workflow
+- Service integrations: GitHub, Slack, Gmail, Postgres, Notion, Linear (each with brand colors)
+- Decision nodes with conditional branching
+- Animated data flow indicators
+- Workflow persistence to `~/.ato/workflows/`
+- Prompt serialization: converts workflow to structured prompt with `@runtime` per step
 
-### Automation Flow (n8n-style)
-- Visual flow diagrams of user-configured automations
-- External MCP service nodes: Gmail, Slack, GitHub, Linear, Postgres, Notion — each with brand colors
-- SVG bezier connections with animated data flow indicators
-- Pan, zoom (scroll wheel + buttons), click-to-inspect nodes
-- Workflow switcher: toggle between multiple automations
-- Right panel: connected services, run stats, searchable node list
-- Example workflows: PR Review Pipeline, Daily Email Digest, DB Migration Guard, Standup Bot
+### Cron Scheduling
+- Standard 5-field cron expressions with validation
+- **Any runtime**: Schedule Claude, Codex, OpenClaw, or Hermes jobs
+- Human-readable schedule preview ("Every day at 7:00 AM")
+- Link cron jobs to automation workflows
+- Manual "Run Now" trigger
+- Retry failed executions
+- Persistence to `~/.ato/cron-jobs.json`
 
 ### Context Visualizer
-- **Breakdown chart**: Horizontal bar chart of token usage by category (system prompts, skills, MCP schemas, CLAUDE.md, conversation, file reads)
-- **Dependencies viewer**: Click any dependency to view its content — CLAUDE.md, skill files, settings.json
-- **Permissions viewer**: All tool permissions at a glance (allowed/ask/denied) with scope info
+- Horizontal bar chart of token usage by category (system prompts, skills, MCP schemas, CLAUDE.md, conversation)
+- Dependencies viewer: click any dependency to view its content
+- Permissions viewer: all tool permissions at a glance
 - Usage percentage bar with color warnings at 75% and 90%
 
+### Hooks Manager
+- Shell hooks by event: PreToolUse, PostToolUse, Notification, Stop, SubagentStop
+- Color-coded by event type
+- Configure command, matcher (regex/exact), timeout, scope (global/project)
+
 ### MCP Server Dashboard
-- Status overview cards (connected/disconnected/error counts)
-- Click to expand: full tool list with descriptions, environment variables, permissions, connection config
+- Status cards (connected/disconnected/error counts)
+- Expand for tool list, environment, permissions, connection config
 - Restart button per server
-
-### Usage Analytics
-- Today / This Week / This Month summary cards
-- Burn rate: tokens/hour, cost/hour, estimated time to limit
-- 30-day line chart with input/output token trends
-
-### Configuration
-- Unified view of all Claude Code config files
-- Click any existing file to view its contents with line numbers
 
 ### MCP Prompt Bar
 - Persistent input at the bottom of every page
 - Query Claude Code via MCP tools without leaving the dashboard
-- Available commands: context usage, skills list, MCP server status, usage stats, skill toggles
-- Expandable chat history with tool invocation labels
 
 ### Internationalization
 - Full i18n: English, Portuguese, Spanish
@@ -99,10 +160,21 @@ npm run dev -w apps/desktop -- -- tauri dev
 npm run dev:mcp
 ```
 
-Or install from npm (when published):
+### Runtime Setup
+
+ATO auto-detects installed runtimes. Install the ones you want to use:
 
 ```bash
-npx ato-mcp
+# Claude (Anthropic) — required for core functionality
+npm install -g @anthropic-ai/claude-code
+
+# Codex (OpenAI) — optional
+npm install -g @openai/codex
+
+# OpenClaw — requires SSH access to a host running OpenClaw
+# Configure host/port/user/key in ATO subagent or cron job settings
+
+# Hermes — install per Hermes documentation
 ```
 
 ---
@@ -110,14 +182,30 @@ npx ato-mcp
 ## Architecture
 
 ```
-apps/desktop/        # Tauri 2.x desktop app (Rust + React)
-packages/core/       # Shared types, token utils, config paths (no I/O)
-packages/db/         # Database abstraction (SQLite for desktop)
-services/mcp-server/ # Standalone MCP server for Claude Code (stdio)
+apps/desktop/               # Tauri 2.x desktop app (Rust + React)
+  src/
+    components/
+      automation/            # Visual workflow builder (types, canvas, nodes)
+      cron/                  # Cron monitoring types
+    stores/
+      useAutomationStore.ts  # Workflow state (Zustand)
+      useCronStore.ts        # Cron jobs, executions, alerts (Zustand)
+    lib/
+      tauri-api.ts           # Frontend → Rust command bridge
+      cron-utils.ts          # Cron parser, validator, human-readable
+      cron-health.ts         # Smart failure detection logic
+      marketplace-mock.ts    # Community skill catalog (mock)
+      skill-similarity.ts    # Conflict detection algorithm
+    i18n/locales/            # EN, PT, ES translations
+  src-tauri/src/lib.rs       # Rust backend (SQLite, CLI dispatch, file I/O)
+
+packages/core/               # Shared types, token utils, config paths (no I/O)
+packages/db/                 # Database abstraction (SQLite for desktop)
+services/mcp-server/         # Standalone MCP server for Claude Code (stdio)
 ```
 
-### Desktop Tech Stack
-- **Rust backend**: SQLite (rusqlite), file watcher (notify)
+### Tech Stack
+- **Rust backend**: SQLite (rusqlite), multi-runtime CLI dispatch, file watcher (notify)
 - **React frontend**: Vite + TailwindCSS + Recharts + Zustand
 - **Data fetching**: TanStack React Query
 - **Icons**: Lucide React
@@ -129,22 +217,45 @@ services/mcp-server/ # Standalone MCP server for Claude Code (stdio)
 - `get_usage_stats` — Token/cost analytics
 - `get_mcp_status` — MCP server health
 
+### Tauri Commands (Rust → Frontend)
+
+| Command | Description |
+|---------|-------------|
+| `detect_agent_runtimes` | Check which CLIs are installed |
+| `prompt_agent` | Dispatch prompt to any runtime |
+| `prompt_claude` | Direct Claude CLI invocation |
+| `get_local_skills` / `get_skill_detail` | Scan & read skills |
+| `create_skill` / `update_skill` / `delete_skill` | Skill CRUD |
+| `list_workflows` / `save_workflow` / `delete_workflow` | Workflow CRUD |
+| `list_cron_jobs` / `save_cron_job` / `delete_cron_job` | Cron CRUD |
+| `trigger_cron_job` | Execute a cron job immediately |
+| `get_cron_history` | Fetch execution history |
+| `get_context_estimate` | Token breakdown by category |
+| `get_local_config` | MCP servers from settings.json |
+
 ---
 
-## Cloud Sync (Optional)
+## Data Storage
 
-The desktop app can optionally sync to a cloud backend (closed source, separate repo).
-Toggle in Settings: OFF = pure local, ON = syncs to cloud.
-The desktop app works fully offline without cloud sync.
+All data is local by default. No network calls unless cloud sync is explicitly enabled.
 
----
+| Data | Location |
+|------|----------|
+| Skills | `~/.claude/skills/`, `.claude/skills/` |
+| Workflows | `~/.ato/workflows/*.json` |
+| Cron jobs | `~/.ato/cron-jobs.json` |
+| Cron history | `~/.ato/cron-history.json` |
+| Database | `~/.ato/local.db` (SQLite) |
+| Config | `~/.claude/settings.json` |
 
 ## Security
 
 - **Local-first**: No network calls unless sync is explicitly enabled
 - **Parameterized SQL**: All queries use parameterized statements
 - **Input validation**: Zod schemas on all boundaries
+- **SSH for OpenClaw**: Key-based auth, no passwords stored
 - **No secrets in repo**: .env files gitignored, no hardcoded credentials
+- **Paths only**: Runtime configs store key file paths, not key contents
 
 ---
 
@@ -160,3 +271,5 @@ See [Releases](https://github.com/WillNigri/Agentic-Tool-Optimization/releases) 
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+Monitoring dashboard, cloud sync, and analytics are closed source (separate repo, paid subscription).

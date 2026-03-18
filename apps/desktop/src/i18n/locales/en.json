@@ -14,7 +14,8 @@
     "mcp": "MCP Servers",
     "config": "Configuration",
     "settings": "Settings",
-    "logout": "Logout"
+    "logout": "Logout",
+    "cron": "Cron Monitor"
   },
   "auth": {
     "login": "Sign In",
@@ -152,36 +153,6 @@
       "anyModel": "Any model"
     }
   },
-  "subagents": {
-    "title": "Subagents",
-    "subtitle": "Create and manage subagents with skill access",
-    "search": "Search subagents...",
-    "createNew": "New Subagent",
-    "name": "Subagent Name",
-    "description": "Description",
-    "type": "Agent Type",
-    "types": {
-      "general-purpose": "General Purpose",
-      "Explore": "Explorer",
-      "Plan": "Planner",
-      "custom": "Custom"
-    },
-    "skills": "Assigned Skills",
-    "skillsHint": "Skills this subagent can access and use",
-    "noSkills": "No skills assigned",
-    "allowedTools": "Allowed Tools",
-    "model": "Model Override",
-    "anyModel": "Default (inherit)",
-    "instructions": "Custom Instructions",
-    "instructionsPlaceholder": "Additional instructions for this subagent...",
-    "noSubagents": "No subagents configured",
-    "enabled": "Active",
-    "disabled": "Inactive",
-    "confirmDelete": "Delete this subagent?",
-    "skillAccess": "Skill Access",
-    "addSkill": "Add Skill",
-    "removeSkill": "Remove"
-  },
   "hooks": {
     "title": "Hooks",
     "subtitle": "Shell commands that execute on Claude Code events",
@@ -223,7 +194,37 @@
     "errorRate": "Error Rate",
     "performance": "Performance Overview",
     "flowObjectives": "Flow Objectives",
-    "search": "Search nodes..."
+    "search": "Search nodes...",
+    "builder": {
+      "palette": "Node Palette",
+      "triggers": "Triggers",
+      "services": "Services",
+      "actions": "Actions",
+      "configure": "Configure Node",
+      "label": "Label",
+      "description": "Description",
+      "service": "Service",
+      "action": "Action",
+      "condition": "Condition",
+      "deleteNode": "Delete Node",
+      "confirmDelete": "Delete this node?",
+      "confirmDeleteWorkflow": "Delete this workflow?",
+      "viewMode": "View",
+      "editMode": "Edit",
+      "save": "Save",
+      "run": "Run",
+      "running": "Running...",
+      "newWorkflow": "New Workflow",
+      "create": "Create",
+      "workflowName": "Workflow name...",
+      "emptyState": "No workflows yet",
+      "emptyStateHint": "Switch to Edit mode to create your first workflow",
+      "dropHint": "Drag nodes from the palette",
+      "executing": "Executing...",
+      "completed": "Completed",
+      "failed": "Failed",
+      "waitingOutput": "Waiting for output..."
+    }
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -297,6 +298,165 @@
     "source": "Source",
     "override": "Overridden by project settings",
     "noConfig": "No configuration files found"
+  },
+  "marketplace": {
+    "title": "Skills Marketplace",
+    "subtitle": "Discover and install community skills",
+    "search": "Search marketplace...",
+    "install": "Install",
+    "installed": "Installed",
+    "installing": "Installing...",
+    "publish": "Publish",
+    "rate": "Rate",
+    "installs": "{{count}} installs",
+    "rating": "{{rating}} / 5",
+    "author": "by {{author}}",
+    "categories": {
+      "library-reference": "Library Reference",
+      "product-verification": "Product Verification",
+      "data-fetching": "Data Fetching",
+      "business-process": "Business Process",
+      "code-scaffolding": "Code Scaffolding",
+      "code-quality": "Code Quality",
+      "ci-cd": "CI/CD",
+      "runbooks": "Runbooks",
+      "infra-ops": "Infra Ops"
+    },
+    "allCategories": "All Categories",
+    "publishModal": {
+      "title": "Publish Skill",
+      "category": "Category",
+      "tags": "Tags",
+      "tagsHint": "Comma-separated tags",
+      "preview": "Preview",
+      "publishing": "Publishing..."
+    },
+    "share": {
+      "title": "Share Skill",
+      "selectUsers": "Select users to share with",
+      "shareLink": "Share Link",
+      "copied": "Copied to clipboard"
+    },
+    "autoImprove": {
+      "title": "Auto-Improve",
+      "running": "Running autoresearch...",
+      "diffTitle": "Suggested Changes",
+      "apply": "Apply Changes",
+      "discard": "Discard"
+    }
+  },
+  "skills.dragHint": "Drag to reorder priority within scope",
+  "skills.tabs": {
+    "mySkills": "My Skills",
+    "marketplace": "Marketplace"
+  },
+  "subagents": {
+    "title": "Subagents",
+    "subtitle": "Create and manage subagents with skill access",
+    "search": "Search subagents...",
+    "createNew": "New Subagent",
+    "name": "Subagent Name",
+    "description": "Description",
+    "type": "Agent Type",
+    "types": {
+      "general-purpose": "General Purpose",
+      "Explore": "Explorer",
+      "Plan": "Planner",
+      "custom": "Custom"
+    },
+    "runtime": "Runtime",
+    "runtimes": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes"
+    },
+    "runtimeConfig": {
+      "sshHost": "SSH Host",
+      "sshPort": "SSH Port",
+      "sshUser": "SSH User",
+      "sshKeyPath": "SSH Key Path",
+      "apiKeyPath": "API Key Path",
+      "endpoint": "Endpoint"
+    },
+    "skills": "Assigned Skills",
+    "skillsHint": "Skills this subagent can access and use",
+    "noSkills": "No skills assigned",
+    "allowedTools": "Allowed Tools",
+    "model": "Model Override",
+    "anyModel": "Default (inherit)",
+    "instructions": "Custom Instructions",
+    "instructionsPlaceholder": "Additional instructions for this subagent...",
+    "noSubagents": "No subagents configured",
+    "enabled": "Active",
+    "disabled": "Inactive",
+    "confirmDelete": "Delete this subagent?",
+    "skillAccess": "Skill Access",
+    "addSkill": "Add Skill",
+    "removeSkill": "Remove"
+  },
+  "cron": {
+    "title": "Cron Monitor",
+    "subtitle": "Visual monitoring of scheduled agent jobs",
+    "newJob": "New Cron Job",
+    "search": "Search cron jobs...",
+    "noJobs": "No cron jobs configured",
+    "noJobsHint": "Create a cron job to schedule agent tasks",
+    "alert": {
+      "title": "{{count}} job(s) need attention",
+      "silentFailure": "silent failure",
+      "chronicWarning": "chronic warning",
+      "failed": "failed",
+      "acknowledge": "Dismiss"
+    },
+    "status": {
+      "healthy": "Healthy",
+      "failed": "Failed",
+      "silent-failure": "Silent Failure",
+      "warning": "Warning",
+      "paused": "Paused"
+    },
+    "job": {
+      "schedule": "Schedule",
+      "runtime": "Runtime",
+      "lastRun": "Last run",
+      "nextRun": "Next run",
+      "runNow": "Run Now",
+      "running": "Running...",
+      "retry": "Retry",
+      "edit": "Edit",
+      "delete": "Delete",
+      "confirmDelete": "Delete this cron job?",
+      "linkedWorkflow": "Linked: {{name}}",
+      "timeline": "7-day timeline"
+    },
+    "detail": {
+      "title": "Job Details",
+      "executionHistory": "Execution History",
+      "duration": "Duration",
+      "successRate": "Success Rate",
+      "avgDuration": "Avg Duration",
+      "totalRuns": "Total Runs",
+      "output": "Output",
+      "error": "Error",
+      "noExecutions": "No executions yet"
+    },
+    "create": {
+      "title": "Create Cron Job",
+      "editTitle": "Edit Cron Job",
+      "name": "Job Name",
+      "namePlaceholder": "e.g., Daily Briefing",
+      "description": "Description",
+      "descriptionPlaceholder": "What does this job do?",
+      "schedule": "Cron Expression",
+      "schedulePlaceholder": "0 7 * * *",
+      "scheduleHint": "minute hour day-of-month month day-of-week",
+      "preview": "Runs: {{schedule}}",
+      "runtime": "Runtime",
+      "prompt": "Agent Prompt",
+      "promptPlaceholder": "What should the agent do on each run?",
+      "invalidCron": "Invalid cron expression"
+    }
   },
   "common": {
     "save": "Save",

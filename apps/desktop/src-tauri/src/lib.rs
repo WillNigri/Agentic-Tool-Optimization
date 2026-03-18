@@ -152,6 +152,14 @@ fn init_database(conn: &Connection) {
             file_path TEXT PRIMARY KEY,
             enabled   INTEGER NOT NULL DEFAULT 1
         );
+        CREATE TABLE IF NOT EXISTS cron_alerts (
+            id         TEXT PRIMARY KEY,
+            job_id     TEXT NOT NULL,
+            type       TEXT NOT NULL,
+            message    TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            acknowledged INTEGER NOT NULL DEFAULT 0
+        );
         ",
     )
     .expect("Failed to initialize database tables");
@@ -691,6 +699,311 @@ async fn prompt_claude(prompt: String) -> Result<String, String> {
     }
 }
 
+// ── Workflow Persistence ──────────────────────────────────────────────────
+
+fn workflows_dir() -> PathBuf {
+    let mut path = home_dir();
+    path.push(".ato");
+    path.push("workflows");
+    fs::create_dir_all(&path).ok();
+    path
+}
+
+#[tauri::command]
+fn list_workflows() -> Result<Vec<serde_json::Value>, String> {
+    let dir = workflows_dir();
+    let mut workflows = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "json") {
+                if let Some(content) = read_file_lossy(&path) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                        workflows.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    Ok(workflows)
+}
+
+#[tauri::command]
+fn save_workflow(workflow: String) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(&workflow)
+        .map_err(|e| format!("Invalid workflow JSON: {}", e))?;
+    let id = parsed.get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Workflow must have an id".to_string())?;
+
+    // Sanitize filename
+    let safe_id: String = id.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    let path = workflows_dir().join(format!("{}.json", safe_id));
+    fs::write(&path, &workflow).map_err(|e| format!("Failed to write workflow: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_workflow(id: String) -> Result<serde_json::Value, String> {
+    let safe_id: String = id.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let path = workflows_dir().join(format!("{}.json", safe_id));
+    let content = read_file_lossy(&path)
+        .ok_or_else(|| format!("Workflow not found: {}", id))?;
+    serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|e| format!("Invalid workflow JSON: {}", e))
+}
+
+#[tauri::command]
+fn delete_workflow(id: String) -> Result<(), String> {
+    let safe_id: String = id.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let path = workflows_dir().join(format!("{}.json", safe_id));
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("Failed to delete workflow: {}", e))?;
+    }
+    Ok(())
+}
+
+// ── Multi-Agent Runtime ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedRuntime {
+    pub runtime: String,
+    pub available: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
+
+fn which_cli(name: &str) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("which").arg(name).output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+fn detect_agent_runtimes() -> Result<Vec<DetectedRuntime>, String> {
+    let runtimes = vec![
+        ("claude", which_cli("claude")),
+        ("codex", which_cli("codex")),
+        ("openclaw", which_cli("openclaw")),
+        ("hermes", which_cli("hermes")),
+    ];
+
+    Ok(runtimes
+        .into_iter()
+        .map(|(name, path)| {
+            let available = path.is_some();
+            DetectedRuntime {
+                runtime: name.to_string(),
+                available,
+                version: if available { Some("CLI".to_string()) } else { None },
+                path,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -> Result<String, String> {
+    use std::process::Command;
+
+    match runtime.as_str() {
+        "claude" => {
+            let claude_path = which_claude().ok_or_else(|| {
+                "Claude Code CLI not found".to_string()
+            })?;
+            let output = Command::new(&claude_path)
+                .args(["--print", &prompt])
+                .output()
+                .map_err(|e| format!("Failed to run claude: {}", e))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                Err(format!("Claude error: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        "codex" => {
+            let codex_path = which_cli("codex").ok_or_else(|| {
+                "Codex CLI not found. Install it with: npm install -g @openai/codex".to_string()
+            })?;
+            let output = Command::new(&codex_path)
+                .args(["--print", &prompt])
+                .output()
+                .map_err(|e| format!("Failed to run codex: {}", e))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                Err(format!("Codex error: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        "openclaw" => {
+            // Parse SSH config from the config JSON
+            let ssh_config: serde_json::Value = config
+                .as_deref()
+                .and_then(|c| serde_json::from_str(c).ok())
+                .unwrap_or_default();
+            let host = ssh_config.get("sshHost").and_then(|v| v.as_str()).unwrap_or("localhost");
+            let port = ssh_config.get("sshPort").and_then(|v| v.as_u64()).unwrap_or(22);
+            let user = ssh_config.get("sshUser").and_then(|v| v.as_str()).unwrap_or("root");
+            let key_path = ssh_config.get("sshKeyPath").and_then(|v| v.as_str());
+
+            let mut cmd = Command::new("ssh");
+            if let Some(key) = key_path {
+                cmd.args(["-i", key]);
+            }
+            cmd.args([
+                "-p", &port.to_string(),
+                &format!("{}@{}", user, host),
+                &format!("openclaw exec '{}'", prompt.replace('\'', "'\\''"))
+            ]);
+
+            let output = cmd.output()
+                .map_err(|e| format!("Failed to SSH to OpenClaw host: {}", e))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                Err(format!("OpenClaw error: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        "hermes" => {
+            let hermes_path = which_cli("hermes").ok_or_else(|| {
+                "Hermes CLI not found".to_string()
+            })?;
+            let output = Command::new(&hermes_path)
+                .args(["--execute", &prompt])
+                .output()
+                .map_err(|e| format!("Failed to run hermes: {}", e))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                Err(format!("Hermes error: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        _ => Err(format!("Unknown runtime: {}", runtime)),
+    }
+}
+
+// ── Cron Job Persistence ─────────────────────────────────────────────────
+
+fn cron_jobs_path() -> PathBuf {
+    let mut path = home_dir();
+    path.push(".ato");
+    fs::create_dir_all(&path).ok();
+    path.push("cron-jobs.json");
+    path
+}
+
+fn cron_history_path() -> PathBuf {
+    let mut path = home_dir();
+    path.push(".ato");
+    fs::create_dir_all(&path).ok();
+    path.push("cron-history.json");
+    path
+}
+
+#[tauri::command]
+fn list_cron_jobs() -> Result<Vec<serde_json::Value>, String> {
+    let path = cron_jobs_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = read_file_lossy(&path).unwrap_or_default();
+    serde_json::from_str::<Vec<serde_json::Value>>(&content)
+        .map_err(|e| format!("Invalid cron jobs JSON: {}", e))
+}
+
+#[tauri::command]
+fn save_cron_job(job: String) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(&job)
+        .map_err(|e| format!("Invalid cron job JSON: {}", e))?;
+    let id = parsed.get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Cron job must have an id".to_string())?;
+
+    let path = cron_jobs_path();
+    let mut jobs: Vec<serde_json::Value> = if path.exists() {
+        let content = read_file_lossy(&path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Update or insert
+    if let Some(idx) = jobs.iter().position(|j| j.get("id").and_then(|v| v.as_str()) == Some(id)) {
+        jobs[idx] = parsed;
+    } else {
+        jobs.push(parsed);
+    }
+
+    let serialized = serde_json::to_string_pretty(&jobs)
+        .map_err(|e| format!("Failed to serialize cron jobs: {}", e))?;
+    fs::write(&path, serialized).map_err(|e| format!("Failed to write cron jobs: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_cron_job(id: String) -> Result<(), String> {
+    let path = cron_jobs_path();
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = read_file_lossy(&path).unwrap_or_default();
+    let mut jobs: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+    jobs.retain(|j| j.get("id").and_then(|v| v.as_str()) != Some(&id));
+
+    let serialized = serde_json::to_string_pretty(&jobs)
+        .map_err(|e| format!("Failed to serialize cron jobs: {}", e))?;
+    fs::write(&path, serialized).map_err(|e| format!("Failed to write cron jobs: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_cron_history(job_id: String) -> Result<Vec<serde_json::Value>, String> {
+    let path = cron_history_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = read_file_lossy(&path).unwrap_or_default();
+    let all: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+    Ok(all.into_iter()
+        .filter(|e| e.get("jobId").and_then(|v| v.as_str()) == Some(&job_id))
+        .collect())
+}
+
+#[tauri::command]
+async fn trigger_cron_job(id: String) -> Result<String, String> {
+    // Read the job to get its prompt and runtime
+    let path = cron_jobs_path();
+    if !path.exists() {
+        return Err("No cron jobs configured".to_string());
+    }
+    let content = read_file_lossy(&path).unwrap_or_default();
+    let jobs: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+    let job = jobs.iter()
+        .find(|j| j.get("id").and_then(|v| v.as_str()) == Some(&id))
+        .ok_or_else(|| format!("Cron job not found: {}", id))?;
+
+    let runtime = job.get("runtime").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+    let prompt = job.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let config = job.get("runtimeConfig").map(|v| v.to_string());
+
+    prompt_agent(runtime, prompt, config).await
+}
+
 fn which_claude() -> Option<String> {
     // Check common installation paths
     let candidates = vec![
@@ -750,6 +1063,17 @@ pub fn run() {
             restart_mcp_server,
             update_skill,
             prompt_claude,
+            list_workflows,
+            save_workflow,
+            load_workflow,
+            delete_workflow,
+            detect_agent_runtimes,
+            prompt_agent,
+            list_cron_jobs,
+            save_cron_job,
+            delete_cron_job,
+            get_cron_history,
+            trigger_cron_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

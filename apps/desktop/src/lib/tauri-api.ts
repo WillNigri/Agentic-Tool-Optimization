@@ -175,3 +175,203 @@ export async function getSyncStatus(): Promise<SyncStatus> {
 export async function setSyncEnabled(enabled: boolean, cloudUrl?: string): Promise<void> {
   return invoke('set_sync_enabled', { enabled, cloudUrl });
 }
+
+// ---- Workflows (Automation Builder) ----
+export interface WorkflowData {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  lastRun?: string;
+  runCount: number;
+  errorCount: number;
+  nodes: Array<{
+    id: string;
+    label: string;
+    description: string;
+    type: string;
+    service?: string;
+    x: number;
+    y: number;
+    stats: { executions: number; errors: number; avgTimeMs: number };
+    status: string;
+    config?: { params: Record<string, string>; condition?: string };
+  }>;
+  edges: Array<{ from: string; to: string; label?: string; animated?: boolean }>;
+}
+
+export async function listWorkflows(): Promise<WorkflowData[]> {
+  try {
+    return await invoke<WorkflowData[]>('list_workflows');
+  } catch {
+    // localStorage fallback for browser dev mode
+    const raw = localStorage.getItem('ato-workflows');
+    return raw ? JSON.parse(raw) : [];
+  }
+}
+
+export async function saveWorkflow(workflow: WorkflowData): Promise<void> {
+  try {
+    await invoke('save_workflow', { workflow: JSON.stringify(workflow) });
+  } catch {
+    // localStorage fallback
+    const all = await listWorkflows();
+    const idx = all.findIndex((w) => w.id === workflow.id);
+    if (idx >= 0) all[idx] = workflow;
+    else all.push(workflow);
+    localStorage.setItem('ato-workflows', JSON.stringify(all));
+  }
+}
+
+export async function loadWorkflow(id: string): Promise<WorkflowData | null> {
+  try {
+    return await invoke<WorkflowData>('load_workflow', { id });
+  } catch {
+    const all = await listWorkflows();
+    return all.find((w) => w.id === id) || null;
+  }
+}
+
+export async function deleteWorkflowFile(id: string): Promise<void> {
+  try {
+    await invoke('delete_workflow', { id });
+  } catch {
+    const all = await listWorkflows();
+    const filtered = all.filter((w) => w.id !== id);
+    localStorage.setItem('ato-workflows', JSON.stringify(filtered));
+  }
+}
+
+// ---- Claude CLI ----
+export async function promptClaude(prompt: string): Promise<string> {
+  return invoke<string>('prompt_claude', { prompt });
+}
+
+// ---- Multi-Agent Runtime ----
+import type { AgentRuntime, DetectedRuntime, RuntimeConfig, CronJob, CronExecution } from '@/components/cron/types';
+export type { AgentRuntime, DetectedRuntime, RuntimeConfig };
+
+export async function detectAgentRuntimes(): Promise<DetectedRuntime[]> {
+  try {
+    return await invoke<DetectedRuntime[]>('detect_agent_runtimes');
+  } catch {
+    // Fallback: only Claude available
+    return [
+      { runtime: 'claude', available: true, version: 'CLI' },
+      { runtime: 'codex', available: false },
+      { runtime: 'openclaw', available: false },
+      { runtime: 'hermes', available: false },
+    ];
+  }
+}
+
+export async function promptAgent(
+  runtime: AgentRuntime,
+  prompt: string,
+  config?: RuntimeConfig
+): Promise<string> {
+  try {
+    return await invoke<string>('prompt_agent', { runtime, prompt, config: config ? JSON.stringify(config) : null });
+  } catch {
+    if (runtime === 'claude') {
+      return promptClaude(prompt);
+    }
+    throw new Error(`Runtime "${runtime}" is not available`);
+  }
+}
+
+// ---- Marketplace / Skills Sharing ----
+
+export interface MarketplaceInstallData {
+  id: string;
+  name: string;
+  content: string;
+}
+
+export async function installMarketplaceSkill(data: MarketplaceInstallData): Promise<void> {
+  try {
+    await invoke('create_skill', {
+      data: {
+        name: data.name,
+        description: '',
+        scope: 'personal',
+        content: data.content,
+        isDirectory: false,
+      },
+    });
+  } catch {
+    // localStorage fallback
+    const installed = JSON.parse(localStorage.getItem('ato-installed-skills') || '[]');
+    installed.push({ ...data, installedAt: new Date().toISOString() });
+    localStorage.setItem('ato-installed-skills', JSON.stringify(installed));
+  }
+}
+
+export async function publishSkill(skillId: string, metadata: {
+  category: string;
+  tags: string[];
+}): Promise<void> {
+  // For now, store published skills locally
+  const published = JSON.parse(localStorage.getItem('ato-published-skills') || '[]');
+  published.push({ skillId, ...metadata, publishedAt: new Date().toISOString() });
+  localStorage.setItem('ato-published-skills', JSON.stringify(published));
+}
+
+export async function shareSkill(skillId: string, userIds: string[]): Promise<{ shareUrl: string }> {
+  // Generate local share JSON
+  const shareData = { skillId, sharedWith: userIds, sharedAt: new Date().toISOString() };
+  const shares = JSON.parse(localStorage.getItem('ato-shared-skills') || '[]');
+  shares.push(shareData);
+  localStorage.setItem('ato-shared-skills', JSON.stringify(shares));
+  return { shareUrl: `ato://skill/${skillId}` };
+}
+
+// ---- Cron Jobs ----
+
+export async function listCronJobs(): Promise<CronJob[]> {
+  try {
+    return await invoke<CronJob[]>('list_cron_jobs');
+  } catch {
+    const raw = localStorage.getItem('ato-cron-jobs');
+    return raw ? JSON.parse(raw) : [];
+  }
+}
+
+export async function saveCronJob(job: CronJob): Promise<void> {
+  try {
+    await invoke('save_cron_job', { job: JSON.stringify(job) });
+  } catch {
+    const all = await listCronJobs();
+    const idx = all.findIndex((j) => j.id === job.id);
+    if (idx >= 0) all[idx] = job;
+    else all.push(job);
+    localStorage.setItem('ato-cron-jobs', JSON.stringify(all));
+  }
+}
+
+export async function deleteCronJob(id: string): Promise<void> {
+  try {
+    await invoke('delete_cron_job', { id });
+  } catch {
+    const all = await listCronJobs();
+    localStorage.setItem('ato-cron-jobs', JSON.stringify(all.filter((j) => j.id !== id)));
+  }
+}
+
+export async function getCronHistory(jobId: string): Promise<CronExecution[]> {
+  try {
+    return await invoke<CronExecution[]>('get_cron_history', { jobId });
+  } catch {
+    const raw = localStorage.getItem('ato-cron-history');
+    const all: CronExecution[] = raw ? JSON.parse(raw) : [];
+    return all.filter((e) => e.jobId === jobId);
+  }
+}
+
+export async function triggerCronJob(id: string): Promise<void> {
+  try {
+    await invoke('trigger_cron_job', { id });
+  } catch {
+    // Mock trigger handled by store
+  }
+}
