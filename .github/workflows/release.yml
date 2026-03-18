@@ -1,31 +1,28 @@
-name: Release Desktop App
+name: Build & Release
 
 on:
   push:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-
 jobs:
-  build-desktop:
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest
             target: aarch64-apple-darwin
-            name: macOS-arm64
-          - platform: macos-latest
+            label: macOS-Apple-Silicon
+          - platform: macos-13
             target: x86_64-apple-darwin
-            name: macOS-x64
+            label: macOS-Intel
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            name: Linux-x64
+            label: Linux
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            name: Windows-x64
+            label: Windows
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -35,9 +32,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install Rust stable
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -46,75 +42,26 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev \
-            libgtk-3-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 
       - name: Install dependencies
         run: npm install
-
-      - name: Build core packages
-        run: |
-          npm run build -w packages/core
-          npm run build -w packages/db
+        working-directory: apps/desktop
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0.5
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
-          releaseName: ATO ${{ github.ref_name }}
+          releaseName: '${{ github.ref_name }}'
           releaseBody: |
-            ## ATO (Agentic Tool Optimization) ${{ github.ref_name }}
+            ## ATO ${{ github.ref_name }}
 
-            The control panel for AI coding tools.
+            Multi-LLM control panel for Claude Code, Codex, OpenClaw, and Hermes.
 
-            ### What's included
-            - Desktop app with offline-first SQLite storage
-            - Skills manager with 4-scope hierarchy, conflict analyzer, Anthropic best practices
-            - Subagents manager with skill access
-            - Hooks manager for Claude Code events
-            - N8N-style automation flow diagram with external MCP service integrations
-            - Context visualizer with dependencies and permissions views
-            - MCP server dashboard with tool inspection
-            - File viewer for CLAUDE.md and config files
-            - MCP prompt bar for in-app queries
-            - Usage analytics with burn rate tracking
-            - i18n: English, Portuguese, Spanish
+            Download the installer for your platform below.
           releaseDraft: false
           prerelease: false
+          projectPath: apps/desktop
           args: --target ${{ matrix.target }}
-
-  publish-mcp:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build packages
-        run: |
-          npm run build -w packages/core
-          npm run build -w services/mcp-server
-
-      - name: Publish MCP server to npm
-        if: env.NPM_TOKEN != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd services/mcp-server
-          npm publish --access public || echo "Publish skipped (may already exist)"
