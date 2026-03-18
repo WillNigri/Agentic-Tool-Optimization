@@ -6,7 +6,7 @@ import { getSkillDetail, getSkills, updateSkill, deleteSkill, type SkillDetail }
 import { cn } from "@/lib/utils";
 import { ModelTag, StatusTag, TokenTag } from "./SkillMetaTags";
 import { analyzeSkillConflicts, getConflictsForSkill } from "@/lib/skill-similarity";
-import { shareSkill, promptClaude } from "@/lib/tauri-api";
+import { shareSkill, promptAgent } from "@/lib/tauri-api";
 import PublishSkillModal from "./PublishSkillModal";
 
 // Anthropic official guideline: keep SKILL.md under 500 lines
@@ -251,8 +251,9 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
               if (autoImproveRunning || !skill) return;
               setAutoImproveRunning(true);
               try {
-                const prompt = `You are improving a Claude Code skill. Analyze this skill and suggest improvements for clarity, specificity, and effectiveness. Return ONLY the improved skill content (full markdown with frontmatter), nothing else.\n\nCurrent skill:\n\`\`\`\n${skill.content}\n\`\`\``;
-                const improved = await promptClaude(prompt);
+                const runtime = skill.runtime || "claude";
+                const prompt = `You are improving an AI coding agent skill. Analyze this skill and suggest improvements for clarity, specificity, and effectiveness. Return ONLY the improved skill content (full markdown with frontmatter), nothing else.\n\nCurrent skill:\n\`\`\`\n${skill.content}\n\`\`\``;
+                const improved = await promptAgent(runtime as "claude" | "codex" | "openclaw" | "hermes", prompt);
                 setAutoImproveDiff({ old: skill.content, new: improved });
               } catch {
                 // Claude CLI not available
