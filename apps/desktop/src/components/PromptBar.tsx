@@ -1,58 +1,32 @@
 import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { Send, Bot, X, Loader2, ChevronUp, ChevronDown, Sparkles, Terminal } from "lucide-react";
+import { Send, Bot, X, Loader2, ChevronUp, ChevronDown, Sparkles, Terminal, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
 interface Message {
   id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "error";
   content: string;
   timestamp: Date;
-  tool?: string; // MCP tool used
 }
 
-// Simulated MCP tool responses
-function simulateMcpResponse(prompt: string): { content: string; tool?: string } {
+/** Call claude CLI via Tauri backend */
+async function promptClaude(prompt: string): Promise<string> {
+  if (isTauri) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke<string>('prompt_claude', { prompt });
+  }
+  // Browser fallback — simulated
+  return simulateMock(prompt);
+}
+
+function simulateMock(prompt: string): string {
   const lower = prompt.toLowerCase();
-
-  if (lower.includes("context") || lower.includes("usage")) {
-    return {
-      tool: "get_context_usage",
-      content: "Context Usage: 67,234 / 200,000 tokens (33.6%)\n\nBreakdown:\n- System Prompts: 28,450 tokens\n- Skills (4 active): 12,300 tokens\n- MCP Schemas (3): 8,200 tokens\n- CLAUDE.md: 2,100 tokens\n- Conversation: 14,184 tokens\n- File Reads: 2,000 tokens",
-    };
-  }
-
-  if (lower.includes("skill") && (lower.includes("list") || lower.includes("show") || lower.includes("status"))) {
-    return {
-      tool: "list_skills",
-      content: "Active Skills (5 enabled):\n\n1. typescript-expert (2,340 tokens) — Personal\n2. code-review (1,890 tokens) — Personal\n3. project-conventions (3,200 tokens) — Project\n4. api-guidelines (1,200 tokens) — Project\n5. security-policy (4,100 tokens) — Enterprise\n\nDisabled: deprecated-skill, docker-helper",
-    };
-  }
-
-  if (lower.includes("mcp") || lower.includes("server")) {
-    return {
-      tool: "get_mcp_status",
-      content: "MCP Servers:\n\n- filesystem: Running (12 tools)\n- github: Running (8 tools)\n- slack: Error — Connection failed\n- postgres: Running (6 tools)\n\nTotal: 3/4 servers healthy, 26 tools available",
-    };
-  }
-
-  if (lower.includes("stats") || lower.includes("cost") || lower.includes("token")) {
-    return {
-      tool: "get_usage_stats",
-      content: "Usage Stats:\n\nToday: 45,230 tokens ($0.68)\nThis Week: 312,450 tokens ($4.69)\nThis Month: 891,000 tokens ($18.67)\n\nBurn Rate: 12,340 tokens/hour ($0.19/hr)\nEstimated time to limit: 2.5 hours",
-    };
-  }
-
-  if (lower.includes("toggle") && lower.includes("skill")) {
-    return {
-      tool: "toggle_skill",
-      content: "Skill toggled successfully. Run `/list_skills` to see current state.",
-    };
-  }
-
-  return {
-    content: "Available MCP commands:\n\n- Ask about **context usage** — get_context_usage\n- Ask about **skills** — list_skills\n- Ask about **MCP servers** — get_mcp_status\n- Ask about **usage/costs** — get_usage_stats\n- **Toggle a skill** — toggle_skill\n\nTry: \"Show me my context usage\" or \"What skills are active?\"",
-  };
+  if (lower.includes("skill")) return "I can help you create a skill! To create one, I'd need:\n\n1. A name (e.g., `my-skill`)\n2. A description (what triggers it)\n3. The skill content (markdown instructions)\n\nTell me what you want the skill to do and I'll generate it for you.\n\n(Note: This is a simulated response. In the desktop app, this connects to your real Claude Code subscription.)";
+  if (lower.includes("context") || lower.includes("usage")) return "Context usage info would appear here from your real Claude Code session.\n\n(Simulated — run in the desktop app to connect to Claude Code.)";
+  return "I'm Claude, running through Claude Code. Ask me anything — create skills, review code, manage configs.\n\n(Simulated — install the desktop app to use your Claude Code subscription.)";
 }
 
 export default function PromptBar() {
@@ -86,21 +60,24 @@ export default function PromptBar() {
     setIsLoading(true);
     setExpanded(true);
 
-    // Simulate MCP delay
-    await new Promise((r) => setTimeout(r, 600 + Math.random() * 800));
-
-    const response = simulateMcpResponse(userMsg.content);
-
-    const assistantMsg: Message = {
-      id: String(Date.now() + 1),
-      role: "assistant",
-      content: response.content,
-      timestamp: new Date(),
-      tool: response.tool,
-    };
-
-    setMessages((prev) => [...prev, assistantMsg]);
-    setIsLoading(false);
+    try {
+      const response = await promptClaude(userMsg.content);
+      setMessages((prev) => [...prev, {
+        id: String(Date.now()),
+        role: "assistant",
+        content: response,
+        timestamp: new Date(),
+      }]);
+    } catch (err) {
+      setMessages((prev) => [...prev, {
+        id: String(Date.now()),
+        role: "error",
+        content: String(err),
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   function clearHistory() {
@@ -110,9 +87,9 @@ export default function PromptBar() {
 
   return (
     <div className="border-t border-cs-border bg-cs-card">
-      {/* Chat history (expandable) */}
+      {/* Chat history */}
       {expanded && messages.length > 0 && (
-        <div className="max-h-64 overflow-y-auto border-b border-cs-border">
+        <div className="max-h-80 overflow-y-auto border-b border-cs-border">
           <div className="p-3 space-y-3">
             {messages.map((msg) => (
               <div
@@ -122,9 +99,17 @@ export default function PromptBar() {
                   msg.role === "user" ? "justify-end" : "justify-start"
                 )}
               >
-                {msg.role === "assistant" && (
-                  <div className="w-6 h-6 rounded-md bg-cs-accent/10 border border-cs-accent/20 flex items-center justify-center shrink-0 mt-0.5">
-                    <Bot size={12} className="text-cs-accent" />
+                {msg.role !== "user" && (
+                  <div className={cn(
+                    "w-6 h-6 rounded-md border flex items-center justify-center shrink-0 mt-0.5",
+                    msg.role === "error"
+                      ? "bg-red-500/10 border-red-500/20"
+                      : "bg-cs-accent/10 border-cs-accent/20"
+                  )}>
+                    {msg.role === "error"
+                      ? <AlertCircle size={12} className="text-red-400" />
+                      : <Bot size={12} className="text-cs-accent" />
+                    }
                   </div>
                 )}
                 <div
@@ -132,16 +117,21 @@ export default function PromptBar() {
                     "rounded-lg px-3 py-2 max-w-[85%]",
                     msg.role === "user"
                       ? "bg-cs-accent/10 border border-cs-accent/20"
-                      : "bg-cs-bg border border-cs-border"
+                      : msg.role === "error"
+                        ? "bg-red-500/5 border border-red-500/20"
+                        : "bg-cs-bg border border-cs-border"
                   )}
                 >
-                  {msg.tool && (
+                  {msg.role === "assistant" && isTauri && (
                     <div className="flex items-center gap-1 mb-1">
                       <Terminal size={10} className="text-cs-accent" />
-                      <span className="text-[9px] font-mono text-cs-accent">{msg.tool}</span>
+                      <span className="text-[9px] font-mono text-cs-accent">claude --print</span>
                     </div>
                   )}
-                  <pre className="text-xs text-cs-text whitespace-pre-wrap font-mono leading-relaxed">
+                  <pre className={cn(
+                    "text-xs whitespace-pre-wrap font-mono leading-relaxed",
+                    msg.role === "error" ? "text-red-400" : "text-cs-text"
+                  )}>
                     {msg.content}
                   </pre>
                   <p className="text-[9px] text-cs-muted mt-1">
@@ -187,7 +177,7 @@ export default function PromptBar() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={t("prompt.placeholder")}
+            placeholder={isTauri ? t("prompt.placeholderReal") : t("prompt.placeholder")}
             className="w-full bg-cs-bg border border-cs-border rounded-lg pl-9 pr-3 py-2 text-sm text-cs-text placeholder:text-cs-muted/60 focus:outline-none focus:border-cs-accent/50 font-mono"
             disabled={isLoading}
           />

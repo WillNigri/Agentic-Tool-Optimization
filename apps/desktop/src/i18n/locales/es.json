@@ -70,7 +70,8 @@
     "fileNotFound": "Archivo no disponible en esta sesion"
   },
   "prompt": {
-    "placeholder": "Pregunta via MCP — contexto, skills, uso, servidores...",
+    "placeholder": "Pregunta via MCP — contexto, skills, uso, servidores... (simulado)",
+    "placeholderReal": "Pregunta a Claude — usa tu suscripcion de Claude Code",
     "thinking": "Consultando via MCP...",
     "clear": "Limpiar historial"
   },

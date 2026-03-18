@@ -655,6 +655,74 @@ fn update_skill(id: String, content: String) -> Result<(), String> {
     Err(format!("Skill not found: {}", id))
 }
 
+#[tauri::command]
+async fn prompt_claude(prompt: String) -> Result<String, String> {
+    use std::process::Command;
+
+    // Find the claude CLI
+    let claude_path = which_claude().ok_or_else(|| {
+        "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code".to_string()
+    })?;
+
+    // Run claude with --print flag (non-interactive, uses subscription)
+    let output = Command::new(&claude_path)
+        .args(["--print", &prompt])
+        .output()
+        .map_err(|e| format!("Failed to run claude: {}", e))?;
+
+    if output.status.success() {
+        let response = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(response)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stderr.contains("not logged in") || stderr.contains("authentication") {
+            Err("Not logged in to Claude Code. Run `claude` in your terminal first to authenticate.".to_string())
+        } else if stderr.is_empty() {
+            // Sometimes claude outputs to stdout even on non-zero exit
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            if !stdout.is_empty() {
+                Ok(stdout)
+            } else {
+                Err("Claude returned no output. Make sure Claude Code is installed and you're logged in.".to_string())
+            }
+        } else {
+            Err(format!("Claude error: {}", stderr.lines().last().unwrap_or(&stderr)))
+        }
+    }
+}
+
+fn which_claude() -> Option<String> {
+    // Check common installation paths
+    let candidates = vec![
+        // Global npm installs
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+        // User npm installs
+        &format!("{}/.npm-global/bin/claude", std::env::var("HOME").unwrap_or_default()),
+        &format!("{}/bin/claude", std::env::var("HOME").unwrap_or_default()),
+        // NVM paths
+        &format!("{}/.nvm/versions/node/*/bin/claude", std::env::var("HOME").unwrap_or_default()),
+    ];
+
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+
+    // Try `which claude` as fallback
+    if let Ok(output) = std::process::Command::new("which").arg("claude").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -681,6 +749,7 @@ pub fn run() {
             set_sync_enabled,
             restart_mcp_server,
             update_skill,
+            prompt_claude,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
