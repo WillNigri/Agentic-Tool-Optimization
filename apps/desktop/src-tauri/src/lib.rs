@@ -172,6 +172,24 @@ fn claude_home() -> PathBuf {
     home_dir().join(".claude")
 }
 
+/// Find the project root by walking up from CWD looking for .git or .claude/
+fn project_root() -> PathBuf {
+    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Walk up to find git root or .claude/ directory
+    for _ in 0..10 {
+        if dir.join(".git").exists() || dir.join(".claude").exists() || dir.join("CLAUDE.md").exists() {
+            return dir;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    // Fallback to CWD
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 fn read_file_lossy(path: &PathBuf) -> Option<String> {
     fs::read_to_string(path).ok()
 }
@@ -351,7 +369,7 @@ fn get_local_skills(db: State<'_, DbState>) -> Result<Vec<LocalSkill>, String> {
     skills.extend(collect_skills(&personal_dir, "personal", "claude", &conn));
 
     // Project: .claude/skills/ (cwd)
-    let project_dir = PathBuf::from(".claude").join("skills");
+    let project_dir = project_root().join(".claude").join("skills");
     skills.extend(collect_skills(&project_dir, "project", "claude", &conn));
 
     // Enterprise: /etc/claude/skills/
@@ -380,9 +398,9 @@ fn get_local_skills(db: State<'_, DbState>) -> Result<Vec<LocalSkill>, String> {
     // Personal: ~/.codex/skills/**/SKILL.md
     skills.extend(collect_skills(&codex_home.join("skills"), "personal", "codex", &conn));
     // Project: .agents/skills/ (Codex convention)
-    skills.extend(collect_skills(&PathBuf::from(".agents").join("skills"), "project", "codex", &conn));
+    skills.extend(collect_skills(&project_root().join(".agents").join("skills"), "project", "codex", &conn));
     // Project: .codex/skills/
-    skills.extend(collect_skills(&PathBuf::from(".codex").join("skills"), "project", "codex", &conn));
+    skills.extend(collect_skills(&project_root().join(".codex").join("skills"), "project", "codex", &conn));
 
     // ── OpenClaw skills ──
     // OPENCLAW_HOME env or defaults to ~/.openclaw
@@ -478,13 +496,13 @@ fn get_skill_detail(db: State<'_, DbState>, id: String) -> Result<SkillDetail, S
     let mut all_skills = Vec::new();
     // Claude
     all_skills.extend(collect_skills(&claude_home().join("skills"), "personal", "claude", &conn));
-    all_skills.extend(collect_skills(&PathBuf::from(".claude").join("skills"), "project", "claude", &conn));
+    all_skills.extend(collect_skills(&project_root().join(".claude").join("skills"), "project", "claude", &conn));
     all_skills.extend(collect_skills(&PathBuf::from("/etc/claude/skills"), "enterprise", "claude", &conn));
     // Codex
     let codex_home = PathBuf::from(std::env::var("CODEX_HOME").unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
     all_skills.extend(collect_skills(&codex_home.join("skills"), "personal", "codex", &conn));
-    all_skills.extend(collect_skills(&PathBuf::from(".agents").join("skills"), "project", "codex", &conn));
-    all_skills.extend(collect_skills(&PathBuf::from(".codex").join("skills"), "project", "codex", &conn));
+    all_skills.extend(collect_skills(&project_root().join(".agents").join("skills"), "project", "codex", &conn));
+    all_skills.extend(collect_skills(&project_root().join(".codex").join("skills"), "project", "codex", &conn));
     // OpenClaw
     let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
     all_skills.extend(collect_skills(&oc_home.join("skills"), "personal", "openclaw", &conn));
@@ -565,7 +583,7 @@ fn get_context_estimate() -> Result<ContextBreakdown, String> {
 
     // Skills
     let personal_dir = claude_home().join("skills");
-    let project_dir = PathBuf::from(".claude").join("skills");
+    let project_dir = project_root().join(".claude").join("skills");
     let mut skill_bytes: u64 = 0;
     for dir in [&personal_dir, &project_dir] {
         if let Ok(entries) = fs::read_dir(dir) {
@@ -585,7 +603,7 @@ fn get_context_estimate() -> Result<ContextBreakdown, String> {
     total += skill_tokens;
 
     // CLAUDE.md
-    let claude_md = PathBuf::from("CLAUDE.md");
+    let claude_md = project_root().join("CLAUDE.md");
     let claude_md_tokens = fs::metadata(&claude_md)
         .map(|m| estimate_tokens(m.len()))
         .unwrap_or(0);
@@ -677,12 +695,12 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
             total += sys;
             // Skills
             let skill_bytes = dir_skill_bytes(&claude_home().join("skills"))
-                + dir_skill_bytes(&PathBuf::from(".claude").join("skills"));
+                + dir_skill_bytes(&project_root().join(".claude").join("skills"));
             let st = estimate_tokens(skill_bytes);
             categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
             total += st;
             // CLAUDE.md
-            let cm = file_tokens(&PathBuf::from("CLAUDE.md"));
+            let cm = file_tokens(&project_root().join("CLAUDE.md"));
             categories.push(ContextCategory { name: "CLAUDE.md".into(), tokens: cm, color: "#FFB800".into() });
             total += cm;
             // MCP schemas
@@ -708,13 +726,13 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
             total += sys;
             // Skills
             let skill_bytes = dir_skill_bytes(&codex_home.join("skills"))
-                + dir_skill_bytes(&PathBuf::from(".agents").join("skills"))
-                + dir_skill_bytes(&PathBuf::from(".codex").join("skills"));
+                + dir_skill_bytes(&project_root().join(".agents").join("skills"))
+                + dir_skill_bytes(&project_root().join(".codex").join("skills"));
             let st = estimate_tokens(skill_bytes);
             categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
             total += st;
             // AGENTS.md
-            let agents_md = file_tokens(&PathBuf::from("AGENTS.md"))
+            let agents_md = file_tokens(&project_root().join("AGENTS.md"))
                 + file_tokens(&codex_home.join("AGENTS.md"));
             categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents_md, color: "#FFB800".into() });
             total += agents_md;
@@ -817,10 +835,10 @@ fn get_local_config() -> Result<Vec<LocalMcpServer>, String> {
     let config_paths: Vec<(PathBuf, &str)> = vec![
         // Claude
         (claude_home().join("settings.json"), "claude"),
-        (PathBuf::from(".claude").join("settings.json"), "claude-project"),
+        (project_root().join(".claude").join("settings.json"), "claude-project"),
         // Codex
         (codex_home.join("config.toml"), "codex"),
-        (PathBuf::from(".codex").join("config.toml"), "codex-project"),
+        (project_root().join(".codex").join("config.toml"), "codex-project"),
         // OpenClaw
         (oc_home.join("openclaw.json"), "openclaw"),
         // Hermes
@@ -900,13 +918,13 @@ fn get_config_files() -> Result<Vec<ConfigFile>, String> {
         ("~/.claude/skills/", claude.join("skills"), "Claude — Personal skills"),
         (".claude/settings.json", PathBuf::from(".claude/settings.json"), "Claude — Project settings"),
         (".claude/skills/", PathBuf::from(".claude/skills"), "Claude — Project skills"),
-        ("CLAUDE.md", PathBuf::from("CLAUDE.md"), "Claude — Project context"),
+        ("CLAUDE.md", project_root().join("CLAUDE.md"), "Claude — Project context"),
         // Codex
         ("~/.codex/config.toml", codex.join("config.toml"), "Codex — Global config"),
         ("~/.codex/AGENTS.md", codex.join("AGENTS.md"), "Codex — Global instructions"),
         ("~/.codex/skills/", codex.join("skills"), "Codex — Personal skills"),
         (".codex/config.toml", PathBuf::from(".codex/config.toml"), "Codex — Project config"),
-        ("AGENTS.md", PathBuf::from("AGENTS.md"), "Codex — Project instructions"),
+        ("AGENTS.md", project_root().join("AGENTS.md"), "Codex — Project instructions"),
         // OpenClaw
         ("~/.openclaw/openclaw.json", openclaw.join("openclaw.json"), "OpenClaw — Config"),
         ("~/.openclaw/workspace/AGENTS.md", openclaw.join("workspace/AGENTS.md"), "OpenClaw — Agent instructions"),
@@ -965,7 +983,7 @@ fn skill_dir_for_runtime(runtime: &str, scope: &str) -> PathBuf {
         // Claude
         ("claude", "enterprise") => PathBuf::from("/etc/claude/skills"),
         ("claude", "personal") => claude_home().join("skills"),
-        ("claude", "project") => PathBuf::from(".claude").join("skills"),
+        ("claude", "project") => project_root().join(".claude/skills"),
         ("claude", "plugin") => claude_home().join("plugins"),
         // Codex
         ("codex", "personal") => {
@@ -973,7 +991,7 @@ fn skill_dir_for_runtime(runtime: &str, scope: &str) -> PathBuf {
                 .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string());
             PathBuf::from(home).join("skills")
         }
-        ("codex", "project") => PathBuf::from(".codex").join("skills"),
+        ("codex", "project") => project_root().join(".codex").join("skills"),
         // OpenClaw
         ("openclaw", "personal") => {
             let home = std::env::var("OPENCLAW_HOME")
@@ -989,7 +1007,7 @@ fn skill_dir_for_runtime(runtime: &str, scope: &str) -> PathBuf {
         ("hermes", _) => home_dir().join(".hermes").join("skills"),
         // Fallback
         (_, "personal") => claude_home().join("skills"),
-        (_, "project") => PathBuf::from(".claude").join("skills"),
+        (_, "project") => project_root().join(".claude").join("skills"),
         _ => claude_home().join("skills"),
     }
 }
@@ -1062,9 +1080,9 @@ fn delete_skill(id: String) -> Result<(), String> {
 
     let dirs = vec![
         claude_home().join("skills"),
-        PathBuf::from(".claude").join("skills"),
+        project_root().join(".claude").join("skills"),
         codex_home.join("skills"),
-        PathBuf::from(".codex").join("skills"),
+        project_root().join(".codex").join("skills"),
         oc_home.join("skills"),
         oc_home.join("workspace").join("skills"),
         home_dir().join(".hermes").join("skills"),
@@ -1106,12 +1124,12 @@ fn update_skill(id: String, content: String) -> Result<(), String> {
     let dirs = vec![
         // Claude
         claude_home().join("skills"),
-        PathBuf::from(".claude").join("skills"),
+        project_root().join(".claude").join("skills"),
         PathBuf::from("/etc/claude/skills"),
         // Codex
         codex_home.join("skills"),
-        PathBuf::from(".agents").join("skills"),
-        PathBuf::from(".codex").join("skills"),
+        project_root().join(".agents").join("skills"),
+        project_root().join(".codex").join("skills"),
         // OpenClaw
         oc_home.join("skills"),
         oc_home.join("workspace").join("skills"),
