@@ -39,19 +39,7 @@
     "shell": {
       "open": true
     },
-    "fs": {
-      "scope": {
-        "allow": [
-          "$HOME/.claude/**",
-          "$HOME/.claude/*",
-          "$APPDATA/**",
-          "$APPDATA/*"
-        ]
-      }
-    },
-    "dialog": {
-      "open": true,
-      "save": true
-    }
+    "fs": {},
+    "dialog": {}
   }
 }
