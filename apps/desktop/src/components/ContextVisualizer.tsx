@@ -97,12 +97,15 @@ export default function ContextVisualizer() {
   if (!data) {
     return (
       <div className="text-cs-muted text-sm">
-        No context data available. Start a Claude Code session to see context breakdown.
+        No context data available. Start a session to see context breakdown.
       </div>
     );
   }
 
-  const usagePercent = (data.totalTokens / data.limit) * 100;
+  // Runtime not installed — limit=0 signals "not connected"
+  const runtimeNotConnected = data.limit === 0;
+
+  const usagePercent = data.limit > 0 ? (data.totalTokens / data.limit) * 100 : 0;
   const barColor =
     usagePercent >= 90
       ? "text-cs-danger"
@@ -146,8 +149,27 @@ export default function ContextVisualizer() {
         })}
       </div>
 
-      {/* Overall progress */}
-      <div className="card">
+      {/* Not connected state */}
+      {runtimeNotConnected && (
+        <div className="card text-center py-10">
+          <div className="w-14 h-14 rounded-full bg-cs-border/20 flex items-center justify-center mx-auto mb-4">
+            {(() => {
+              const rt = RUNTIME_TABS.find((r) => r.id === activeRuntime);
+              const Icon = rt?.icon || Terminal;
+              return <Icon size={24} className="text-cs-muted/40" />;
+            })()}
+          </div>
+          <p className="text-sm font-medium text-cs-muted mb-1">
+            {RUNTIME_TABS.find((r) => r.id === activeRuntime)?.label} is not connected
+          </p>
+          <p className="text-xs text-cs-muted/60 max-w-sm mx-auto">
+            Install the CLI or configure it in the Setup Wizard to see context usage for this runtime.
+          </p>
+        </div>
+      )}
+
+      {/* Overall progress — only show when connected */}
+      {!runtimeNotConnected && <><div className="card">
         <div className="flex items-end justify-between mb-2">
           <span className="text-sm text-cs-muted">{t('context.totalUsed')}</span>
           <span className={cn("text-lg font-semibold", barColor)}>
@@ -381,6 +403,9 @@ export default function ContextVisualizer() {
           </div>
         </div>
       )}
+
+      {/* Close runtimeNotConnected wrapper */}
+      </> }
 
       {/* File viewer slide-over */}
       {viewingFile && (

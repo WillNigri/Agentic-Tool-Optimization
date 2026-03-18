@@ -643,6 +643,29 @@ fn file_tokens(path: &PathBuf) -> u64 {
 
 #[tauri::command]
 fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> {
+    // Check if runtime is installed — return limit=0 if not (frontend shows "not connected")
+    let is_available = match runtime.as_str() {
+        "claude" => which_claude().is_some(),
+        "codex" => which_cli("codex").is_some(),
+        "openclaw" => {
+            let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+                .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+            oc_home.exists()
+        }
+        "hermes" => {
+            which_cli("hermes").is_some() || home_dir().join(".hermes").exists()
+        }
+        _ => false,
+    };
+
+    if !is_available {
+        return Ok(ContextBreakdown {
+            total_tokens: 0,
+            limit: 0, // Frontend uses limit=0 to detect "not connected"
+            categories: Vec::new(),
+        });
+    }
+
     let mut categories = Vec::new();
     let mut total: u64 = 0;
 
