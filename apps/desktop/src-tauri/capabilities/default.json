@@ -10,6 +10,7 @@
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-exists",
-    "fs:scope-home"
+    "fs:scope-home",
+    "updater:default"
   ]
 }

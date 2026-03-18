@@ -68,3 +68,5 @@ jobs:
           prerelease: false
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
+          includeUpdaterJson: true
+          updaterJsonKeepUniversal: true

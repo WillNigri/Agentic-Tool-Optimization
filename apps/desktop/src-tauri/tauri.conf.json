@@ -33,12 +33,18 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://localhost:*; img-src 'self' asset: https://asset.localhost; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://localhost:* https://api.agentictool.ai https://github.com https://api.github.com; img-src 'self' asset: https://asset.localhost; style-src 'self' 'unsafe-inline'"
     }
   },
   "plugins": {
     "shell": {
       "open": true
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
     }
   }
 }
