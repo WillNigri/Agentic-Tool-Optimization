@@ -1590,13 +1590,112 @@ fn cron_history_path() -> PathBuf {
 
 #[tauri::command]
 fn list_cron_jobs() -> Result<Vec<serde_json::Value>, String> {
+    let mut all_jobs: Vec<serde_json::Value> = Vec::new();
+
+    // 1. ATO-created cron jobs
     let path = cron_jobs_path();
-    if !path.exists() {
-        return Ok(Vec::new());
+    if path.exists() {
+        if let Some(content) = read_file_lossy(&path) {
+            if let Ok(jobs) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                all_jobs.extend(jobs);
+            }
+        }
     }
-    let content = read_file_lossy(&path).unwrap_or_default();
-    serde_json::from_str::<Vec<serde_json::Value>>(&content)
-        .map_err(|e| format!("Invalid cron jobs JSON: {}", e))
+
+    // 2. Claude Code native scheduled tasks (from ~/.claude/claudecron/tasks.db)
+    let claude_cron_db = claude_home().join("claudecron").join("tasks.db");
+    if claude_cron_db.exists() {
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &claude_cron_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            // Try to read tasks from Claude's schema
+            let query_result = conn.prepare(
+                "SELECT id, name, schedule, prompt, enabled, created_at, last_run_at FROM tasks"
+            );
+            if let Ok(mut stmt) = query_result {
+                let tasks = stmt.query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let name: String = row.get(1)?;
+                    let schedule: String = row.get(2)?;
+                    let prompt: String = row.get(3)?;
+                    let enabled: bool = row.get(4)?;
+                    let created_at: String = row.get(5)?;
+                    let last_run_at: Option<String> = row.get(6)?;
+
+                    Ok(serde_json::json!({
+                        "id": format!("claude-native-{}", id),
+                        "name": name,
+                        "description": format!("Claude Code scheduled task"),
+                        "schedule": schedule,
+                        "runtime": "claude",
+                        "prompt": prompt,
+                        "enabled": enabled,
+                        "status": if enabled { "healthy" } else { "paused" },
+                        "source": "claude-code",
+                        "createdAt": created_at,
+                        "updatedAt": created_at,
+                        "lastRunAt": last_run_at,
+                    }))
+                });
+
+                if let Ok(rows) = tasks {
+                    for task in rows.flatten() {
+                        all_jobs.push(task);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Claude Desktop Cowork scheduled tasks
+    // macOS: ~/Library/Application Support/Claude/
+    let claude_desktop_dir = home_dir()
+        .join("Library")
+        .join("Application Support")
+        .join("Claude");
+    if claude_desktop_dir.exists() {
+        // Look for any task/schedule databases
+        for db_name in ["tasks.db", "scheduled_tasks.db", "cowork.db"] {
+            let db_path = claude_desktop_dir.join(db_name);
+            if db_path.exists() {
+                if let Ok(conn) = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                ) {
+                    // Try common table names
+                    for table in ["tasks", "scheduled_tasks", "dispatches"] {
+                        let query = format!("SELECT * FROM {} LIMIT 50", table);
+                        if let Ok(stmt) = conn.prepare(&query) {
+                            let col_names: Vec<String> = (0..stmt.column_count())
+                                .map(|i| stmt.column_name(i).unwrap_or("unknown").to_string())
+                                .collect();
+                            drop(stmt);
+
+                            if let Ok(mut stmt2) = conn.prepare(&query) {
+                                if let Ok(rows) = stmt2.query_map([], |row| {
+                                    let mut obj = serde_json::Map::new();
+                                    for (i, col_name) in col_names.iter().enumerate() {
+                                        let val: String = row.get::<_, String>(i).unwrap_or_default();
+                                        obj.insert(col_name.clone(), serde_json::Value::String(val));
+                                    }
+                                    obj.insert("source".to_string(), serde_json::Value::String("claude-desktop".to_string()));
+                                    obj.insert("runtime".to_string(), serde_json::Value::String("claude".to_string()));
+                                    Ok(serde_json::Value::Object(obj))
+                                }) {
+                                    for task in rows.flatten() {
+                                        all_jobs.push(task);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(all_jobs)
 }
 
 #[tauri::command]
