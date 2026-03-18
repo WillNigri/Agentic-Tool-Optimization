@@ -8,12 +8,14 @@ import {
   Bot,
   Webhook,
   Workflow,
+  Clock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
+import { useCronStore } from "@/stores/useCronStore";
 
-export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "analytics" | "mcp" | "config";
+export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "config";
 
 interface SidebarProps {
   active: Section;
@@ -26,6 +28,7 @@ const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: s
   { id: "subagents", labelKey: "nav.subagents", icon: Bot },
   { id: "hooks", labelKey: "nav.hooks", icon: Webhook },
   { id: "automation", labelKey: "nav.automation", icon: Workflow },
+  { id: "cron", labelKey: "nav.cron", icon: Clock },
   { id: "analytics", labelKey: "nav.analytics", icon: BarChart3 },
   { id: "mcp", labelKey: "nav.mcp", icon: Server },
   { id: "config", labelKey: "nav.config", icon: Settings },
@@ -41,6 +44,7 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
   const { t, i18n } = useTranslation();
   const logout = useAuthStore((s) => s.logout);
   const user = useAuthStore((s) => s.user);
+  const cronAlertCount = useCronStore((s) => s.getActiveAlertCount());
 
   function changeLanguage(lang: string) {
     i18n.changeLanguage(lang);
@@ -71,7 +75,10 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
               )}
             >
               <Icon size={18} />
-              {t(item.labelKey)}
+              <span className="flex-1 text-left">{t(item.labelKey)}</span>
+              {item.id === "cron" && cronAlertCount > 0 && (
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              )}
             </button>
           );
         })}

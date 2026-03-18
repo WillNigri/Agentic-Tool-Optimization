@@ -8,6 +8,7 @@ import ConfigEditor from "@/components/ConfigEditor";
 import SubagentsManager from "@/components/SubagentsManager";
 import HooksManager from "@/components/HooksManager";
 import AutomationFlow from "@/components/AutomationFlow";
+import CronDashboard from "@/components/cron/CronDashboard";
 import PromptBar from "@/components/PromptBar";
 
 const PANELS: Record<Section, React.ComponentType> = {
@@ -16,6 +17,7 @@ const PANELS: Record<Section, React.ComponentType> = {
   subagents: SubagentsManager,
   hooks: HooksManager,
   automation: AutomationFlow,
+  cron: CronDashboard,
   analytics: UsageAnalytics,
   mcp: McpDashboard,
   config: ConfigEditor,

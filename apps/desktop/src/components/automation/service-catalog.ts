@@ -5,6 +5,16 @@ import type { ServiceAction, NodeTemplate } from "./types";
 // ---------------------------------------------------------------------------
 
 export const SERVICE_ACTIONS: Record<string, ServiceAction[]> = {
+  cron: [
+    {
+      id: "schedule",
+      label: "Scheduled Trigger",
+      description: "Trigger on a cron schedule (linked to Cron Monitor)",
+      params: [
+        { key: "schedule", label: "Cron Expression", type: "text", placeholder: "0 7 * * *", required: true },
+      ],
+    },
+  ],
   github: [
     {
       id: "pr_opened",
@@ -149,7 +159,7 @@ export const SERVICE_ACTIONS: Record<string, ServiceAction[]> = {
 export const NODE_TEMPLATES: NodeTemplate[] = [
   // Triggers
   { type: "trigger", label: "Webhook", description: "HTTP webhook trigger", category: "triggers" },
-  { type: "trigger", label: "Cron / Schedule", description: "Time-based trigger", category: "triggers" },
+  { type: "trigger", service: "cron", label: "Cron / Schedule", description: "Time-based trigger (linked to Cron Monitor)", category: "triggers" },
   { type: "trigger", label: "File Watcher", description: "File change trigger", category: "triggers" },
   { type: "trigger", label: "Manual", description: "Manual trigger", category: "triggers" },
   { type: "trigger", service: "github", label: "GitHub PR", description: "PR opened trigger", action: "pr_opened", category: "triggers" },
