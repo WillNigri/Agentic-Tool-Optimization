@@ -150,7 +150,12 @@
       "directory": "Diretorio",
       "directoryHint": "Cria uma pasta com subdiretorios scripts/, references/ e assets/",
       "descriptionPlaceholder": "O que essa skill faz?",
-      "anyModel": "Qualquer modelo"
+      "anyModel": "Qualquer modelo",
+      "aiGenerate": "Gerar com IA",
+      "aiGenerateHint": "Descreva o que voce quer que a skill faca e a IA escreve o conteudo para voce.",
+      "aiPromptPlaceholder": "ex., Uma skill que aplica nossas convencoes de nomes de API e valida padroes de endpoints REST...",
+      "aiGenerateButton": "Gerar Skill",
+      "aiGenerating": "Gerando..."
     },
     "tabs": {
       "mySkills": "Minhas Skills",

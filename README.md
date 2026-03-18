@@ -143,7 +143,7 @@ npm install
 npm run dev:desktop
 ```
 
-Opens at `http://localhost:5173` with mock data — full UI, no Rust/Tauri required.
+Opens at `http://localhost:5173` — full UI, no Rust/Tauri required.
 
 ### Desktop app (full Tauri build)
 
@@ -159,6 +159,38 @@ npm run dev -w apps/desktop -- -- tauri dev
 ```bash
 npm run dev:mcp
 ```
+
+### Connect ATO MCP to Claude Code
+
+Add the ATO MCP server to your Claude Code settings so Claude can read your dashboard data (context, skills, usage, runtime status):
+
+```bash
+# Option 1: Add to ~/.claude/settings.json
+cat <<EOF >> ~/.claude/settings.json
+{
+  "mcpServers": {
+    "ato": {
+      "command": "npx",
+      "args": ["tsx", "/path/to/Agentic-Tool-Optimization/services/mcp-server/src/index.ts"]
+    }
+  }
+}
+EOF
+
+# Option 2: If you built the MCP server
+cd services/mcp-server && npm run build
+# Then add to settings.json:
+# "ato": { "command": "node", "args": ["/path/to/services/mcp-server/dist/index.js"] }
+```
+
+Once connected, Claude Code gets these tools:
+- `get_context_usage` — See what's consuming your context window
+- `list_skills` / `toggle_skill` — Manage skills from the CLI
+- `get_usage_stats` — Token consumption and cost data
+- `get_mcp_status` — Check configured MCP servers
+- `get_runtime_status` — Health check any runtime (Claude/Codex/OpenClaw/Hermes)
+- `get_all_runtime_statuses` — Health check all runtimes at once
+- `get_agent_logs` — Read agent execution history
 
 ### Runtime Setup
 

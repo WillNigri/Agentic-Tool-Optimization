@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { X } from "lucide-react";
+import { X, Sparkles, Loader2 } from "lucide-react";
 import { createSkill, type CreateSkillData } from "@/lib/api";
 import type { SkillScope } from "@/lib/tauri-api";
+import { promptAgent } from "@/lib/tauri-api";
+import type { AgentRuntime } from "@/components/cron/types";
 
 const AVAILABLE_TOOLS = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Agent"];
 const AVAILABLE_MODELS = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"];
@@ -30,6 +32,10 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
   const [isDirectory, setIsDirectory] = useState(false);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [model, setModel] = useState("");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiRuntime, setAiRuntime] = useState<AgentRuntime>("claude");
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const createMutation = useMutation({
     mutationFn: (data: CreateSkillData) => createSkill(data),
@@ -225,6 +231,62 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+            </div>
+
+            {/* AI Generate */}
+            <div className="rounded-lg border border-cs-accent/20 bg-cs-accent/5 p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Sparkles size={14} className="text-cs-accent" />
+                <label className="text-xs font-semibold text-cs-accent uppercase tracking-wider">
+                  {t("skills.create.aiGenerate")}
+                </label>
+              </div>
+              <p className="text-[10px] text-cs-muted mb-2">
+                {t("skills.create.aiGenerateHint")}
+              </p>
+              <textarea
+                className="w-full h-16 p-2.5 bg-cs-bg border border-cs-border rounded-lg text-sm text-cs-text resize-none focus:outline-none focus:border-cs-accent mb-2"
+                value={aiPrompt}
+                onChange={(e) => setAiPrompt(e.target.value)}
+                placeholder={t("skills.create.aiPromptPlaceholder")}
+              />
+              {aiError && (
+                <p className="text-[11px] text-red-400 mb-2">{aiError}</p>
+              )}
+              <button
+                type="button"
+                disabled={!aiPrompt.trim() || aiGenerating}
+                onClick={async () => {
+                  setAiGenerating(true);
+                  setAiError(null);
+                  try {
+                    const result = await promptAgent(aiRuntime, `You are creating a Claude Code skill file. Based on this description, generate a complete SKILL.md file with proper YAML frontmatter (name, description, allowed-tools if needed) and detailed markdown instructions. Return ONLY the file content, no explanation.\n\nSkill name: ${name || "unnamed"}\nDescription: ${description || aiPrompt}\nUser request: ${aiPrompt}`);
+                    setContent(result.trim());
+                    // Try to extract name/description from generated frontmatter
+                    const nameMatch = result.match(/^name:\s*(.+)$/m);
+                    const descMatch = result.match(/^description:\s*(.+)$/m);
+                    if (nameMatch && !name) setName(nameMatch[1].trim());
+                    if (descMatch && !description) setDescription(descMatch[1].trim());
+                  } catch (err) {
+                    setAiError(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setAiGenerating(false);
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-cs-accent text-cs-bg font-medium hover:bg-cs-accent/90 transition-colors disabled:opacity-50"
+              >
+                {aiGenerating ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    {t("skills.create.aiGenerating")}
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={12} />
+                    {t("skills.create.aiGenerateButton")}
+                  </>
+                )}
+              </button>
             </div>
 
             {/* Content */}

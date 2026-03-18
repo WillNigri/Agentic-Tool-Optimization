@@ -150,7 +150,12 @@
       "directory": "Directorio",
       "directoryHint": "Crea una carpeta con subdirectorios scripts/, references/ y assets/",
       "descriptionPlaceholder": "Que hace esta skill?",
-      "anyModel": "Cualquier modelo"
+      "anyModel": "Cualquier modelo",
+      "aiGenerate": "Generar con IA",
+      "aiGenerateHint": "Describe lo que quieres que haga la skill y la IA escribira el contenido por ti.",
+      "aiPromptPlaceholder": "ej., Una skill que aplique nuestras convenciones de nombres de API y valide patrones de endpoints REST...",
+      "aiGenerateButton": "Generar Skill",
+      "aiGenerating": "Generando..."
     },
     "tabs": {
       "mySkills": "Mis Skills",
