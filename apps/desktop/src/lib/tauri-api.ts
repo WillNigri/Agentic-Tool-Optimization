@@ -308,6 +308,31 @@ export async function promptAgent(
   }
 }
 
+// ---- Runtime Path Override ----
+
+/**
+ * Save a custom CLI path when auto-detect fails.
+ * Persisted to ~/.ato/{runtime}-path
+ */
+export async function setRuntimePath(runtime: AgentRuntime, path: string): Promise<void> {
+  try {
+    await invoke('set_runtime_path', { runtime, path });
+  } catch {
+    localStorage.setItem(`ato-runtime-path-${runtime}`, path);
+  }
+}
+
+/**
+ * Get a previously saved custom CLI path.
+ */
+export async function getRuntimePath(runtime: AgentRuntime): Promise<string | null> {
+  try {
+    return await invoke<string | null>('get_runtime_path', { runtime });
+  } catch {
+    return localStorage.getItem(`ato-runtime-path-${runtime}`);
+  }
+}
+
 // ---- Agent Status (Inbound / Two-Way) ----
 
 export interface AgentStatus {

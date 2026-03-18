@@ -14,7 +14,7 @@ import {
   Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { queryAgentStatus, detectAgentRuntimes } from "@/lib/tauri-api";
+import { queryAgentStatus, detectAgentRuntimes, setRuntimePath } from "@/lib/tauri-api";
 import type { AgentRuntime, OpenClawConfig } from "@/components/cron/types";
 import type { AgentStatus } from "@/lib/tauri-api";
 
@@ -145,6 +145,19 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
     );
   }
 
+  async function handleSetPath(runtime: AgentRuntime, path: string) {
+    await setRuntimePath(runtime, path);
+    // Re-detect after setting custom path
+    const status = await queryAgentStatus(runtime);
+    setRuntimes((prev) =>
+      prev.map((rt) =>
+        rt.runtime === runtime
+          ? { ...rt, status, config: { ...rt.config, customPath: path } }
+          : rt
+      )
+    );
+  }
+
   async function verifyRuntime(runtime: AgentRuntime) {
     setRuntimes((prev) =>
       prev.map((rt) =>
@@ -221,6 +234,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
               runtimes={runtimes}
               onToggle={toggleRuntime}
               onUpdateConfig={updateConfig}
+              onSetPath={handleSetPath}
             />
           )}
 
@@ -314,10 +328,12 @@ function RuntimesStep({
   runtimes,
   onToggle,
   onUpdateConfig,
+  onSetPath,
 }: {
   runtimes: RuntimeSetup[];
   onToggle: (runtime: AgentRuntime) => void;
   onUpdateConfig: (runtime: AgentRuntime, key: string, value: string) => void;
+  onSetPath: (runtime: AgentRuntime, path: string) => void;
 }) {
   return (
     <div>
@@ -429,6 +445,39 @@ function RuntimesStep({
                   <CheckCircle size={10} />
                   Auto-detected{rt.status.version ? ` (${rt.status.version})` : ""}
                   {rt.status.path && <span className="text-cs-muted font-mono ml-1">{rt.status.path}</span>}
+                </div>
+              )}
+
+              {/* Fallback: manual path input when not auto-detected */}
+              {rt.enabled && !rt.status?.available && rt.runtime !== "openclaw" && (
+                <div className="mt-3 pl-8">
+                  <div className="flex items-center gap-1.5 mb-1.5 text-[10px] text-yellow-400">
+                    <XCircle size={10} />
+                    Not found automatically — enter the path to the CLI binary
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      className="input text-xs flex-1"
+                      placeholder={`/path/to/${rt.runtime}`}
+                      value={rt.config.customPath || ""}
+                      onChange={(e) => onUpdateConfig(rt.runtime, "customPath", e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const path = rt.config.customPath;
+                        if (path?.trim()) onSetPath(rt.runtime, path.trim());
+                      }}
+                      disabled={!rt.config.customPath?.trim()}
+                      className="px-3 py-1.5 text-[11px] rounded-lg bg-cs-accent text-cs-bg font-medium hover:bg-cs-accent/90 transition-colors disabled:opacity-50 shrink-0"
+                    >
+                      Verify
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-cs-muted mt-1">
+                    Tip: run <code className="text-cs-accent">which {rt.runtime}</code> in your terminal to find the path
+                  </p>
                 </div>
               )}
             </div>

@@ -819,7 +819,36 @@ pub struct DetectedRuntime {
     pub path: Option<String>,
 }
 
+/// Search for a CLI binary by name, checking common install paths + `which`.
 fn which_cli(name: &str) -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    // Check common install locations
+    let candidates: Vec<String> = vec![
+        format!("/usr/local/bin/{}", name),
+        format!("/opt/homebrew/bin/{}", name),
+        format!("{}/.npm-global/bin/{}", home, name),
+        format!("{}/bin/{}", home, name),
+        format!("{}/.local/bin/{}", home, name),
+        format!("{}/.cargo/bin/{}", home, name),
+    ];
+
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    // Check user-configured override from settings
+    let override_path = home_dir().join(".ato").join(format!("{}-path", name));
+    if let Some(custom) = read_file_lossy(&override_path) {
+        let trimmed = custom.trim().to_string();
+        if !trimmed.is_empty() && std::path::Path::new(&trimmed).exists() {
+            return Some(trimmed);
+        }
+    }
+
+    // Fall back to `which`
     if let Ok(output) = std::process::Command::new("which").arg(name).output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -828,13 +857,30 @@ fn which_cli(name: &str) -> Option<String> {
             }
         }
     }
+
     None
+}
+
+/// Save a custom CLI path for a runtime (used when auto-detect fails).
+#[tauri::command]
+fn set_runtime_path(runtime: String, path: String) -> Result<(), String> {
+    let ato_dir = home_dir().join(".ato");
+    fs::create_dir_all(&ato_dir).ok();
+    let file_path = ato_dir.join(format!("{}-path", runtime));
+    fs::write(&file_path, path.trim()).map_err(|e| format!("Failed to save runtime path: {}", e))
+}
+
+/// Get a saved custom CLI path for a runtime.
+#[tauri::command]
+fn get_runtime_path(runtime: String) -> Result<Option<String>, String> {
+    let file_path = home_dir().join(".ato").join(format!("{}-path", runtime));
+    Ok(read_file_lossy(&file_path).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
 #[tauri::command]
 fn detect_agent_runtimes() -> Result<Vec<DetectedRuntime>, String> {
     let runtimes = vec![
-        ("claude", which_cli("claude")),
+        ("claude", which_claude().or_else(|| which_cli("claude"))),
         ("codex", which_cli("codex")),
         ("openclaw", which_cli("openclaw")),
         ("hermes", which_cli("hermes")),
@@ -1352,6 +1398,8 @@ pub fn run() {
             load_workflow,
             delete_workflow,
             detect_agent_runtimes,
+            set_runtime_path,
+            get_runtime_path,
             prompt_agent,
             query_agent_status,
             query_all_agent_statuses,
