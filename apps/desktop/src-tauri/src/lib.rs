@@ -689,21 +689,15 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
 
     match runtime.as_str() {
         "claude" => {
-            // System prompts
+            // Always loaded
             let sys: u64 = 28000;
             categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
             total += sys;
-            // Skills
-            let skill_bytes = dir_skill_bytes(&claude_home().join("skills"))
-                + dir_skill_bytes(&project_root().join(".claude").join("skills"));
-            let st = estimate_tokens(skill_bytes);
-            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
-            total += st;
-            // CLAUDE.md
+            // CLAUDE.md — always loaded
             let cm = file_tokens(&project_root().join("CLAUDE.md"));
             categories.push(ContextCategory { name: "CLAUDE.md".into(), tokens: cm, color: "#FFB800".into() });
             total += cm;
-            // MCP schemas
+            // MCP schemas — always loaded
             let settings_path = claude_home().join("settings.json");
             let mcp: u64 = read_file_lossy(&settings_path)
                 .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
@@ -711,38 +705,40 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
                 .unwrap_or(0);
             categories.push(ContextCategory { name: "MCP Schemas".into(), tokens: mcp, color: "#3b82f6".into() });
             total += mcp;
-            // Conversation
+            // Conversation — estimated active
             categories.push(ContextCategory { name: "Conversation".into(), tokens: 15000, color: "#a78bfa".into() });
             total += 15000;
+            // Skills — on-demand, NOT counted in total (loaded only when triggered)
+            let skill_bytes = dir_skill_bytes(&claude_home().join("skills"))
+                + dir_skill_bytes(&project_root().join(".claude").join("skills"));
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
+            // NOT added to total — skills are loaded individually when invoked
 
             Ok(ContextBreakdown { total_tokens: total, limit: 200000, categories })
         }
         "codex" => {
             let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
                 .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
-            // System prompts
+            // Always loaded
             let sys: u64 = 20000;
             categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
             total += sys;
-            // Skills
-            let skill_bytes = dir_skill_bytes(&codex_home.join("skills"))
-                + dir_skill_bytes(&project_root().join(".agents").join("skills"))
-                + dir_skill_bytes(&project_root().join(".codex").join("skills"));
-            let st = estimate_tokens(skill_bytes);
-            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
-            total += st;
-            // AGENTS.md
             let agents_md = file_tokens(&project_root().join("AGENTS.md"))
                 + file_tokens(&codex_home.join("AGENTS.md"));
             categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents_md, color: "#FFB800".into() });
             total += agents_md;
-            // config.toml
             let cfg = file_tokens(&codex_home.join("config.toml"));
             categories.push(ContextCategory { name: "config.toml".into(), tokens: cfg, color: "#3b82f6".into() });
             total += cfg;
-            // Conversation
             categories.push(ContextCategory { name: "Conversation".into(), tokens: 12000, color: "#a78bfa".into() });
             total += 12000;
+            // Skills — on-demand
+            let skill_bytes = dir_skill_bytes(&codex_home.join("skills"))
+                + dir_skill_bytes(&project_root().join(".agents").join("skills"))
+                + dir_skill_bytes(&project_root().join(".codex").join("skills"));
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
 
             Ok(ContextBreakdown { total_tokens: total, limit: 192000, categories })
         }
@@ -750,40 +746,36 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
             let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
                 .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
             let ws = oc_home.join("workspace");
-            // System prompts
+            // Always loaded
             let sys: u64 = 15000;
             categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
             total += sys;
-            // AGENTS.md
             let agents = file_tokens(&ws.join("AGENTS.md"));
             categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents, color: "#FFB800".into() });
             total += agents;
-            // SOUL.md
             let soul = file_tokens(&ws.join("SOUL.md"));
             categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
             total += soul;
-            // TOOLS.md
             let tools = file_tokens(&ws.join("TOOLS.md"));
             categories.push(ContextCategory { name: "TOOLS.md".into(), tokens: tools, color: "#06b6d4".into() });
             total += tools;
-            // Skills
-            let skill_bytes = dir_skill_bytes(&oc_home.join("skills"))
-                + dir_skill_bytes(&ws.join("skills"));
-            let st = estimate_tokens(skill_bytes);
-            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
-            total += st;
-            // Memory
+            // Memory — always loaded at session start
             let mem_dir = ws.join("memory");
             let mem_bytes = dir_skill_bytes(&mem_dir);
             let mem = estimate_tokens(mem_bytes);
             categories.push(ContextCategory { name: "Memory".into(), tokens: mem, color: "#a78bfa".into() });
             total += mem;
+            // Skills — on-demand
+            let skill_bytes = dir_skill_bytes(&oc_home.join("skills"))
+                + dir_skill_bytes(&ws.join("skills"));
+            let st = estimate_tokens(skill_bytes);
+            categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
 
             Ok(ContextBreakdown { total_tokens: total, limit: 200000, categories })
         }
         "hermes" => {
             let hermes_home = home_dir().join(".hermes");
-            // System prompts
+            // Always loaded
             let sys: u64 = 12000;
             categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
             total += sys;
@@ -791,7 +783,16 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
             let soul = file_tokens(&hermes_home.join("SOUL.md"));
             categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
             total += soul;
-            // Skills (with category subdirs)
+            // Memory — always loaded
+            let mem_bytes = file_tokens(&hermes_home.join("memories").join("MEMORY.md"))
+                + file_tokens(&hermes_home.join("memories").join("USER.md"));
+            categories.push(ContextCategory { name: "Memory".into(), tokens: mem_bytes, color: "#a78bfa".into() });
+            total += mem_bytes;
+            // Config
+            let cfg = file_tokens(&hermes_home.join("config.yaml"));
+            categories.push(ContextCategory { name: "config.yaml".into(), tokens: cfg, color: "#3b82f6".into() });
+            total += cfg;
+            // Skills — on-demand
             let skills_dir = hermes_home.join("skills");
             let mut skill_bytes = dir_skill_bytes(&skills_dir);
             if skills_dir.exists() {
@@ -804,17 +805,7 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
                 }
             }
             let st = estimate_tokens(skill_bytes);
-            categories.push(ContextCategory { name: "Skills".into(), tokens: st, color: "#00FFB2".into() });
-            total += st;
-            // Memory
-            let mem_bytes = file_tokens(&hermes_home.join("memories").join("MEMORY.md"))
-                + file_tokens(&hermes_home.join("memories").join("USER.md"));
-            categories.push(ContextCategory { name: "Memory".into(), tokens: mem_bytes, color: "#a78bfa".into() });
-            total += mem_bytes;
-            // Config
-            let cfg = file_tokens(&hermes_home.join("config.yaml"));
-            categories.push(ContextCategory { name: "config.yaml".into(), tokens: cfg, color: "#3b82f6".into() });
-            total += cfg;
+            categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
 
             Ok(ContextBreakdown { total_tokens: total, limit: 128000, categories })
         }
