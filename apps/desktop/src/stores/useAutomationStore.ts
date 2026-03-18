@@ -181,8 +181,8 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   mode: "view",
   setMode: (mode) => set({ mode }),
 
-  workflows: MOCK_WORKFLOWS,
-  activeWorkflowId: MOCK_WORKFLOWS[0].id,
+  workflows: [],
+  activeWorkflowId: "",
   dirty: false,
 
   setActiveWorkflowId: (id) =>
@@ -197,7 +197,16 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
 
   getActiveWorkflow: () => {
     const s = get();
-    return s.workflows.find((w) => w.id === s.activeWorkflowId)!;
+    return s.workflows.find((w) => w.id === s.activeWorkflowId) || {
+      id: "",
+      name: "",
+      description: "",
+      enabled: false,
+      runCount: 0,
+      errorCount: 0,
+      nodes: [],
+      edges: [],
+    };
   },
 
   selectedNodeId: null,

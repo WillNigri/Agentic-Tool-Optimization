@@ -186,13 +186,10 @@ interface CronStore {
 }
 
 export const useCronStore = create<CronStore>((set, get) => {
-  const mockExecutions = generateMockExecutions();
-  const initialAlerts = getActiveAlerts(MOCK_JOBS, mockExecutions);
-
   return {
-    jobs: MOCK_JOBS,
-    executions: mockExecutions,
-    alerts: initialAlerts,
+    jobs: [],
+    executions: [],
+    alerts: [],
 
     selectedJobId: null,
     selectJob: (id) => set({ selectedJobId: id }),

@@ -326,7 +326,7 @@ function RuntimeSelector({
 export default function SubagentsManager() {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
-  const [subagents, setSubagents] = useState<Subagent[]>(MOCK_SUBAGENTS);
+  const [subagents, setSubagents] = useState<Subagent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
 

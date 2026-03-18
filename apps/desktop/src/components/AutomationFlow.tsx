@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import { X, Globe, Activity } from "lucide-react";
+import { X, Globe, Activity, Workflow } from "lucide-react";
 import { TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./automation/constants";
 import { serializeWorkflowToPrompt } from "./automation/helpers";
 import { useAutomationStore } from "@/stores/useAutomationStore";
@@ -95,6 +95,34 @@ export default function AutomationFlow() {
       finishExecution(message);
     }
   }, [workflow, execution.running, startExecution, updateNodeExecStatus, appendOutput, finishExecution]);
+
+  if (workflows.length === 0) {
+    return (
+      <div className="flex flex-col h-full w-full items-center justify-center" style={{ background: "#0a0a0f" }}>
+        <div className="text-center">
+          <div className="w-16 h-16 rounded-full bg-[#2a2a3a]/30 flex items-center justify-center mx-auto mb-4">
+            <Activity size={24} className="text-cs-muted/50" />
+          </div>
+          <p className="text-cs-muted text-sm mb-1">
+            {t("automation.builder.emptyState")}
+          </p>
+          <p className="text-cs-muted/60 text-xs mb-4">
+            {t("automation.builder.emptyStateHint")}
+          </p>
+          <button
+            onClick={() => {
+              const { createWorkflow, setMode } = useAutomationStore.getState();
+              createWorkflow("My First Workflow");
+              setMode("edit");
+            }}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-cs-accent text-cs-bg font-medium hover:bg-cs-accent/90 transition-colors"
+          >
+            {t("automation.builder.newWorkflow")}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full w-full" style={{ background: "#0a0a0f" }}>
