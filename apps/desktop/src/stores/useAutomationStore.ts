@@ -325,10 +325,13 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   saveWorkflow: () => set({ dirty: false }),
 
   loadWorkflows: (workflows) =>
-    set({
+    set((s) => ({
       workflows,
-      activeWorkflowId: workflows[0]?.id || "",
-    }),
+      activeWorkflowId:
+        s.activeWorkflowId && workflows.some((w) => w.id === s.activeWorkflowId)
+          ? s.activeWorkflowId
+          : workflows[0]?.id || "",
+    })),
 
   // Execution
   execution: {

@@ -17,29 +17,42 @@ interface ParsedStep {
  *   ## Step 0: Detect base branch
  *   ## Phase 1: Root Cause Investigation
  *   ## Step 3.5: Pre-Landing Review
+ *   ## Steps\n 1. Check email\n 2. Fix config
+ *   1. Run git config\n 2. If not set, run...\n 3. Proceed
  */
 function parseStepsFromContent(content: string): ParsedStep[] {
+  // Try header-based steps first (## Step N: / ## Phase N:)
+  const headerSteps = parseHeaderSteps(content);
+  if (headerSteps.length >= 2) return headerSteps;
+
+  // Try numbered list items under a steps/workflow section or at top level
+  const listSteps = parseNumberedListSteps(content);
+  if (listSteps.length >= 2) return listSteps;
+
+  return [];
+}
+
+/**
+ * Parse "## Step N:" and "## Phase N:" headers.
+ */
+function parseHeaderSteps(content: string): ParsedStep[] {
   const steps: ParsedStep[] = [];
   const lines = content.split("\n");
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
 
-    // Match "## Step N: Title" or "## Phase N: Title" (with optional sub-numbers like 3.5)
     const stepMatch = line.match(/^#{1,3}\s+(?:Step|Phase)\s+[\d.]+(?:\s*[:—–-]\s*(.+))?$/i);
     if (stepMatch) {
       const title = stepMatch[1]?.trim() || line.replace(/^#{1,3}\s+/, "");
 
-      // Skip boilerplate headers
       if (title.toLowerCase() === "steps to reproduce") continue;
       if (title.toLowerCase().startsWith("steps to")) continue;
 
-      // Get the first non-empty line after the header as description
       let desc = "";
       for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
         const nextLine = lines[j].trim();
         if (nextLine && !nextLine.startsWith("#") && !nextLine.startsWith("```")) {
-          // Clean markdown formatting
           desc = nextLine
             .replace(/^\d+\.\s*/, "")
             .replace(/\*\*/g, "")
@@ -49,11 +62,77 @@ function parseStepsFromContent(content: string): ParsedStep[] {
         }
       }
 
-      steps.push({
-        label: title,
-        description: desc,
-        original: line,
-      });
+      steps.push({ label: title, description: desc, original: line });
+    }
+  }
+
+  return steps;
+}
+
+/**
+ * Parse numbered list items (1. 2. 3.) as steps.
+ * Looks for them under ## Steps / ## Workflow / ## Process headers,
+ * or as top-level numbered items after the frontmatter/title section.
+ */
+function parseNumberedListSteps(content: string): ParsedStep[] {
+  const steps: ParsedStep[] = [];
+  const lines = content.split("\n");
+
+  // Find a section header that signals steps, or scan the whole body
+  let startIdx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (/^#{1,3}\s+(?:Steps|Workflow|Process|Procedure|Instructions|How.?to)/i.test(line)) {
+      startIdx = i + 1;
+      break;
+    }
+  }
+
+  // If no explicit section found, start after frontmatter and first heading
+  if (startIdx === 0) {
+    let pastFrontmatter = false;
+    let pastTitle = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (i === 0 && line === "---") { pastFrontmatter = false; continue; }
+      if (!pastFrontmatter && line === "---") { pastFrontmatter = true; continue; }
+      if (pastFrontmatter && !pastTitle && line.startsWith("#")) { pastTitle = true; continue; }
+      if (pastFrontmatter && pastTitle) { startIdx = i; break; }
+    }
+  }
+
+  for (let i = startIdx; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    // Stop at the next heading (a different section)
+    if (line.startsWith("#") && steps.length > 0) break;
+
+    // Match "N. Description" (numbered list items)
+    const numMatch = line.match(/^(\d+)\.\s+(.+)/);
+    if (numMatch) {
+      const rawText = numMatch[2].trim();
+      // Clean markdown: remove backticks, bold, inline code blocks
+      const label = rawText
+        .replace(/`[^`]+`/g, (m) => m.slice(1, -1)) // unwrap inline code
+        .replace(/\*\*/g, "")
+        .slice(0, 80);
+
+      // Get continuation lines as description
+      let desc = "";
+      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+        const nextLine = lines[j].trim();
+        if (!nextLine || nextLine.startsWith("#") || /^\d+\.\s/.test(nextLine)) break;
+        if (nextLine.startsWith("```")) break;
+        if (!desc) {
+          desc = nextLine
+            .replace(/\*\*/g, "")
+            .replace(/^[-*]\s*/, "")
+            .replace(/`[^`]+`/g, (m) => m.slice(1, -1))
+            .slice(0, 100);
+        }
+      }
+
+      steps.push({ label, description: desc, original: line });
     }
   }
 

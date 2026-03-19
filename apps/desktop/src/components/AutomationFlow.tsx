@@ -41,7 +41,7 @@ export default function AutomationFlow() {
   });
 
   useEffect(() => {
-    if (skills.length > 0 && workflows.length === 0) {
+    if (skills.length > 0) {
       // Fetch full content for each skill to detect automation steps
       Promise.all(
         skills.map((s) => getSkillDetail(s.id).catch(() => null))
@@ -50,11 +50,16 @@ export default function AutomationFlow() {
         const skillWorkflows = generateWorkflowsFromSkills(validDetails);
         if (skillWorkflows.length > 0) {
           const store = useAutomationStore.getState();
-          store.loadWorkflows(skillWorkflows);
+          // Merge skill workflows with existing ones (avoid duplicates)
+          const existingIds = new Set(store.workflows.map((w) => w.id));
+          const newWorkflows = skillWorkflows.filter((w) => !existingIds.has(w.id));
+          if (newWorkflows.length > 0) {
+            store.loadWorkflows([...store.workflows, ...newWorkflows]);
+          }
         }
       });
     }
-  }, [skills, workflows.length]);
+  }, [skills]);
 
   const workflow = getActiveWorkflow();
   const selectedNode = workflow.nodes.find((n) => n.id === selectedNodeId) || null;
