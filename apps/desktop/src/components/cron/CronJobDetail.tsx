@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   X,
@@ -11,11 +12,13 @@ import {
   Cpu,
   Server,
   Globe,
+  Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CronJob, CronExecution, AgentRuntime } from "./types";
 import { cronToHuman, formatRelativeTime } from "@/lib/cron-utils";
 import { useCronStore } from "@/stores/useCronStore";
+import EditCronJobModal from "./EditCronJobModal";
 import {
   BarChart,
   Bar,
@@ -40,6 +43,7 @@ interface CronJobDetailProps {
 
 export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
   const { t } = useTranslation();
+  const [showEditModal, setShowEditModal] = useState(false);
   const allExecutions = useCronStore((s) => s.executions);
   const executions = allExecutions
     .filter((e) => e.jobId === job.id)
@@ -233,6 +237,15 @@ export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
           >
             {job.enabled ? t("cron.job.pause") : t("cron.job.resume")}
           </button>
+          {job.source === "openclaw-gateway" && (
+            <button
+              onClick={() => setShowEditModal(true)}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg border border-cs-accent/30 text-cs-accent hover:bg-cs-accent/10 transition-colors"
+            >
+              <Pencil size={14} />
+              Edit
+            </button>
+          )}
           <div className="flex-1" />
           <button
             onClick={handleDelete}
@@ -243,6 +256,18 @@ export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
           </button>
         </div>
       </div>
+
+      {/* Edit modal for OpenClaw jobs */}
+      {showEditModal && (
+        <EditCronJobModal
+          job={job}
+          onClose={() => setShowEditModal(false)}
+          onSaved={() => {
+            setShowEditModal(false);
+            // Trigger a refresh - the parent will re-fetch via react-query
+          }}
+        />
+      )}
     </>
   );
 }

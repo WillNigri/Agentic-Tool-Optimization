@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Play, Loader2, Terminal, Cpu, Server, Globe, Link2 } from "lucide-react";
+import { Play, Loader2, Terminal, Cpu, Server, Globe, Link2, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CronJob, CronExecution, AgentRuntime } from "./types";
 import ExecutionTimeline from "./ExecutionTimeline";
 import { cronToHuman, formatRelativeTime } from "@/lib/cron-utils";
+import { openclawRunCronJob } from "@/lib/tauri-api";
+import EditCronJobModal from "./EditCronJobModal";
 
 const RUNTIME_ICON: Record<AgentRuntime, typeof Terminal> = {
   claude: Terminal,
@@ -45,9 +48,26 @@ export default function CronJobCard({
   onTrigger,
 }: CronJobCardProps) {
   const { t } = useTranslation();
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [ocRunning, setOcRunning] = useState(false);
   const RuntimeIcon = RUNTIME_ICON[job.runtime];
   const runtimeColor = RUNTIME_COLOR[job.runtime];
   const statusConfig = STATUS_COLORS[job.status] || STATUS_COLORS.healthy;
+  const isOpenClaw = job.source === "openclaw-gateway";
+
+  // Strip "oc-" prefix for real OpenClaw ID
+  const realOcId = job.id.startsWith("oc-") ? job.id.slice(3) : job.id;
+
+  async function handleOpenClawRun() {
+    setOcRunning(true);
+    try {
+      await openclawRunCronJob(realOcId);
+    } catch {
+      // Error handling could be added here
+    } finally {
+      setOcRunning(false);
+    }
+  }
 
   return (
     <div
@@ -124,24 +144,40 @@ export default function CronJobCard({
           <ExecutionTimeline executions={executions} />
         </div>
 
-        {/* Right: Run Now button */}
-        <div className="shrink-0 pt-1">
+        {/* Right: Run Now + Edit buttons */}
+        <div className="shrink-0 pt-1 flex items-center gap-1.5">
+          {isOpenClaw && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowEditModal(true);
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-lg border border-cs-accent/30 text-cs-accent hover:bg-cs-accent/10 transition-colors"
+              title="Edit job"
+            >
+              <Pencil size={12} />
+            </button>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onTrigger();
+              if (isOpenClaw) {
+                handleOpenClawRun();
+              } else {
+                onTrigger();
+              }
             }}
-            disabled={isRunning || !job.enabled}
+            disabled={(isOpenClaw ? ocRunning : isRunning) || !job.enabled}
             className={cn(
               "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
-              isRunning
+              (isOpenClaw ? ocRunning : isRunning)
                 ? "border-yellow-500/40 text-yellow-400 bg-yellow-500/10"
                 : job.enabled
                   ? "border-cs-accent/40 text-cs-accent bg-cs-accent/10 hover:bg-cs-accent/20"
                   : "border-cs-border text-cs-muted opacity-50 cursor-not-allowed"
             )}
           >
-            {isRunning ? (
+            {(isOpenClaw ? ocRunning : isRunning) ? (
               <>
                 <Loader2 size={12} className="animate-spin" />
                 {t("cron.job.running")}
@@ -155,6 +191,15 @@ export default function CronJobCard({
           </button>
         </div>
       </div>
+
+      {/* Edit modal for OpenClaw jobs */}
+      {showEditModal && (
+        <EditCronJobModal
+          job={job}
+          onClose={() => setShowEditModal(false)}
+          onSaved={() => setShowEditModal(false)}
+        />
+      )}
     </div>
   );
 }

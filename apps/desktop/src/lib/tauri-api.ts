@@ -581,6 +581,23 @@ export async function openclawTestConnection(wsUrl: string, token: string): Prom
   return invoke('openclaw_test_connection', { wsUrl, token });
 }
 
+// ---- OpenClaw Cron CRUD ----
+export async function openclawEditCronJob(id: string, args: string): Promise<unknown> {
+  return invoke('openclaw_edit_cron_job', { id, args });
+}
+export async function openclawAddCronJob(args: string): Promise<unknown> {
+  return invoke('openclaw_add_cron_job', { args });
+}
+export async function openclawDeleteCronJob(id: string): Promise<unknown> {
+  return invoke('openclaw_delete_cron_job', { id });
+}
+export async function openclawRunCronJob(id: string): Promise<unknown> {
+  return invoke('openclaw_run_cron_job', { id });
+}
+export async function openclawToggleCronJob(id: string, enable: boolean): Promise<unknown> {
+  return invoke('openclaw_toggle_cron_job', { id, enable });
+}
+
 // ---- Context Files ----
 
 export interface ContextFile {

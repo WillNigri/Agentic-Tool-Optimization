@@ -2192,6 +2192,35 @@ async fn test_runtime_connection(runtime: String, config: String) -> Result<serd
     }
 }
 
+// ── OpenClaw Cron CRUD ────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn openclaw_edit_cron_job(id: String, args: String) -> Result<serde_json::Value, String> {
+    // args is a space-separated string of CLI flags like "--name foo --every 1h --message 'do stuff'"
+    openclaw_ssh_command(&format!("cron edit {} {} --json", id, args))
+}
+
+#[tauri::command]
+async fn openclaw_add_cron_job(args: String) -> Result<serde_json::Value, String> {
+    openclaw_ssh_command(&format!("cron add {} --json", args))
+}
+
+#[tauri::command]
+async fn openclaw_delete_cron_job(id: String) -> Result<serde_json::Value, String> {
+    openclaw_ssh_command(&format!("cron rm {} --json", id))
+}
+
+#[tauri::command]
+async fn openclaw_run_cron_job(id: String) -> Result<serde_json::Value, String> {
+    openclaw_ssh_command(&format!("cron run {} --json", id))
+}
+
+#[tauri::command]
+async fn openclaw_toggle_cron_job(id: String, enable: bool) -> Result<serde_json::Value, String> {
+    let flag = if enable { "--enable" } else { "--disable" };
+    openclaw_ssh_command(&format!("cron edit {} {} --json", id, flag))
+}
+
 // ── Context Files (SOUL.md, AGENTS.md, etc.) ─────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2338,6 +2367,11 @@ pub fn run() {
             openclaw_skills_status,
             openclaw_list_sessions,
             openclaw_test_connection,
+            openclaw_edit_cron_job,
+            openclaw_add_cron_job,
+            openclaw_delete_cron_job,
+            openclaw_run_cron_job,
+            openclaw_toggle_cron_job,
             save_runtime_config,
             load_runtime_config,
             test_runtime_connection,
