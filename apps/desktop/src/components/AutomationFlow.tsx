@@ -42,17 +42,29 @@ export default function AutomationFlow() {
 
   useEffect(() => {
     if (skills.length > 0) {
+      console.log("[ATO] Automation: fetching details for", skills.length, "skills");
       // Fetch full content for each skill to detect automation steps
       Promise.all(
-        skills.map((s) => getSkillDetail(s.id).catch(() => null))
+        skills.map((s) =>
+          getSkillDetail(s.id).catch((err) => {
+            console.warn("[ATO] Failed to get detail for skill", s.name, s.id, err);
+            return null;
+          })
+        )
       ).then((details) => {
         const validDetails = details.filter((d): d is SkillDetail => d !== null);
+        console.log("[ATO] Automation: got", validDetails.length, "valid details from", details.length, "total");
+        for (const d of validDetails) {
+          console.log("[ATO] Skill:", d.name, "content length:", d.content?.length ?? 0, "first 100:", d.content?.slice(0, 100));
+        }
         const skillWorkflows = generateWorkflowsFromSkills(validDetails);
+        console.log("[ATO] Automation: generated", skillWorkflows.length, "workflows");
         if (skillWorkflows.length > 0) {
           const store = useAutomationStore.getState();
           // Merge skill workflows with existing ones (avoid duplicates)
           const existingIds = new Set(store.workflows.map((w) => w.id));
           const newWorkflows = skillWorkflows.filter((w) => !existingIds.has(w.id));
+          console.log("[ATO] Automation: new workflows to add:", newWorkflows.length);
           if (newWorkflows.length > 0) {
             store.loadWorkflows([...store.workflows, ...newWorkflows]);
           }
