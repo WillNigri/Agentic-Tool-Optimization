@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, Search, AlertTriangle, X, List, CalendarDays } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCronStore } from "@/stores/useCronStore";
+import { useRuntimeCronJobs } from "@/hooks/useRuntimeData";
 import CronJobCard from "./CronJobCard";
 import CronJobDetail from "./CronJobDetail";
 import CronCalendar from "./CronCalendar";
@@ -14,6 +15,16 @@ export default function CronDashboard() {
   const { t } = useTranslation();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [view, setView] = useState<CronView>("list");
+
+  // Load cron jobs from all runtimes
+  const { jobs: runtimeJobs, isLoading: runtimeLoading } = useRuntimeCronJobs();
+  const loadJobs = useCronStore((s) => s.loadJobs);
+
+  useEffect(() => {
+    if (runtimeJobs.length > 0) {
+      loadJobs(runtimeJobs);
+    }
+  }, [runtimeJobs, loadJobs]);
 
   const {
     alerts,

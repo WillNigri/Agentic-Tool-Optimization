@@ -187,6 +187,18 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
                       w.enabled ? "bg-[#00FFB2]" : "bg-[#8888a0]/40"
                     )} />
                     <span className="text-sm font-medium text-[#e8e8f0]">{w.name}</span>
+                    {/* Runtime source badge */}
+                    {(() => {
+                      const rt = w.nodes[0]?.runtime;
+                      if (!rt) return null;
+                      const colors: Record<string, string> = { claude: "#f97316", codex: "#22c55e", openclaw: "#06b6d4", hermes: "#a855f7" };
+                      const c = colors[rt] || "#8888a0";
+                      return (
+                        <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ color: c, background: `${c}18` }}>
+                          {rt}
+                        </span>
+                      );
+                    })()}
                     <span className="text-[10px] text-[#8888a0] ml-auto">{w.runCount} runs</span>
                   </div>
                   <p className="text-[11px] text-[#8888a0] truncate pl-4 mb-1.5">{w.description}</p>

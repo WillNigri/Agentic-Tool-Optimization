@@ -1,5 +1,8 @@
+mod openclaw_ws;
+
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -2032,6 +2035,196 @@ fn which_claude() -> Option<String> {
     which_cli("claude")
 }
 
+// ── OpenClaw WebSocket + Runtime Config ───────────────────────────────────
+
+fn load_openclaw_ws_config() -> Option<(String, String)> {
+    let config_path = home_dir().join(".ato").join("openclaw-config.json");
+    let content = read_file_lossy(&config_path)?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let ws_url = config.get("wsUrl")?.as_str()?.to_string();
+    let token = config.get("token")?.as_str().unwrap_or("").to_string();
+    Some((ws_url, token))
+}
+
+#[tauri::command]
+async fn openclaw_gateway_status() -> Result<serde_json::Value, String> {
+    let (url, token) = load_openclaw_ws_config()
+        .ok_or("OpenClaw not configured. Set wsUrl and token in Configuration.")?;
+    openclaw_ws::rpc_call(&url, &token, "status", json!({})).await
+}
+
+#[tauri::command]
+async fn openclaw_list_cron_jobs() -> Result<serde_json::Value, String> {
+    let (url, token) = load_openclaw_ws_config()
+        .ok_or("OpenClaw not configured")?;
+    openclaw_ws::rpc_call(&url, &token, "cron.list", json!({"limit": 200})).await
+}
+
+#[tauri::command]
+async fn openclaw_cron_status() -> Result<serde_json::Value, String> {
+    let (url, token) = load_openclaw_ws_config()
+        .ok_or("OpenClaw not configured")?;
+    openclaw_ws::rpc_call(&url, &token, "cron.status", json!({})).await
+}
+
+#[tauri::command]
+async fn openclaw_list_agents() -> Result<serde_json::Value, String> {
+    let (url, token) = load_openclaw_ws_config()
+        .ok_or("OpenClaw not configured")?;
+    openclaw_ws::rpc_call(&url, &token, "agents.list", json!({})).await
+}
+
+#[tauri::command]
+async fn openclaw_skills_status() -> Result<serde_json::Value, String> {
+    let (url, token) = load_openclaw_ws_config()
+        .ok_or("OpenClaw not configured")?;
+    openclaw_ws::rpc_call(&url, &token, "skills.status", json!({})).await
+}
+
+#[tauri::command]
+async fn openclaw_list_sessions() -> Result<serde_json::Value, String> {
+    let (url, token) = load_openclaw_ws_config()
+        .ok_or("OpenClaw not configured")?;
+    openclaw_ws::rpc_call(&url, &token, "sessions.list", json!({})).await
+}
+
+#[tauri::command]
+async fn openclaw_test_connection(ws_url: String, token: String) -> Result<serde_json::Value, String> {
+    openclaw_ws::test_connection(&ws_url, &token).await
+}
+
+#[tauri::command]
+fn save_runtime_config(runtime: String, config: String) -> Result<(), String> {
+    let ato_dir = home_dir().join(".ato");
+    fs::create_dir_all(&ato_dir).ok();
+    let file_path = ato_dir.join(format!("{}-config.json", runtime));
+    fs::write(&file_path, config).map_err(|e| format!("Failed to save config: {}", e))
+}
+
+#[tauri::command]
+fn load_runtime_config(runtime: String) -> Result<Option<String>, String> {
+    let file_path = home_dir().join(".ato").join(format!("{}-config.json", runtime));
+    Ok(read_file_lossy(&file_path))
+}
+
+#[tauri::command]
+async fn test_runtime_connection(runtime: String, config: String) -> Result<serde_json::Value, String> {
+    match runtime.as_str() {
+        "openclaw" => {
+            let parsed: serde_json::Value = serde_json::from_str(&config).map_err(|e| e.to_string())?;
+            let ws_url = parsed.get("wsUrl").and_then(|v| v.as_str()).unwrap_or("ws://localhost:18789").to_string();
+            let token = parsed.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            openclaw_ws::test_connection(&ws_url, &token).await
+        }
+        "claude" => {
+            let path = which_cli("claude").ok_or("Claude CLI not found")?;
+            let output = std::process::Command::new(&path).arg("--version").output().map_err(|e| e.to_string())?;
+            Ok(json!({"connected": output.status.success(), "version": String::from_utf8_lossy(&output.stdout).trim().to_string()}))
+        }
+        "codex" => {
+            let path = which_cli("codex").ok_or("Codex CLI not found")?;
+            let output = std::process::Command::new(&path).arg("--version").output().map_err(|e| e.to_string())?;
+            Ok(json!({"connected": output.status.success(), "version": String::from_utf8_lossy(&output.stdout).trim().to_string()}))
+        }
+        "hermes" => {
+            let path = which_cli("hermes").ok_or("Hermes CLI not found")?;
+            let output = std::process::Command::new(&path).arg("--version").output().map_err(|e| e.to_string())?;
+            Ok(json!({"connected": output.status.success(), "version": String::from_utf8_lossy(&output.stdout).trim().to_string()}))
+        }
+        _ => Err(format!("Unknown runtime: {}", runtime))
+    }
+}
+
+// ── Context Files (SOUL.md, AGENTS.md, etc.) ─────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextFile {
+    pub runtime: String,
+    pub name: String,
+    pub file_path: String,
+    pub token_count: u64,
+    pub exists: bool,
+}
+
+#[tauri::command]
+fn list_context_files() -> Result<Vec<ContextFile>, String> {
+    let mut files = Vec::new();
+
+    // Claude context files
+    let claude = claude_home();
+    for name in ["CLAUDE.md", "settings.json", "settings.local.json"] {
+        let p = claude.join(name);
+        let exists = p.exists();
+        let tokens = if exists { estimate_tokens(fs::metadata(&p).map(|m| m.len()).unwrap_or(0)) } else { 0 };
+        files.push(ContextFile {
+            runtime: "claude".into(), name: name.into(),
+            file_path: p.to_string_lossy().into(), token_count: tokens, exists,
+        });
+    }
+    // Project CLAUDE.md
+    for proj in discover_project_roots() {
+        let p = proj.join("CLAUDE.md");
+        if p.exists() {
+            let tokens = estimate_tokens(fs::metadata(&p).map(|m| m.len()).unwrap_or(0));
+            let label = format!("CLAUDE.md ({})", proj.file_name().unwrap_or_default().to_string_lossy());
+            files.push(ContextFile {
+                runtime: "claude".into(), name: label,
+                file_path: p.to_string_lossy().into(), token_count: tokens, exists: true,
+            });
+        }
+    }
+
+    // OpenClaw context files
+    let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+    let oc_workspace = oc_home.join("workspace");
+    for name in ["SOUL.md", "AGENTS.md", "TOOLS.md", "config.yaml"] {
+        let p = oc_workspace.join(name);
+        let exists = p.exists();
+        let tokens = if exists { estimate_tokens(fs::metadata(&p).map(|m| m.len()).unwrap_or(0)) } else { 0 };
+        files.push(ContextFile {
+            runtime: "openclaw".into(), name: name.into(),
+            file_path: p.to_string_lossy().into(), token_count: tokens, exists,
+        });
+    }
+    // Also check root .openclaw
+    for name in ["SOUL.md", "config.yaml"] {
+        let p = oc_home.join(name);
+        if p.exists() && !files.iter().any(|f| f.file_path == p.to_string_lossy().to_string()) {
+            let tokens = estimate_tokens(fs::metadata(&p).map(|m| m.len()).unwrap_or(0));
+            files.push(ContextFile {
+                runtime: "openclaw".into(), name: name.into(),
+                file_path: p.to_string_lossy().into(), token_count: tokens, exists: true,
+            });
+        }
+    }
+
+    // Hermes context files
+    let hermes_home = home_dir().join(".hermes");
+    for name in ["SOUL.md", "config.yaml", "memories/MEMORY.md", "memories/USER.md"] {
+        let p = hermes_home.join(name);
+        let exists = p.exists();
+        let tokens = if exists { estimate_tokens(fs::metadata(&p).map(|m| m.len()).unwrap_or(0)) } else { 0 };
+        files.push(ContextFile {
+            runtime: "hermes".into(), name: name.into(),
+            file_path: p.to_string_lossy().into(), token_count: tokens, exists,
+        });
+    }
+
+    // Filter to only existing files
+    Ok(files.into_iter().filter(|f| f.exists).collect())
+}
+
+#[tauri::command]
+fn read_context_file(file_path: String) -> Result<String, String> {
+    read_file_lossy(&PathBuf::from(&file_path)).ok_or_else(|| format!("Cannot read: {}", file_path))
+}
+
+#[tauri::command]
+fn write_context_file(file_path: String, content: String) -> Result<(), String> {
+    fs::write(&file_path, &content).map_err(|e| format!("Failed to write: {}", e))
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -2081,6 +2274,19 @@ pub fn run() {
             delete_cron_job,
             get_cron_history,
             trigger_cron_job,
+            openclaw_gateway_status,
+            openclaw_list_cron_jobs,
+            openclaw_cron_status,
+            openclaw_list_agents,
+            openclaw_skills_status,
+            openclaw_list_sessions,
+            openclaw_test_connection,
+            save_runtime_config,
+            load_runtime_config,
+            test_runtime_connection,
+            list_context_files,
+            read_context_file,
+            write_context_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

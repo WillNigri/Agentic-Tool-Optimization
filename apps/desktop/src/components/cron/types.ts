@@ -11,6 +11,8 @@ export type CronJobStatus =
   | "warning"
   | "paused";
 
+export type CronJobSource = "ato" | "claude-native" | "openclaw-gateway" | "hermes-fs";
+
 export interface CronJob {
   id: string;
   name: string;
@@ -26,6 +28,8 @@ export interface CronJob {
   updatedAt: string;
   lastRunAt?: string;
   nextRunAt?: string;
+  source?: CronJobSource;
+  readOnly?: boolean; // true for jobs from external runtimes
 }
 
 export interface CronExecution {

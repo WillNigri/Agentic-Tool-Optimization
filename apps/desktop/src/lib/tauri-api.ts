@@ -537,3 +537,67 @@ export async function triggerCronJob(id: string): Promise<void> {
     // Mock trigger handled by store
   }
 }
+
+// ---- Runtime Configuration ----
+export async function saveRuntimeConfig(runtime: string, config: string): Promise<void> {
+  return invoke('save_runtime_config', { runtime, config });
+}
+
+export async function loadRuntimeConfig(runtime: string): Promise<string | null> {
+  return invoke<string | null>('load_runtime_config', { runtime });
+}
+
+export async function testRuntimeConnection(runtime: string, config: string): Promise<{ connected: boolean; version?: string; error?: string }> {
+  return invoke('test_runtime_connection', { runtime, config });
+}
+
+// ---- OpenClaw Gateway ----
+export async function openclawGatewayStatus(): Promise<unknown> {
+  return invoke('openclaw_gateway_status');
+}
+
+export async function openclawListCronJobs(): Promise<unknown> {
+  return invoke('openclaw_list_cron_jobs');
+}
+
+export async function openclawCronStatus(): Promise<unknown> {
+  return invoke('openclaw_cron_status');
+}
+
+export async function openclawListAgents(): Promise<unknown> {
+  return invoke('openclaw_list_agents');
+}
+
+export async function openclawSkillsStatus(): Promise<unknown> {
+  return invoke('openclaw_skills_status');
+}
+
+export async function openclawListSessions(): Promise<unknown> {
+  return invoke('openclaw_list_sessions');
+}
+
+export async function openclawTestConnection(wsUrl: string, token: string): Promise<unknown> {
+  return invoke('openclaw_test_connection', { wsUrl, token });
+}
+
+// ---- Context Files ----
+
+export interface ContextFile {
+  runtime: string;
+  name: string;
+  filePath: string;
+  tokenCount: number;
+  exists: boolean;
+}
+
+export async function listContextFiles(): Promise<ContextFile[]> {
+  return invoke<ContextFile[]>('list_context_files');
+}
+
+export async function readContextFile(filePath: string): Promise<string> {
+  return invoke<string>('read_context_file', { filePath });
+}
+
+export async function writeContextFile(filePath: string, content: string): Promise<void> {
+  return invoke('write_context_file', { filePath, content });
+}

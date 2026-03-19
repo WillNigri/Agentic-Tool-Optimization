@@ -84,6 +84,13 @@ export default function CronJobCard({
             <span className={cn("text-[10px] font-medium", statusConfig.text)}>
               {t(`cron.status.${job.status}`)}
             </span>
+
+            {/* Source badge */}
+            {job.source && job.source !== "ato" && (
+              <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-cs-border/50 text-cs-muted uppercase tracking-wider">
+                {job.source === "openclaw-gateway" ? "OpenClaw" : job.source === "hermes-fs" ? "Hermes" : job.source === "claude-native" ? "Claude" : job.source}
+              </span>
+            )}
           </div>
 
           {/* Schedule */}

@@ -4,7 +4,7 @@ import ContextVisualizer from "@/components/ContextVisualizer";
 import SkillsManager from "@/components/SkillsManager";
 import UsageAnalytics from "@/components/UsageAnalytics";
 import McpDashboard from "@/components/McpDashboard";
-import ConfigEditor from "@/components/ConfigEditor";
+import RuntimeSettings from "@/components/RuntimeSettings";
 import SubagentsManager from "@/components/SubagentsManager";
 import HooksManager from "@/components/HooksManager";
 import AutomationFlow from "@/components/AutomationFlow";
@@ -21,7 +21,7 @@ const PANELS: Record<Section, React.ComponentType> = {
   cron: CronDashboard,
   analytics: UsageAnalytics,
   mcp: McpDashboard,
-  config: ConfigEditor,
+  config: RuntimeSettings,
 };
 
 function isSetupComplete(): boolean {

@@ -179,6 +179,9 @@ interface CronStore {
   acknowledgeAlert: (alertId: string) => void;
   refreshAlerts: () => void;
 
+  // External data loading
+  loadJobs: (jobs: CronJob[]) => void;
+
   // Computed
   getJobExecutions: (jobId: string) => CronExecution[];
   getActiveAlertCount: () => number;
@@ -335,6 +338,15 @@ export const useCronStore = create<CronStore>((set, get) => {
       if (newAlerts.length > 0) {
         set((s) => ({ alerts: [...s.alerts, ...newAlerts] }));
       }
+    },
+
+    loadJobs: (jobs) => {
+      set((s) => {
+        // Merge: keep ATO-local jobs, replace external ones
+        const localJobs = s.jobs.filter((j) => !j.source || j.source === "ato");
+        const externalJobs = jobs.filter((j) => j.source && j.source !== "ato");
+        return { jobs: [...localJobs, ...externalJobs] };
+      });
     },
 
     getJobExecutions: (jobId) =>
