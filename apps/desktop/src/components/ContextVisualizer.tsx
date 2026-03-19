@@ -296,20 +296,46 @@ export default function ContextVisualizer() {
 
           {/* Category legend cards */}
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-            {data.categories.map((cat) => (
-              <div key={cat.name} className="card flex items-center gap-3">
+            {data.categories.map((cat) => {
+              // Determine if this category is a viewable file
+              const isFile = cat.name.endsWith(".md") || cat.name.endsWith(".yaml") || cat.name.endsWith(".json") || cat.name.endsWith(".toml");
+              const filePathMap: Record<string, Record<string, string>> = {
+                claude: { "CLAUDE.md": "CLAUDE.md", "System Prompts": "", "MCP Schemas": "", "Conversation": "" },
+                openclaw: { "SOUL.md": "~/.openclaw/workspace/SOUL.md", "AGENTS.md": "~/.openclaw/workspace/AGENTS.md", "TOOLS.md": "~/.openclaw/workspace/TOOLS.md" },
+                hermes: { "SOUL.md": "~/.hermes/SOUL.md", "config.yaml": "~/.hermes/config.yaml" },
+              };
+              const filePath = filePathMap[activeRuntime]?.[cat.name];
+              const isClickable = isFile && cat.tokens > 0;
+
+              return (
                 <div
-                  className="w-3 h-3 rounded-full shrink-0"
-                  style={{ backgroundColor: cat.color }}
-                />
-                <div className="min-w-0">
-                  <p className="text-sm truncate">{cat.name}</p>
-                  <p className="text-xs text-cs-muted">
-                    {t('context.tokens', { count: formatNumber(cat.tokens) })}
-                  </p>
+                  key={cat.name}
+                  onClick={() => {
+                    if (isClickable && filePath) {
+                      // For remote files, use the context file reader
+                      const resolved = filePath.replace("~", process.env.HOME || "/root");
+                      setViewingFile(resolved);
+                    }
+                  }}
+                  className={cn(
+                    "card flex items-center gap-3",
+                    isClickable && "cursor-pointer hover:border-cs-accent/30 transition-colors"
+                  )}
+                >
+                  <div
+                    className="w-3 h-3 rounded-full shrink-0"
+                    style={{ backgroundColor: cat.color }}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm truncate">{cat.name}</p>
+                    <p className="text-xs text-cs-muted">
+                      {t('context.tokens', { count: formatNumber(cat.tokens) })}
+                    </p>
+                  </div>
+                  {isClickable && <ExternalLink size={12} className="text-cs-muted/40 shrink-0" />}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}

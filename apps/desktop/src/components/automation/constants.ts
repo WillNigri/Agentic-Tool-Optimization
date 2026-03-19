@@ -24,8 +24,8 @@ import {
 // Dimensions
 // ---------------------------------------------------------------------------
 
-export const NODE_W = 180;
-export const NODE_H = 90;
+export const NODE_W = 200;
+export const NODE_H = 100;
 export const PORT_SIZE = 8;
 export const PALETTE_W = 220;
 export const CONFIG_PANEL_W = 280;

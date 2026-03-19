@@ -216,6 +216,7 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
     errorCount: 0,
     nodes,
     edges,
+    source: "skill" as const,
   };
 }
 

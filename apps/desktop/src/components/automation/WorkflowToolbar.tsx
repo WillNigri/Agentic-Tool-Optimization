@@ -28,6 +28,7 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [newName, setNewName] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState<string>("all");
+  const [sourceFilter, setSourceFilter] = useState<string>("all");
 
   const {
     mode,
@@ -207,8 +208,29 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
                 </div>
               );
             })()}
+            {/* Source type filter */}
+            {(() => {
+              const sources = [...new Set(workflows.map((w) => w.source).filter(Boolean))];
+              if (sources.length <= 1) return null;
+              const labels: Record<string, string> = { skill: "Skills", cron: "Cron Jobs", manual: "Manual" };
+              return (
+                <div className="flex items-center gap-1 px-3 py-1.5 border-b border-[#2a2a3a] shrink-0">
+                  <button
+                    onClick={() => setSourceFilter("all")}
+                    className={cn("px-2 py-0.5 text-[10px] font-medium rounded-md transition-colors", sourceFilter === "all" ? "bg-[#8888a020] text-[#e8e8f0]" : "text-[#8888a0] hover:text-[#e8e8f0]")}
+                  >All</button>
+                  {sources.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setSourceFilter(s!)}
+                      className={cn("px-2 py-0.5 text-[10px] font-medium rounded-md transition-colors", sourceFilter === s ? "bg-[#8888a020] text-[#e8e8f0]" : "text-[#8888a0] hover:text-[#e8e8f0]")}
+                    >{labels[s!] || s}</button>
+                  ))}
+                </div>
+              );
+            })()}
             <div className="overflow-y-auto flex-1">
-            {workflows.filter((w) => runtimeFilter === "all" || w.nodes[0]?.runtime === runtimeFilter).map((w) => {
+            {workflows.filter((w) => (runtimeFilter === "all" || w.nodes[0]?.runtime === runtimeFilter) && (sourceFilter === "all" || w.source === sourceFilter)).map((w) => {
               const services = [...new Set(w.nodes.filter((n) => n.service).map((n) => n.service!))];
               return (
                 <button

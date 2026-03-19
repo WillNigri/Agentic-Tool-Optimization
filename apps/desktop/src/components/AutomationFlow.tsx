@@ -98,13 +98,37 @@ export default function AutomationFlow() {
           scheduleLabel = (schedule.expression as string) || "Cron";
         }
 
+        const agentId = (job.agentId as string) || "main";
+        const sessionKey = (job.sessionKey as string) || "";
+        const deliveryChannel = (delivery?.channel as string) || "";
+        const deliveryTo = (delivery?.to as string) || "";
+
         const nodes: FlowNode[] = [
-          { id: `${id}-trigger`, label: scheduleLabel, description: `Trigger: ${name}`, type: "trigger", runtime: "openclaw", x: 50, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 }, status: enabled ? "active" : "idle" },
-          { id: `${id}-action`, label: name, description: prompt.slice(0, 80), type: "action", runtime: "openclaw", x: 310, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 }, status: state?.lastRunStatus === "ok" ? "active" : state?.lastRunStatus === "error" ? "error" : "idle" },
+          {
+            id: `${id}-trigger`, label: scheduleLabel, description: `Trigger: ${name}`,
+            type: "trigger", runtime: "openclaw",
+            x: 50, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+            status: enabled ? "active" : "idle",
+          },
+          {
+            id: `${id}-action`, label: name, description: prompt.slice(0, 80),
+            type: "action", runtime: "openclaw",
+            agentId, agentName: agentId === "main" ? "Growdor" : agentId,
+            tool: sessionKey.includes("discord") ? "Discord" : sessionKey.includes("slack") ? "Slack" : undefined,
+            x: 310, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+            status: state?.lastRunStatus === "ok" ? "active" : state?.lastRunStatus === "error" ? "error" : "idle",
+          },
         ];
 
-        if (delivery?.channel) {
-          nodes.push({ id: `${id}-delivery`, label: `${delivery.channel}`, description: `Deliver to ${delivery.to || delivery.channel}`, type: "service", service: (delivery.channel as string) || undefined, runtime: "openclaw", x: 570, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 }, status: "idle" });
+        if (deliveryChannel) {
+          nodes.push({
+            id: `${id}-delivery`, label: deliveryChannel,
+            description: `Deliver to ${deliveryTo || deliveryChannel}`,
+            type: "service", service: deliveryChannel, runtime: "openclaw",
+            tool: deliveryChannel,
+            x: 570, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+            status: "idle",
+          });
         }
 
         const edges: FlowEdge[] = [];
@@ -112,7 +136,7 @@ export default function AutomationFlow() {
           edges.push({ from: nodes[i].id, to: nodes[i + 1].id, animated: i === 0 });
         }
 
-        return { id, name: `⚡ ${name}`, description: `OpenClaw: ${scheduleLabel}`, enabled, runCount: 0, errorCount: 0, nodes, edges };
+        return { id, name: `⚡ ${name}`, description: `OpenClaw: ${scheduleLabel}`, enabled, runCount: 0, errorCount: 0, nodes, edges, source: "cron" as const };
       });
 
       const store = useAutomationStore.getState();

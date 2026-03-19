@@ -13,6 +13,10 @@ export interface FlowNode {
   type: "trigger" | "process" | "decision" | "action" | "output" | "service";
   service?: string;
   runtime?: AgentRuntime;
+  agentId?: string;    // WHO: which agent runs this step
+  agentName?: string;  // WHO: human-readable name
+  skillId?: string;    // WHAT: which skill is invoked
+  tool?: string;       // HOW: external tool/MCP used
   x: number;
   y: number;
   stats: {
@@ -23,6 +27,8 @@ export interface FlowNode {
   status: "active" | "idle" | "error";
   config?: NodeConfig;
 }
+
+export type WorkflowSource = "skill" | "cron" | "manual";
 
 export interface NodeConfig {
   params: Record<string, string>;
@@ -46,6 +52,7 @@ export interface Workflow {
   errorCount: number;
   nodes: FlowNode[];
   edges: FlowEdge[];
+  source?: WorkflowSource;
 }
 
 export interface NodeTemplate {

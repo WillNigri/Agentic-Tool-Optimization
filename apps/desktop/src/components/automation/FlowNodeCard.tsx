@@ -104,6 +104,32 @@ export default function FlowNodeCard({
           >
             {node.description}
           </p>
+          {/* WHO / WHAT / HOW secondary info */}
+          {(node.agentName || node.skillId || node.tool) && (
+            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap" style={{ fontSize: 9, lineHeight: "12px" }}>
+              {node.agentName && (
+                <span className="text-[#06b6d4] font-medium truncate">
+                  {node.agentName}
+                </span>
+              )}
+              {node.agentName && (node.skillId || node.tool) && (
+                <span className="text-[#8888a0]">→</span>
+              )}
+              {node.skillId && (
+                <span className="text-[#00FFB2] font-medium truncate">
+                  {node.skillId}
+                </span>
+              )}
+              {node.skillId && node.tool && (
+                <span className="text-[#8888a0]">→</span>
+              )}
+              {node.tool && (
+                <span className="text-[#f97316] font-medium truncate">
+                  {node.tool}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Stats row */}
