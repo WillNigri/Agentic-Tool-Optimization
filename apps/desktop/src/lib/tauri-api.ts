@@ -598,6 +598,11 @@ export async function openclawToggleCronJob(id: string, enable: boolean): Promis
   return invoke('openclaw_toggle_cron_job', { id, enable });
 }
 
+// ---- OpenClaw Skills ----
+export async function openclawListSkills(): Promise<LocalSkill[]> {
+  return invoke<LocalSkill[]>('openclaw_list_skills');
+}
+
 // ---- Context Files ----
 
 export interface ContextFile {

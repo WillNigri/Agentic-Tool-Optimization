@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe } from "lucide-react";
 import { getSkills, toggleSkill, type Skill } from "@/lib/api";
+import { openclawListSkills } from "@/lib/tauri-api";
 import { formatNumber, cn } from "@/lib/utils";
 import { analyzeSkillConflicts, type SkillConflict } from "@/lib/skill-similarity";
 import SkillDetailPanel from "./SkillDetailPanel";
@@ -39,11 +40,31 @@ export default function SkillsManager() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const queryClient = useQueryClient();
 
-  const { data: skills = [], isLoading, error } = useQuery({
+  const { data: localSkills = [], isLoading, error } = useQuery({
     queryKey: ["skills"],
     queryFn: getSkills,
     retry: false,
   });
+
+  // Fetch remote OpenClaw skills
+  const { data: ocSkills = [] } = useQuery({
+    queryKey: ["openclaw-skills-list"],
+    queryFn: async () => {
+      try {
+        return await openclawListSkills();
+      } catch {
+        return [];
+      }
+    },
+    retry: 1,
+  });
+
+  // Merge local + remote skills, dedup by name
+  const skills = useMemo(() => {
+    const localNames = new Set(localSkills.map((s) => s.name));
+    const newOc = ocSkills.filter((s) => !localNames.has(s.name));
+    return [...localSkills, ...newOc];
+  }, [localSkills, ocSkills]);
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>

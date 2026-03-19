@@ -2268,6 +2268,32 @@ async fn openclaw_toggle_cron_job(id: String, enable: bool) -> Result<serde_json
     openclaw_ssh_command(&format!("cron edit {} {} --json", id, flag))
 }
 
+// ── Remote OpenClaw Skills ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn openclaw_list_skills() -> Result<Vec<LocalSkill>, String> {
+    let result = openclaw_ssh_command("exec 'ls ~/.openclaw/workspace/skills/ 2>/dev/null'")?;
+    let text = result.as_str().unwrap_or("").trim().to_string();
+    if text.is_empty() { return Ok(Vec::new()); }
+
+    let skills: Vec<LocalSkill> = text.lines().filter(|l| !l.is_empty()).map(|name| {
+        LocalSkill {
+            id: format!("oc-skill-{}", name.trim()),
+            name: name.trim().to_string(),
+            description: format!("OpenClaw skill: {}", name.trim()),
+            file_path: format!("~/.openclaw/workspace/skills/{}", name.trim()),
+            scope: "personal".to_string(),
+            runtime: "openclaw".to_string(),
+            project: None,
+            token_count: 0,
+            enabled: true,
+            content_hash: "".to_string(),
+        }
+    }).collect();
+
+    Ok(skills)
+}
+
 // ── Context Files (SOUL.md, AGENTS.md, etc.) ─────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2422,6 +2448,7 @@ pub fn run() {
             save_runtime_config,
             load_runtime_config,
             test_runtime_connection,
+            openclaw_list_skills,
             list_context_files,
             read_context_file,
             write_context_file,

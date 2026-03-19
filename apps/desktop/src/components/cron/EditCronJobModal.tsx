@@ -17,8 +17,19 @@ type RunType = "system-event" | "agent-turn";
 type DeliveryType = "announce" | "none";
 
 function parseEverySchedule(schedule: string): { type: ScheduleType; amount: string; unit: EveryUnit; cron: string } {
+  // Handle "Every Nd/Nh/Nm" format from OpenClaw normalizer
+  const everyMatch = schedule.match(/^Every\s+(\d+)([dhm])$/i);
+  if (everyMatch) {
+    const units: Record<string, EveryUnit> = { d: "days", h: "hours", m: "minutes" };
+    return { type: "every", amount: everyMatch[1], unit: units[everyMatch[2]] || "hours", cron: "" };
+  }
+
+  // Handle "unknown" or empty
+  if (schedule === "unknown" || !schedule) {
+    return { type: "every", amount: "1", unit: "days", cron: "" };
+  }
+
   // Try to detect "every"-style patterns from cron expressions
-  // e.g. "*/30 * * * *" = every 30 minutes, "0 */2 * * *" = every 2 hours
   const minMatch = schedule.match(/^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$/);
   if (minMatch) return { type: "every", amount: minMatch[1], unit: "minutes", cron: schedule };
 

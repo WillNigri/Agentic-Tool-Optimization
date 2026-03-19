@@ -103,6 +103,10 @@ export default function AutomationFlow() {
         const deliveryChannel = (delivery?.channel as string) || "";
         const deliveryTo = (delivery?.to as string) || "";
 
+        // Parse numbered steps from prompt (1. Do X, 2. Do Y, etc.)
+        const promptSteps = prompt.match(/\d+\.\s+[^\n]+/g) || [];
+        const agentNameStr = agentId === "main" ? "Growdor" : agentId;
+
         const nodes: FlowNode[] = [
           {
             id: `${id}-trigger`, label: scheduleLabel, description: `Trigger: ${name}`,
@@ -110,23 +114,44 @@ export default function AutomationFlow() {
             x: 50, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
             status: enabled ? "active" : "idle",
           },
-          {
+        ];
+
+        if (promptSteps.length >= 2) {
+          // Multiple steps in the prompt — show each as a node
+          promptSteps.forEach((step, i) => {
+            const stepLabel = step.replace(/^\d+\.\s+/, "").slice(0, 40);
+            const isLast = i === promptSteps.length - 1;
+            nodes.push({
+              id: `${id}-step-${i}`, label: stepLabel, description: step.replace(/^\d+\.\s+/, "").slice(0, 80),
+              type: isLast ? "output" : i === 0 ? "action" : "process",
+              runtime: "openclaw",
+              agentId, agentName: agentNameStr,
+              x: 50 + (i + 1) * 230, y: 180,
+              stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+              status: state?.lastRunStatus === "ok" ? "active" : "idle",
+            });
+          });
+        } else {
+          // Single action node
+          nodes.push({
             id: `${id}-action`, label: name, description: prompt.slice(0, 80),
             type: "action", runtime: "openclaw",
-            agentId, agentName: agentId === "main" ? "Growdor" : agentId,
+            agentId, agentName: agentNameStr,
             tool: sessionKey.includes("discord") ? "Discord" : sessionKey.includes("slack") ? "Slack" : undefined,
             x: 310, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
             status: state?.lastRunStatus === "ok" ? "active" : state?.lastRunStatus === "error" ? "error" : "idle",
-          },
-        ];
+          });
+        }
 
         if (deliveryChannel) {
+          const lastNode = nodes[nodes.length - 1];
           nodes.push({
             id: `${id}-delivery`, label: deliveryChannel,
             description: `Deliver to ${deliveryTo || deliveryChannel}`,
             type: "service", service: deliveryChannel, runtime: "openclaw",
             tool: deliveryChannel,
-            x: 570, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+            x: lastNode.x + 230, y: 180,
+            stats: { executions: 0, errors: 0, avgTimeMs: 0 },
             status: "idle",
           });
         }
