@@ -40,7 +40,10 @@ interface CronJobDetailProps {
 
 export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
   const { t } = useTranslation();
-  const executions = useCronStore((s) => s.getJobExecutions(job.id));
+  const allExecutions = useCronStore((s) => s.executions);
+  const executions = allExecutions
+    .filter((e) => e.jobId === job.id)
+    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const retryExecution = useCronStore((s) => s.retryExecution);
   const deleteJob = useCronStore((s) => s.deleteJob);
   const toggleJob = useCronStore((s) => s.toggleJob);

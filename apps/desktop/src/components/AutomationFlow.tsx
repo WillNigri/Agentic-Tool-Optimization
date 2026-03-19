@@ -11,10 +11,11 @@ import NodePalette from "./automation/NodePalette";
 import NodeConfigPanel from "./automation/NodeConfigPanel";
 import FlowCanvas from "./automation/FlowCanvas";
 import ExecutionOverlay from "./automation/ExecutionOverlay";
-import { promptAgent, saveWorkflow as persistWorkflow } from "@/lib/tauri-api";
+import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/tauri-api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
 import type { SkillDetail } from "@/lib/tauri-api";
+import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./automation/types";
 
 export default function AutomationFlow() {
   const { t } = useTranslation();
@@ -72,6 +73,56 @@ export default function AutomationFlow() {
       });
     }
   }, [skills]);
+
+  // Also load OpenClaw cron jobs as workflows
+  useEffect(() => {
+    openclawListCronJobs().then((result) => {
+      const raw = (result as Record<string, unknown>)?.jobs ?? [];
+      if (!Array.isArray(raw) || raw.length === 0) return;
+
+      const ocWorkflows: WorkflowType[] = (raw as Record<string, unknown>[]).map((job) => {
+        const name = (job.name as string) || "Unnamed";
+        const id = `oc-wf-${job.id || name}`;
+        const prompt = ((job.payload as Record<string, unknown>)?.message as string) || "";
+        const schedule = job.schedule as Record<string, unknown> | undefined;
+        const delivery = job.delivery as Record<string, unknown> | undefined;
+        const state = job.state as Record<string, unknown> | undefined;
+        const enabled = job.enabled !== false;
+
+        // Schedule label
+        let scheduleLabel = "Scheduled";
+        if (schedule?.kind === "every" && schedule?.everyMs) {
+          const ms = schedule.everyMs as number;
+          scheduleLabel = ms >= 86400000 ? `Every ${Math.round(ms / 86400000)}d` : ms >= 3600000 ? `Every ${Math.round(ms / 3600000)}h` : `Every ${Math.round(ms / 60000)}m`;
+        } else if (schedule?.kind === "cron") {
+          scheduleLabel = (schedule.expression as string) || "Cron";
+        }
+
+        const nodes: FlowNode[] = [
+          { id: `${id}-trigger`, label: scheduleLabel, description: `Trigger: ${name}`, type: "trigger", runtime: "openclaw", x: 50, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 }, status: enabled ? "active" : "idle" },
+          { id: `${id}-action`, label: name, description: prompt.slice(0, 80), type: "action", runtime: "openclaw", x: 310, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 }, status: state?.lastRunStatus === "ok" ? "active" : state?.lastRunStatus === "error" ? "error" : "idle" },
+        ];
+
+        if (delivery?.channel) {
+          nodes.push({ id: `${id}-delivery`, label: `${delivery.channel}`, description: `Deliver to ${delivery.to || delivery.channel}`, type: "service", service: (delivery.channel as string) || undefined, runtime: "openclaw", x: 570, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 }, status: "idle" });
+        }
+
+        const edges: FlowEdge[] = [];
+        for (let i = 0; i < nodes.length - 1; i++) {
+          edges.push({ from: nodes[i].id, to: nodes[i + 1].id, animated: i === 0 });
+        }
+
+        return { id, name: `⚡ ${name}`, description: `OpenClaw: ${scheduleLabel}`, enabled, runCount: 0, errorCount: 0, nodes, edges };
+      });
+
+      const store = useAutomationStore.getState();
+      const existingIds = new Set(store.workflows.map((w) => w.id));
+      const newOc = ocWorkflows.filter((w) => !existingIds.has(w.id));
+      if (newOc.length > 0) {
+        store.loadWorkflows([...store.workflows, ...newOc]);
+      }
+    }).catch(() => { /* OpenClaw not connected, skip */ });
+  }, []);
 
   const workflow = getActiveWorkflow();
   const selectedNode = workflow.nodes.find((n) => n.id === selectedNodeId) || null;

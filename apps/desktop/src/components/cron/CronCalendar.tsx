@@ -103,9 +103,38 @@ function getCalendarDays(year: number, month: number, jobs: CronJob[], execution
 }
 
 function getJobsForDate(date: Date, jobs: CronJob[]): CronJob[] {
+  const dateStr = date.toISOString().slice(0, 10);
   return jobs.filter((job) => {
     if (!job.enabled) return false;
-    return matchesCronDate(job.schedule, date);
+
+    // Standard cron expression match
+    if (matchesCronDate(job.schedule, date)) return true;
+
+    // For non-cron schedules (OpenClaw "Every Nd/Nh" etc.), check lastRunAt/nextRunAt
+    if (job.lastRunAt && job.lastRunAt.slice(0, 10) === dateStr) return true;
+    if (job.nextRunAt && job.nextRunAt.slice(0, 10) === dateStr) return true;
+
+    // For "Every" schedules, estimate if this date would have a run
+    const everyMatch = job.schedule.match(/^Every (\d+)([dhm])$/);
+    if (everyMatch && job.lastRunAt) {
+      const amount = parseInt(everyMatch[1]);
+      const unit = everyMatch[2];
+      const intervalMs = unit === "d" ? amount * 86400000 : unit === "h" ? amount * 3600000 : amount * 60000;
+      const lastRun = new Date(job.lastRunAt).getTime();
+      const dayStart = new Date(dateStr).getTime();
+      const dayEnd = dayStart + 86400000;
+      // Check if any interval occurrence falls on this day
+      if (intervalMs >= 86400000) {
+        // Daily or longer: check if a run lands on this day
+        const diff = dayStart - lastRun;
+        if (diff >= 0 && diff % intervalMs < 86400000) return true;
+      } else {
+        // Shorter than a day: this job runs every day
+        return true;
+      }
+    }
+
+    return false;
   });
 }
 
@@ -114,7 +143,9 @@ function getExecutionsForDate(dateStr: string, executions: CronExecution[]): Cro
 }
 
 /** Get the scheduled time from a cron expression (HH:MM) */
-function getScheduledTime(schedule: string): string {
+function getScheduledTime(schedule: string | unknown): string {
+  if (typeof schedule !== "string") return "";
+  if (schedule.startsWith("Every ")) return schedule;
   const parsed = parseCron(schedule);
   if (!parsed) return "";
   const h = parsed.hour === "*" ? "--" : parsed.hour.padStart(2, "0");

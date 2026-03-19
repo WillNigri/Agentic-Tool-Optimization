@@ -27,6 +27,7 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [newName, setNewName] = useState("");
+  const [runtimeFilter, setRuntimeFilter] = useState<string>("all");
 
   const {
     mode,
@@ -167,10 +168,47 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
         <>
           <div className="fixed inset-0 z-40" onClick={() => setDropdownOpen(false)} />
           <div
-            className="absolute top-full left-4 mt-1 w-80 rounded-lg border border-[#2a2a3a] shadow-xl overflow-hidden z-50"
+            className="absolute top-full left-4 mt-1 w-80 max-h-[70vh] rounded-lg border border-[#2a2a3a] shadow-xl overflow-hidden flex flex-col z-50"
             style={{ background: "#16161e" }}
           >
-            {workflows.map((w) => {
+            {/* Runtime filter tabs */}
+            {(() => {
+              const runtimes = [...new Set(workflows.map((w) => w.nodes[0]?.runtime).filter(Boolean))];
+              if (runtimes.length <= 1) return null;
+              const COLORS: Record<string, string> = { claude: "#f97316", openclaw: "#06b6d4", codex: "#22c55e", hermes: "#a855f7" };
+              return (
+                <div className="flex items-center gap-1 px-3 py-2 border-b border-[#2a2a3a] shrink-0">
+                  <button
+                    onClick={() => setRuntimeFilter("all")}
+                    className={cn(
+                      "px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider rounded-md transition-colors",
+                      runtimeFilter === "all" ? "bg-[#00FFB215] text-[#00FFB2]" : "text-[#8888a0] hover:text-[#e8e8f0]"
+                    )}
+                  >
+                    All ({workflows.length})
+                  </button>
+                  {runtimes.map((rt) => {
+                    const count = workflows.filter((w) => w.nodes[0]?.runtime === rt).length;
+                    const c = COLORS[rt] || "#8888a0";
+                    return (
+                      <button
+                        key={rt}
+                        onClick={() => setRuntimeFilter(rt)}
+                        className={cn(
+                          "px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider rounded-md transition-colors",
+                          runtimeFilter === rt ? "text-[#e8e8f0]" : "text-[#8888a0] hover:text-[#e8e8f0]"
+                        )}
+                        style={runtimeFilter === rt ? { background: `${c}20`, color: c } : {}}
+                      >
+                        {rt} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+            <div className="overflow-y-auto flex-1">
+            {workflows.filter((w) => runtimeFilter === "all" || w.nodes[0]?.runtime === runtimeFilter).map((w) => {
               const services = [...new Set(w.nodes.filter((n) => n.service).map((n) => n.service!))];
               return (
                 <button
@@ -222,8 +260,9 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
               );
             })}
 
+            </div>
             {/* New workflow button */}
-            <div className="border-t border-[#2a2a3a]">
+            <div className="border-t border-[#2a2a3a] shrink-0">
               {showNewDialog ? (
                 <div className="p-3 flex gap-2">
                   <input
