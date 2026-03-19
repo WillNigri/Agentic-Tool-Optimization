@@ -1,100 +1,234 @@
 // ---------------------------------------------------------------------------
-// Auto-detect automation flows from skill content by parsing Step/Phase headers
+// Auto-detect automation flows from skill content by parsing Step/Phase headers.
+// Generic parser — works for any skill formatted with standard Step/Phase headers,
+// YAML frontmatter tools, conditional branches, and tool references.
 // ---------------------------------------------------------------------------
 
 import type { Workflow, FlowNode, FlowEdge } from "@/components/automation/types";
 import type { SkillDetail } from "@/lib/tauri-api";
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 interface ParsedStep {
   label: string;
   description: string;
-  original: string; // raw header text
+  original: string;       // raw header text
+  body: string;           // full text between this header and the next
+  condition: string | null; // e.g. "only if user said yes"
+  tools: string[];        // tools detected in the step body
+  hasHumanInput: boolean; // AskUserQuestion / approval gate detected
 }
 
+interface SkillFrontmatter {
+  name?: string;
+  tools: string[];  // allowed-tools from YAML frontmatter
+}
+
+// ---------------------------------------------------------------------------
+// Known tool / service catalog — used for detection in step content
+// ---------------------------------------------------------------------------
+
+const TOOL_CATALOG: Record<string, { label: string; service?: string }> = {
+  websearch:        { label: "WebSearch",        service: "websearch" },
+  webfetch:         { label: "WebFetch",         service: "webfetch" },
+  browse:           { label: "Browse",           service: "browse" },
+  bash:             { label: "Bash",             service: "bash" },
+  github:           { label: "GitHub",           service: "github" },
+  "gh ":            { label: "GitHub CLI",       service: "github" },
+  "git ":           { label: "Git",              service: "github" },
+  "create pr":      { label: "GitHub PR",        service: "github" },
+  slack:            { label: "Slack",            service: "slack" },
+  discord:          { label: "Discord",          service: "discord" },
+  telegram:         { label: "Telegram",         service: "telegram" },
+  email:            { label: "Email",            service: "email" },
+  resend:           { label: "Resend",           service: "resend" },
+  notion:           { label: "Notion",           service: "notion" },
+  linear:           { label: "Linear",           service: "linear" },
+  postgres:         { label: "PostgreSQL",       service: "postgres" },
+  redis:            { label: "Redis",            service: "redis" },
+  askuserquestion:  { label: "User Input",       service: undefined },
+};
+
+// Patterns indicating human involvement in a step
+const HUMAN_PATTERNS = [
+  /askuserquestion/i,
+  /ask\s+(?:the\s+)?user/i,
+  /user\s+approv/i,
+  /human\s+(?:review|approval|input)/i,
+  /wait\s+for\s+(?:user|human|confirmation)/i,
+  /confirm\s+with\s+(?:the\s+)?user/i,
+  /get\s+(?:user\s+)?approval/i,
+];
+
+// Patterns indicating a conditional/branching step (in header or body)
+const CONDITION_PATTERNS = [
+  /\(only if (.+?)\)/i,
+  /\(if (.+?)\)/i,
+  /\(when (.+?)\)/i,
+  /\(optional[:\s]*(.+?)\)/i,
+  /\(conditional[:\s]*(.+?)\)/i,
+];
+
+// Runtime → human-readable label
+const RUNTIME_LABELS: Record<string, string> = {
+  claude: "Claude Code", codex: "Codex", openclaw: "OpenClaw", hermes: "Hermes",
+};
+
+// ---------------------------------------------------------------------------
+// Frontmatter parser
+// ---------------------------------------------------------------------------
+
+function parseFrontmatter(content: string): SkillFrontmatter {
+  const fm: SkillFrontmatter = { tools: [] };
+  if (!content.startsWith("---")) return fm;
+
+  const endIdx = content.indexOf("\n---", 3);
+  if (endIdx < 0) return fm;
+
+  const block = content.slice(4, endIdx);
+
+  // Extract name
+  const nameMatch = block.match(/^name:\s*(.+)/m);
+  if (nameMatch) fm.name = nameMatch[1].trim();
+
+  // Extract allowed-tools (list format: "  - ToolName" or inline: "tools: A, B, C")
+  const toolLines: string[] = [];
+  const lines = block.split("\n");
+  let inToolSection = false;
+  for (const line of lines) {
+    if (/^(?:allowed-tools|tools)\s*:/i.test(line)) {
+      // Check inline value
+      const inline = line.replace(/^(?:allowed-tools|tools)\s*:\s*/i, "").trim();
+      if (inline && !inline.startsWith("|")) {
+        toolLines.push(...inline.split(",").map((t) => t.trim()).filter(Boolean));
+      }
+      inToolSection = true;
+      continue;
+    }
+    if (inToolSection) {
+      if (/^\s+-\s+/.test(line)) {
+        toolLines.push(line.replace(/^\s+-\s+/, "").trim());
+      } else if (/^\S/.test(line)) {
+        inToolSection = false;
+      }
+    }
+  }
+  fm.tools = toolLines;
+  return fm;
+}
+
+// ---------------------------------------------------------------------------
+// Step parser — extracts steps with full body, conditions, tools, human flags
+// ---------------------------------------------------------------------------
+
 /**
- * Parse a SKILL.md's content for sequential steps or phases.
- * Detects patterns like:
- *   ## Step 0: Detect base branch
- *   ## Phase 1: Root Cause Investigation
- *   ## Step 3.5: Pre-Landing Review
- *   ## Steps\n 1. Check email\n 2. Fix config
- *   1. Run git config\n 2. If not set, run...\n 3. Proceed
+ * Parse steps/phases from skill content. Returns enriched ParsedStep objects
+ * with body text, detected tools, conditions, and human involvement flags.
  */
-function parseStepsFromContent(content: string): ParsedStep[] {
+function parseStepsFromContent(content: string, frontmatterTools: string[]): ParsedStep[] {
   // Try header-based steps first (## Step N: / ## Phase N:)
-  const headerSteps = parseHeaderSteps(content);
+  const headerSteps = parseHeaderStepsEnriched(content, frontmatterTools);
   if (headerSteps.length >= 2) return headerSteps;
 
-  // Try numbered list items under a steps/workflow section or at top level
-  const listSteps = parseNumberedListSteps(content);
+  // Try numbered list items
+  const listSteps = parseNumberedListStepsEnriched(content, frontmatterTools);
   if (listSteps.length >= 2) return listSteps;
 
   return [];
 }
 
-/**
- * Parse "## Step N:" and "## Phase N:" headers.
- */
-function parseHeaderSteps(content: string): ParsedStep[] {
+function parseHeaderStepsEnriched(content: string, fmTools: string[]): ParsedStep[] {
   const steps: ParsedStep[] = [];
   const lines = content.split("\n");
 
+  // Find all step/phase header positions
+  const headerPositions: { idx: number; line: string }[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
-
-    const stepMatch = line.match(/^#{1,3}\s+(?:Step|Phase)\s+[\d.]+(?:\s*[:—–-]\s*(.+))?$/i);
-    if (stepMatch) {
-      const title = stepMatch[1]?.trim() || line.replace(/^#{1,3}\s+/, "");
-
-      if (title.toLowerCase() === "steps to reproduce") continue;
-      if (title.toLowerCase().startsWith("steps to")) continue;
-
-      let desc = "";
-      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-        const nextLine = lines[j].trim();
-        if (nextLine && !nextLine.startsWith("#") && !nextLine.startsWith("```")) {
-          desc = nextLine
-            .replace(/^\d+\.\s*/, "")
-            .replace(/\*\*/g, "")
-            .replace(/^[-*]\s*/, "")
-            .slice(0, 100);
-          break;
-        }
-      }
-
-      steps.push({ label: title, description: desc, original: line });
+    if (/^#{1,3}\s+(?:Step|Phase)\s+[\d.]+(?:\s*[:—–-]\s*(.+))?$/i.test(line)) {
+      if (line.toLowerCase().includes("steps to reproduce")) continue;
+      if (line.toLowerCase().includes("steps to ")) continue;
+      headerPositions.push({ idx: i, line });
     }
+  }
+
+  for (let h = 0; h < headerPositions.length; h++) {
+    const { idx, line } = headerPositions[h];
+    const nextIdx = h + 1 < headerPositions.length ? headerPositions[h + 1].idx : lines.length;
+
+    // Extract title from header
+    const titleMatch = line.match(/^#{1,3}\s+(?:Step|Phase)\s+[\d.]+\s*[:—–-]\s*(.+)$/i);
+    let title = titleMatch?.[1]?.trim() || line.replace(/^#{1,3}\s+/, "");
+
+    // Extract condition from title parenthetical
+    let condition: string | null = null;
+    for (const pat of CONDITION_PATTERNS) {
+      const cm = title.match(pat);
+      if (cm) {
+        condition = cm[1].trim();
+        title = title.replace(pat, "").trim();
+        break;
+      }
+    }
+
+    // Get body text between this header and the next
+    const bodyLines = lines.slice(idx + 1, nextIdx);
+    const body = bodyLines.join("\n");
+
+    // First non-empty, non-code, non-heading line as description
+    let desc = "";
+    for (const bl of bodyLines) {
+      const trimmed = bl.trim();
+      if (trimmed && !trimmed.startsWith("#") && !trimmed.startsWith("```")) {
+        desc = trimmed
+          .replace(/^\d+\.\s*/, "")
+          .replace(/\*\*/g, "")
+          .replace(/^[-*]\s*/, "")
+          .slice(0, 100);
+        break;
+      }
+    }
+
+    // Detect tools used in this step's body
+    const tools = detectToolsInText(body, fmTools);
+
+    // Detect human involvement
+    const hasHumanInput = HUMAN_PATTERNS.some((p) => p.test(body)) ||
+      HUMAN_PATTERNS.some((p) => p.test(title));
+
+    // Also check for conditions in body (e.g. "If the user wants competitive research:")
+    if (!condition) {
+      const bodyCondition = body.match(/^(?:if|only if|when)\s+(?:the\s+)?user\s+(.{5,60}?)(?:[:.]\s)/im);
+      if (bodyCondition) {
+        condition = bodyCondition[0].replace(/[:.]\s*$/, "").trim();
+      }
+    }
+
+    steps.push({ label: title, description: desc, original: line, body, condition, tools, hasHumanInput });
   }
 
   return steps;
 }
 
-/**
- * Parse numbered list items (1. 2. 3.) as steps.
- * Looks for them under ## Steps / ## Workflow / ## Process headers,
- * or as top-level numbered items after the frontmatter/title section.
- */
-function parseNumberedListSteps(content: string): ParsedStep[] {
+function parseNumberedListStepsEnriched(content: string, fmTools: string[]): ParsedStep[] {
   const steps: ParsedStep[] = [];
   const lines = content.split("\n");
 
-  // Find a section header that signals steps, or scan the whole body
+  // Find section header or start after frontmatter
   let startIdx = 0;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (/^#{1,3}\s+(?:Steps|Workflow|Process|Procedure|Instructions|How.?to)/i.test(line)) {
+    if (/^#{1,3}\s+(?:Steps|Workflow|Process|Procedure|Instructions|How.?to)/i.test(lines[i].trim())) {
       startIdx = i + 1;
       break;
     }
   }
-
-  // If no explicit section found, start after frontmatter and first heading
   if (startIdx === 0) {
-    let pastFrontmatter = false;
-    let pastTitle = false;
+    let pastFrontmatter = false, pastTitle = false;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      if (i === 0 && line === "---") { pastFrontmatter = false; continue; }
+      if (i === 0 && line === "---") { continue; }
       if (!pastFrontmatter && line === "---") { pastFrontmatter = true; continue; }
       if (pastFrontmatter && !pastTitle && line.startsWith("#")) { pastTitle = true; continue; }
       if (pastFrontmatter && pastTitle) { startIdx = i; break; }
@@ -103,109 +237,258 @@ function parseNumberedListSteps(content: string): ParsedStep[] {
 
   for (let i = startIdx; i < lines.length; i++) {
     const line = lines[i].trim();
-
-    // Stop at the next heading (a different section)
     if (line.startsWith("#") && steps.length > 0) break;
 
-    // Match "N. Description" (numbered list items)
     const numMatch = line.match(/^(\d+)\.\s+(.+)/);
     if (numMatch) {
-      const rawText = numMatch[2].trim();
-      // Clean markdown: remove backticks, bold, inline code blocks
-      const label = rawText
-        .replace(/`[^`]+`/g, (m) => m.slice(1, -1)) // unwrap inline code
-        .replace(/\*\*/g, "")
-        .slice(0, 80);
+      let rawText = numMatch[2].trim()
+        .replace(/`[^`]+`/g, (m) => m.slice(1, -1))
+        .replace(/\*\*/g, "");
 
-      // Get continuation lines as description
-      let desc = "";
-      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-        const nextLine = lines[j].trim();
-        if (!nextLine || nextLine.startsWith("#") || /^\d+\.\s/.test(nextLine)) break;
-        if (nextLine.startsWith("```")) break;
-        if (!desc) {
-          desc = nextLine
-            .replace(/\*\*/g, "")
-            .replace(/^[-*]\s*/, "")
-            .replace(/`[^`]+`/g, (m) => m.slice(1, -1))
-            .slice(0, 100);
+      // Check for condition
+      let condition: string | null = null;
+      for (const pat of CONDITION_PATTERNS) {
+        const cm = rawText.match(pat);
+        if (cm) {
+          condition = cm[1].trim();
+          rawText = rawText.replace(pat, "").trim();
+          break;
         }
       }
 
-      steps.push({ label, description: desc, original: line });
+      // Continuation lines as body
+      const bodyLines: string[] = [];
+      for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
+        const next = lines[j].trim();
+        if (!next || next.startsWith("#") || /^\d+\.\s/.test(next)) break;
+        if (next.startsWith("```")) break;
+        bodyLines.push(next);
+      }
+      const body = bodyLines.join("\n");
+      const desc = bodyLines[0]
+        ?.replace(/\*\*/g, "").replace(/^[-*]\s*/, "")
+        .replace(/`[^`]+`/g, (m) => m.slice(1, -1)).slice(0, 100) || "";
+
+      const tools = detectToolsInText(rawText + "\n" + body, fmTools);
+      const hasHumanInput = HUMAN_PATTERNS.some((p) => p.test(rawText + " " + body));
+
+      steps.push({ label: rawText.slice(0, 80), description: desc, original: line, body, condition, tools, hasHumanInput });
     }
   }
 
   return steps;
 }
 
-/**
- * Infer node type from step label/description.
- */
-function inferNodeType(label: string, _desc: string, index: number, total: number): FlowNode["type"] {
-  const lower = label.toLowerCase();
+// ---------------------------------------------------------------------------
+// Tool detection — scans text for known tool names and frontmatter tool refs
+// ---------------------------------------------------------------------------
+
+function detectToolsInText(text: string, frontmatterTools: string[]): string[] {
+  const lower = text.toLowerCase();
+  const found = new Map<string, string>(); // service → label
+
+  // Match against known tool catalog
+  for (const [key, info] of Object.entries(TOOL_CATALOG)) {
+    if (lower.includes(key)) {
+      const svc = info.service || key;
+      if (!found.has(svc)) found.set(svc, info.label);
+    }
+  }
+
+  // Also check frontmatter tools mentioned in the step body
+  for (const t of frontmatterTools) {
+    const tLower = t.toLowerCase();
+    if (lower.includes(tLower) && !found.has(tLower)) {
+      const catalogMatch = TOOL_CATALOG[tLower];
+      if (catalogMatch) {
+        found.set(catalogMatch.service || tLower, catalogMatch.label);
+      }
+    }
+  }
+
+  return [...found.values()];
+}
+
+// ---------------------------------------------------------------------------
+// Node type inference
+// ---------------------------------------------------------------------------
+
+function inferNodeType(step: ParsedStep, index: number, total: number): FlowNode["type"] {
+  // Conditional steps are decision nodes
+  if (step.condition) return "decision";
+
+  const lower = step.label.toLowerCase();
 
   if (index === 0) return "trigger";
   if (index === total - 1) {
-    if (lower.includes("report") || lower.includes("output") || lower.includes("commit") || lower.includes("push")) return "output";
+    if (lower.match(/report|output|commit|push|write|confirm|deliver/)) return "output";
   }
 
-  if (lower.includes("check") || lower.includes("review") || lower.includes("verify") || lower.includes("audit") || lower.includes("triage") || lower.includes("gate")) return "decision";
-  if (lower.includes("fix") || lower.includes("run") || lower.includes("test") || lower.includes("execute") || lower.includes("implement")) return "action";
-  if (lower.includes("create pr") || lower.includes("github") || lower.includes("push")) return "service";
+  if (lower.match(/check|review|verify|audit|triage|gate|pre-?check/)) return "decision";
+  if (lower.match(/fix|run|test|execute|implement|build|generate/)) return "action";
+  if (lower.match(/create pr|github|push|deploy|notify|send/)) return "service";
 
   return "process";
 }
 
-/**
- * Infer service from step label.
- */
 function inferService(label: string): string | undefined {
   const lower = label.toLowerCase();
-  if (lower.includes("pr") || lower.includes("github") || lower.includes("branch") || lower.includes("push") || lower.includes("diff")) return "github";
-  if (lower.includes("slack") || lower.includes("notify")) return "slack";
+  if (lower.match(/\bpr\b|github|branch|push|diff/)) return "github";
+  if (lower.match(/slack|notify/)) return "slack";
+  if (lower.match(/telegram/)) return "telegram";
+  if (lower.match(/email|resend/)) return "email";
+  if (lower.match(/discord/)) return "discord";
   return undefined;
 }
 
-/**
- * Convert a skill with its full content to a visual workflow.
- * Returns null if the skill has no detectable steps/phases.
- */
-export function skillToWorkflow(skill: SkillDetail): Workflow | null {
-  const steps = parseStepsFromContent(skill.content);
+// ---------------------------------------------------------------------------
+// Workflow builder — converts parsed steps into a visual graph
+// ---------------------------------------------------------------------------
 
-  // Need at least 2 steps to form a flow
+export function skillToWorkflow(skill: SkillDetail): Workflow | null {
+  const fm = parseFrontmatter(skill.content);
+  const steps = parseStepsFromContent(skill.content, fm.tools);
+
   if (steps.length < 2) return null;
 
-  // Cap at 12 steps for visual clarity (skip sub-steps like 3.25, 3.5)
+  // Cap at 12 steps for visual clarity
   const mainSteps = steps.length > 12
     ? steps.filter((_, i) => i % Math.ceil(steps.length / 12) === 0 || i === steps.length - 1).slice(0, 12)
     : steps;
 
-  const nodes: FlowNode[] = mainSteps.map((step, i) => {
-    const nodeType = inferNodeType(step.label, step.description, i, mainSteps.length);
-    return {
-      id: `${skill.id}-step-${i}`,
-      label: step.label,
-      description: step.description,
+  const runtimeName = (skill.runtime as string) || "claude";
+  const agentLabel = RUNTIME_LABELS[runtimeName] || runtimeName.charAt(0).toUpperCase() + runtimeName.slice(1);
+
+  // Layout constants
+  const ROW_HOW = 50;       // top row: tools/services (HOW)
+  const ROW_WHAT = 180;     // middle row: action steps (WHAT)
+  const ROW_WHO = 310;      // bottom row: agent (WHO)
+  const COL_START = 50;
+  const COL_SPACING = 230;
+
+  const nodes: FlowNode[] = [];
+  const edges: FlowEdge[] = [];
+
+  // Track column offsets — conditional branches shift columns
+  let col = COL_START;
+
+  mainSteps.forEach((step, i) => {
+    const nodeType = inferNodeType(step, i, mainSteps.length);
+    const labelService = inferService(step.label);
+    const stepId = `${skill.id}-step-${i}`;
+
+    // ── WHAT row: action step node ──
+    nodes.push({
+      id: stepId,
+      label: step.label.slice(0, 40),
+      description: step.description || step.label.slice(0, 80),
       type: nodeType,
-      service: inferService(step.label),
+      service: labelService,
       runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
-      x: 50 + i * 230,
-      y: 180,
+      x: col,
+      y: ROW_WHAT,
       stats: { executions: 0, errors: 0, avgTimeMs: 0 },
       status: "idle",
-    };
+    });
+
+    // Horizontal edge from previous step
+    if (i > 0) {
+      const prevStepId = `${skill.id}-step-${i - 1}`;
+      const prevStep = mainSteps[i - 1];
+
+      if (step.condition) {
+        // Conditional: edge from previous step with condition label
+        edges.push({
+          from: prevStepId,
+          to: stepId,
+          label: step.condition.slice(0, 30),
+          animated: false,
+        });
+      } else if (prevStep.condition) {
+        // Coming after a conditional step — this is the continuation path
+        edges.push({
+          from: prevStepId,
+          to: stepId,
+          animated: false,
+        });
+      } else {
+        edges.push({
+          from: `${skill.id}-step-${i - 1}`,
+          to: stepId,
+          animated: i === 1,
+        });
+      }
+    }
+
+    // ── HOW row: tool nodes (from step body detection + label service) ──
+    const stepTools = step.tools.length > 0
+      ? step.tools
+      : labelService
+        ? [labelService.charAt(0).toUpperCase() + labelService.slice(1)]
+        : [];
+
+    // Deduplicate — show at most 2 tools per step for visual clarity
+    const uniqueTools = [...new Set(stepTools)].slice(0, 2);
+
+    uniqueTools.forEach((toolLabel, tIdx) => {
+      const toolId = `${skill.id}-tool-${i}-${tIdx}`;
+      const toolService = Object.entries(TOOL_CATALOG)
+        .find(([, v]) => v.label === toolLabel)?.[1]?.service
+        || labelService
+        || toolLabel.toLowerCase();
+
+      nodes.push({
+        id: toolId,
+        label: toolLabel,
+        description: `Via ${toolLabel}`,
+        type: "service",
+        service: toolService,
+        runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
+        tool: toolLabel,
+        x: col + tIdx * 120,
+        y: ROW_HOW,
+        stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+        status: "idle",
+      });
+      edges.push({ from: toolId, to: stepId });
+    });
+
+    // ── WHO row: human involvement nodes ──
+    if (step.hasHumanInput) {
+      const humanId = `${skill.id}-human-${i}`;
+      nodes.push({
+        id: humanId,
+        label: "Human Approval",
+        description: "User input or approval required",
+        type: "decision",
+        runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
+        agentName: "Human",
+        x: col,
+        y: ROW_WHO,
+        stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+        status: "idle",
+      });
+      edges.push({ from: humanId, to: stepId });
+    }
+
+    col += COL_SPACING;
   });
 
-  const edges: FlowEdge[] = [];
-  for (let i = 0; i < nodes.length - 1; i++) {
-    edges.push({
-      from: nodes[i].id,
-      to: nodes[i + 1].id,
-      animated: i === 0,
-    });
-  }
+  // Bottom row: agent node (WHO) — connected to first step
+  const agentNodeId = `${skill.id}-agent`;
+  nodes.push({
+    id: agentNodeId,
+    label: agentLabel,
+    description: `Runtime: ${runtimeName}`,
+    type: "process",
+    runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
+    agentName: agentLabel,
+    x: COL_START,
+    y: ROW_WHO + (mainSteps[0]?.hasHumanInput ? 130 : 0),
+    stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+    status: "active",
+  });
+  edges.push({ from: agentNodeId, to: `${skill.id}-step-0` });
 
   return {
     id: `skill-${skill.id}`,
@@ -222,7 +505,6 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
 
 /**
  * Generate workflows from all skills that have detectable automation steps.
- * Requires full SkillDetail (with content) for each skill.
  */
 export function generateWorkflowsFromSkills(skills: SkillDetail[]): Workflow[] {
   return skills

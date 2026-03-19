@@ -100,65 +100,131 @@ export default function AutomationFlow() {
 
         const agentId = (job.agentId as string) || "main";
         const sessionKey = (job.sessionKey as string) || "";
-        const deliveryChannel = (delivery?.channel as string) || "";
+        const rawDeliveryChannel = (delivery?.channel as string) || "";
         const deliveryTo = (delivery?.to as string) || "";
+
+        // Normalize delivery channel — infer from channel name, `to` field, or delivery metadata
+        const DELIVERY_MAP: Record<string, string> = {
+          telegram: "telegram", tg: "telegram",
+          email: "email", resend: "resend",
+          slack: "slack", discord: "discord",
+          announce: "announce", webhook: "webhook",
+        };
+        function resolveDeliveryChannel(channel: string, to: string): string {
+          const lower = channel.toLowerCase();
+          if (DELIVERY_MAP[lower]) return DELIVERY_MAP[lower];
+          // Infer from `to` field patterns
+          if (to.startsWith("chat:") || to.includes("telegram")) return "telegram";
+          if (to.includes("@") && to.includes(".")) return "email";
+          if (to.startsWith("#") || to.includes("slack")) return "slack";
+          // If channel is a generic placeholder like "last", skip it
+          if (["last", "none", "stdout", ""].includes(lower)) return "";
+          return channel;
+        }
+        const deliveryChannel = resolveDeliveryChannel(rawDeliveryChannel, deliveryTo);
 
         // Parse numbered steps from prompt (1. Do X, 2. Do Y, etc.)
         const promptSteps = prompt.match(/\d+\.\s+[^\n]+/g) || [];
         const agentNameStr = agentId === "main" ? "Growdor" : agentId;
 
-        const nodes: FlowNode[] = [
-          {
-            id: `${id}-trigger`, label: scheduleLabel, description: `Trigger: ${name}`,
-            type: "trigger", runtime: "openclaw",
-            x: 50, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
-            status: enabled ? "active" : "idle",
-          },
-        ];
-
-        if (promptSteps.length >= 2) {
-          // Multiple steps in the prompt — show each as a node
-          promptSteps.forEach((step, i) => {
-            const stepLabel = step.replace(/^\d+\.\s+/, "").slice(0, 40);
-            const isLast = i === promptSteps.length - 1;
-            nodes.push({
-              id: `${id}-step-${i}`, label: stepLabel, description: step.replace(/^\d+\.\s+/, "").slice(0, 80),
-              type: isLast ? "output" : i === 0 ? "action" : "process",
-              runtime: "openclaw",
-              agentId, agentName: agentNameStr,
-              x: 50 + (i + 1) * 230, y: 180,
-              stats: { executions: 0, errors: 0, avgTimeMs: 0 },
-              status: state?.lastRunStatus === "ok" ? "active" : "idle",
-            });
-          });
-        } else {
-          // Single action node
-          nodes.push({
-            id: `${id}-action`, label: name, description: prompt.slice(0, 80),
-            type: "action", runtime: "openclaw",
-            agentId, agentName: agentNameStr,
-            tool: sessionKey.includes("discord") ? "Discord" : sessionKey.includes("slack") ? "Slack" : undefined,
-            x: 310, y: 180, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
-            status: state?.lastRunStatus === "ok" ? "active" : state?.lastRunStatus === "error" ? "error" : "idle",
-          });
+        // Detect tools/APIs mentioned in prompt text
+        const KNOWN_TOOLS: Record<string, string> = {
+          "resend": "Resend API", "email": "Email API", "gh cli": "GitHub CLI", "gh api": "GitHub API",
+          "github": "GitHub", "discord": "Discord", "slack": "Slack", "twitter": "X/Twitter",
+          "notion": "Notion", "linear": "Linear", "postgres": "PostgreSQL", "redis": "Redis",
+          "http.server": "HTTP Server", "puppeteer": "Browser", "chromium": "Browser",
+        };
+        function detectTools(text: string): string[] {
+          const lower = text.toLowerCase();
+          return Object.entries(KNOWN_TOOLS)
+            .filter(([key]) => lower.includes(key))
+            .map(([, label]) => label);
         }
 
-        if (deliveryChannel) {
-          const lastNode = nodes[nodes.length - 1];
+        // Layout constants — 3 rows
+        const ROW_TOOLS = 50;    // top row: APIs/tools
+        const ROW_ACTIONS = 180; // middle row: action steps
+        const ROW_AGENTS = 310;  // bottom row: agents
+        const COL_START = 50;
+        const COL_SPACING = 230;
+
+        const nodes: FlowNode[] = [];
+        const edges: FlowEdge[] = [];
+
+        // Trigger node (left, on action row)
+        nodes.push({
+          id: `${id}-trigger`, label: scheduleLabel, description: `Trigger: ${name}`,
+          type: "trigger", runtime: "openclaw",
+          x: COL_START, y: ROW_ACTIONS, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+          status: enabled ? "active" : "idle",
+        });
+
+        // Build action steps
+        const steps = promptSteps.length >= 2
+          ? promptSteps.map((s) => s.replace(/^\d+\.\s+/, ""))
+          : [prompt || name];
+
+        steps.forEach((stepText, i) => {
+          const col = COL_START + (i + 1) * COL_SPACING;
+          const stepLabel = stepText.slice(0, 40);
+          const isLast = i === steps.length - 1;
+          const stepId = `${id}-step-${i}`;
+
+          // Middle row: action step (WHAT)
           nodes.push({
-            id: `${id}-delivery`, label: deliveryChannel,
+            id: stepId, label: stepLabel, description: stepText.slice(0, 80),
+            type: isLast && !deliveryChannel ? "output" : i === 0 ? "action" : "process",
+            runtime: "openclaw",
+            x: col, y: ROW_ACTIONS, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+            status: state?.lastRunStatus === "ok" ? "active" : "idle",
+          });
+
+          // Connect horizontally
+          const prevId = i === 0 ? `${id}-trigger` : `${id}-step-${i - 1}`;
+          edges.push({ from: prevId, to: stepId, animated: i === 0 });
+
+          // Top row: detected tools for this step (HOW)
+          const stepTools = detectTools(stepText);
+          if (stepTools.length > 0) {
+            const toolId = `${id}-tool-${i}`;
+            nodes.push({
+              id: toolId, label: stepTools[0], description: stepTools.join(", "),
+              type: "service", service: stepTools[0].toLowerCase().split(" ")[0],
+              runtime: "openclaw", tool: stepTools[0],
+              x: col, y: ROW_TOOLS, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+              status: "idle",
+            });
+            edges.push({ from: toolId, to: stepId });
+          }
+
+          // Bottom row: agent (WHO) — show once at first step
+          if (i === 0) {
+            const agentNodeId = `${id}-agent`;
+            nodes.push({
+              id: agentNodeId, label: agentNameStr, description: `Agent: ${agentId}`,
+              type: "process", runtime: "openclaw",
+              agentName: agentNameStr,
+              x: col, y: ROW_AGENTS, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+              status: "active",
+            });
+            edges.push({ from: agentNodeId, to: stepId });
+          }
+        });
+
+        // Delivery node (end of action row)
+        if (deliveryChannel) {
+          const lastStepX = COL_START + steps.length * COL_SPACING;
+          const deliveryId = `${id}-delivery`;
+          nodes.push({
+            id: deliveryId, label: deliveryChannel,
             description: `Deliver to ${deliveryTo || deliveryChannel}`,
             type: "service", service: deliveryChannel, runtime: "openclaw",
             tool: deliveryChannel,
-            x: lastNode.x + 230, y: 180,
-            stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+            x: lastStepX, y: ROW_ACTIONS, stats: { executions: 0, errors: 0, avgTimeMs: 0 },
             status: "idle",
           });
-        }
-
-        const edges: FlowEdge[] = [];
-        for (let i = 0; i < nodes.length - 1; i++) {
-          edges.push({ from: nodes[i].id, to: nodes[i + 1].id, animated: i === 0 });
+          const lastStepId = `${id}-step-${steps.length - 1}`;
+          edges.push({ from: lastStepId, to: deliveryId });
         }
 
         return { id, name: `⚡ ${name}`, description: `OpenClaw: ${scheduleLabel}`, enabled, runCount: 0, errorCount: 0, nodes, edges, source: "cron" as const };

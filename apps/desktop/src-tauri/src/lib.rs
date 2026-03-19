@@ -2098,8 +2098,8 @@ fn load_openclaw_ssh_config() -> Result<(String, u64, String, Option<String>), S
     Ok((host, port, user, key_path))
 }
 
-/// Run an openclaw CLI command via SSH and return the JSON output
-fn openclaw_ssh_command(subcmd: &str) -> Result<serde_json::Value, String> {
+/// Build the base SSH command for OpenClaw
+fn openclaw_ssh_base() -> Result<(std::process::Command, String, u64, String), String> {
     let (host, port, user, key_path) = load_openclaw_ssh_config()?;
     let user_path = get_user_path();
     let mut cmd = std::process::Command::new("ssh");
@@ -2108,11 +2108,14 @@ fn openclaw_ssh_command(subcmd: &str) -> Result<serde_json::Value, String> {
     if let Some(ref key) = key_path {
         cmd.args(["-i", key]);
     }
-    cmd.args([
-        "-p", &port.to_string(),
-        &format!("{}@{}", user, host),
-        &format!("openclaw {} 2>/dev/null", subcmd),
-    ]);
+    cmd.args(["-p", &port.to_string(), &format!("{}@{}", user, host)]);
+    Ok((cmd, host, port, user))
+}
+
+/// Run an openclaw CLI command via SSH and return the JSON output
+fn openclaw_ssh_command(subcmd: &str) -> Result<serde_json::Value, String> {
+    let (mut cmd, ..) = openclaw_ssh_base()?;
+    cmd.arg(format!("openclaw {} 2>/dev/null", subcmd));
     let output = cmd.output().map_err(|e| format!("SSH failed: {}", e))?;
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2120,6 +2123,19 @@ fn openclaw_ssh_command(subcmd: &str) -> Result<serde_json::Value, String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("OpenClaw command failed: {}", stderr.trim()))
+    }
+}
+
+/// Run a raw shell command via SSH and return plain text output
+fn openclaw_ssh_raw(shell_cmd: &str) -> Result<String, String> {
+    let (mut cmd, ..) = openclaw_ssh_base()?;
+    cmd.arg(shell_cmd);
+    let output = cmd.output().map_err(|e| format!("SSH failed: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("SSH command failed: {}", stderr.trim()))
     }
 }
 
@@ -2272,24 +2288,63 @@ async fn openclaw_toggle_cron_job(id: String, enable: bool) -> Result<serde_json
 
 #[tauri::command]
 async fn openclaw_list_skills() -> Result<Vec<LocalSkill>, String> {
-    let result = openclaw_ssh_command("exec 'ls ~/.openclaw/workspace/skills/ 2>/dev/null'")?;
-    let text = result.as_str().unwrap_or("").trim().to_string();
-    if text.is_empty() { return Ok(Vec::new()); }
+    let mut skills = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    let skills: Vec<LocalSkill> = text.lines().filter(|l| !l.is_empty()).map(|name| {
-        LocalSkill {
-            id: format!("oc-skill-{}", name.trim()),
-            name: name.trim().to_string(),
-            description: format!("OpenClaw skill: {}", name.trim()),
-            file_path: format!("~/.openclaw/workspace/skills/{}", name.trim()),
-            scope: "personal".to_string(),
-            runtime: "openclaw".to_string(),
-            project: None,
-            token_count: 0,
-            enabled: true,
-            content_hash: "".to_string(),
+    // Scan multiple known OpenClaw skill directories
+    let dirs = [
+        "~/.openclaw/skills",
+        "~/.openclaw/workspace/skills",
+    ];
+
+    for dir in &dirs {
+        let cmd = format!("ls {} 2>/dev/null", dir);
+        if let Ok(text) = openclaw_ssh_raw(&cmd) {
+            for name in text.lines().filter(|l| !l.is_empty()) {
+                let name = name.trim().to_string();
+                if seen.contains(&name) { continue; }
+                seen.insert(name.clone());
+                skills.push(LocalSkill {
+                    id: format!("oc-skill-{}", name),
+                    name: name.clone(),
+                    description: format!("OpenClaw skill: {}", name),
+                    file_path: format!("{}/{}", dir, name),
+                    scope: "personal".to_string(),
+                    runtime: "openclaw".to_string(),
+                    project: None,
+                    token_count: 0,
+                    enabled: true,
+                    content_hash: "".to_string(),
+                });
+            }
         }
-    }).collect();
+    }
+
+    // Also detect pseudo-skills from AGENTS.md, SOUL.md, TOOLS.md
+    let special_files = ["AGENTS.md", "SOUL.md", "TOOLS.md"];
+    for f in &special_files {
+        let cmd = format!("test -f ~/.openclaw/workspace/{} && echo exists", f);
+        if let Ok(text) = openclaw_ssh_raw(&cmd) {
+            if text.contains("exists") {
+                let name = f.trim_end_matches(".md").to_lowercase();
+                if !seen.contains(&name) {
+                    seen.insert(name.clone());
+                    skills.push(LocalSkill {
+                        id: format!("oc-skill-{}", name),
+                        name,
+                        description: format!("OpenClaw context: {}", f),
+                        file_path: format!("~/.openclaw/workspace/{}", f),
+                        scope: "personal".to_string(),
+                        runtime: "openclaw".to_string(),
+                        project: None,
+                        token_count: 0,
+                        enabled: true,
+                        content_hash: "".to_string(),
+                    });
+                }
+            }
+        }
+    }
 
     Ok(skills)
 }
