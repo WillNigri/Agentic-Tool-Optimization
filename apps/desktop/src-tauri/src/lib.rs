@@ -573,23 +573,20 @@ fn get_local_skills(db: State<'_, DbState>) -> Result<Vec<LocalSkill>, String> {
 fn get_skill_detail(db: State<'_, DbState>, id: String) -> Result<SkillDetail, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    // Scan all directories — just scan Claude dirs for detail lookup since
-    // the skill ID will only match one location regardless
+    // Reuse the same scanning logic as get_local_skills so we find skills
+    // from all discovered projects (not just CWD-based project_root)
     let mut all_skills = Vec::new();
-    // Claude
+    // Claude personal + enterprise
     all_skills.extend(collect_skills(&claude_home().join("skills"), "personal", "claude", &conn));
-    all_skills.extend(collect_skills(&project_root().join(".claude").join("skills"), "project", "claude", &conn));
     all_skills.extend(collect_skills(&PathBuf::from("/etc/claude/skills"), "enterprise", "claude", &conn));
-    // Codex
+    // Codex personal
     let codex_home = PathBuf::from(std::env::var("CODEX_HOME").unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
     all_skills.extend(collect_skills(&codex_home.join("skills"), "personal", "codex", &conn));
-    all_skills.extend(collect_skills(&project_root().join(".agents").join("skills"), "project", "codex", &conn));
-    all_skills.extend(collect_skills(&project_root().join(".codex").join("skills"), "project", "codex", &conn));
-    // OpenClaw
+    // OpenClaw personal
     let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
     all_skills.extend(collect_skills(&oc_home.join("skills"), "personal", "openclaw", &conn));
     all_skills.extend(collect_skills(&oc_home.join("workspace").join("skills"), "personal", "openclaw", &conn));
-    // Hermes
+    // Hermes personal
     let hermes_skills = home_dir().join(".hermes").join("skills");
     all_skills.extend(collect_skills(&hermes_skills, "personal", "hermes", &conn));
     if hermes_skills.exists() {
@@ -600,6 +597,13 @@ fn get_skill_detail(db: State<'_, DbState>, id: String) -> Result<SkillDetail, S
                 }
             }
         }
+    }
+    // Project skills from ALL discovered projects
+    let projects = discover_project_roots();
+    for proj in &projects {
+        all_skills.extend(collect_skills(&proj.join(".claude").join("skills"), "project", "claude", &conn));
+        all_skills.extend(collect_skills(&proj.join(".agents").join("skills"), "project", "codex", &conn));
+        all_skills.extend(collect_skills(&proj.join(".codex").join("skills"), "project", "codex", &conn));
     }
 
     let skill = all_skills.iter().find(|s| s.id == id)
