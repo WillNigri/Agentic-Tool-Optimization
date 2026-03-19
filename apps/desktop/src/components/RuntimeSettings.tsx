@@ -145,7 +145,9 @@ export default function RuntimeSettings() {
         if (raw) {
           try {
             const parsed = JSON.parse(raw);
-            updateState(rt.id, { config: parsed });
+            // If config has SSH host set, mark as potentially connected
+            const hasConfig = parsed.sshHost || parsed.path || parsed.endpoint;
+            updateState(rt.id, { config: parsed, ...(hasConfig ? { status: "connected" as const } : {}) });
           } catch {
             // ignore parse errors
           }

@@ -1957,11 +1957,13 @@ async fn query_agent_status(runtime: String, config: Option<String>) -> Result<A
 
 #[tauri::command]
 fn query_all_agent_statuses() -> Result<Vec<AgentStatus>, String> {
-    // Synchronous check — just detect availability (no auth checks for speed)
+    // Check OpenClaw via saved config
+    let oc_available = load_openclaw_ssh_config().is_ok();
+
     let runtimes = vec![
         ("claude", which_claude()),
         ("codex", which_cli("codex")),
-        ("openclaw", None::<String>), // needs config
+        ("openclaw", if oc_available { Some("ssh".to_string()) } else { None }),
         ("hermes", which_cli("hermes")),
     ];
 
