@@ -10,12 +10,13 @@ const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TA
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   // Always try the Tauri import — it will succeed in the desktop app
   // even if __TAURI__ global isn't set yet at module load time
+  let tauriInvoke;
   try {
-    const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
-    return await tauriInvoke<T>(cmd, args);
+    ({ invoke: tauriInvoke } = await import('@tauri-apps/api/core'));
   } catch {
     throw new Error(`Tauri not available for command: ${cmd}`);
   }
+  return await tauriInvoke<T>(cmd, args);
 }
 
 // ---- Context ----

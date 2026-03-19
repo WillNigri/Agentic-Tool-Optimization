@@ -170,9 +170,12 @@ export default function RuntimeSettings() {
     for (const status of agentStatuses) {
       const rtId = status.runtime as string;
       if (runtimeStates[rtId]) {
+        // Don't override a manually tested "connected" status
+        const current = runtimeStates[rtId].status;
+        if (current === "connected") continue;
         updateState(rtId, {
           status: status.healthy ? "connected" : status.available ? "disconnected" : "disconnected",
-          version: status.version,
+          version: status.version || runtimeStates[rtId].version,
         });
       }
     }
@@ -225,8 +228,19 @@ export default function RuntimeSettings() {
       try {
         const result = await tauriApi.testRuntimeConnection(runtimeId, JSON.stringify(config));
         return { runtimeId, result };
-      } catch {
-        // Fallback: use detectAgentRuntimes for a basic check
+      } catch (err) {
+        console.error("[ATO] testRuntimeConnection failed:", runtimeId, err);
+        // For runtimes with SSH/remote config, show the actual error
+        if (runtimeId === "openclaw" || runtimeId === "hermes") {
+          return {
+            runtimeId,
+            result: {
+              connected: false,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          };
+        }
+        // Fallback for local runtimes: use detectAgentRuntimes
         const detected = await detectAgentRuntimes();
         const match = detected.find((d) => d.runtime === runtimeId);
         return {
@@ -240,10 +254,18 @@ export default function RuntimeSettings() {
       }
     },
     onSuccess: ({ runtimeId, result }) => {
+      // If we got a result at all, the connection worked
+      // OpenClaw returns gateway status object, others return {connected, version}
+      const r = result as Record<string, unknown> | null;
+      const connected = r === null ? false
+        : "connected" in r ? !!r.connected
+        : true; // Any response means connection succeeded
+      const version = r && "version" in r ? String(r.version) : runtimeStates[runtimeId].version;
+      const error = r && "error" in r ? String(r.error) : null;
       updateState(runtimeId, {
-        status: result.connected ? "connected" : "disconnected",
-        version: result.version ?? runtimeStates[runtimeId].version,
-        testError: result.error ?? null,
+        status: connected ? "connected" : "disconnected",
+        version,
+        testError: error,
       });
     },
     onError: (err, { runtimeId }) => {

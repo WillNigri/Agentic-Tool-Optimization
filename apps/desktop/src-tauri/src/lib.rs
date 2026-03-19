@@ -2037,60 +2037,99 @@ fn which_claude() -> Option<String> {
 
 // ── OpenClaw WebSocket + Runtime Config ───────────────────────────────────
 
-fn load_openclaw_ws_config() -> Option<(String, String)> {
+/// Load OpenClaw SSH config from ~/.ato/openclaw-config.json
+fn load_openclaw_ssh_config() -> Result<(String, u64, String, Option<String>), String> {
     let config_path = home_dir().join(".ato").join("openclaw-config.json");
-    let content = read_file_lossy(&config_path)?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let ws_url = config.get("wsUrl")?.as_str()?.to_string();
-    let token = config.get("token")?.as_str().unwrap_or("").to_string();
-    Some((ws_url, token))
+    let content = read_file_lossy(&config_path)
+        .ok_or("OpenClaw not configured. Go to Configuration to set SSH host.")?;
+    let config: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let host = config.get("sshHost").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if host.is_empty() { return Err("No SSH host configured".into()); }
+    let port = config.get("sshPort").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64())).unwrap_or(22);
+    let user = config.get("sshUser").and_then(|v| v.as_str()).unwrap_or("root").to_string();
+    let key_path = config.get("sshKeyPath").and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty());
+    Ok((host, port, user, key_path))
+}
+
+/// Run an openclaw CLI command via SSH and return the JSON output
+fn openclaw_ssh_command(subcmd: &str) -> Result<serde_json::Value, String> {
+    let (host, port, user, key_path) = load_openclaw_ssh_config()?;
+    let user_path = get_user_path();
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.env("PATH", &user_path);
+    cmd.args(["-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new"]);
+    if let Some(ref key) = key_path {
+        cmd.args(["-i", key]);
+    }
+    cmd.args([
+        "-p", &port.to_string(),
+        &format!("{}@{}", user, host),
+        &format!("openclaw {} 2>/dev/null", subcmd),
+    ]);
+    let output = cmd.output().map_err(|e| format!("SSH failed: {}", e))?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        serde_json::from_str(stdout.trim()).map_err(|e| format!("Invalid JSON from openclaw: {}", e))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("OpenClaw command failed: {}", stderr.trim()))
+    }
 }
 
 #[tauri::command]
 async fn openclaw_gateway_status() -> Result<serde_json::Value, String> {
-    let (url, token) = load_openclaw_ws_config()
-        .ok_or("OpenClaw not configured. Set wsUrl and token in Configuration.")?;
-    openclaw_ws::rpc_call(&url, &token, "status", json!({})).await
+    openclaw_ssh_command("status --json")
 }
 
 #[tauri::command]
 async fn openclaw_list_cron_jobs() -> Result<serde_json::Value, String> {
-    let (url, token) = load_openclaw_ws_config()
-        .ok_or("OpenClaw not configured")?;
-    openclaw_ws::rpc_call(&url, &token, "cron.list", json!({"limit": 200})).await
+    openclaw_ssh_command("cron list --all --json")
 }
 
 #[tauri::command]
 async fn openclaw_cron_status() -> Result<serde_json::Value, String> {
-    let (url, token) = load_openclaw_ws_config()
-        .ok_or("OpenClaw not configured")?;
-    openclaw_ws::rpc_call(&url, &token, "cron.status", json!({})).await
+    openclaw_ssh_command("cron status --json")
 }
 
 #[tauri::command]
 async fn openclaw_list_agents() -> Result<serde_json::Value, String> {
-    let (url, token) = load_openclaw_ws_config()
-        .ok_or("OpenClaw not configured")?;
-    openclaw_ws::rpc_call(&url, &token, "agents.list", json!({})).await
+    openclaw_ssh_command("agents list --json")
 }
 
 #[tauri::command]
 async fn openclaw_skills_status() -> Result<serde_json::Value, String> {
-    let (url, token) = load_openclaw_ws_config()
-        .ok_or("OpenClaw not configured")?;
-    openclaw_ws::rpc_call(&url, &token, "skills.status", json!({})).await
+    openclaw_ssh_command("skills status --json")
 }
 
 #[tauri::command]
 async fn openclaw_list_sessions() -> Result<serde_json::Value, String> {
-    let (url, token) = load_openclaw_ws_config()
-        .ok_or("OpenClaw not configured")?;
-    openclaw_ws::rpc_call(&url, &token, "sessions.list", json!({})).await
+    openclaw_ssh_command("sessions list --json")
 }
 
 #[tauri::command]
 async fn openclaw_test_connection(ws_url: String, token: String) -> Result<serde_json::Value, String> {
-    openclaw_ws::test_connection(&ws_url, &token).await
+    // Test via SSH instead of WebSocket since the gateway requires crypto auth
+    let _ = (ws_url, token); // Unused - we use SSH config instead
+    let (host, port, user, key_path) = load_openclaw_ssh_config()?;
+    let user_path = get_user_path();
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.env("PATH", &user_path);
+    cmd.args(["-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new"]);
+    if let Some(ref key) = key_path {
+        cmd.args(["-i", key]);
+    }
+    cmd.args([
+        "-p", &port.to_string(),
+        &format!("{}@{}", user, host),
+        "openclaw --version 2>/dev/null || echo UNKNOWN",
+    ]);
+    let output = cmd.output().map_err(|e| format!("SSH connection failed: {}", e))?;
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(json!({"connected": true, "version": version, "host": host, "user": user}))
+    } else {
+        Err(format!("SSH to {}@{}:{} failed", user, host, port))
+    }
 }
 
 #[tauri::command]
@@ -2111,10 +2150,28 @@ fn load_runtime_config(runtime: String) -> Result<Option<String>, String> {
 async fn test_runtime_connection(runtime: String, config: String) -> Result<serde_json::Value, String> {
     match runtime.as_str() {
         "openclaw" => {
-            let parsed: serde_json::Value = serde_json::from_str(&config).map_err(|e| e.to_string())?;
-            let ws_url = parsed.get("wsUrl").and_then(|v| v.as_str()).unwrap_or("ws://localhost:18789").to_string();
-            let token = parsed.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            openclaw_ws::test_connection(&ws_url, &token).await
+            // Use SSH to test connection (gateway requires crypto auth for WebSocket)
+            let (host, port, user, key_path) = load_openclaw_ssh_config()?;
+            let user_path = get_user_path();
+            let mut cmd = std::process::Command::new("ssh");
+            cmd.env("PATH", &user_path);
+            cmd.args(["-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new"]);
+            if let Some(ref key) = key_path {
+                cmd.args(["-i", key]);
+            }
+            cmd.args([
+                "-p", &port.to_string(),
+                &format!("{}@{}", user, host),
+                "openclaw --version 2>/dev/null || echo UNKNOWN",
+            ]);
+            let output = cmd.output().map_err(|e| format!("SSH connection failed: {}", e))?;
+            if output.status.success() {
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok(json!({"connected": true, "version": version, "host": host}))
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                Err(format!("SSH to {}@{}:{} failed: {}", user, host, port, stderr))
+            }
         }
         "claude" => {
             let path = which_cli("claude").ok_or("Claude CLI not found")?;

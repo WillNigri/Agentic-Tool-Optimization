@@ -20,7 +20,8 @@ export interface ParsedCron {
  * Parse a 5-field cron expression into its components.
  * Returns null if invalid.
  */
-export function parseCron(expression: string): ParsedCron | null {
+export function parseCron(expression: string | unknown): ParsedCron | null {
+  if (typeof expression !== "string") return null;
   const parts = expression.trim().split(/\s+/);
   if (parts.length !== 5) return null;
 
@@ -64,9 +65,11 @@ function isValidField(field: string, min: number, max: number): boolean {
 /**
  * Convert a cron expression to a human-readable string.
  */
-export function cronToHuman(expression: string): string {
+export function cronToHuman(expression: string | unknown): string {
+  if (typeof expression !== "string") return String(expression ?? "Unknown schedule");
+  if (expression.startsWith("Every ")) return expression; // Already human-readable
   const parsed = parseCron(expression);
-  if (!parsed) return "Invalid expression";
+  if (!parsed) return expression; // Return as-is instead of "Invalid expression"
 
   const { minute, hour, dayOfMonth, month, dayOfWeek } = parsed;
 
@@ -171,7 +174,8 @@ export function matchesCronDate(expression: string, date: Date): boolean {
  * For accurate scheduling, a proper cron library should be used.
  * This provides a rough estimate for display purposes.
  */
-export function getNextRun(expression: string, fromDate: Date = new Date()): Date | null {
+export function getNextRun(expression: string | unknown, fromDate: Date = new Date()): Date | null {
+  if (typeof expression !== "string") return null;
   const parsed = parseCron(expression);
   if (!parsed) return null;
 

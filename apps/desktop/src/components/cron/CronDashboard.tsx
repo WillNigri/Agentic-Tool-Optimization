@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, Component, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, Search, AlertTriangle, X, List, CalendarDays } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -9,22 +9,41 @@ import CronJobDetail from "./CronJobDetail";
 import CronCalendar from "./CronCalendar";
 import CreateCronJobModal from "./CreateCronJobModal";
 
+// Error boundary to prevent black page
+class CronErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-6 text-center">
+          <p className="text-red-400 text-sm mb-2">Cron Monitor encountered an error</p>
+          <pre className="text-xs text-cs-muted bg-cs-card p-3 rounded overflow-auto">{this.state.error.message}</pre>
+          <button onClick={() => this.setState({ error: null })} className="mt-3 px-4 py-2 text-xs bg-cs-accent/20 text-cs-accent rounded">Retry</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 type CronView = "list" | "calendar";
 
-export default function CronDashboard() {
+function CronDashboardInner() {
   const { t } = useTranslation();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [view, setView] = useState<CronView>("list");
 
   // Load cron jobs from all runtimes
-  const { jobs: runtimeJobs, isLoading: runtimeLoading } = useRuntimeCronJobs();
-  const loadJobs = useCronStore((s) => s.loadJobs);
+  const { jobs: runtimeJobs } = useRuntimeCronJobs();
 
+  const runtimeJobsJson = JSON.stringify(runtimeJobs.map((j) => j.id).sort());
   useEffect(() => {
     if (runtimeJobs.length > 0) {
-      loadJobs(runtimeJobs);
+      useCronStore.getState().loadJobs(runtimeJobs);
     }
-  }, [runtimeJobs, loadJobs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimeJobsJson]);
 
   const {
     alerts,
@@ -190,5 +209,13 @@ export default function CronDashboard() {
         <CreateCronJobModal onClose={() => setShowCreateModal(false)} />
       )}
     </>
+  );
+}
+
+export default function CronDashboard() {
+  return (
+    <CronErrorBoundary>
+      <CronDashboardInner />
+    </CronErrorBoundary>
   );
 }
