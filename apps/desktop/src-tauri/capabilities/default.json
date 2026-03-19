@@ -11,6 +11,7 @@
     "fs:allow-write-text-file",
     "fs:allow-exists",
     "fs:scope-home",
-    "updater:default"
+    "updater:default",
+    "process:default"
   ]
 }
