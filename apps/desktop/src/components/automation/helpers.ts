@@ -9,9 +9,11 @@ export function getConnectionPoints(
   fromNode: FlowNode,
   toNode: FlowNode
 ): { x1: number; y1: number; x2: number; y2: number } {
-  const fromCenterX = fromNode.x + NODE_W / 2;
+  const fromW = fromNode.width || NODE_W;
+  const toW = toNode.width || NODE_W;
+  const fromCenterX = fromNode.x + fromW / 2;
   const fromCenterY = fromNode.y + NODE_H / 2;
-  const toCenterX = toNode.x + NODE_W / 2;
+  const toCenterX = toNode.x + toW / 2;
   const toCenterY = toNode.y + NODE_H / 2;
 
   const dx = toCenterX - fromCenterX;
@@ -21,11 +23,11 @@ export function getConnectionPoints(
 
   if (Math.abs(dx) > Math.abs(dy)) {
     if (dx > 0) {
-      x1 = fromNode.x + NODE_W; y1 = fromCenterY;
+      x1 = fromNode.x + fromW; y1 = fromCenterY;
       x2 = toNode.x; y2 = toCenterY;
     } else {
       x1 = fromNode.x; y1 = fromCenterY;
-      x2 = toNode.x + NODE_W; y2 = toCenterY;
+      x2 = toNode.x + toW; y2 = toCenterY;
     }
   } else {
     if (dy > 0) {

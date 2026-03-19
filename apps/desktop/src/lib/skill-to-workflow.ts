@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Workflow, FlowNode, FlowEdge } from "@/components/automation/types";
+import { NODE_W } from "@/components/automation/constants";
 import type { SkillDetail } from "@/lib/tauri-api";
 
 // ---------------------------------------------------------------------------
@@ -364,27 +365,48 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
   const ROW_WHAT = 180;     // middle row: action steps (WHAT)
   const ROW_WHO = 310;      // bottom row: agent (WHO)
   const COL_START = 50;
-  const COL_SPACING = 230;
+  const COL_GAP = 30;       // minimum gap between columns
 
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];
 
-  // Track column offsets — conditional branches shift columns
-  let col = COL_START;
-
-  mainSteps.forEach((step, i) => {
-    const nodeType = inferNodeType(step, i, mainSteps.length);
+  // Pre-compute per-step data so we can calculate column positions
+  const stepData = mainSteps.map((step, i) => {
     const labelService = inferService(step.label);
+    const stepTools = step.tools.length > 0
+      ? step.tools
+      : labelService
+        ? [labelService.charAt(0).toUpperCase() + labelService.slice(1)]
+        : [];
+    const uniqueTools = [...new Set(stepTools)].slice(0, 3);
+    // Width needed: max of action node width vs tool nodes side-by-side
+    const toolsWidth = uniqueTools.length * NODE_W + Math.max(0, uniqueTools.length - 1) * COL_GAP;
+    const slotWidth = Math.max(NODE_W, toolsWidth);
+    return { step, labelService, uniqueTools, slotWidth, nodeType: inferNodeType(step, i, mainSteps.length) };
+  });
+
+  // Calculate column X positions — each step starts after the previous one's slot + gap
+  const colPositions: number[] = [];
+  let x = COL_START;
+  for (const sd of stepData) {
+    colPositions.push(x);
+    x += sd.slotWidth + COL_GAP;
+  }
+
+  stepData.forEach((sd, i) => {
+    const col = colPositions[i];
     const stepId = `${skill.id}-step-${i}`;
 
-    // ── WHAT row: action step node ──
+    // ── WHAT row: action step node — stretches to match tool row width ──
+    const actionWidth = sd.slotWidth;
     nodes.push({
       id: stepId,
-      label: step.label.slice(0, 40),
-      description: step.description || step.label.slice(0, 80),
-      type: nodeType,
-      service: labelService,
+      label: sd.step.label.slice(0, 40),
+      description: sd.step.description || sd.step.label.slice(0, 80),
+      type: sd.nodeType,
+      service: sd.labelService,
       runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
+      ...(actionWidth > NODE_W ? { width: actionWidth } : {}),
       x: col,
       y: ROW_WHAT,
       stats: { executions: 0, errors: 0, avgTimeMs: 0 },
@@ -394,49 +416,22 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
     // Horizontal edge from previous step
     if (i > 0) {
       const prevStepId = `${skill.id}-step-${i - 1}`;
-      const prevStep = mainSteps[i - 1];
-
-      if (step.condition) {
-        // Conditional: edge from previous step with condition label
-        edges.push({
-          from: prevStepId,
-          to: stepId,
-          label: step.condition.slice(0, 30),
-          animated: false,
-        });
-      } else if (prevStep.condition) {
-        // Coming after a conditional step — this is the continuation path
-        edges.push({
-          from: prevStepId,
-          to: stepId,
-          animated: false,
-        });
+      if (sd.step.condition) {
+        edges.push({ from: prevStepId, to: stepId, label: sd.step.condition.slice(0, 30), animated: false });
       } else {
-        edges.push({
-          from: `${skill.id}-step-${i - 1}`,
-          to: stepId,
-          animated: i === 1,
-        });
+        edges.push({ from: prevStepId, to: stepId, animated: i === 1 });
       }
     }
 
-    // ── HOW row: tool nodes (from step body detection + label service) ──
-    const stepTools = step.tools.length > 0
-      ? step.tools
-      : labelService
-        ? [labelService.charAt(0).toUpperCase() + labelService.slice(1)]
-        : [];
-
-    // Deduplicate — show at most 2 tools per step for visual clarity
-    const uniqueTools = [...new Set(stepTools)].slice(0, 2);
-
-    uniqueTools.forEach((toolLabel, tIdx) => {
+    // ── HOW row: tool nodes (spread evenly across slot width) ──
+    sd.uniqueTools.forEach((toolLabel, tIdx) => {
       const toolId = `${skill.id}-tool-${i}-${tIdx}`;
       const toolService = Object.entries(TOOL_CATALOG)
         .find(([, v]) => v.label === toolLabel)?.[1]?.service
-        || labelService
+        || sd.labelService
         || toolLabel.toLowerCase();
 
+      const toolX = col + tIdx * (NODE_W + COL_GAP);
       nodes.push({
         id: toolId,
         label: toolLabel,
@@ -445,7 +440,7 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
         service: toolService,
         runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
         tool: toolLabel,
-        x: col + tIdx * 120,
+        x: toolX,
         y: ROW_HOW,
         stats: { executions: 0, errors: 0, avgTimeMs: 0 },
         status: "idle",
@@ -454,7 +449,7 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
     });
 
     // ── WHO row: human involvement nodes ──
-    if (step.hasHumanInput) {
+    if (sd.step.hasHumanInput) {
       const humanId = `${skill.id}-human-${i}`;
       nodes.push({
         id: humanId,
@@ -470,8 +465,6 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
       });
       edges.push({ from: humanId, to: stepId });
     }
-
-    col += COL_SPACING;
   });
 
   // Bottom row: agent node (WHO) — connected to first step
@@ -483,7 +476,7 @@ export function skillToWorkflow(skill: SkillDetail): Workflow | null {
     type: "process",
     runtime: (skill.runtime as "claude" | "codex" | "openclaw" | "hermes") || "claude",
     agentName: agentLabel,
-    x: COL_START,
+    x: colPositions[0],
     y: ROW_WHO + (mainSteps[0]?.hasHumanInput ? 130 : 0),
     stats: { executions: 0, errors: 0, avgTimeMs: 0 },
     status: "active",

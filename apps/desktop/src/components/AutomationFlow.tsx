@@ -128,17 +128,37 @@ export default function AutomationFlow() {
         const agentNameStr = agentId === "main" ? "Growdor" : agentId;
 
         // Detect tools/APIs mentioned in prompt text
-        const KNOWN_TOOLS: Record<string, string> = {
-          "resend": "Resend API", "email": "Email API", "gh cli": "GitHub CLI", "gh api": "GitHub API",
-          "github": "GitHub", "discord": "Discord", "slack": "Slack", "twitter": "X/Twitter",
-          "notion": "Notion", "linear": "Linear", "postgres": "PostgreSQL", "redis": "Redis",
-          "http.server": "HTTP Server", "puppeteer": "Browser", "chromium": "Browser",
-        };
+        // Tool detection uses regex patterns to avoid false positives
+        // e.g. "emails sent" should NOT match as Email API
+        const KNOWN_TOOLS: [RegExp, string][] = [
+          [/\bresend\b/i, "Resend API"],
+          [/\bemail\s*api\b/i, "Email API"],
+          [/\bsend\s*email/i, "Email API"],
+          [/\bgh\s+cli\b/i, "GitHub CLI"],
+          [/\bgh\s+api\b/i, "GitHub API"],
+          [/\bgithub\b/i, "GitHub"],
+          [/\bdiscord\b/i, "Discord"],
+          [/\bslack\b/i, "Slack"],
+          [/\btwitter\b/i, "X/Twitter"],
+          [/\bnotion\b/i, "Notion"],
+          [/\blinear\b/i, "Linear"],
+          [/\bpostgres/i, "PostgreSQL"],
+          [/\bredis\b/i, "Redis"],
+          [/\bhttp\.server\b/i, "HTTP Server"],
+          [/\bpuppeteer\b/i, "Browser"],
+          [/\bchromium\b/i, "Browser"],
+          [/\btelegram\b/i, "Telegram"],
+        ];
         function detectTools(text: string): string[] {
-          const lower = text.toLowerCase();
-          return Object.entries(KNOWN_TOOLS)
-            .filter(([key]) => lower.includes(key))
-            .map(([, label]) => label);
+          const seen = new Set<string>();
+          const results: string[] = [];
+          for (const [pattern, label] of KNOWN_TOOLS) {
+            if (pattern.test(text) && !seen.has(label)) {
+              seen.add(label);
+              results.push(label);
+            }
+          }
+          return results;
         }
 
         // Layout constants — 3 rows
@@ -213,7 +233,7 @@ export default function AutomationFlow() {
 
         // Delivery node (end of action row)
         if (deliveryChannel) {
-          const lastStepX = COL_START + steps.length * COL_SPACING;
+          const lastStepX = COL_START + (steps.length + 1) * COL_SPACING;
           const deliveryId = `${id}-delivery`;
           nodes.push({
             id: deliveryId, label: deliveryChannel,

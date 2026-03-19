@@ -55,7 +55,7 @@ export default function FlowNodeCard({
       style={{
         left: node.x,
         top: node.y,
-        width: NODE_W,
+        width: node.width || NODE_W,
         height: NODE_H,
         zIndex: isSelected ? 20 : 10,
       }}

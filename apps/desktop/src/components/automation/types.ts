@@ -17,6 +17,7 @@ export interface FlowNode {
   agentName?: string;  // WHO: human-readable name
   skillId?: string;    // WHAT: which skill is invoked
   tool?: string;       // HOW: external tool/MCP used
+  width?: number;      // override default NODE_W (for wider nodes)
   x: number;
   y: number;
   stats: {
