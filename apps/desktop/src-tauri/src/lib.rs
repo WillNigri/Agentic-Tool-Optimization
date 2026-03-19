@@ -757,7 +757,7 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
         "openclaw" => {
             let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
                 .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
-            oc_home.exists()
+            oc_home.exists() || load_openclaw_ssh_config().is_ok()
         }
         "hermes" => {
             which_cli("hermes").is_some() || home_dir().join(".hermes").exists()
@@ -835,30 +835,75 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
             let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
                 .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
             let ws = oc_home.join("workspace");
-            // Always loaded
-            let sys: u64 = 15000;
-            categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
-            total += sys;
-            let agents = file_tokens(&ws.join("AGENTS.md"));
-            categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents, color: "#FFB800".into() });
-            total += agents;
-            let soul = file_tokens(&ws.join("SOUL.md"));
-            categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
-            total += soul;
-            let tools = file_tokens(&ws.join("TOOLS.md"));
-            categories.push(ContextCategory { name: "TOOLS.md".into(), tokens: tools, color: "#06b6d4".into() });
-            total += tools;
-            // Memory — always loaded at session start
-            let mem_dir = ws.join("memory");
-            let mem_bytes = dir_skill_bytes(&mem_dir);
-            let mem = estimate_tokens(mem_bytes);
-            categories.push(ContextCategory { name: "Memory".into(), tokens: mem, color: "#a78bfa".into() });
-            total += mem;
-            // Skills — on-demand
-            let skill_bytes = dir_skill_bytes(&oc_home.join("skills"))
-                + dir_skill_bytes(&ws.join("skills"));
-            let st = estimate_tokens(skill_bytes);
-            categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
+            let has_local = ws.exists();
+
+            if has_local {
+                // Local OpenClaw install
+                let sys: u64 = 15000;
+                categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
+                total += sys;
+                let agents = file_tokens(&ws.join("AGENTS.md"));
+                categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents, color: "#FFB800".into() });
+                total += agents;
+                let soul = file_tokens(&ws.join("SOUL.md"));
+                categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
+                total += soul;
+                let tools = file_tokens(&ws.join("TOOLS.md"));
+                categories.push(ContextCategory { name: "TOOLS.md".into(), tokens: tools, color: "#06b6d4".into() });
+                total += tools;
+                let mem_dir = ws.join("memory");
+                let mem_bytes = dir_skill_bytes(&mem_dir);
+                let mem = estimate_tokens(mem_bytes);
+                categories.push(ContextCategory { name: "Memory".into(), tokens: mem, color: "#a78bfa".into() });
+                total += mem;
+                let skill_bytes = dir_skill_bytes(&oc_home.join("skills"))
+                    + dir_skill_bytes(&ws.join("skills"));
+                let st = estimate_tokens(skill_bytes);
+                categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
+            } else {
+                // Remote OpenClaw via SSH — fetch file sizes
+                let sys: u64 = 15000;
+                categories.push(ContextCategory { name: "System Prompts".into(), tokens: sys, color: "#FF4466".into() });
+                total += sys;
+
+                if let Ok(result) = openclaw_ssh_command(
+                    "exec 'echo $(wc -c < ~/.openclaw/workspace/SOUL.md 2>/dev/null || echo 0) $(wc -c < ~/.openclaw/workspace/AGENTS.md 2>/dev/null || echo 0) $(wc -c < ~/.openclaw/workspace/TOOLS.md 2>/dev/null || echo 0) $(wc -c < ~/.openclaw/workspace/MEMORY.md 2>/dev/null || echo 0) $(find ~/.openclaw/workspace/skills -name SKILL.md -exec wc -c {} + 2>/dev/null | tail -1 | awk \"{print \\$1}\" || echo 0) $(find ~/.openclaw/workspace/memory -type f -exec wc -c {} + 2>/dev/null | tail -1 | awk \"{print \\$1}\" || echo 0)'"
+                ) {
+                    // Parse the response — it should be a string with space-separated byte counts
+                    let text = result.as_str().unwrap_or("").trim().to_string();
+                    let parts: Vec<u64> = text.split_whitespace()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+
+                    let soul_bytes = parts.first().copied().unwrap_or(0);
+                    let agents_bytes = parts.get(1).copied().unwrap_or(0);
+                    let tools_bytes = parts.get(2).copied().unwrap_or(0);
+                    let memory_bytes = parts.get(3).copied().unwrap_or(0);
+                    let skills_bytes = parts.get(4).copied().unwrap_or(0);
+                    let mem_dir_bytes = parts.get(5).copied().unwrap_or(0);
+
+                    let soul = estimate_tokens(soul_bytes);
+                    categories.push(ContextCategory { name: "SOUL.md".into(), tokens: soul, color: "#f97316".into() });
+                    total += soul;
+                    let agents = estimate_tokens(agents_bytes);
+                    categories.push(ContextCategory { name: "AGENTS.md".into(), tokens: agents, color: "#FFB800".into() });
+                    total += agents;
+                    let tools = estimate_tokens(tools_bytes);
+                    categories.push(ContextCategory { name: "TOOLS.md".into(), tokens: tools, color: "#06b6d4".into() });
+                    total += tools;
+                    let mem = estimate_tokens(memory_bytes + mem_dir_bytes);
+                    categories.push(ContextCategory { name: "Memory".into(), tokens: mem, color: "#a78bfa".into() });
+                    total += mem;
+                    let st = estimate_tokens(skills_bytes);
+                    categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: st, color: "#00FFB233".into() });
+                } else {
+                    // SSH failed — show estimate
+                    categories.push(ContextCategory { name: "SOUL.md (estimated)".into(), tokens: 2000, color: "#f97316".into() });
+                    total += 2000;
+                    categories.push(ContextCategory { name: "AGENTS.md (estimated)".into(), tokens: 500, color: "#FFB800".into() });
+                    total += 500;
+                }
+            }
 
             Ok(ContextBreakdown { total_tokens: total, limit: 200000, categories })
         }
