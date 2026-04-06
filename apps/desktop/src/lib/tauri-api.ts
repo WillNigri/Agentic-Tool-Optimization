@@ -624,3 +624,101 @@ export async function readContextFile(filePath: string): Promise<string> {
 export async function writeContextFile(filePath: string, content: string): Promise<void> {
   return invoke('write_context_file', { filePath, content });
 }
+
+// ---- Agent Configuration Manager ----
+
+export type AgentConfigRuntime = 'claude' | 'codex' | 'openclaw' | 'hermes' | 'shared';
+export type AgentConfigScope = 'global' | 'project';
+export type AgentConfigFileType = 'skill' | 'settings' | 'project-config' | 'mcp' | 'soul';
+
+export interface AgentConfigFile {
+  path: string;
+  scope: AgentConfigScope;
+  runtime: AgentConfigRuntime;
+  fileType: AgentConfigFileType;
+  exists: boolean;
+  lastModified: string | null;
+  tokenCount: number | null;
+  projectName: string | null;
+}
+
+export interface ParsedConfigFile {
+  path: string;
+  format: 'yaml-frontmatter' | 'json' | 'toml' | 'yaml' | 'markdown' | 'unknown';
+  content: unknown;
+  raw: string;
+}
+
+export interface AgentPermission {
+  tool: string;
+  pattern: string | null;
+  allowed: boolean;
+  requiresApproval: boolean;
+}
+
+export interface ContextPreviewSection {
+  name: string;
+  tokens: number;
+  files: string[];
+}
+
+export interface AgentContextPreview {
+  totalTokens: number;
+  limit: number;
+  sections: ContextPreviewSection[];
+}
+
+/**
+ * Scan all config files for all agent runtimes
+ */
+export async function scanAgentConfigFiles(projectPath?: string): Promise<AgentConfigFile[]> {
+  try {
+    return await invoke<AgentConfigFile[]>('scan_agent_config_files', { projectPath: projectPath || null });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read and parse a config file
+ */
+export async function readAgentConfigFile(path: string): Promise<ParsedConfigFile> {
+  return invoke<ParsedConfigFile>('read_agent_config_file', { path });
+}
+
+/**
+ * Write a config file back to disk
+ */
+export async function writeAgentConfigFile(path: string, content: string): Promise<void> {
+  return invoke('write_agent_config_file', { path, content });
+}
+
+/**
+ * Create a new skill file from template
+ */
+export async function createAgentSkill(
+  runtime: AgentConfigRuntime,
+  name: string,
+  scope: AgentConfigScope,
+  description: string
+): Promise<string> {
+  return invoke<string>('create_agent_skill', { runtime, name, scope, description });
+}
+
+/**
+ * Parse permissions from a settings file
+ */
+export async function parseAgentPermissions(path: string): Promise<AgentPermission[]> {
+  try {
+    return await invoke<AgentPermission[]>('parse_agent_permissions', { path });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get context preview for a runtime
+ */
+export async function getAgentContextPreview(runtime: AgentConfigRuntime): Promise<AgentContextPreview> {
+  return invoke<AgentContextPreview>('get_agent_context_preview', { runtime });
+}

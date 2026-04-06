@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "ato-mcp": "./dist/index.js" },
+  "bin": {
+    "ato-mcp": "./dist/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
@@ -11,6 +13,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "chokidar": "^3.6.0",
     "glob": "^11.0.0",
     "gray-matter": "^4.0.3",
     "zod": "^3.24.0"

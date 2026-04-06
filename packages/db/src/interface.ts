@@ -79,6 +79,8 @@ export interface DatabaseAdapter {
 
   // Usage
   insertUsage(userId: string, record: InsertUsageInput): Promise<void>;
+  /** Batch insert multiple usage records in a single transaction (optimized) */
+  insertUsageBatch?(userId: string, records: InsertUsageInput[]): Promise<void>;
   getUsageSummary(userId: string, since: Date): Promise<UsageSummaryRow>;
   getDailyUsage(userId: string, days: number): Promise<DailyUsageRow[]>;
   getBurnRate(userId: string): Promise<BurnRateRow>;
@@ -91,4 +93,8 @@ export interface DatabaseAdapter {
   // Settings (key-value store)
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, value: string): Promise<void>;
+
+  // Transaction support (optional)
+  /** Execute a function within a transaction */
+  transaction?<T>(fn: () => T): Promise<T>;
 }

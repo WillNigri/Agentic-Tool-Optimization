@@ -12,6 +12,7 @@
     "automation": "Automacao",
     "analytics": "Analytics",
     "mcp": "Servidores MCP",
+    "agents": "Config de Agentes",
     "config": "Configuracao",
     "settings": "Configuracoes",
     "logout": "Sair",

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { glob } from "glob";
+import { cache, CACHE_KEYS, CACHE_TTL } from "../cache.js";
 
 interface LogEntry {
   timestamp?: string;
@@ -75,136 +76,128 @@ async function parseLogFile(filePath: string): Promise<LogEntry[]> {
   return entries;
 }
 
+async function computeUsageStats(): Promise<UsageStats> {
+  const logsDir = path.join(os.homedir(), ".claude", "logs");
+
+  let logFiles: string[];
+  try {
+    logFiles = await glob("**/*.jsonl", {
+      cwd: logsDir,
+      absolute: true,
+    });
+  } catch {
+    return {
+      daily: [],
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      total_cost_usd: 0,
+      total_requests: 0,
+      log_files_found: 0,
+    };
+  }
+
+  if (logFiles.length === 0) {
+    return {
+      daily: [],
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      total_cost_usd: 0,
+      total_requests: 0,
+      log_files_found: 0,
+    };
+  }
+
+  // Parse all log files
+  const allEntries: LogEntry[] = [];
+  for (const file of logFiles) {
+    const entries = await parseLogFile(file);
+    allEntries.push(...entries);
+  }
+
+  // Group by date
+  const dailyMap = new Map<string, DailySummary>();
+
+  for (const entry of allEntries) {
+    // Only process entries that have token info
+    if (!entry.input_tokens && !entry.output_tokens) continue;
+
+    const date = entry.timestamp
+      ? entry.timestamp.substring(0, 10)
+      : "unknown";
+
+    let daily = dailyMap.get(date);
+    if (!daily) {
+      daily = {
+        date,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_cost_usd: 0,
+        request_count: 0,
+        sessions: [],
+      };
+      dailyMap.set(date, daily);
+    }
+
+    daily.total_input_tokens += entry.input_tokens || 0;
+    daily.total_output_tokens += entry.output_tokens || 0;
+    daily.total_cache_read_tokens += entry.cache_read_tokens || 0;
+    daily.total_cache_write_tokens += entry.cache_write_tokens || 0;
+    daily.total_cost_usd += estimateCost(entry);
+    daily.request_count += 1;
+
+    if (entry.session_id && !daily.sessions.includes(entry.session_id)) {
+      daily.sessions.push(entry.session_id);
+    }
+  }
+
+  const dailySummaries = Array.from(dailyMap.values()).sort(
+    (a, b) => a.date.localeCompare(b.date),
+  );
+
+  const stats: UsageStats = {
+    daily: dailySummaries,
+    total_input_tokens: dailySummaries.reduce(
+      (s, d) => s + d.total_input_tokens,
+      0,
+    ),
+    total_output_tokens: dailySummaries.reduce(
+      (s, d) => s + d.total_output_tokens,
+      0,
+    ),
+    total_cost_usd: dailySummaries.reduce(
+      (s, d) => s + d.total_cost_usd,
+      0,
+    ),
+    total_requests: dailySummaries.reduce(
+      (s, d) => s + d.request_count,
+      0,
+    ),
+    log_files_found: logFiles.length,
+  };
+
+  // Round cost values
+  stats.total_cost_usd = Math.round(stats.total_cost_usd * 10000) / 10000;
+  for (const day of stats.daily) {
+    day.total_cost_usd = Math.round(day.total_cost_usd * 10000) / 10000;
+  }
+
+  return stats;
+}
+
 export function registerUsageTools(server: McpServer): void {
   server.tool(
     "get_usage_stats",
-    "Reads Claude Code JSONL logs from ~/.claude/logs/ and returns daily/session usage summaries with token counts and cost estimates",
+    "Reads Claude Code JSONL logs from ~/.claude/logs/ and returns daily/session usage summaries with token counts and cost estimates. Results are cached for 5 minutes.",
     {},
     async () => {
       try {
-        const logsDir = path.join(os.homedir(), ".claude", "logs");
-
-        let logFiles: string[];
-        try {
-          logFiles = await glob("**/*.jsonl", {
-            cwd: logsDir,
-            absolute: true,
-          });
-        } catch {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  message: "No logs directory found at ~/.claude/logs/",
-                  daily: [],
-                  total_input_tokens: 0,
-                  total_output_tokens: 0,
-                  total_cost_usd: 0,
-                  total_requests: 0,
-                  log_files_found: 0,
-                }),
-              },
-            ],
-          };
-        }
-
-        if (logFiles.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  message: "No .jsonl log files found in ~/.claude/logs/",
-                  daily: [],
-                  total_input_tokens: 0,
-                  total_output_tokens: 0,
-                  total_cost_usd: 0,
-                  total_requests: 0,
-                  log_files_found: 0,
-                }),
-              },
-            ],
-          };
-        }
-
-        // Parse all log files
-        const allEntries: LogEntry[] = [];
-        for (const file of logFiles) {
-          const entries = await parseLogFile(file);
-          allEntries.push(...entries);
-        }
-
-        // Group by date
-        const dailyMap = new Map<string, DailySummary>();
-
-        for (const entry of allEntries) {
-          // Only process entries that have token info
-          if (!entry.input_tokens && !entry.output_tokens) continue;
-
-          const date = entry.timestamp
-            ? entry.timestamp.substring(0, 10)
-            : "unknown";
-
-          let daily = dailyMap.get(date);
-          if (!daily) {
-            daily = {
-              date,
-              total_input_tokens: 0,
-              total_output_tokens: 0,
-              total_cache_read_tokens: 0,
-              total_cache_write_tokens: 0,
-              total_cost_usd: 0,
-              request_count: 0,
-              sessions: [],
-            };
-            dailyMap.set(date, daily);
-          }
-
-          daily.total_input_tokens += entry.input_tokens || 0;
-          daily.total_output_tokens += entry.output_tokens || 0;
-          daily.total_cache_read_tokens += entry.cache_read_tokens || 0;
-          daily.total_cache_write_tokens += entry.cache_write_tokens || 0;
-          daily.total_cost_usd += estimateCost(entry);
-          daily.request_count += 1;
-
-          if (entry.session_id && !daily.sessions.includes(entry.session_id)) {
-            daily.sessions.push(entry.session_id);
-          }
-        }
-
-        const dailySummaries = Array.from(dailyMap.values()).sort(
-          (a, b) => a.date.localeCompare(b.date),
+        const stats = await cache.getOrSet(
+          CACHE_KEYS.USAGE_STATS,
+          CACHE_TTL.USAGE_STATS,
+          computeUsageStats
         );
-
-        const stats: UsageStats = {
-          daily: dailySummaries,
-          total_input_tokens: dailySummaries.reduce(
-            (s, d) => s + d.total_input_tokens,
-            0,
-          ),
-          total_output_tokens: dailySummaries.reduce(
-            (s, d) => s + d.total_output_tokens,
-            0,
-          ),
-          total_cost_usd: dailySummaries.reduce(
-            (s, d) => s + d.total_cost_usd,
-            0,
-          ),
-          total_requests: dailySummaries.reduce(
-            (s, d) => s + d.request_count,
-            0,
-          ),
-          log_files_found: logFiles.length,
-        };
-
-        // Round cost values
-        stats.total_cost_usd =
-          Math.round(stats.total_cost_usd * 10000) / 10000;
-        for (const day of stats.daily) {
-          day.total_cost_usd =
-            Math.round(day.total_cost_usd * 10000) / 10000;
-        }
 
         return {
           content: [

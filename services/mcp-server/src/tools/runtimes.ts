@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
+import { cache, CACHE_KEYS, CACHE_TTL } from "../cache.js";
+import { runtimePaths } from "../runtime-paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,16 +34,6 @@ interface RuntimeLog {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function whichCli(name: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("which", [name]);
-    const p = stdout.trim();
-    return p || null;
-  } catch {
-    return null;
-  }
-}
 
 async function runCommand(
   cmd: string,
@@ -85,11 +77,12 @@ async function sshCommand(
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-specific status checks
+// Runtime-specific status checks (using cached paths)
 // ---------------------------------------------------------------------------
 
 async function getClaudeStatus(): Promise<RuntimeStatus> {
-  const cliPath = await whichCli("claude");
+  // Use cached path instead of calling 'which' every time
+  const cliPath = await runtimePaths.getPath("claude");
   if (!cliPath) {
     return { runtime: "claude", available: false, version: null, path: null, healthy: false, details: {} };
   }
@@ -116,7 +109,8 @@ async function getClaudeStatus(): Promise<RuntimeStatus> {
 }
 
 async function getCodexStatus(): Promise<RuntimeStatus> {
-  const cliPath = await whichCli("codex");
+  // Use cached path instead of calling 'which' every time
+  const cliPath = await runtimePaths.getPath("codex");
   if (!cliPath) {
     return { runtime: "codex", available: false, version: null, path: null, healthy: false, details: {} };
   }
@@ -203,7 +197,8 @@ async function getOpenClawStatus(config?: Record<string, unknown>): Promise<Runt
 
 async function getHermesStatus(config?: Record<string, unknown>): Promise<RuntimeStatus> {
   const endpoint = (config?.endpoint as string) || "";
-  const cliPath = await whichCli("hermes");
+  // Use cached path instead of calling 'which' every time
+  const cliPath = await runtimePaths.getPath("hermes");
 
   // Check CLI availability
   if (!cliPath && !endpoint) {
@@ -282,7 +277,7 @@ export function registerRuntimeTools(server: McpServer): void {
   // Query status of any runtime
   server.tool(
     "get_runtime_status",
-    "Check the health and availability of an AI coding agent runtime (claude, codex, openclaw, hermes). Returns version, path, health status, and runtime-specific details.",
+    "Check the health and availability of an AI coding agent runtime (claude, codex, openclaw, hermes). Uses cached CLI paths for faster detection.",
     {
       runtime: z.enum(["claude", "codex", "openclaw", "hermes"]).describe("Which runtime to check"),
       config: z.string().optional().describe("JSON config for runtime (e.g. SSH config for openclaw)"),
@@ -322,21 +317,28 @@ export function registerRuntimeTools(server: McpServer): void {
   // Query all runtimes at once
   server.tool(
     "get_all_runtime_statuses",
-    "Check health and availability of all configured AI coding agent runtimes at once. Returns status for Claude, Codex, OpenClaw, and Hermes.",
+    "Check health and availability of all configured AI coding agent runtimes at once. Uses cached CLI paths and parallel execution for faster results. Results are cached for 30 seconds.",
     {},
     async () => {
       try {
-        const [claude, codex, openclaw, hermes] = await Promise.all([
-          getClaudeStatus(),
-          getCodexStatus(),
-          getOpenClawStatus(),
-          getHermesStatus(),
-        ]);
+        const statuses = await cache.getOrSet(
+          CACHE_KEYS.ALL_RUNTIME_STATUSES,
+          CACHE_TTL.RUNTIME_STATUS,
+          async () => {
+            const [claude, codex, openclaw, hermes] = await Promise.all([
+              getClaudeStatus(),
+              getCodexStatus(),
+              getOpenClawStatus(),
+              getHermesStatus(),
+            ]);
+            return { claude, codex, openclaw, hermes };
+          }
+        );
 
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ claude, codex, openclaw, hermes }, null, 2),
+            text: JSON.stringify(statuses, null, 2),
           }],
         };
       } catch (error) {
@@ -351,17 +353,116 @@ export function registerRuntimeTools(server: McpServer): void {
   // Read agent execution logs
   server.tool(
     "get_agent_logs",
-    "Read execution logs for agent runtimes from ~/.ato/agent-logs.jsonl. Optionally filter by runtime.",
+    "Read execution logs for agent runtimes from ~/.ato/agent-logs.jsonl. Optionally filter by runtime. Results are cached for 10 seconds.",
     {
       runtime: z.enum(["claude", "codex", "openclaw", "hermes"]).optional().describe("Filter by runtime"),
       limit: z.number().optional().describe("Max entries to return (default 50)"),
     },
     async ({ runtime, limit }) => {
       try {
-        const logs = await getAtoLogs(runtime, limit || 50);
+        const effectiveLimit = limit || 50;
+        const cacheKey = `${CACHE_KEYS.AGENT_LOGS}:${runtime || "all"}:${effectiveLimit}`;
+
+        const logs = await cache.getOrSet(
+          cacheKey,
+          CACHE_TTL.AGENT_LOGS,
+          () => getAtoLogs(runtime, effectiveLimit)
+        );
+
         return {
           content: [{ type: "text", text: JSON.stringify(logs, null, 2) }],
         };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: String(error) }) }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Runtime path cache management tools
+  server.tool(
+    "get_runtime_path_cache",
+    "Returns statistics about the runtime path cache, showing cached CLI paths and their ages.",
+    {},
+    async () => {
+      try {
+        const stats = await runtimePaths.stats();
+        return {
+          content: [{ type: "text", text: JSON.stringify(stats, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: String(error) }) }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "refresh_runtime_paths",
+    "Forces re-discovery of all runtime CLI paths. Use this if you've installed or moved a CLI tool.",
+    {},
+    async () => {
+      try {
+        const paths = await runtimePaths.refreshAll();
+        // Also invalidate runtime status cache
+        cache.invalidate(CACHE_KEYS.ALL_RUNTIME_STATUSES);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: "Runtime paths refreshed",
+              paths,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: String(error) }) }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "set_runtime_path",
+    "Manually set the path for a runtime CLI. Useful when the CLI is installed in a non-standard location.",
+    {
+      runtime: z.enum(["claude", "codex", "hermes"]).describe("Which runtime to set the path for"),
+      path: z.string().describe("Absolute path to the CLI executable"),
+    },
+    async ({ runtime, path: cliPath }) => {
+      try {
+        const success = await runtimePaths.setPath(runtime, cliPath);
+        if (success) {
+          // Invalidate runtime status cache
+          cache.invalidate(CACHE_KEYS.ALL_RUNTIME_STATUSES);
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: `Path for ${runtime} set to ${cliPath}`,
+              }),
+            }],
+          };
+        } else {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: `Path ${cliPath} does not exist or is not executable`,
+              }),
+            }],
+            isError: true,
+          };
+        }
       } catch (error) {
         return {
           content: [{ type: "text", text: JSON.stringify({ error: String(error) }) }],

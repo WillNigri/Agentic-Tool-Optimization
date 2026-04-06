@@ -2439,6 +2439,881 @@ fn write_context_file(file_path: String, content: String) -> Result<(), String> 
     fs::write(&file_path, &content).map_err(|e| format!("Failed to write: {}", e))
 }
 
+// ── Agent Configuration Manager ──────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigFile {
+    pub path: String,
+    pub scope: String,           // "global" | "project"
+    pub runtime: String,         // "claude" | "codex" | "openclaw" | "hermes" | "shared"
+    pub file_type: String,       // "skill" | "settings" | "project-config" | "mcp" | "soul"
+    pub exists: bool,
+    pub last_modified: Option<String>,
+    pub token_count: Option<u64>,
+    pub project_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedConfigFile {
+    pub path: String,
+    pub format: String,          // "yaml-frontmatter" | "json" | "toml" | "yaml" | "markdown"
+    pub content: serde_json::Value,  // Parsed content as JSON
+    pub raw: String,             // Original file content
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Permission {
+    pub tool: String,
+    pub pattern: Option<String>,
+    pub allowed: bool,
+    pub requires_approval: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPreviewSection {
+    pub name: String,
+    pub tokens: u64,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPreview {
+    pub total_tokens: u64,
+    pub limit: u64,
+    pub sections: Vec<ContextPreviewSection>,
+}
+
+/// Scan all config files for all runtimes in both global and project scopes
+/// Based on official documentation for Claude Code, Codex CLI, Hermes, and OpenClaw
+#[tauri::command]
+fn scan_agent_config_files(project_path: Option<String>) -> Result<Vec<AgentConfigFile>, String> {
+    let home = home_dir();
+    let mut configs = Vec::new();
+
+    // Determine project roots to scan
+    let project_roots: Vec<PathBuf> = if let Some(ref p) = project_path {
+        vec![PathBuf::from(p)]
+    } else {
+        discover_project_roots()
+    };
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CLAUDE CODE - Global Config Files
+    // Docs: https://docs.anthropic.com/en/docs/claude-code
+    // ══════════════════════════════════════════════════════════════════════════
+    let claude_home = home.join(".claude");
+
+    // Settings
+    add_config_if_exists(&mut configs, claude_home.join("settings.json"), "global", "claude", "settings", None);
+
+    // MCP servers, OAuth, preferences
+    add_config_if_exists(&mut configs, home.join(".claude.json"), "global", "claude", "mcp", None);
+
+    // User-level CLAUDE.md (personal instructions)
+    add_config_if_exists(&mut configs, claude_home.join("CLAUDE.md"), "global", "claude", "project-config", None);
+
+    // Keybindings
+    add_config_if_exists(&mut configs, claude_home.join("keybindings.json"), "global", "claude", "settings", None);
+
+    // Skills directory
+    let claude_skills = claude_home.join("skills");
+    if claude_skills.exists() {
+        scan_skills_directory(&mut configs, &claude_skills, "global", "claude", None);
+    }
+
+    // Subagents directory (~/.claude/agents/*.md)
+    let claude_agents = claude_home.join("agents");
+    if claude_agents.exists() {
+        scan_md_directory(&mut configs, &claude_agents, "global", "claude", "subagent", None);
+    }
+
+    // Rules directory (~/.claude/rules/*.md)
+    let claude_rules = claude_home.join("rules");
+    if claude_rules.exists() {
+        scan_md_directory(&mut configs, &claude_rules, "global", "claude", "rules", None);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CODEX CLI - Global Config Files
+    // Docs: https://developers.openai.com/codex/config-reference
+    // ══════════════════════════════════════════════════════════════════════════
+    let codex_home = std::env::var("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".codex"));
+
+    // Primary config (TOML format)
+    add_config_if_exists(&mut configs, codex_home.join("config.toml"), "global", "codex", "settings", None);
+
+    // Organization requirements
+    add_config_if_exists(&mut configs, codex_home.join("requirements.toml"), "global", "codex", "settings", None);
+
+    // System-wide config
+    add_config_if_exists(&mut configs, PathBuf::from("/etc/codex/config.toml"), "global", "codex", "settings", None);
+
+    // User-level skills (~/.agents/skills/ - shared with OpenClaw)
+    let user_agents_skills = home.join(".agents").join("skills");
+    if user_agents_skills.exists() {
+        scan_skills_directory(&mut configs, &user_agents_skills, "global", "codex", None);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // HERMES - Global Config Files
+    // Docs: https://hermes-agent.nousresearch.com/docs/
+    // ══════════════════════════════════════════════════════════════════════════
+    let hermes_home = std::env::var("HERMES_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".hermes"));
+
+    // Primary config (YAML format)
+    add_config_if_exists(&mut configs, hermes_home.join("config.yaml"), "global", "hermes", "settings", None);
+
+    // Environment variables
+    add_config_if_exists(&mut configs, hermes_home.join(".env"), "global", "hermes", "settings", None);
+
+    // OAuth tokens
+    add_config_if_exists(&mut configs, hermes_home.join("auth.json"), "global", "hermes", "settings", None);
+
+    // Agent identity/personality
+    add_config_if_exists(&mut configs, hermes_home.join("SOUL.md"), "global", "hermes", "soul", None);
+
+    // Memories directory
+    let hermes_memories = hermes_home.join("memories");
+    add_config_if_exists(&mut configs, hermes_memories.join("MEMORY.md"), "global", "hermes", "memory", None);
+    add_config_if_exists(&mut configs, hermes_memories.join("USER.md"), "global", "hermes", "memory", None);
+
+    // Skills directory (with category subdirs)
+    let hermes_skills = hermes_home.join("skills");
+    if hermes_skills.exists() {
+        scan_skills_directory_recursive(&mut configs, &hermes_skills, "global", "hermes", None);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // OPENCLAW - Global Config Files
+    // Docs: https://docs.openclaw.ai/
+    // ══════════════════════════════════════════════════════════════════════════
+    let openclaw_home = std::env::var("OPENCLAW_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".openclaw"));
+
+    // Main config (JSON5 format)
+    add_config_if_exists(&mut configs, openclaw_home.join("openclaw.json"), "global", "openclaw", "settings", None);
+
+    // Managed/local skills
+    let openclaw_skills = openclaw_home.join("skills");
+    if openclaw_skills.exists() {
+        scan_skills_directory(&mut configs, &openclaw_skills, "global", "openclaw", None);
+    }
+
+    // Personal agent skills (~/.agents/skills/ - shared with Codex)
+    // Already scanned above for Codex, add for OpenClaw too
+    if user_agents_skills.exists() {
+        scan_skills_directory(&mut configs, &user_agents_skills, "global", "openclaw", None);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // PROJECT-LEVEL CONFIG FILES
+    // ══════════════════════════════════════════════════════════════════════════
+    for project_root in project_roots {
+        let project_name = project_root.file_name()
+            .map(|n| n.to_string_lossy().to_string());
+
+        // ── CLAUDE CODE - Project ──
+        // Main project instructions
+        add_config_if_exists(&mut configs, project_root.join("CLAUDE.md"), "project", "claude", "project-config", project_name.clone());
+        // Alternative location
+        add_config_if_exists(&mut configs, project_root.join(".claude").join("CLAUDE.md"), "project", "claude", "project-config", project_name.clone());
+        // Local overrides (gitignored)
+        add_config_if_exists(&mut configs, project_root.join("CLAUDE.local.md"), "project", "claude", "project-config", project_name.clone());
+        // Shared settings
+        add_config_if_exists(&mut configs, project_root.join(".claude").join("settings.json"), "project", "claude", "settings", project_name.clone());
+        // Local settings (gitignored)
+        add_config_if_exists(&mut configs, project_root.join(".claude").join("settings.local.json"), "project", "claude", "settings", project_name.clone());
+        // Project MCP servers
+        add_config_if_exists(&mut configs, project_root.join(".mcp.json"), "project", "claude", "mcp", project_name.clone());
+
+        // Project skills
+        let project_claude_skills = project_root.join(".claude").join("skills");
+        if project_claude_skills.exists() {
+            scan_skills_directory(&mut configs, &project_claude_skills, "project", "claude", project_name.clone());
+        }
+        // Project subagents
+        let project_claude_agents = project_root.join(".claude").join("agents");
+        if project_claude_agents.exists() {
+            scan_md_directory(&mut configs, &project_claude_agents, "project", "claude", "subagent", project_name.clone());
+        }
+        // Project rules
+        let project_claude_rules = project_root.join(".claude").join("rules");
+        if project_claude_rules.exists() {
+            scan_md_directory(&mut configs, &project_claude_rules, "project", "claude", "rules", project_name.clone());
+        }
+
+        // ── CODEX CLI - Project ──
+        // Project instructions (Codex uses AGENTS.md)
+        add_config_if_exists(&mut configs, project_root.join("AGENTS.md"), "project", "codex", "project-config", project_name.clone());
+        add_config_if_exists(&mut configs, project_root.join("AGENTS.override.md"), "project", "codex", "project-config", project_name.clone());
+        // Project config
+        add_config_if_exists(&mut configs, project_root.join(".codex").join("config.toml"), "project", "codex", "settings", project_name.clone());
+        // Project skills (.agents/skills/)
+        let project_agents_skills = project_root.join(".agents").join("skills");
+        if project_agents_skills.exists() {
+            scan_skills_directory(&mut configs, &project_agents_skills, "project", "codex", project_name.clone());
+        }
+
+        // ── HERMES - Project ──
+        // Hermes-specific project instructions (highest priority)
+        add_config_if_exists(&mut configs, project_root.join(".hermes.md"), "project", "hermes", "project-config", project_name.clone());
+        // Falls back to AGENTS.md (compatible)
+        // AGENTS.md already added for Codex, mark as shared
+        // Falls back to CLAUDE.md (compatible) - already added
+        // Project config
+        add_config_if_exists(&mut configs, project_root.join(".hermes").join("config.yaml"), "project", "hermes", "settings", project_name.clone());
+        // Project skills
+        let project_hermes_skills = project_root.join(".hermes").join("skills");
+        if project_hermes_skills.exists() {
+            scan_skills_directory_recursive(&mut configs, &project_hermes_skills, "project", "hermes", project_name.clone());
+        }
+
+        // ── OPENCLAW - Project/Workspace ──
+        // SOUL.md - Agent personality (shared between Hermes & OpenClaw)
+        add_config_if_exists(&mut configs, project_root.join("SOUL.md"), "project", "shared", "soul", project_name.clone());
+        // AGENTS.md - Operating rules (already added for Codex)
+        // USER.md - Personal user context
+        add_config_if_exists(&mut configs, project_root.join("USER.md"), "project", "openclaw", "memory", project_name.clone());
+        // IDENTITY.md - Agent name, emoji, avatar
+        add_config_if_exists(&mut configs, project_root.join("IDENTITY.md"), "project", "openclaw", "project-config", project_name.clone());
+        // TOOLS.md - Environment-specific tool notes
+        add_config_if_exists(&mut configs, project_root.join("TOOLS.md"), "project", "openclaw", "project-config", project_name.clone());
+        // MEMORY.md - Long-term memories
+        add_config_if_exists(&mut configs, project_root.join("MEMORY.md"), "project", "openclaw", "memory", project_name.clone());
+        // HEARTBEAT.md - Scheduled tasks
+        add_config_if_exists(&mut configs, project_root.join("HEARTBEAT.md"), "project", "openclaw", "project-config", project_name.clone());
+        // Workspace config
+        add_config_if_exists(&mut configs, project_root.join(".openclaw").join("openclaw.json"), "project", "openclaw", "settings", project_name.clone());
+        // Workspace skills (highest priority for OpenClaw)
+        let project_openclaw_skills = project_root.join("skills");
+        if project_openclaw_skills.exists() {
+            scan_skills_directory(&mut configs, &project_openclaw_skills, "project", "openclaw", project_name.clone());
+        }
+        // .agents/skills/ for OpenClaw too
+        if project_agents_skills.exists() {
+            scan_skills_directory(&mut configs, &project_agents_skills, "project", "openclaw", project_name.clone());
+        }
+    }
+
+    Ok(configs)
+}
+
+/// Scan a directory for .md files (used for agents/, rules/)
+fn scan_md_directory(
+    configs: &mut Vec<AgentConfigFile>,
+    dir: &PathBuf,
+    scope: &str,
+    runtime: &str,
+    file_type: &str,
+    project_name: Option<String>,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "md").unwrap_or(false) {
+                add_config_if_exists(configs, path, scope, runtime, file_type, project_name.clone());
+            }
+        }
+    }
+}
+
+/// Scan skills directory recursively (for Hermes category subdirs)
+fn scan_skills_directory_recursive(
+    configs: &mut Vec<AgentConfigFile>,
+    dir: &PathBuf,
+    scope: &str,
+    runtime: &str,
+    project_name: Option<String>,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Check if this is a skill directory (has SKILL.md)
+                let skill_file = path.join("SKILL.md");
+                if skill_file.exists() {
+                    add_config_if_exists(configs, skill_file, scope, runtime, "skill", project_name.clone());
+                } else {
+                    // It's a category directory, recurse
+                    scan_skills_directory_recursive(configs, &path, scope, runtime, project_name.clone());
+                }
+            } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+                // Single file skill
+                add_config_if_exists(configs, path, scope, runtime, "skill", project_name.clone());
+            }
+        }
+    }
+}
+
+fn add_config_if_exists(
+    configs: &mut Vec<AgentConfigFile>,
+    path: PathBuf,
+    scope: &str,
+    runtime: &str,
+    file_type: &str,
+    project_name: Option<String>,
+) {
+    let exists = path.exists();
+    let last_modified = if exists {
+        fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| {
+                let secs = d.as_secs();
+                // Format as ISO 8601
+                let datetime = chrono_lite(secs);
+                datetime
+            })
+    } else {
+        None
+    };
+
+    let token_count = if exists {
+        fs::read_to_string(&path)
+            .ok()
+            .map(|content| estimate_tokens(content.len() as u64))
+    } else {
+        None
+    };
+
+    configs.push(AgentConfigFile {
+        path: path.to_string_lossy().to_string(),
+        scope: scope.to_string(),
+        runtime: runtime.to_string(),
+        file_type: file_type.to_string(),
+        exists,
+        last_modified,
+        token_count,
+        project_name,
+    });
+}
+
+fn scan_skills_directory(
+    configs: &mut Vec<AgentConfigFile>,
+    dir: &PathBuf,
+    scope: &str,
+    runtime: &str,
+    project_name: Option<String>,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Directory skill - look for SKILL.md
+                let skill_file = path.join("SKILL.md");
+                if skill_file.exists() {
+                    add_config_if_exists(configs, skill_file, scope, runtime, "skill", project_name.clone());
+                }
+            } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+                // Single file skill
+                add_config_if_exists(configs, path, scope, runtime, "skill", project_name.clone());
+            }
+        }
+    }
+}
+
+/// Simple datetime formatter (avoid adding chrono dependency)
+fn chrono_lite(unix_secs: u64) -> String {
+    // Basic ISO 8601 format without full chrono dependency
+    // Just return the unix timestamp as a string for now
+    format!("{}", unix_secs)
+}
+
+/// Read and parse a config file, handling different formats
+#[tauri::command]
+fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
+    let path_buf = PathBuf::from(&path);
+    let content = fs::read_to_string(&path_buf)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let extension = path_buf.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let (format, parsed) = match extension {
+        "json" => {
+            let value: serde_json::Value = serde_json::from_str(&content)
+                .map_err(|e| format!("Invalid JSON: {}", e))?;
+            ("json".to_string(), value)
+        }
+        "toml" => {
+            // Simple TOML parsing - convert to JSON-like structure
+            let parsed = parse_simple_toml(&content);
+            ("toml".to_string(), parsed)
+        }
+        "yaml" | "yml" => {
+            // Simple YAML parsing
+            let parsed = parse_simple_yaml(&content);
+            ("yaml".to_string(), parsed)
+        }
+        "md" => {
+            // Check for YAML frontmatter
+            if content.trim_start().starts_with("---") {
+                let (frontmatter, body) = parse_frontmatter(&content);
+                let mut obj = serde_json::Map::new();
+                obj.insert("frontmatter".to_string(), frontmatter);
+                obj.insert("body".to_string(), serde_json::Value::String(body));
+                ("yaml-frontmatter".to_string(), serde_json::Value::Object(obj))
+            } else {
+                let mut obj = serde_json::Map::new();
+                obj.insert("body".to_string(), serde_json::Value::String(content.clone()));
+                ("markdown".to_string(), serde_json::Value::Object(obj))
+            }
+        }
+        _ => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("raw".to_string(), serde_json::Value::String(content.clone()));
+            ("unknown".to_string(), serde_json::Value::Object(obj))
+        }
+    };
+
+    Ok(ParsedConfigFile {
+        path,
+        format,
+        content: parsed,
+        raw: content,
+    })
+}
+
+/// Simple TOML parser (without full toml crate dependency)
+fn parse_simple_toml(content: &str) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    let mut current_section = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Section header
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = trimmed[1..trimmed.len()-1].to_string();
+            if !obj.contains_key(&current_section) {
+                obj.insert(current_section.clone(), serde_json::Value::Object(serde_json::Map::new()));
+            }
+            continue;
+        }
+
+        // Key = value
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim().to_string();
+            let value_str = trimmed[eq_pos+1..].trim();
+            let value = parse_toml_value(value_str);
+
+            if current_section.is_empty() {
+                obj.insert(key, value);
+            } else if let Some(section) = obj.get_mut(&current_section) {
+                if let serde_json::Value::Object(ref mut section_map) = section {
+                    section_map.insert(key, value);
+                }
+            }
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+fn parse_toml_value(s: &str) -> serde_json::Value {
+    // Handle quoted strings
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        return serde_json::Value::String(s[1..s.len()-1].to_string());
+    }
+    // Handle booleans
+    if s == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if s == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    // Handle numbers
+    if let Ok(n) = s.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(n) = s.parse::<f64>() {
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
+        }
+    }
+    // Handle arrays (simple case)
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = s[1..s.len()-1].trim();
+        let items: Vec<serde_json::Value> = inner
+            .split(',')
+            .map(|item| parse_toml_value(item.trim()))
+            .collect();
+        return serde_json::Value::Array(items);
+    }
+    // Default to string
+    serde_json::Value::String(s.to_string())
+}
+
+/// Simple YAML parser (basic key-value pairs)
+fn parse_simple_yaml(content: &str) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    let mut current_key: Option<String> = None;
+    let mut current_indent = 0;
+    let mut stack: Vec<(String, serde_json::Map<String, serde_json::Value>, usize)> = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() || line.trim().starts_with('#') {
+            continue;
+        }
+
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+
+        // Key: value pair
+        if let Some(colon_pos) = trimmed.find(':') {
+            let key = trimmed[..colon_pos].trim().to_string();
+            let value_str = trimmed[colon_pos+1..].trim();
+
+            if value_str.is_empty() {
+                // Nested object starts
+                current_key = Some(key);
+                current_indent = indent;
+            } else {
+                // Simple value
+                let value = parse_yaml_value(value_str);
+                obj.insert(key, value);
+            }
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+fn parse_yaml_value(s: &str) -> serde_json::Value {
+    let s = s.trim();
+    // Handle quoted strings
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        return serde_json::Value::String(s[1..s.len()-1].to_string());
+    }
+    // Handle booleans
+    if s == "true" || s == "yes" {
+        return serde_json::Value::Bool(true);
+    }
+    if s == "false" || s == "no" {
+        return serde_json::Value::Bool(false);
+    }
+    // Handle null
+    if s == "null" || s == "~" {
+        return serde_json::Value::Null;
+    }
+    // Handle numbers
+    if let Ok(n) = s.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(n) = s.parse::<f64>() {
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
+        }
+    }
+    // Default to string
+    serde_json::Value::String(s.to_string())
+}
+
+/// Write a config file back to disk
+#[tauri::command]
+fn write_agent_config_file(path: String, content: String) -> Result<(), String> {
+    // Create parent directories if needed
+    let path_buf = PathBuf::from(&path);
+    if let Some(parent) = path_buf.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    fs::write(&path, &content)
+        .map_err(|e| format!("Failed to write file: {}", e))
+}
+
+/// Create a new skill file from template
+#[tauri::command]
+fn create_agent_skill(runtime: String, name: String, scope: String, description: String) -> Result<String, String> {
+    let home = home_dir();
+    let skill_slug = name.replace(' ', "-").to_lowercase();
+
+    // Determine base directory based on runtime and scope (per official docs)
+    let base_dir = match (runtime.as_str(), scope.as_str()) {
+        // Claude: ~/.claude/skills/ or .claude/skills/
+        ("claude", "global") => home.join(".claude").join("skills"),
+        ("claude", "project") => project_root().join(".claude").join("skills"),
+        // Codex: ~/.agents/skills/ (shared) or .agents/skills/
+        ("codex", "global") => home.join(".agents").join("skills"),
+        ("codex", "project") => project_root().join(".agents").join("skills"),
+        // Hermes: ~/.hermes/skills/ or .hermes/skills/
+        ("hermes", "global") => home.join(".hermes").join("skills"),
+        ("hermes", "project") => project_root().join(".hermes").join("skills"),
+        // OpenClaw: ~/.openclaw/skills/ or workspace/skills/
+        ("openclaw", "global") => home.join(".openclaw").join("skills"),
+        ("openclaw", "project") => project_root().join("skills"),
+        _ => return Err(format!("Unknown runtime/scope: {}/{}", runtime, scope)),
+    };
+
+    // Create skill as directory with SKILL.md (recommended structure)
+    let skill_dir = base_dir.join(&skill_slug);
+    fs::create_dir_all(&skill_dir)
+        .map_err(|e| format!("Failed to create skill directory: {}", e))?;
+
+    let skill_path = skill_dir.join("SKILL.md");
+
+    // Generate template based on runtime (different formats per docs)
+    let template = match runtime.as_str() {
+        "claude" => format!(
+r#"---
+name: {}
+description: {}
+allowed-tools:
+  - Read
+  - Edit
+  - Bash
+user-invocable: true
+---
+
+# {}
+
+{}
+
+## When to Use
+
+Trigger this skill when...
+
+## Instructions
+
+[Add your skill instructions here]
+
+## Verification
+
+How to confirm the skill worked correctly.
+"#,
+            skill_slug, description, name, description
+        ),
+        "codex" => format!(
+r#"---
+name: {}
+description: {}
+---
+
+# {}
+
+{}
+
+## When to Use
+
+Trigger this skill when...
+
+## Instructions
+
+[Add your skill instructions here]
+
+## Verification
+
+How to confirm the skill worked correctly.
+"#,
+            skill_slug, description, name, description
+        ),
+        "hermes" => format!(
+r#"---
+name: {}
+description: {}
+version: 1.0.0
+metadata:
+  hermes:
+    tags: [Custom]
+    category: custom
+---
+
+# {}
+
+{}
+
+## When to Use
+
+Trigger conditions and use cases.
+
+## Quick Reference
+
+Common commands or shortcuts.
+
+## Procedure
+
+1. Step one
+2. Step two
+3. Step three
+
+## Pitfalls
+
+Known failure modes and solutions.
+
+## Verification
+
+How to confirm the skill worked correctly.
+"#,
+            skill_slug, description, name, description
+        ),
+        "openclaw" => format!(
+r#"---
+name: {}
+description: {}
+user-invocable: true
+---
+
+# {}
+
+{}
+
+## When to Use
+
+Trigger this skill when...
+
+## Instructions
+
+[Add your skill instructions here]
+
+## Verification
+
+How to confirm the skill worked correctly.
+"#,
+            skill_slug, description, name, description
+        ),
+        _ => return Err(format!("Unknown runtime: {}", runtime)),
+    };
+
+    fs::write(&skill_path, &template)
+        .map_err(|e| format!("Failed to create skill file: {}", e))?;
+
+    Ok(skill_path.to_string_lossy().to_string())
+}
+
+/// Parse permissions from a settings file
+#[tauri::command]
+fn parse_agent_permissions(path: String) -> Result<Vec<Permission>, String> {
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let mut permissions = Vec::new();
+
+    // Try to parse as JSON (Claude settings.json format)
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+        // Claude format: { "permissions": { "allow": ["Bash(git:*)", "Read"] } }
+        if let Some(perms) = json.get("permissions") {
+            if let Some(allow) = perms.get("allow").and_then(|v| v.as_array()) {
+                for item in allow {
+                    if let Some(s) = item.as_str() {
+                        let (tool, pattern) = parse_permission_string(s);
+                        permissions.push(Permission {
+                            tool,
+                            pattern,
+                            allowed: true,
+                            requires_approval: false,
+                        });
+                    }
+                }
+            }
+            if let Some(deny) = perms.get("deny").and_then(|v| v.as_array()) {
+                for item in deny {
+                    if let Some(s) = item.as_str() {
+                        let (tool, pattern) = parse_permission_string(s);
+                        permissions.push(Permission {
+                            tool,
+                            pattern,
+                            allowed: false,
+                            requires_approval: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(permissions)
+}
+
+fn parse_permission_string(s: &str) -> (String, Option<String>) {
+    // Parse "Bash(git:*)" -> ("Bash", Some("git:*"))
+    if let Some(paren_start) = s.find('(') {
+        if s.ends_with(')') {
+            let tool = s[..paren_start].to_string();
+            let pattern = s[paren_start+1..s.len()-1].to_string();
+            return (tool, Some(pattern));
+        }
+    }
+    (s.to_string(), None)
+}
+
+/// Get context preview showing what will be in the agent's context window
+#[tauri::command]
+fn get_agent_context_preview(runtime: String) -> Result<ContextPreview, String> {
+    let home = home_dir();
+    let project = project_root();
+    let mut sections = Vec::new();
+    let mut total_tokens: u64 = 0;
+
+    // System prompt (estimated)
+    let system_tokens = 30000u64; // Approximate system prompt size
+    sections.push(ContextPreviewSection {
+        name: "System Prompt".to_string(),
+        tokens: system_tokens,
+        files: vec!["(built-in)".to_string()],
+    });
+    total_tokens += system_tokens;
+
+    // Project config (CLAUDE.md, AGENTS.md, etc.)
+    let project_config_files: Vec<PathBuf> = match runtime.as_str() {
+        "claude" => vec![project.join("CLAUDE.md")],
+        "codex" => vec![project.join("AGENTS.md")],
+        "hermes" | "openclaw" => vec![project.join("SOUL.md")],
+        _ => vec![],
+    };
+
+    let mut config_tokens: u64 = 0;
+    let mut config_files = Vec::new();
+    for path in project_config_files {
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                config_tokens += estimate_tokens(content.len() as u64);
+                config_files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    if config_tokens > 0 {
+        sections.push(ContextPreviewSection {
+            name: "Project Config".to_string(),
+            tokens: config_tokens,
+            files: config_files,
+        });
+        total_tokens += config_tokens;
+    }
+
+    // Note: Skills are on-demand, not counted in context total
+    // But we can show them as "available" with their token counts
+
+    let limit = match runtime.as_str() {
+        "claude" => 200000u64,
+        "codex" => 128000u64,
+        "hermes" => 128000u64,
+        "openclaw" => 128000u64,
+        _ => 100000u64,
+    };
+
+    Ok(ContextPreview {
+        total_tokens,
+        limit,
+        sections,
+    })
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -2507,6 +3382,13 @@ pub fn run() {
             list_context_files,
             read_context_file,
             write_context_file,
+            // Agent Configuration Manager
+            scan_agent_config_files,
+            read_agent_config_file,
+            write_agent_config_file,
+            create_agent_skill,
+            parse_agent_permissions,
+            get_agent_context_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

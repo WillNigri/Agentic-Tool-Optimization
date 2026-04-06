@@ -12,6 +12,7 @@
     "automation": "Automation",
     "analytics": "Analytics",
     "mcp": "MCP Servers",
+    "agents": "Agent Config",
     "config": "Configuration",
     "settings": "Settings",
     "logout": "Logout",
@@ -499,6 +500,70 @@
     "views": {
       "list": "List",
       "calendar": "Calendar"
+    }
+  },
+  "agentManager": {
+    "title": "Agent Configuration",
+    "subtitle": "Manage config files for all your AI coding agents",
+    "newSkill": "New Skill",
+    "selectFile": "Select a config file to edit",
+    "notFound": "not found",
+    "tabs": {
+      "files": "Config Files",
+      "permissions": "Permissions",
+      "preview": "Context Preview"
+    },
+    "explorer": {
+      "title": "Config Files",
+      "global": "Global (~/)",
+      "project": "Project",
+      "noFiles": "No config files found"
+    },
+    "editor": {
+      "fileNotFound": "File does not exist",
+      "createFile": "Create File",
+      "unsaved": "Unsaved",
+      "saved": "Saved",
+      "saveFailed": "Save failed",
+      "revert": "Revert changes",
+      "export": "Export to other format"
+    },
+    "export": {
+      "title": "Export Config",
+      "source": "Source",
+      "converted": "Converted",
+      "copy": "Copy",
+      "copied": "Copied!",
+      "download": "Download"
+    },
+    "permissions": {
+      "tool": "Tool",
+      "allowed": "Always allowed",
+      "approval": "Requires approval",
+      "denied": "Denied",
+      "noSources": "No permission sources found",
+      "noSourcesHint": "Create a settings.json file to configure permissions"
+    },
+    "preview": {
+      "loading": "Loading context preview...",
+      "totalUsed": "Total Used",
+      "limit": "Context Limit",
+      "usage": "Usage",
+      "ofLimit": "of limit",
+      "tokens": "tokens",
+      "breakdown": "Context Breakdown",
+      "skillsNote": "Skills are on-demand",
+      "skillsNoteDetail": "Skills are not counted in the context total. They are only loaded when triggered by your prompts."
+    },
+    "createSkill": {
+      "title": "Create New Skill",
+      "name": "Skill Name",
+      "namePlaceholder": "my-skill",
+      "description": "Description",
+      "descriptionPlaceholder": "What does this skill do?",
+      "runtime": "Runtime",
+      "scope": "Scope",
+      "willCreate": "Will create:"
     }
   },
   "common": {

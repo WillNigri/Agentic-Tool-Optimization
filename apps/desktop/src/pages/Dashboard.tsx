@@ -11,6 +11,7 @@ import AutomationFlow from "@/components/AutomationFlow";
 import CronDashboard from "@/components/cron/CronDashboard";
 import PromptBar from "@/components/PromptBar";
 import SetupWizard from "@/components/SetupWizard";
+import { AgentManager } from "@/components/AgentManager";
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
@@ -21,6 +22,7 @@ const PANELS: Record<Section, React.ComponentType> = {
   cron: CronDashboard,
   analytics: UsageAnalytics,
   mcp: McpDashboard,
+  agents: AgentManager,
   config: RuntimeSettings,
 };
 

@@ -12,6 +12,7 @@ import {
   Clock,
   Crown,
   User,
+  Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
@@ -19,7 +20,7 @@ import { useTranslation } from "react-i18next";
 import { useCronStore } from "@/stores/useCronStore";
 import LoginModal from "./LoginModal";
 
-export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "config";
+export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config";
 
 interface SidebarProps {
   active: Section;
@@ -35,6 +36,7 @@ const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: s
   { id: "cron", labelKey: "nav.cron", icon: Clock },
   { id: "analytics", labelKey: "nav.analytics", icon: BarChart3 },
   { id: "mcp", labelKey: "nav.mcp", icon: Server },
+  { id: "agents", labelKey: "nav.agents", icon: Settings2 },
   { id: "config", labelKey: "nav.config", icon: Settings },
 ];
 
