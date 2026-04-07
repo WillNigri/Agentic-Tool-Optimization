@@ -33,6 +33,20 @@
 - Activity logs for audit trail
 - Skill sync across devices
 
+### v0.6.0 — Deeper Runtime Integration
+- Live context tracking from runtime session logs (reads Claude session JSONL)
+- Real MCP tool discovery (JSON-RPC protocol to running MCP servers)
+- Config editor with write support (FileViewer with save functionality)
+- Hooks read/write from actual settings files (HooksManager + Tauri commands)
+
+### v0.7.0 — Marketplace Backend
+- Marketplace service with PostgreSQL schema
+- Skill submissions with versioning (semver)
+- Search, filter, and discovery endpoints
+- Ratings and reviews with helpfulness voting
+- Skill packs (collections) with import/export as JSON
+- Update notifications for installed skills
+
 ---
 
 ## Upcoming
@@ -46,18 +60,6 @@
 - Notification preferences per event type
 - Desktop UI for managing notification channels
 - Events: cron failures, health alerts, team invitations, sync conflicts
-
-### v0.6.0 — Deeper Runtime Integration
-- Live context tracking from runtime session logs
-- Real MCP tool discovery (connect to running MCP servers)
-- Config editor with write support (edit settings from the app)
-- Hooks read/write from actual settings files
-
-### v0.7.0 — Marketplace Backend
-- Real skill submissions and discovery
-- Skill ratings and reviews
-- Versioning and update notifications
-- Import/export skill packs
 
 ### v0.8.0 — Advanced Automation
 - Webhook triggers (inbound)
