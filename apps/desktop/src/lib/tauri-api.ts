@@ -36,6 +36,113 @@ export async function getContextForRuntime(runtime: AgentRuntime) {
   }>('get_context_for_runtime', { runtime });
 }
 
+// ---- Live Session Tracking (Phase 4) ----
+
+export interface SessionFileRead {
+  path: string;
+  timestamp: string;
+  tokenEstimate: number;
+}
+
+export interface LiveSessionData {
+  sessionId: string | null;
+  projectPath: string | null;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  messageCount: number;
+  toolCallCount: number;
+  filesRead: SessionFileRead[];
+  startedAt: string | null;
+  lastActivity: string | null;
+  model: string | null;
+  isActive: boolean;
+}
+
+/**
+ * Get live session data from Claude Code's session logs
+ */
+export async function getLiveSessionData(): Promise<LiveSessionData> {
+  return invoke<LiveSessionData>('get_live_session_data');
+}
+
+/**
+ * Get context breakdown with live session data for Claude
+ */
+export async function getLiveContextBreakdown() {
+  return invoke<{
+    totalTokens: number;
+    limit: number;
+    categories: Array<{ name: string; tokens: number; color: string }>;
+  }>('get_live_context_breakdown');
+}
+
+// ---- MCP Tool Discovery (Phase 4) ----
+
+export interface McpTool {
+  name: string;
+  description: string | null;
+  inputSchema: unknown | null;
+}
+
+export interface McpServerDetails {
+  serverName: string;
+  serverVersion: string | null;
+  protocolVersion: string | null;
+  tools: McpTool[];
+  connected: boolean;
+  error: string | null;
+}
+
+/**
+ * Discover tools from a specific MCP server
+ */
+export async function discoverMcpServerTools(serverName: string): Promise<McpServerDetails> {
+  return invoke<McpServerDetails>('discover_mcp_server_tools', { serverName });
+}
+
+/**
+ * Get all MCP servers with discovered tools
+ */
+export async function getMcpServersWithTools(): Promise<McpServerDetails[]> {
+  return invoke<McpServerDetails[]>('get_mcp_servers_with_tools');
+}
+
+// ---- Hooks Read/Write (Phase 4) ----
+
+export interface HookConfig {
+  id: string;
+  name: string;
+  event: string;
+  command: string;
+  matcher: string | null;
+  timeout: number | null;
+  scope: string;
+  enabled: boolean;
+}
+
+/**
+ * Get all hooks from settings files
+ */
+export async function getHooks(): Promise<HookConfig[]> {
+  return invoke<HookConfig[]>('get_hooks');
+}
+
+/**
+ * Save a hook to settings file
+ */
+export async function saveHook(hook: HookConfig): Promise<void> {
+  return invoke<void>('save_hook', { hook });
+}
+
+/**
+ * Delete a hook from settings file
+ */
+export async function deleteHook(hookId: string): Promise<void> {
+  return invoke<void>('delete_hook', { hookId });
+}
+
 // ---- Skills ----
 export type SkillScope = 'enterprise' | 'personal' | 'project' | 'plugin';
 
@@ -721,4 +828,602 @@ export async function parseAgentPermissions(path: string): Promise<AgentPermissi
  */
 export async function getAgentContextPreview(runtime: AgentConfigRuntime): Promise<AgentContextPreview> {
   return invoke<AgentContextPreview>('get_agent_context_preview', { runtime });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 1: Skill Health Check
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface ValidationIssue {
+  code: string;
+  severity: 'error' | 'warning';
+  message: string;
+  line?: number;
+  suggestion?: string;
+}
+
+export interface SkillValidation {
+  path: string;
+  skillName?: string;
+  valid: boolean;
+  errors: ValidationIssue[];
+  warnings: ValidationIssue[];
+  tokenCount: number;
+}
+
+/**
+ * Validate a single skill file
+ */
+export async function validateSkill(path: string): Promise<SkillValidation> {
+  return invoke<SkillValidation>('validate_skill', { path });
+}
+
+/**
+ * Validate all skill files across all runtimes
+ */
+export async function validateAllSkills(): Promise<SkillValidation[]> {
+  return invoke<SkillValidation[]>('validate_all_skills');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 2: Onboarding Checklist
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface OnboardingAction {
+  actionType: 'create_file' | 'open_editor' | 'run_command' | 'external_link';
+  target: string;
+}
+
+export interface OnboardingItem {
+  id: string;
+  label: string;
+  completed: boolean;
+  action?: OnboardingAction;
+}
+
+export interface OnboardingStatus {
+  runtime: string;
+  items: OnboardingItem[];
+  completionPercent: number;
+}
+
+/**
+ * Get onboarding status for a specific runtime
+ */
+export async function getOnboardingStatus(runtime: AgentConfigRuntime): Promise<OnboardingStatus> {
+  return invoke<OnboardingStatus>('get_onboarding_status', { runtime });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 3: Profile Snapshots
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface ProfileFile {
+  path: string;
+  content: string;
+  scope: 'global' | 'project';
+}
+
+export interface ProfileSnapshot {
+  id: string;
+  name: string;
+  description?: string;
+  runtime: string;
+  files: ProfileFile[];
+  createdAt: string;
+}
+
+/**
+ * Save current configuration as a profile snapshot
+ */
+export async function saveProfileSnapshot(
+  name: string,
+  description: string | null,
+  runtime: AgentConfigRuntime
+): Promise<string> {
+  return invoke<string>('save_profile_snapshot', { name, description, runtime });
+}
+
+/**
+ * List all profile snapshots
+ */
+export async function listProfileSnapshots(): Promise<ProfileSnapshot[]> {
+  return invoke<ProfileSnapshot[]>('list_profile_snapshots');
+}
+
+/**
+ * Load a profile snapshot (writes files to disk)
+ */
+export async function loadProfileSnapshot(profileId: string): Promise<void> {
+  return invoke<void>('load_profile_snapshot', { profileId });
+}
+
+/**
+ * Delete a profile snapshot
+ */
+export async function deleteProfileSnapshot(profileId: string): Promise<void> {
+  return invoke<void>('delete_profile_snapshot', { profileId });
+}
+
+/**
+ * Export a profile snapshot as JSON
+ */
+export async function exportProfileSnapshot(profileId: string): Promise<string> {
+  return invoke<string>('export_profile_snapshot', { profileId });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 4: Skill Usage Analytics
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface SkillUsageStat {
+  skillPath: string;
+  skillName: string;
+  triggerCount: number;
+  lastUsed?: string;
+  avgTokens?: number;
+}
+
+/**
+ * Get usage statistics for all skills
+ */
+export async function getSkillUsageStats(): Promise<SkillUsageStat[]> {
+  return invoke<SkillUsageStat[]>('get_skill_usage_stats');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 6: Project Manager
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  isActive: boolean;
+  skillCount: number;
+  lastAccessed?: string;
+  createdAt: string;
+  hasClaude: boolean;
+  hasCodex: boolean;
+  hasHermes: boolean;
+  hasOpenclaw: boolean;
+}
+
+export interface DiscoveredProject {
+  path: string;
+  name: string;
+  skillCount: number;
+  runtimes: string[];
+}
+
+/**
+ * Discover projects on the system that have agent configurations
+ */
+export async function discoverProjects(): Promise<DiscoveredProject[]> {
+  return invoke<DiscoveredProject[]>('discover_projects');
+}
+
+/**
+ * List all saved projects
+ */
+export async function listProjects(): Promise<Project[]> {
+  return invoke<Project[]>('list_projects');
+}
+
+/**
+ * Add a project to the list
+ */
+export async function addProject(name: string, path: string): Promise<Project> {
+  return invoke<Project>('add_project', { name, path });
+}
+
+/**
+ * Update a project's name
+ */
+export async function updateProject(projectId: string, name: string): Promise<void> {
+  return invoke<void>('update_project', { projectId, name });
+}
+
+/**
+ * Delete a project from the list (doesn't delete files)
+ */
+export async function deleteProject(projectId: string): Promise<void> {
+  return invoke<void>('delete_project', { projectId });
+}
+
+/**
+ * Set the active project
+ */
+export async function setActiveProject(projectId: string): Promise<void> {
+  return invoke<void>('set_active_project', { projectId });
+}
+
+/**
+ * Get the active project
+ */
+export async function getActiveProject(): Promise<Project | null> {
+  return invoke<Project | null>('get_active_project');
+}
+
+/**
+ * Get skills for a specific project
+ */
+export async function getProjectSkills(projectPath: string): Promise<LocalSkill[]> {
+  return invoke<LocalSkill[]>('get_project_skills', { projectPath });
+}
+
+/**
+ * Clone a skill from one project to another
+ */
+export async function cloneSkill(
+  sourceSkillPath: string,
+  targetProjectPath: string,
+  targetRuntime: AgentConfigRuntime
+): Promise<string> {
+  return invoke<string>('clone_skill', { sourceSkillPath, targetProjectPath, targetRuntime });
+}
+
+/**
+ * Refresh skill count for a project
+ */
+export async function refreshProjectSkills(projectId: string): Promise<number> {
+  return invoke<number>('refresh_project_skills', { projectId });
+}
+
+// ============================================================================
+// Secrets Manager
+// ============================================================================
+
+export interface Secret {
+  id: string;
+  name: string;
+  keyType: string;
+  runtime?: string;
+  projectId?: string;
+  createdAt: string;
+  updatedAt: string;
+  hasValue: boolean;
+}
+
+/**
+ * List all secrets (metadata only)
+ */
+export async function listSecrets(): Promise<Secret[]> {
+  return invoke<Secret[]>('list_secrets');
+}
+
+/**
+ * Save a new secret
+ */
+export async function saveSecret(
+  name: string,
+  keyType: string,
+  value: string,
+  runtime?: string,
+  projectId?: string
+): Promise<Secret> {
+  return invoke<Secret>('save_secret', { name, keyType, value, runtime, projectId });
+}
+
+/**
+ * Get secret value (requires user action)
+ */
+export async function getSecretValue(secretId: string): Promise<string> {
+  return invoke<string>('get_secret_value', { secretId });
+}
+
+/**
+ * Update a secret
+ */
+export async function updateSecret(
+  secretId: string,
+  name?: string,
+  value?: string
+): Promise<void> {
+  return invoke<void>('update_secret', { secretId, name, value });
+}
+
+/**
+ * Delete a secret
+ */
+export async function deleteSecret(secretId: string): Promise<void> {
+  return invoke<void>('delete_secret', { secretId });
+}
+
+// ============================================================================
+// Environment Variables
+// ============================================================================
+
+export interface EnvVar {
+  id: string;
+  projectId?: string;
+  runtime?: string;
+  key: string;
+  value: string;
+  createdAt: string;
+}
+
+/**
+ * List environment variables
+ */
+export async function listEnvVars(projectId?: string, runtime?: string): Promise<EnvVar[]> {
+  return invoke<EnvVar[]>('list_env_vars', { projectId, runtime });
+}
+
+/**
+ * Save an environment variable
+ */
+export async function saveEnvVar(
+  key: string,
+  value: string,
+  projectId?: string,
+  runtime?: string
+): Promise<EnvVar> {
+  return invoke<EnvVar>('save_env_var', { key, value, projectId, runtime });
+}
+
+/**
+ * Update an environment variable
+ */
+export async function updateEnvVar(
+  envId: string,
+  key?: string,
+  value?: string
+): Promise<void> {
+  return invoke<void>('update_env_var', { envId, key, value });
+}
+
+/**
+ * Delete an environment variable
+ */
+export async function deleteEnvVar(envId: string): Promise<void> {
+  return invoke<void>('delete_env_var', { envId });
+}
+
+/**
+ * Import environment variables from a .env file
+ */
+export async function importEnvFile(
+  filePath: string,
+  projectId?: string,
+  runtime?: string
+): Promise<EnvVar[]> {
+  return invoke<EnvVar[]>('import_env_file', { filePath, projectId, runtime });
+}
+
+// ============================================================================
+// Model Configuration
+// ============================================================================
+
+export interface ModelConfig {
+  id: string;
+  runtime: string;
+  projectId?: string;
+  modelId: string;
+  maxTokens?: number;
+  temperature?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * List all model configurations
+ */
+export async function listModelConfigs(): Promise<ModelConfig[]> {
+  return invoke<ModelConfig[]>('list_model_configs');
+}
+
+/**
+ * Save or update model configuration
+ */
+export async function saveModelConfig(
+  runtime: string,
+  modelId: string,
+  projectId?: string,
+  maxTokens?: number,
+  temperature?: number
+): Promise<ModelConfig> {
+  return invoke<ModelConfig>('save_model_config', { runtime, modelId, projectId, maxTokens, temperature });
+}
+
+/**
+ * Get model config for a runtime
+ */
+export async function getModelConfig(runtime: string, projectId?: string): Promise<ModelConfig | null> {
+  return invoke<ModelConfig | null>('get_model_config', { runtime, projectId });
+}
+
+// ============================================================================
+// Execution Logs
+// ============================================================================
+
+export interface ExecutionLog {
+  id: string;
+  runtime: string;
+  prompt?: string;
+  response?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  durationMs?: number;
+  status: string;
+  errorMessage?: string;
+  skillName?: string;
+  createdAt: string;
+}
+
+/**
+ * Get execution logs
+ */
+export async function getExecutionLogs(
+  runtime?: string,
+  status?: string,
+  limit?: number
+): Promise<ExecutionLog[]> {
+  return invoke<ExecutionLog[]>('get_execution_logs', { runtime, status, limit });
+}
+
+/**
+ * Add an execution log entry
+ */
+export async function addExecutionLog(
+  runtime: string,
+  status: string,
+  prompt?: string,
+  response?: string,
+  tokensIn?: number,
+  tokensOut?: number,
+  durationMs?: number,
+  errorMessage?: string,
+  skillName?: string
+): Promise<ExecutionLog> {
+  return invoke<ExecutionLog>('add_execution_log', {
+    runtime, status, prompt, response, tokensIn, tokensOut, durationMs, errorMessage, skillName
+  });
+}
+
+// ============================================================================
+// Health Checks
+// ============================================================================
+
+export interface RuntimeHealth {
+  runtime: string;
+  status: string;
+  latencyMs?: number;
+  uptimePercent?: number;
+  lastCheck?: string;
+  errorMessage?: string;
+}
+
+/**
+ * Get health status for all runtimes
+ */
+export async function getHealthStatus(): Promise<RuntimeHealth[]> {
+  return invoke<RuntimeHealth[]>('get_health_status');
+}
+
+/**
+ * Record a health check
+ */
+export async function recordHealthCheck(
+  runtime: string,
+  status: string,
+  latencyMs?: number,
+  errorMessage?: string
+): Promise<void> {
+  return invoke<void>('record_health_check', { runtime, status, latencyMs, errorMessage });
+}
+
+// ---- Phase 2: Real-time Monitoring ----
+
+/**
+ * Start the log file watcher for real-time updates
+ */
+export async function startLogWatcher(): Promise<boolean> {
+  return invoke<boolean>('start_log_watcher');
+}
+
+/**
+ * Stop the log file watcher
+ */
+export async function stopLogWatcher(): Promise<boolean> {
+  return invoke<boolean>('stop_log_watcher');
+}
+
+/**
+ * Check if log watcher is running
+ */
+export async function isLogWatcherRunning(): Promise<boolean> {
+  return invoke<boolean>('is_log_watcher_running');
+}
+
+/**
+ * Start the background health poller
+ */
+export async function startHealthPoller(): Promise<boolean> {
+  return invoke<boolean>('start_health_poller');
+}
+
+/**
+ * Stop the background health poller
+ */
+export async function stopHealthPoller(): Promise<boolean> {
+  return invoke<boolean>('stop_health_poller');
+}
+
+/**
+ * Check if health poller is running
+ */
+export async function isHealthPollerRunning(): Promise<boolean> {
+  return invoke<boolean>('is_health_poller_running');
+}
+
+/**
+ * Health history data point
+ */
+export interface HealthHistoryPoint {
+  timestamp: string;
+  latencyMs: number | null;
+  status: string;
+}
+
+/**
+ * Runtime health history with stats
+ */
+export interface RuntimeHealthHistory {
+  runtime: string;
+  dataPoints: HealthHistoryPoint[];
+  avgLatencyMs: number | null;
+  uptimePercent: number;
+  totalChecks: number;
+}
+
+/**
+ * Get health check history for charts
+ */
+export async function getHealthHistory(
+  runtime?: string,
+  hours?: number
+): Promise<RuntimeHealthHistory[]> {
+  return invoke<RuntimeHealthHistory[]>('get_health_history', { runtime, hours });
+}
+
+/**
+ * Runtime execution count
+ */
+export interface RuntimeExecutionCount {
+  runtime: string;
+  count: number;
+  successCount: number;
+  errorCount: number;
+}
+
+/**
+ * Daily execution count
+ */
+export interface DailyExecutionCount {
+  date: string;
+  count: number;
+  successCount: number;
+  errorCount: number;
+}
+
+/**
+ * Aggregated usage metrics
+ */
+export interface UsageMetrics {
+  totalExecutions: number;
+  successfulExecutions: number;
+  failedExecutions: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  avgDurationMs: number | null;
+  executionsByRuntime: RuntimeExecutionCount[];
+  executionsByDay: DailyExecutionCount[];
+}
+
+/**
+ * Get aggregated usage metrics
+ */
+export async function getUsageMetrics(days?: number): Promise<UsageMetrics> {
+  return invoke<UsageMetrics>('get_usage_metrics', { days });
 }

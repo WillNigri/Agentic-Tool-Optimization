@@ -13,6 +13,16 @@ import {
   Crown,
   User,
   Settings2,
+  FolderKanban,
+  KeyRound,
+  FileCode,
+  Cpu,
+  ScrollText,
+  Activity,
+  Cloud,
+  Users,
+  RefreshCw,
+  BellRing,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
@@ -20,7 +30,7 @@ import { useTranslation } from "react-i18next";
 import { useCronStore } from "@/stores/useCronStore";
 import LoginModal from "./LoginModal";
 
-export type Section = "context" | "skills" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config";
+export type Section = "context" | "skills" | "projects" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications";
 
 interface SidebarProps {
   active: Section;
@@ -30,13 +40,23 @@ interface SidebarProps {
 const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: string }[] = [
   { id: "context", labelKey: "nav.context", icon: Layers },
   { id: "skills", labelKey: "nav.skills", icon: Sparkles },
+  { id: "projects", labelKey: "nav.projects", icon: FolderKanban },
   { id: "subagents", labelKey: "nav.subagents", icon: Bot },
   { id: "hooks", labelKey: "nav.hooks", icon: Webhook },
   { id: "automation", labelKey: "nav.automation", icon: Workflow },
   { id: "cron", labelKey: "nav.cron", icon: Clock },
   { id: "analytics", labelKey: "nav.analytics", icon: BarChart3 },
+  { id: "logs", labelKey: "nav.logs", icon: ScrollText },
+  { id: "health", labelKey: "nav.health", icon: Activity },
   { id: "mcp", labelKey: "nav.mcp", icon: Server },
   { id: "agents", labelKey: "nav.agents", icon: Settings2 },
+  { id: "cloud", labelKey: "nav.cloud", icon: Cloud },
+  { id: "teams", labelKey: "nav.teams", icon: Users },
+  { id: "sync", labelKey: "nav.sync", icon: RefreshCw },
+  { id: "notifications", labelKey: "nav.notifications", icon: BellRing },
+  { id: "secrets", labelKey: "nav.secrets", icon: KeyRound },
+  { id: "env", labelKey: "nav.env", icon: FileCode },
+  { id: "models", labelKey: "nav.models", icon: Cpu },
   { id: "config", labelKey: "nav.config", icon: Settings },
 ];
 

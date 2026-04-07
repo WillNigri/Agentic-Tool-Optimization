@@ -24,3 +24,9 @@ notify = "6"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde_yaml = "0.9"
+keyring = "2"
+dirs = "5"
+toml = "0.8"

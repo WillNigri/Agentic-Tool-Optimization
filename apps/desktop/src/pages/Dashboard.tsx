@@ -11,18 +11,37 @@ import AutomationFlow from "@/components/AutomationFlow";
 import CronDashboard from "@/components/cron/CronDashboard";
 import PromptBar from "@/components/PromptBar";
 import SetupWizard from "@/components/SetupWizard";
-import { AgentManager } from "@/components/AgentManager";
+import { AgentManager, ProjectManager } from "@/components/AgentManager";
+import { SecretsManager } from "@/components/SecretsManager";
+import { EnvManager } from "@/components/EnvManager";
+import { ModelConfig } from "@/components/ModelConfig";
+import { LogViewer } from "@/components/LogViewer";
+import { HealthDashboard } from "@/components/HealthDashboard";
+import CloudAuth from "@/components/CloudAuth";
+import TeamWorkspaces from "@/components/TeamWorkspaces";
+import SkillSync from "@/components/SkillSync";
+import NotificationsSettings from "@/components/NotificationsSettings";
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
   skills: SkillsManager,
+  projects: ProjectManager,
   subagents: SubagentsManager,
   hooks: HooksManager,
   automation: AutomationFlow,
   cron: CronDashboard,
   analytics: UsageAnalytics,
+  logs: LogViewer,
+  health: HealthDashboard,
   mcp: McpDashboard,
   agents: AgentManager,
+  cloud: CloudAuth,
+  teams: TeamWorkspaces,
+  sync: SkillSync,
+  notifications: NotificationsSettings,
+  secrets: SecretsManager,
+  env: EnvManager,
+  models: ModelConfig,
   config: RuntimeSettings,
 };
 

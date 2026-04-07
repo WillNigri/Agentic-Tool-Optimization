@@ -102,6 +102,78 @@ export async function getContextForRuntime(runtime: tauriApi.AgentRuntime): Prom
   return getContextBreakdown(); // fallback
 }
 
+// ---- Live Session Tracking (Phase 4) ----
+
+export type LiveSessionData = tauriApi.LiveSessionData;
+export type SessionFileRead = tauriApi.SessionFileRead;
+
+export async function getLiveSessionData(): Promise<LiveSessionData> {
+  if (isTauri) return tauriApi.getLiveSessionData();
+  // Mock data for browser dev mode
+  return {
+    sessionId: null,
+    projectPath: null,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    messageCount: 0,
+    toolCallCount: 0,
+    filesRead: [],
+    startedAt: null,
+    lastActivity: null,
+    model: null,
+    isActive: false,
+  };
+}
+
+export async function getLiveContextBreakdown(): Promise<ContextBreakdown> {
+  if (isTauri) return tauriApi.getLiveContextBreakdown();
+  return getContextBreakdown(); // fallback
+}
+
+// ---- MCP Tool Discovery (Phase 4) ----
+
+export type McpTool = tauriApi.McpTool;
+export type McpServerDetails = tauriApi.McpServerDetails;
+
+export async function discoverMcpServerTools(serverName: string): Promise<McpServerDetails> {
+  if (isTauri) return tauriApi.discoverMcpServerTools(serverName);
+  // Mock response for browser dev mode
+  return {
+    serverName,
+    serverVersion: null,
+    protocolVersion: null,
+    tools: [],
+    connected: false,
+    error: "Tauri not available",
+  };
+}
+
+export async function getMcpServersWithTools(): Promise<McpServerDetails[]> {
+  if (isTauri) return tauriApi.getMcpServersWithTools();
+  return []; // Mock for browser dev mode
+}
+
+// ---- Hooks Read/Write (Phase 4) ----
+
+export type HookConfig = tauriApi.HookConfig;
+
+export async function getHooks(): Promise<HookConfig[]> {
+  if (isTauri) return tauriApi.getHooks();
+  return []; // Mock for browser dev mode
+}
+
+export async function saveHook(hook: HookConfig): Promise<void> {
+  if (isTauri) return tauriApi.saveHook(hook);
+  console.log('[Mock] Save hook:', hook);
+}
+
+export async function deleteHook(hookId: string): Promise<void> {
+  if (isTauri) return tauriApi.deleteHook(hookId);
+  console.log('[Mock] Delete hook:', hookId);
+}
+
 // ---- Skills ----
 
 export type Skill = tauriApi.LocalSkill;

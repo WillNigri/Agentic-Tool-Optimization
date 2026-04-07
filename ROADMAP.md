@@ -17,20 +17,35 @@
 - GitHub Actions CI for macOS, Windows, Linux
 - i18n: English, Portuguese, Spanish
 
+### v0.4.0 — Monitoring & Analytics
+- Real-time log viewer with file watcher
+- Background health polling for all runtimes
+- Usage analytics dashboard with execution metrics
+- Latency/uptime charts per runtime
+- Cost tracking per runtime with burn rate visualization
+
+### v0.5.0 — Cloud Sync & Collaboration
+- Cloud backend (ato-cloud) with PostgreSQL
+- GitHub OAuth login
+- Team workspaces with shared skill libraries
+- Team member management (invite, roles, permissions)
+- Team skills sharing and collaboration
+- Activity logs for audit trail
+- Skill sync across devices
+
 ---
 
 ## Upcoming
 
-### v0.4.0 — Monitoring & Analytics
-- Live cron execution tracking
-- Usage analytics dashboard across all runtimes
-- Cost tracking per runtime with burn rate visualization
-- Execution replay for failed jobs
-
-### v0.5.0 — Cloud Sync & Collaboration
-- Cloud backend for syncing skills, workflows, and cron jobs across machines
-- GitHub OAuth login
-- Team workspaces with shared skill libraries
+### v0.5.5 — Notifications & Integrations
+- Notifications service with provider abstraction
+- Slack webhook integration
+- Discord webhook integration
+- Telegram bot integration
+- Email notifications (SMTP)
+- Notification preferences per event type
+- Desktop UI for managing notification channels
+- Events: cron failures, health alerts, team invitations, sync conflicts
 
 ### v0.6.0 — Deeper Runtime Integration
 - Live context tracking from runtime session logs
@@ -45,7 +60,7 @@
 - Import/export skill packs
 
 ### v0.8.0 — Advanced Automation
-- Webhook triggers
+- Webhook triggers (inbound)
 - Parallel node execution
 - Error handling nodes (try/catch/retry per step)
 - Variables and data passing between nodes

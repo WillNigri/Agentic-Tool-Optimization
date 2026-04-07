@@ -1,7 +1,19 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
-import { FolderTree, Shield, Eye, Plus, RefreshCw, AlertTriangle, Loader2 } from "lucide-react";
+import {
+  FolderTree,
+  Shield,
+  Eye,
+  Plus,
+  RefreshCw,
+  AlertTriangle,
+  Loader2,
+  Zap,
+  BookOpen,
+  HeartPulse,
+  BarChart3,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAgentConfigStore, type RuntimeFilter } from "@/stores/useAgentConfigStore";
 import {
@@ -9,14 +21,22 @@ import {
   getAgentContextPreview,
   type AgentConfigRuntime,
   type AgentConfigFile,
+  type ProfileSnapshot,
 } from "@/lib/tauri-api";
 import ConfigFileExplorer from "./ConfigFileExplorer";
 import ConfigFileEditor from "./ConfigFileEditor";
 import PermissionMatrix from "./PermissionMatrix";
 import ContextPreview from "./ContextPreview";
 import CreateSkillModal from "./CreateSkillModal";
+import HealthCheckPanel from "./HealthCheckPanel";
+import SkillUsagePanel from "./SkillUsagePanel";
+import ProfileDropdown from "./ProfileDropdown";
+import SaveProfileModal from "./SaveProfileModal";
+import ProfileManagerModal from "./ProfileManagerModal";
+import OnboardingModal from "./OnboardingModal";
+import RuntimeComparisonModal from "./RuntimeComparisonModal";
 
-type Tab = "files" | "permissions" | "preview";
+type Tab = "files" | "permissions" | "preview" | "health" | "usage";
 
 const RUNTIME_OPTIONS: { value: RuntimeFilter; label: string }[] = [
   { value: "all", label: "All Runtimes" },
@@ -30,6 +50,10 @@ export default function AgentManager() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>("files");
   const [showCreateSkill, setShowCreateSkill] = useState(false);
+  const [showSaveProfile, setShowSaveProfile] = useState(false);
+  const [showManageProfiles, setShowManageProfiles] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showComparison, setShowComparison] = useState(false);
 
   const {
     setConfigFiles,
@@ -50,9 +74,7 @@ export default function AgentManager() {
   } = useQuery<AgentConfigFile[]>({
     queryKey: ["agent-config-files"],
     queryFn: async () => {
-      console.log("[AgentManager] Fetching config files...");
       const result = await scanAgentConfigFiles();
-      console.log("[AgentManager] Got config files:", result);
       return result;
     },
     retry: 1,
@@ -77,10 +99,18 @@ export default function AgentManager() {
       });
   }, [activeRuntime, setContextPreview]);
 
+  const handleLoadProfile = (profile: ProfileSnapshot) => {
+    // The ProfileDropdown or ProfileManagerModal handles the actual loading
+    // This is just to trigger a refetch after loading
+    refetch();
+  };
+
   const tabs: { id: Tab; label: string; icon: typeof FolderTree }[] = [
     { id: "files", label: t("agentManager.tabs.files", "Config Files"), icon: FolderTree },
     { id: "permissions", label: t("agentManager.tabs.permissions", "Permissions"), icon: Shield },
     { id: "preview", label: t("agentManager.tabs.preview", "Context Preview"), icon: Eye },
+    { id: "health", label: t("agentManager.tabs.health", "Health Check"), icon: HeartPulse },
+    { id: "usage", label: t("agentManager.tabs.usage", "Usage"), icon: BarChart3 },
   ];
 
   // Loading state
@@ -126,6 +156,33 @@ export default function AgentManager() {
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Setup Guide */}
+          <button
+            onClick={() => setShowOnboarding(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border text-sm hover:bg-cs-border/50 transition-colors"
+            title={t("agentManager.onboarding.button", "Setup Guide")}
+          >
+            <BookOpen size={14} />
+            <span className="hidden sm:inline">Setup Guide</span>
+          </button>
+
+          {/* Compare Runtimes */}
+          <button
+            onClick={() => setShowComparison(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border text-sm hover:bg-cs-border/50 transition-colors"
+            title={t("agentManager.compare.button", "Compare Runtimes")}
+          >
+            <Zap size={14} />
+            <span className="hidden sm:inline">Compare</span>
+          </button>
+
+          {/* Profile dropdown */}
+          <ProfileDropdown
+            onSaveProfile={() => setShowSaveProfile(true)}
+            onLoadProfile={handleLoadProfile}
+            onManageProfiles={() => setShowManageProfiles(true)}
+          />
+
           {/* Runtime filter */}
           <select
             value={activeRuntime}
@@ -139,7 +196,7 @@ export default function AgentManager() {
             ))}
           </select>
 
-          {/* Actions */}
+          {/* Refresh */}
           <button
             onClick={() => refetch()}
             disabled={isFetching}
@@ -149,6 +206,7 @@ export default function AgentManager() {
             <RefreshCw size={16} className={isFetching ? "animate-spin" : ""} />
           </button>
 
+          {/* New Skill */}
           <button
             onClick={() => setShowCreateSkill(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-cs-accent text-black text-sm font-medium hover:bg-cs-accent/90 transition-colors"
@@ -160,7 +218,7 @@ export default function AgentManager() {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 mb-4 border-b border-cs-border">
+      <div className="flex items-center gap-1 mb-4 border-b border-cs-border overflow-x-auto">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           return (
@@ -168,7 +226,7 @@ export default function AgentManager() {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={cn(
-                "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors",
+                "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap",
                 activeTab === tab.id
                   ? "border-cs-accent text-cs-accent"
                   : "border-transparent text-cs-muted hover:text-cs-text"
@@ -212,9 +270,21 @@ export default function AgentManager() {
         {activeTab === "permissions" && <PermissionMatrix />}
 
         {activeTab === "preview" && <ContextPreview />}
+
+        {activeTab === "health" && (
+          <div className="h-full border border-cs-border rounded-lg overflow-hidden">
+            <HealthCheckPanel selectedPath={selectedFilePath} />
+          </div>
+        )}
+
+        {activeTab === "usage" && (
+          <div className="h-full border border-cs-border rounded-lg overflow-hidden">
+            <SkillUsagePanel />
+          </div>
+        )}
       </div>
 
-      {/* Create skill modal */}
+      {/* Modals */}
       {showCreateSkill && (
         <CreateSkillModal
           onClose={() => setShowCreateSkill(false)}
@@ -223,6 +293,26 @@ export default function AgentManager() {
             refetch();
           }}
         />
+      )}
+
+      {showSaveProfile && (
+        <SaveProfileModal
+          currentRuntime={activeRuntime === "all" ? "claude" : activeRuntime}
+          onClose={() => setShowSaveProfile(false)}
+          onSaved={() => setShowSaveProfile(false)}
+        />
+      )}
+
+      {showManageProfiles && (
+        <ProfileManagerModal onClose={() => setShowManageProfiles(false)} />
+      )}
+
+      {showOnboarding && (
+        <OnboardingModal onClose={() => setShowOnboarding(false)} />
+      )}
+
+      {showComparison && (
+        <RuntimeComparisonModal onClose={() => setShowComparison(false)} />
       )}
     </div>
   );

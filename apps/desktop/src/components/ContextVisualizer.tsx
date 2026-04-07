@@ -12,9 +12,9 @@ import {
   Pie,
 } from "recharts";
 import { useTranslation } from "react-i18next";
-import { getContextBreakdown, getContextForRuntime } from "@/lib/api";
+import { getContextBreakdown, getContextForRuntime, getLiveSessionData, getLiveContextBreakdown } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
-import { ChevronRight, AlertTriangle, Shield, FolderTree, FileText, BarChart3, ExternalLink, Terminal, Cpu, Server, Globe } from "lucide-react";
+import { ChevronRight, AlertTriangle, Shield, FolderTree, FileText, BarChart3, ExternalLink, Terminal, Cpu, Server, Globe, Zap, Clock, FileCode, MessageSquare, Database } from "lucide-react";
 import FileViewer from "./FileViewer";
 import type { AgentRuntime } from "@/components/cron/types";
 
@@ -88,7 +88,7 @@ const DEP_TYPE_COLORS = {
   mcp: "#3b82f6",
 };
 
-type DetailView = "chart" | "dependencies" | "permissions";
+type DetailView = "chart" | "dependencies" | "permissions" | "live";
 
 export default function ContextVisualizer() {
   const { t } = useTranslation();
@@ -99,6 +99,22 @@ export default function ContextVisualizer() {
   const { data, isLoading } = useQuery({
     queryKey: ["context-breakdown", activeRuntime],
     queryFn: () => getContextForRuntime(activeRuntime),
+  });
+
+  // Live session data (only for Claude)
+  const { data: liveSession, isLoading: liveLoading } = useQuery({
+    queryKey: ["live-session"],
+    queryFn: () => getLiveSessionData(),
+    refetchInterval: 5000, // Refresh every 5 seconds
+    enabled: activeRuntime === "claude",
+  });
+
+  // Live context breakdown (uses actual session data)
+  const { data: liveContext } = useQuery({
+    queryKey: ["live-context-breakdown"],
+    queryFn: () => getLiveContextBreakdown(),
+    refetchInterval: 10000, // Refresh every 10 seconds
+    enabled: activeRuntime === "claude",
   });
 
   if (isLoading) {
@@ -226,10 +242,13 @@ export default function ContextVisualizer() {
       {/* View switcher tabs */}
       <div className="flex gap-1 p-1 bg-cs-bg rounded-lg border border-cs-border">
         {([
-          { id: "chart" as const, label: t('context.views.breakdown'), icon: BarChart3 },
-          { id: "dependencies" as const, label: t('context.views.dependencies'), icon: FolderTree },
-          { id: "permissions" as const, label: t('context.views.permissions'), icon: Shield },
-        ] as const).map(({ id, label, icon: Icon }) => (
+          { id: "chart" as const, label: t('context.views.breakdown'), icon: BarChart3, claudeOnly: false },
+          { id: "live" as const, label: "Live Session", icon: Zap, claudeOnly: true },
+          { id: "dependencies" as const, label: t('context.views.dependencies'), icon: FolderTree, claudeOnly: false },
+          { id: "permissions" as const, label: t('context.views.permissions'), icon: Shield, claudeOnly: false },
+        ] as const)
+          .filter(item => !item.claudeOnly || activeRuntime === "claude")
+          .map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setDetailView(id)}
@@ -242,6 +261,9 @@ export default function ContextVisualizer() {
           >
             <Icon size={14} />
             {label}
+            {id === "live" && liveSession?.isActive && (
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            )}
           </button>
         ))}
       </div>
@@ -438,6 +460,216 @@ export default function ContextVisualizer() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live Session View (Phase 4 - Claude only) */}
+      {detailView === "live" && activeRuntime === "claude" && (
+        <div className="space-y-4">
+          {/* Session Status */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className={cn(
+                  "w-3 h-3 rounded-full",
+                  liveSession?.isActive ? "bg-green-400 animate-pulse" : "bg-cs-muted/40"
+                )} />
+                <span className="text-sm font-medium">
+                  {liveSession?.isActive ? "Active Session" : "No Active Session"}
+                </span>
+              </div>
+              {liveSession?.model && (
+                <span className="text-xs px-2 py-1 rounded bg-cs-border/50 text-cs-muted font-mono">
+                  {liveSession.model.split('-').slice(-2).join('-')}
+                </span>
+              )}
+            </div>
+
+            {liveSession?.sessionId ? (
+              <div className="space-y-3">
+                {/* Session Info */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex items-center gap-2">
+                    <Clock size={14} className="text-cs-muted" />
+                    <div>
+                      <p className="text-[10px] text-cs-muted uppercase">Started</p>
+                      <p className="text-xs font-mono">
+                        {liveSession.startedAt
+                          ? new Date(liveSession.startedAt).toLocaleTimeString()
+                          : "—"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <MessageSquare size={14} className="text-cs-muted" />
+                    <div>
+                      <p className="text-[10px] text-cs-muted uppercase">Messages</p>
+                      <p className="text-xs font-mono">{formatNumber(liveSession.messageCount)}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Token Usage */}
+                <div className="pt-3 border-t border-cs-border">
+                  <p className="text-xs text-cs-muted mb-2">Token Usage</p>
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                    <div className="bg-cs-bg rounded-lg p-2">
+                      <p className="text-[10px] text-cs-muted">Input</p>
+                      <p className="text-sm font-semibold text-blue-400">
+                        {formatNumber(liveSession.totalInputTokens)}
+                      </p>
+                    </div>
+                    <div className="bg-cs-bg rounded-lg p-2">
+                      <p className="text-[10px] text-cs-muted">Output</p>
+                      <p className="text-sm font-semibold text-green-400">
+                        {formatNumber(liveSession.totalOutputTokens)}
+                      </p>
+                    </div>
+                    <div className="bg-cs-bg rounded-lg p-2">
+                      <p className="text-[10px] text-cs-muted">Cache Read</p>
+                      <p className="text-sm font-semibold text-cyan-400">
+                        {formatNumber(liveSession.cacheReadTokens)}
+                      </p>
+                    </div>
+                    <div className="bg-cs-bg rounded-lg p-2">
+                      <p className="text-[10px] text-cs-muted">Cache Write</p>
+                      <p className="text-sm font-semibold text-purple-400">
+                        {formatNumber(liveSession.cacheCreationTokens)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Tool Calls */}
+                <div className="flex items-center justify-between pt-3 border-t border-cs-border">
+                  <div className="flex items-center gap-2">
+                    <Terminal size={14} className="text-cs-muted" />
+                    <span className="text-xs text-cs-muted">Tool Calls</span>
+                  </div>
+                  <span className="text-sm font-mono">{formatNumber(liveSession.toolCallCount)}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-6">
+                <p className="text-sm text-cs-muted">
+                  Start a Claude Code session to see live context tracking.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Files Read in Session */}
+          {liveSession?.filesRead && liveSession.filesRead.length > 0 && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <FileCode size={14} className="text-cs-muted" />
+                  <span className="text-sm font-medium">Files Read ({liveSession.filesRead.length})</span>
+                </div>
+                <span className="text-xs text-cs-muted">
+                  ~{formatNumber(liveSession.filesRead.reduce((s, f) => s + f.tokenEstimate, 0))} tokens
+                </span>
+              </div>
+              <div className="space-y-1 max-h-64 overflow-y-auto">
+                {liveSession.filesRead.slice(-20).reverse().map((file, i) => (
+                  <div
+                    key={`${file.path}-${i}`}
+                    onClick={() => setViewingFile(file.path)}
+                    className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-cs-border/30 cursor-pointer transition-colors"
+                  >
+                    <FileText size={12} className="text-cs-muted shrink-0" />
+                    <span className="text-xs font-mono truncate flex-1" title={file.path}>
+                      {file.path.split('/').slice(-2).join('/')}
+                    </span>
+                    <span className="text-[10px] text-cs-muted shrink-0">
+                      {formatNumber(file.tokenEstimate)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Cache Performance */}
+          {liveSession && (liveSession.cacheReadTokens > 0 || liveSession.cacheCreationTokens > 0) && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-3">
+                <Database size={14} className="text-cs-muted" />
+                <span className="text-sm font-medium">Cache Performance</span>
+              </div>
+              <div className="space-y-2">
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-cs-muted">Cache Hit Rate</span>
+                    <span className="text-cyan-400">
+                      {liveSession.totalInputTokens > 0
+                        ? ((liveSession.cacheReadTokens / (liveSession.totalInputTokens + liveSession.cacheReadTokens)) * 100).toFixed(1)
+                        : 0}%
+                    </span>
+                  </div>
+                  <div className="w-full h-2 bg-cs-bg rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-cyan-400 rounded-full transition-all"
+                      style={{
+                        width: `${liveSession.totalInputTokens > 0
+                          ? (liveSession.cacheReadTokens / (liveSession.totalInputTokens + liveSession.cacheReadTokens)) * 100
+                          : 0}%`
+                      }}
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-cs-muted">
+                  {formatNumber(liveSession.cacheReadTokens)} tokens served from cache,
+                  saving ~${((liveSession.cacheReadTokens * 0.9 * 15) / 1_000_000).toFixed(2)} on this session
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Live Context Breakdown */}
+          {liveContext && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-3">
+                <BarChart3 size={14} className="text-cs-muted" />
+                <span className="text-sm font-medium">Live Context Breakdown</span>
+              </div>
+              <div className="h-48">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={liveContext.categories}
+                    layout="vertical"
+                    margin={{ left: 0, right: 10, top: 0, bottom: 0 }}
+                  >
+                    <XAxis
+                      type="number"
+                      tick={{ fill: "#8888a0", fontSize: 10 }}
+                      tickFormatter={formatNumber}
+                    />
+                    <YAxis
+                      type="category"
+                      dataKey="name"
+                      width={100}
+                      tick={{ fill: "#8888a0", fontSize: 10 }}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#16161e",
+                        border: "1px solid #2a2a3a",
+                        borderRadius: 6,
+                        fontSize: 12,
+                      }}
+                      formatter={(value: number) => [formatNumber(value), "tokens"]}
+                    />
+                    <Bar dataKey="tokens" radius={[0, 4, 4, 0]}>
+                      {liveContext.categories.map((cat, i) => (
+                        <Cell key={i} fill={cat.color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

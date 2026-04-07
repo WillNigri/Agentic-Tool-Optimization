@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Search,
   Plus,
@@ -9,8 +10,13 @@ import {
   FolderOpen,
   Trash2,
   Terminal,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getHooks, saveHook, deleteHook, type HookConfig } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,58 +60,33 @@ const EVENT_COLORS: Record<HookEvent, string> = {
   SubagentStop: "#3b82f6",
 };
 
-// ---------------------------------------------------------------------------
-// Mock data
-// ---------------------------------------------------------------------------
+// Convert HookConfig from API to our Hook type
+function hookConfigToHook(config: HookConfig): Hook {
+  return {
+    id: config.id,
+    name: config.name,
+    event: config.event as HookEvent,
+    command: config.command,
+    matcher: config.matcher ?? undefined,
+    timeout: config.timeout ?? undefined,
+    scope: config.scope as "global" | "project",
+    enabled: config.enabled,
+  };
+}
 
-const INITIAL_HOOKS: Hook[] = [
-  {
-    id: "hook-1",
-    name: "lint-on-write",
-    event: "PostToolUse",
-    matcher: "Write",
-    command: "eslint --fix $FILE_PATH",
-    scope: "project",
-    enabled: true,
-  },
-  {
-    id: "hook-2",
-    name: "block-rm-rf",
-    event: "PreToolUse",
-    matcher: "Bash",
-    command:
-      "echo $TOOL_INPUT | grep -q 'rm -rf' && exit 1 || exit 0",
-    scope: "global",
-    enabled: true,
-  },
-  {
-    id: "hook-3",
-    name: "notify-slack",
-    event: "Notification",
-    command:
-      "curl -X POST $SLACK_WEBHOOK -d '{\"text\":\"$MESSAGE\"}'",
-    scope: "global",
-    enabled: false,
-  },
-  {
-    id: "hook-4",
-    name: "format-code",
-    event: "PostToolUse",
-    matcher: "Write|Edit",
-    command: "prettier --write $FILE_PATH",
-    scope: "project",
-    enabled: true,
-  },
-  {
-    id: "hook-5",
-    name: "log-stops",
-    event: "Stop",
-    command:
-      'echo "$(date): session stopped" >> ~/.claude/stop.log',
-    scope: "global",
-    enabled: true,
-  },
-];
+// Convert Hook to HookConfig for API
+function hookToHookConfig(hook: Hook): HookConfig {
+  return {
+    id: hook.id,
+    name: hook.name,
+    event: hook.event,
+    command: hook.command,
+    matcher: hook.matcher ?? null,
+    timeout: hook.timeout ?? null,
+    scope: hook.scope,
+    enabled: hook.enabled,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -113,11 +94,53 @@ const INITIAL_HOOKS: Hook[] = [
 
 export default function HooksManager() {
   const { t } = useTranslation();
-  const [hooks, setHooks] = useState<Hook[]>([]);
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<Hook | null>(null);
   const [creatingNew, setCreatingNew] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Fetch hooks from settings files
+  const { data: hooksData = [], isLoading, error, refetch } = useQuery({
+    queryKey: ["hooks"],
+    queryFn: getHooks,
+  });
+
+  // Convert API data to our Hook type
+  const hooks: Hook[] = hooksData.map(hookConfigToHook);
+
+  // Save mutation
+  const saveMutation = useMutation({
+    mutationFn: (hook: Hook) => saveHook(hookToHookConfig(hook)),
+    onSuccess: () => {
+      setSaveSuccess(true);
+      setSaveError(null);
+      queryClient.invalidateQueries({ queryKey: ["hooks"] });
+      setExpandedId(null);
+      setEditDraft(null);
+      setCreatingNew(false);
+      setTimeout(() => setSaveSuccess(false), 2500);
+    },
+    onError: (err) => {
+      setSaveError(err instanceof Error ? err.message : "Failed to save hook");
+    },
+  });
+
+  // Delete mutation
+  const deleteMutation = useMutation({
+    mutationFn: deleteHook,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["hooks"] });
+      setExpandedId(null);
+      setEditDraft(null);
+      setCreatingNew(false);
+    },
+    onError: (err) => {
+      setSaveError(err instanceof Error ? err.message : "Failed to delete hook");
+    },
+  });
 
   // ── helpers ──────────────────────────────────────────────────────────
 
@@ -133,9 +156,10 @@ export default function HooksManager() {
   })).filter((g) => g.hooks.length > 0);
 
   function handleToggle(id: string) {
-    setHooks((prev) =>
-      prev.map((h) => (h.id === id ? { ...h, enabled: !h.enabled } : h))
-    );
+    const hook = hooks.find((h) => h.id === id);
+    if (hook) {
+      saveMutation.mutate({ ...hook, enabled: !hook.enabled });
+    }
   }
 
   function handleExpand(hook: Hook) {
@@ -146,32 +170,24 @@ export default function HooksManager() {
       setExpandedId(hook.id);
       setEditDraft({ ...hook });
       setCreatingNew(false);
+      setSaveError(null);
     }
   }
 
   function handleSave() {
     if (!editDraft) return;
-    setHooks((prev) =>
-      prev.some((h) => h.id === editDraft.id)
-        ? prev.map((h) => (h.id === editDraft.id ? editDraft : h))
-        : [...prev, editDraft]
-    );
-    setExpandedId(null);
-    setEditDraft(null);
-    setCreatingNew(false);
+    saveMutation.mutate(editDraft);
   }
 
   function handleDelete(id: string) {
-    setHooks((prev) => prev.filter((h) => h.id !== id));
-    setExpandedId(null);
-    setEditDraft(null);
-    setCreatingNew(false);
+    deleteMutation.mutate(id);
   }
 
   function handleCancel() {
     setExpandedId(null);
     setEditDraft(null);
     setCreatingNew(false);
+    setSaveError(null);
   }
 
   function handleNewHook() {
@@ -186,6 +202,16 @@ export default function HooksManager() {
     setEditDraft(newHook);
     setExpandedId(newHook.id);
     setCreatingNew(true);
+    setSaveError(null);
+  }
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 size={24} className="text-cs-muted animate-spin" />
+      </div>
+    );
   }
 
   // ── render ───────────────────────────────────────────────────────────
@@ -193,10 +219,37 @@ export default function HooksManager() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h2 className="text-xl font-semibold mb-1">{t("hooks.title")}</h2>
-        <p className="text-cs-muted text-sm">{t("hooks.subtitle")}</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold mb-1">{t("hooks.title")}</h2>
+          <p className="text-cs-muted text-sm">{t("hooks.subtitle")}</p>
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="p-2 rounded-lg hover:bg-cs-border transition-colors text-cs-muted hover:text-cs-text"
+          title="Refresh hooks"
+        >
+          <RefreshCw size={16} />
+        </button>
       </div>
+
+      {/* Error message */}
+      {(error || saveError) && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+          <AlertCircle size={14} className="text-red-400 shrink-0" />
+          <p className="text-xs text-red-300">
+            {error ? "Failed to load hooks from settings" : saveError}
+          </p>
+        </div>
+      )}
+
+      {/* Success message */}
+      {saveSuccess && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-cs-success/10 border border-cs-success/20">
+          <CheckCircle2 size={14} className="text-cs-success shrink-0" />
+          <p className="text-xs text-cs-success">Hook saved to settings file</p>
+        </div>
+      )}
 
       {/* Search */}
       <div className="relative">

@@ -1,121 +1,59 @@
 import { useTranslation } from "react-i18next";
-import { X, FileText, Copy, Check } from "lucide-react";
+import { X, FileText, Copy, Check, Edit3, Save, Loader2, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
-
-// Mock file contents — in production these would come from Tauri fs read
-const MOCK_FILE_CONTENTS: Record<string, string> = {
-  "CLAUDE.md": `# ATO (Open Source)
-
-Desktop dashboard and MCP server for AI coding tool visibility. MIT licensed.
-
-## Structure
-
-\`\`\`
-apps/desktop/        # Tauri 2.x desktop app (Rust + React)
-packages/core/       # Shared types, token utils, config paths (no I/O)
-packages/db/         # Database abstraction (SQLite for desktop)
-services/mcp-server/ # Standalone MCP server for Claude Code (stdio)
-\`\`\`
-
-## Commands
-
-- \`npm run dev:desktop\` — Start Tauri desktop app in dev mode
-- \`npm run dev:mcp\` — Start MCP server in dev mode
-- \`npm run build:desktop\` — Build desktop app for distribution
-- \`npm run build\` — Build all packages
-
-## Desktop App
-
-Tauri 2.x with:
-- **Rust backend**: SQLite (rusqlite), file watcher (notify crate)
-- **React frontend**: Vite + TailwindCSS + Recharts + Zustand
-- **i18n**: English, Portuguese, Spanish (react-i18next)
-- **Theme**: Dark (#0a0a0f) + cyan/mint (#00FFB2) accent
-- **Offline-first**: Works without internet, all data in local SQLite
-
-## Security
-
-- Desktop is local-first. No network calls unless sync explicitly enabled.
-- Use parameterized SQL queries only.
-- Validate all inputs with zod schemas.`,
-
-  "~/.claude/settings.json": `{
-  "permissions": {
-    "allow": [
-      "Read",
-      "Grep",
-      "Glob",
-      "Bash(npm run *)",
-      "Bash(git *)",
-      "Write(src/**)",
-      "Edit(src/**)"
-    ],
-    "deny": [
-      "Bash(rm -rf *)",
-      "WebFetch"
-    ]
-  },
-  "model": "claude-sonnet-4-5",
-  "theme": "dark"
-}`,
-
-  "~/.claude/skills/code-review.md": `---
-name: code-review
-description: Perform thorough code reviews checking correctness, security, performance, readability, and test coverage.
-allowed-tools: Read, Grep, Glob
----
-
-# Code Review
-
-When reviewing code, check for:
-
-1. **Correctness** — Does the code do what it claims?
-2. **Security** — Any injection vectors, exposed secrets?
-3. **Performance** — Unnecessary allocations, N+1 queries?
-4. **Readability** — Clear naming, good structure?
-5. **Tests** — Adequate coverage for the change?`,
-
-  ".claude/skills/conventions.md": `---
-name: project-conventions
-description: Project coding standards for ATO desktop app.
-allowed-tools: Read, Write, Bash, Glob, Grep
-model: claude-sonnet-4-5
----
-
-# Project Conventions
-
-## File Structure
-- Components in \`src/components/\`
-- Utilities in \`src/lib/\`
-- Pages in \`src/pages/\`
-
-## Styling
-- Use Tailwind CSS utility classes
-- Dark theme with cyan accent (#00FFB2)
-- Monospace font for code elements
-
-## State Management
-- Zustand for global state
-- React Query for server state
-- Local state for component-specific UI`,
-};
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import * as tauriApi from "@/lib/tauri-api";
 
 interface FileViewerProps {
   filePath: string;
   onClose: () => void;
+  readOnly?: boolean;
 }
 
-export default function FileViewer({ filePath, onClose }: FileViewerProps) {
+export default function FileViewer({ filePath, onClose, readOnly = false }: FileViewerProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [copied, setCopied] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedContent, setEditedContent] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Try to find content by exact path or by matching end of path
-  const content = MOCK_FILE_CONTENTS[filePath]
-    || Object.entries(MOCK_FILE_CONTENTS).find(([k]) => filePath.endsWith(k))?.[1]
-    || null;
+  // Read file content from Tauri
+  const { data: fileContent, isLoading, error } = useQuery({
+    queryKey: ["context-file", filePath],
+    queryFn: () => tauriApi.readContextFile(filePath),
+    retry: false,
+  });
 
+  // Update edited content when file content loads
+  useEffect(() => {
+    if (fileContent) {
+      setEditedContent(fileContent);
+    }
+  }, [fileContent]);
+
+  const content = isEditing ? editedContent : fileContent;
   const lineCount = content ? content.split("\n").length : 0;
+  const hasChanges = isEditing && editedContent !== fileContent;
+
+  // Save mutation
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      await tauriApi.writeContextFile(filePath, editedContent);
+    },
+    onSuccess: () => {
+      setSaveSuccess(true);
+      setSaveError(null);
+      setIsEditing(false);
+      queryClient.invalidateQueries({ queryKey: ["context-file", filePath] });
+      setTimeout(() => setSaveSuccess(false), 2500);
+    },
+    onError: (err) => {
+      setSaveError(err instanceof Error ? err.message : "Failed to save file");
+    },
+  });
 
   function handleCopy() {
     if (content) {
@@ -125,6 +63,30 @@ export default function FileViewer({ filePath, onClose }: FileViewerProps) {
     }
   }
 
+  function handleStartEdit() {
+    setEditedContent(fileContent || "");
+    setIsEditing(true);
+    setSaveError(null);
+  }
+
+  function handleCancelEdit() {
+    setIsEditing(false);
+    setEditedContent(fileContent || "");
+    setSaveError(null);
+  }
+
+  function handleSave() {
+    saveMutation.mutate();
+  }
+
+  // Determine if file is editable (config/skill files)
+  const isEditable = !readOnly && (
+    filePath.endsWith(".json") ||
+    filePath.endsWith(".md") ||
+    filePath.endsWith(".yaml") ||
+    filePath.endsWith(".toml")
+  );
+
   return (
     <>
       <div className="fixed inset-0 bg-black/30 z-40 lg:hidden" onClick={onClose} />
@@ -132,22 +94,70 @@ export default function FileViewer({ filePath, onClose }: FileViewerProps) {
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-cs-border">
           <div className="flex items-center gap-2 min-w-0">
-            <FileText size={18} className="text-cs-accent shrink-0" />
+            <FileText size={18} className={cn("shrink-0", isEditing ? "text-yellow-400" : "text-cs-accent")} />
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold truncate">{filePath.split("/").pop()}</h3>
+              <h3 className="text-sm font-semibold truncate flex items-center gap-2">
+                {filePath.split("/").pop()}
+                {isEditing && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 font-normal">
+                    Editing
+                  </span>
+                )}
+                {hasChanges && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-cs-accent/10 text-cs-accent font-normal">
+                    Modified
+                  </span>
+                )}
+              </h3>
               <p className="text-[10px] text-cs-muted font-mono truncate">{filePath}</p>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-3">
-            {content && (
+            {!isLoading && content && (
+              <span className="text-[10px] text-cs-muted font-mono">{lineCount} lines</span>
+            )}
+            {!isEditing && content && (
+              <button
+                onClick={handleCopy}
+                className="p-1.5 rounded hover:bg-cs-border transition-colors text-cs-muted hover:text-cs-text"
+                title="Copy"
+              >
+                {copied ? <Check size={14} className="text-cs-accent" /> : <Copy size={14} />}
+              </button>
+            )}
+            {isEditable && !isEditing && content && (
+              <button
+                onClick={handleStartEdit}
+                className="p-1.5 rounded hover:bg-cs-border transition-colors text-cs-muted hover:text-cs-text"
+                title="Edit"
+              >
+                <Edit3 size={14} />
+              </button>
+            )}
+            {isEditing && (
               <>
-                <span className="text-[10px] text-cs-muted font-mono">{lineCount} lines</span>
                 <button
-                  onClick={handleCopy}
-                  className="p-1.5 rounded hover:bg-cs-border transition-colors text-cs-muted hover:text-cs-text"
-                  title="Copy"
+                  onClick={handleCancelEdit}
+                  className="px-2 py-1 rounded text-xs text-cs-muted hover:text-cs-text hover:bg-cs-border transition-colors"
                 >
-                  {copied ? <Check size={14} className="text-cs-accent" /> : <Copy size={14} />}
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={saveMutation.isPending || !hasChanges}
+                  className={cn(
+                    "flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors",
+                    hasChanges
+                      ? "bg-cs-accent text-cs-bg hover:bg-cs-accent/90"
+                      : "bg-cs-border/50 text-cs-muted cursor-not-allowed"
+                  )}
+                >
+                  {saveMutation.isPending ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <Save size={12} />
+                  )}
+                  Save
                 </button>
               </>
             )}
@@ -160,9 +170,43 @@ export default function FileViewer({ filePath, onClose }: FileViewerProps) {
           </div>
         </div>
 
+        {/* Save error */}
+        {saveError && (
+          <div className="mx-4 mt-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+            <AlertCircle size={14} className="text-red-400 shrink-0" />
+            <p className="text-xs text-red-300">{saveError}</p>
+          </div>
+        )}
+
+        {/* Save success */}
+        {saveSuccess && (
+          <div className="mx-4 mt-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-cs-success/10 border border-cs-success/20">
+            <Check size={14} className="text-cs-success shrink-0" />
+            <p className="text-xs text-cs-success">File saved successfully</p>
+          </div>
+        )}
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
-          {content ? (
+          {isLoading ? (
+            <div className="flex items-center justify-center h-full">
+              <Loader2 size={24} className="text-cs-muted animate-spin" />
+            </div>
+          ) : error ? (
+            <div className="text-center py-12">
+              <FileText size={32} className="text-cs-muted/30 mx-auto mb-3" />
+              <p className="text-sm text-cs-muted">{t("context.fileNotFound")}</p>
+              <p className="text-xs text-red-400/80 mt-2">{String(error)}</p>
+              <p className="text-xs text-cs-muted/60 mt-1 font-mono">{filePath}</p>
+            </div>
+          ) : isEditing ? (
+            <textarea
+              value={editedContent}
+              onChange={(e) => setEditedContent(e.target.value)}
+              className="w-full h-full min-h-[400px] text-sm font-mono text-cs-text bg-cs-bg border border-cs-border rounded-lg p-4 resize-none focus:outline-none focus:border-cs-accent/50 focus:ring-1 focus:ring-cs-accent/20"
+              spellCheck={false}
+            />
+          ) : content ? (
             <pre className="text-sm font-mono text-cs-text whitespace-pre-wrap leading-relaxed">
               {content.split("\n").map((line, i) => (
                 <div key={i} className="flex hover:bg-cs-bg/50 -mx-2 px-2 rounded">
@@ -176,8 +220,15 @@ export default function FileViewer({ filePath, onClose }: FileViewerProps) {
           ) : (
             <div className="text-center py-12">
               <FileText size={32} className="text-cs-muted/30 mx-auto mb-3" />
-              <p className="text-sm text-cs-muted">{t("context.fileNotFound")}</p>
-              <p className="text-xs text-cs-muted/60 mt-1 font-mono">{filePath}</p>
+              <p className="text-sm text-cs-muted">File is empty</p>
+              {isEditable && (
+                <button
+                  onClick={handleStartEdit}
+                  className="mt-3 px-3 py-1.5 text-xs text-cs-accent hover:bg-cs-accent/10 rounded transition-colors"
+                >
+                  Start editing
+                </button>
+              )}
             </div>
           )}
         </div>

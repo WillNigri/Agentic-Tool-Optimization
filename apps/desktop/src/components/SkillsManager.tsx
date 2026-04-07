@@ -1,9 +1,9 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe } from "lucide-react";
+import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe, FolderKanban } from "lucide-react";
 import { getSkills, toggleSkill, type Skill } from "@/lib/api";
-import { openclawListSkills } from "@/lib/tauri-api";
+import { openclawListSkills, listProjects, type Project } from "@/lib/tauri-api";
 import { formatNumber, cn } from "@/lib/utils";
 import { analyzeSkillConflicts, type SkillConflict } from "@/lib/skill-similarity";
 import SkillDetailPanel from "./SkillDetailPanel";
@@ -35,6 +35,7 @@ export default function SkillsManager() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<SkillsTab>("my-skills");
   const [runtimeFilter, setRuntimeFilter] = useState<RuntimeFilter>("all");
+  const [projectFilter, setProjectFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -44,6 +45,13 @@ export default function SkillsManager() {
     queryKey: ["skills"],
     queryFn: getSkills,
     retry: false,
+  });
+
+  // Fetch projects for filtering
+  const { data: projects = [] } = useQuery<Project[]>({
+    queryKey: ["projects"],
+    queryFn: listProjects,
+    retry: 1,
   });
 
   // Fetch remote OpenClaw skills
@@ -75,7 +83,11 @@ export default function SkillsManager() {
   const filtered = skills.filter((s) => {
     const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase());
     const matchesRuntime = runtimeFilter === "all" || s.runtime === runtimeFilter;
-    return matchesSearch && matchesRuntime;
+    // Filter by project: check if skill's filePath starts with project path
+    const matchesProject = projectFilter === "all" ||
+      (projectFilter === "global" && (s.filePath.startsWith("~") || s.filePath.startsWith("/Users"))) ||
+      s.filePath.includes(projectFilter);
+    return matchesSearch && matchesRuntime && matchesProject;
   });
 
   // Get unique runtimes that have skills (for showing runtime counts)
@@ -162,35 +174,58 @@ export default function SkillsManager() {
           <MarketplaceGrid />
         ) : (
           <>
-            {/* Runtime filter */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {RUNTIME_FILTERS.map((rf) => {
-                const count = rf.id === "all" ? skills.length : (runtimeCounts[rf.id] || 0);
-                const Icon = rf.icon;
-                // Skip runtimes with 0 skills (except "all")
-                if (rf.id !== "all" && count === 0) return null;
-                return (
-                  <button
-                    key={rf.id}
-                    onClick={() => setRuntimeFilter(rf.id)}
-                    className={cn(
-                      "flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-full border transition-colors",
-                      runtimeFilter === rf.id
-                        ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
-                        : "border-cs-border text-cs-muted hover:text-cs-text"
-                    )}
-                    style={
-                      runtimeFilter === rf.id && rf.id !== "all"
-                        ? { borderColor: `${rf.color}66`, background: `${rf.color}18`, color: rf.color }
-                        : undefined
-                    }
+            {/* Filters row */}
+            <div className="flex items-center gap-4 flex-wrap">
+              {/* Runtime filter */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {RUNTIME_FILTERS.map((rf) => {
+                  const count = rf.id === "all" ? skills.length : (runtimeCounts[rf.id] || 0);
+                  const Icon = rf.icon;
+                  // Skip runtimes with 0 skills (except "all")
+                  if (rf.id !== "all" && count === 0) return null;
+                  return (
+                    <button
+                      key={rf.id}
+                      onClick={() => setRuntimeFilter(rf.id)}
+                      className={cn(
+                        "flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-full border transition-colors",
+                        runtimeFilter === rf.id
+                          ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
+                          : "border-cs-border text-cs-muted hover:text-cs-text"
+                      )}
+                      style={
+                        runtimeFilter === rf.id && rf.id !== "all"
+                          ? { borderColor: `${rf.color}66`, background: `${rf.color}18`, color: rf.color }
+                          : undefined
+                      }
+                    >
+                      {Icon && <Icon size={11} />}
+                      {rf.label}
+                      <span className="text-[9px] opacity-60">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Project filter */}
+              {projects.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <FolderKanban size={14} className="text-cs-muted" />
+                  <select
+                    value={projectFilter}
+                    onChange={(e) => setProjectFilter(e.target.value)}
+                    className="bg-cs-card border border-cs-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-cs-accent"
                   >
-                    {Icon && <Icon size={11} />}
-                    {rf.label}
-                    <span className="text-[9px] opacity-60">({count})</span>
-                  </button>
-                );
-              })}
+                    <option value="all">{t("skills.filters.allProjects", "All Projects")}</option>
+                    <option value="global">{t("skills.filters.global", "Global Skills")}</option>
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.path}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Priority legend */}

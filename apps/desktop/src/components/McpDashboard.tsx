@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle } from "lucide-react";
-import { getMcpServers, restartMcpServer, type McpServer } from "@/lib/api";
+import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle, Loader2, CheckCircle2, XCircle, Code } from "lucide-react";
+import { getMcpServers, restartMcpServer, getMcpServersWithTools, discoverMcpServerTools, type McpServer, type McpServerDetails } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const STATUS_COLORS: Record<McpServer["status"], string> = {
@@ -11,28 +11,44 @@ const STATUS_COLORS: Record<McpServer["status"], string> = {
   error: "bg-cs-danger",
 };
 
-// Tool details are read from real config — no mock data
-// Tools and env/permissions would come from actually connecting to MCP servers
-
 export default function McpDashboard() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [expandedTools, setExpandedTools] = useState<string | null>(null);
 
   const { data: servers = [], isLoading } = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: getMcpServers,
   });
 
+  // Real-time tool discovery
+  const { data: serversWithTools = [], isLoading: isDiscovering, refetch: refetchTools } = useQuery({
+    queryKey: ["mcp-servers-with-tools"],
+    queryFn: getMcpServersWithTools,
+    staleTime: 60000, // Cache for 1 minute
+    refetchOnWindowFocus: false,
+  });
+
+  // Create a map of server details by name
+  const serverDetailsMap = new Map<string, McpServerDetails>(
+    serversWithTools.map(s => [s.serverName, s])
+  );
+
   const restart = useMutation({
     mutationFn: restartMcpServer,
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers-with-tools"] });
+    },
   });
 
   const selectedServer = servers.find((s) => s.id === selectedId);
-  const selectedTools: { name: string; description: string }[] = [];
-  const selectedDetails: { env: Record<string, string>; configPath: string; permissions: string[] } | null = null;
+  const getServerDetails = (serverName: string): McpServerDetails | undefined => {
+    // Extract clean name without source suffix
+    const cleanName = serverName.split(" (")[0];
+    return serverDetailsMap.get(cleanName);
+  };
 
   if (isLoading) {
     return <LoadingSkeleton />;
@@ -48,18 +64,34 @@ export default function McpDashboard() {
       </div>
 
       {/* Status overview */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <div className="card text-center">
-          <p className="text-2xl font-semibold text-cs-accent">{servers.filter(s => s.status === "running").length}</p>
+          <p className="text-2xl font-semibold text-cs-accent">
+            {isDiscovering ? "..." : serversWithTools.filter(s => s.connected).length}
+          </p>
           <p className="text-xs text-cs-muted">{t('mcp.status.connected')}</p>
         </div>
         <div className="card text-center">
-          <p className="text-2xl font-semibold text-cs-muted">{servers.filter(s => s.status === "stopped").length}</p>
+          <p className="text-2xl font-semibold text-cs-muted">
+            {isDiscovering ? "..." : serversWithTools.filter(s => !s.connected).length}
+          </p>
           <p className="text-xs text-cs-muted">{t('mcp.status.disconnected')}</p>
         </div>
         <div className="card text-center">
-          <p className="text-2xl font-semibold text-cs-danger">{servers.filter(s => s.status === "error").length}</p>
-          <p className="text-xs text-cs-muted">{t('mcp.status.error')}</p>
+          <p className="text-2xl font-semibold text-purple-400">
+            {isDiscovering ? "..." : serversWithTools.reduce((sum, s) => sum + s.tools.length, 0)}
+          </p>
+          <p className="text-xs text-cs-muted">Total Tools</p>
+        </div>
+        <div className="card text-center">
+          <button
+            onClick={() => refetchTools()}
+            disabled={isDiscovering}
+            className="w-full h-full flex flex-col items-center justify-center gap-1 hover:text-cs-accent transition-colors"
+          >
+            <RefreshCw size={20} className={cn(isDiscovering && "animate-spin")} />
+            <p className="text-xs text-cs-muted">{isDiscovering ? "Discovering..." : "Refresh"}</p>
+          </button>
         </div>
       </div>
 
@@ -71,7 +103,12 @@ export default function McpDashboard() {
         </div>
       ) : (
         <div className="space-y-2">
-          {servers.map((server) => (
+          {servers.map((server) => {
+            const details = getServerDetails(server.name);
+            const toolCount = details?.tools.length ?? server.toolCount;
+            const isConnected = details?.connected ?? false;
+
+            return (
             <div
               key={server.id}
               onClick={() => setSelectedId(selectedId === server.id ? null : server.id)}
@@ -87,7 +124,7 @@ export default function McpDashboard() {
                   <div
                     className={cn(
                       "w-2.5 h-2.5 rounded-full shrink-0",
-                      STATUS_COLORS[server.status]
+                      isConnected ? "bg-cs-success" : details?.error ? "bg-cs-danger" : "bg-cs-muted"
                     )}
                   />
                   <div className="min-w-0">
@@ -96,12 +133,34 @@ export default function McpDashboard() {
                       <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-cs-border/50 text-cs-muted">
                         {server.transport}
                       </span>
+                      {details?.serverVersion && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400">
+                          v{details.serverVersion}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-3 text-xs text-cs-muted">
-                      <span>{t(`mcp.status.${server.status === 'running' ? 'connected' : server.status === 'stopped' ? 'disconnected' : 'error'}`)}</span>
+                      {isConnected ? (
+                        <span className="flex items-center gap-1 text-green-400">
+                          <CheckCircle2 size={10} />
+                          Connected
+                        </span>
+                      ) : details?.error ? (
+                        <span className="flex items-center gap-1 text-red-400">
+                          <XCircle size={10} />
+                          Error
+                        </span>
+                      ) : isDiscovering ? (
+                        <span className="flex items-center gap-1">
+                          <Loader2 size={10} className="animate-spin" />
+                          Discovering...
+                        </span>
+                      ) : (
+                        <span>Not connected</span>
+                      )}
                       <span className="text-cs-border">|</span>
-                      <span>
-                        {t('mcp.tools', { count: server.toolCount })}
+                      <span className={cn(toolCount > 0 && "text-purple-400")}>
+                        {t('mcp.tools', { count: toolCount })}
                       </span>
                       {server.url && (
                         <>
@@ -140,97 +199,112 @@ export default function McpDashboard() {
               </div>
 
               {/* Expanded detail */}
-              {selectedId === server.id && selectedDetails && (
+              {selectedId === server.id && (
                 <div className="mt-4 pt-4 border-t border-cs-border space-y-4">
                   {/* Connection info */}
                   <div>
                     <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-2">
                       {t('mcp.connection')}
                     </h4>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
                       <div className="bg-cs-bg rounded-lg p-2.5">
                         <p className="text-[10px] text-cs-muted uppercase">Transport</p>
                         <p className="text-sm font-mono">{server.transport}</p>
                       </div>
                       <div className="bg-cs-bg rounded-lg p-2.5">
-                        <p className="text-[10px] text-cs-muted uppercase">{t('mcp.configSource')}</p>
-                        <p className="text-sm font-mono truncate">{selectedDetails.configPath}</p>
+                        <p className="text-[10px] text-cs-muted uppercase">Status</p>
+                        <p className={cn(
+                          "text-sm font-mono",
+                          isConnected ? "text-green-400" : "text-red-400"
+                        )}>
+                          {isConnected ? "Connected" : "Disconnected"}
+                        </p>
+                      </div>
+                      {details?.protocolVersion && (
+                        <div className="bg-cs-bg rounded-lg p-2.5">
+                          <p className="text-[10px] text-cs-muted uppercase">Protocol</p>
+                          <p className="text-sm font-mono">{details.protocolVersion}</p>
+                        </div>
+                      )}
+                      <div className="bg-cs-bg rounded-lg p-2.5">
+                        <p className="text-[10px] text-cs-muted uppercase">Tools</p>
+                        <p className="text-sm font-mono text-purple-400">{toolCount}</p>
                       </div>
                     </div>
                     {server.command && (
                       <div className="bg-cs-bg rounded-lg p-2.5 mt-2">
                         <p className="text-[10px] text-cs-muted uppercase">{t('mcp.command')}</p>
-                        <p className="text-sm font-mono text-cs-accent">{server.command}</p>
+                        <p className="text-sm font-mono text-cs-accent truncate">{server.command}</p>
                       </div>
                     )}
                   </div>
 
-                  {/* Environment variables */}
-                  <div>
-                    <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-2">
-                      {t('mcp.environment')}
-                    </h4>
-                    <div className="space-y-1">
-                      {Object.entries(selectedDetails.env).map(([key, val]) => (
-                        <div key={key} className="bg-cs-bg rounded-lg px-2.5 py-2 flex items-center gap-2">
-                          <span className="text-xs font-mono text-cs-accent">{key}</span>
-                          <span className="text-xs text-cs-muted">=</span>
-                          <span className="text-xs font-mono text-cs-muted truncate">{val}</span>
-                        </div>
-                      ))}
+                  {/* Error state */}
+                  {details?.error && (
+                    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+                      <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs font-medium text-red-400">Connection Error</p>
+                        <p className="text-[10px] text-red-400/80 mt-0.5">{details.error}</p>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
-                  {/* Permissions */}
-                  <div>
-                    <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-2">
-                      {t('mcp.permissions')}
-                    </h4>
-                    <div className="flex gap-2">
-                      {selectedDetails.permissions.map((perm) => (
-                        <span
-                          key={perm}
-                          className="px-2 py-0.5 text-xs font-mono rounded-full border border-cs-accent/40 bg-cs-accent/10 text-cs-accent"
-                        >
-                          {perm}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Tools */}
-                  {selectedTools.length > 0 && (
+                  {/* Discovered Tools */}
+                  {details && details.tools.length > 0 && (
                     <div>
                       <h4 className="text-xs font-medium text-cs-muted uppercase tracking-wider mb-2">
-                        {t('mcp.tools', { count: selectedTools.length })}
+                        Discovered Tools ({details.tools.length})
                       </h4>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                        {selectedTools.map((tool) => (
-                          <div key={tool.name} className="bg-cs-bg rounded-lg px-2.5 py-2 flex items-start gap-2">
-                            <Wrench size={12} className="text-cs-muted mt-0.5 shrink-0" />
-                            <div className="min-w-0">
-                              <p className="text-xs font-mono font-medium">{tool.name}</p>
-                              <p className="text-[10px] text-cs-muted truncate">{tool.description}</p>
+                        {details.tools.map((tool) => (
+                          <div
+                            key={tool.name}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedTools(expandedTools === tool.name ? null : tool.name);
+                            }}
+                            className={cn(
+                              "bg-cs-bg rounded-lg px-2.5 py-2 cursor-pointer transition-colors hover:bg-cs-bg/80",
+                              expandedTools === tool.name && "ring-1 ring-purple-500/30"
+                            )}
+                          >
+                            <div className="flex items-start gap-2">
+                              <Wrench size={12} className="text-purple-400 mt-0.5 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-mono font-medium text-purple-400">{tool.name}</p>
+                                <p className="text-[10px] text-cs-muted line-clamp-2">{tool.description || "No description"}</p>
+                              </div>
+                              {tool.inputSchema && (
+                                <Code size={10} className="text-cs-muted shrink-0" />
+                              )}
                             </div>
+                            {/* Expanded tool schema */}
+                            {expandedTools === tool.name && tool.inputSchema && (
+                              <div className="mt-2 pt-2 border-t border-cs-border">
+                                <p className="text-[10px] text-cs-muted uppercase mb-1">Input Schema</p>
+                                <pre className="text-[10px] font-mono text-cs-muted bg-cs-card rounded p-2 overflow-x-auto max-h-32">
+                                  {JSON.stringify(tool.inputSchema, null, 2)}
+                                </pre>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {/* Error state */}
-                  {server.status === "error" && (
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
-                      <AlertCircle size={14} className="text-red-400 shrink-0" />
-                      <p className="text-xs text-red-400">
-                        Connection failed. Check server command and configuration.
-                      </p>
+                  {/* No tools discovered */}
+                  {details && details.connected && details.tools.length === 0 && (
+                    <div className="text-center py-4">
+                      <p className="text-xs text-cs-muted">No tools exposed by this server.</p>
                     </div>
                   )}
                 </div>
               )}
             </div>
-          ))}
+          );
+          })}
         </div>
       )}
     </div>

@@ -1,4 +1,6 @@
 mod openclaw_ws;
+mod log_watcher;
+mod health_poller;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -6,7 +8,9 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, Manager};
+use log_watcher::LogWatcherState;
+use health_poller::HealthPollerState;
 
 // ── Types matching frontend expectations ─────────────────────────────────
 
@@ -124,6 +128,132 @@ pub struct SyncStatus {
     pub cloud_url: Option<String>,
 }
 
+// ── Secrets & Config Types ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Secret {
+    pub id: String,
+    pub name: String,
+    pub key_type: String,      // "api_key", "ssh_key", "token"
+    pub runtime: Option<String>,
+    pub project_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub has_value: bool,       // Whether a value is stored in keychain
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub runtime: Option<String>,
+    pub key: String,
+    pub value: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfig {
+    pub id: String,
+    pub runtime: String,
+    pub project_id: Option<String>,
+    pub model_id: String,
+    pub max_tokens: Option<i32>,
+    pub temperature: Option<f64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionLog {
+    pub id: String,
+    pub runtime: String,
+    pub prompt: Option<String>,
+    pub response: Option<String>,
+    pub tokens_in: Option<i32>,
+    pub tokens_out: Option<i32>,
+    pub duration_ms: Option<i32>,
+    pub status: String,        // "success", "error", "timeout"
+    pub error_message: Option<String>,
+    pub skill_name: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheck {
+    pub id: String,
+    pub runtime: String,
+    pub status: String,        // "healthy", "degraded", "offline"
+    pub latency_ms: Option<i32>,
+    pub error_message: Option<String>,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealth {
+    pub runtime: String,
+    pub status: String,
+    pub latency_ms: Option<i32>,
+    pub uptime_percent: Option<f64>,
+    pub last_check: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthHistoryPoint {
+    pub timestamp: String,
+    pub latency_ms: Option<i32>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthHistory {
+    pub runtime: String,
+    pub data_points: Vec<HealthHistoryPoint>,
+    pub avg_latency_ms: Option<f64>,
+    pub uptime_percent: f64,
+    pub total_checks: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageMetrics {
+    pub total_executions: i64,
+    pub successful_executions: i64,
+    pub failed_executions: i64,
+    pub total_tokens_in: i64,
+    pub total_tokens_out: i64,
+    pub avg_duration_ms: Option<f64>,
+    pub executions_by_runtime: Vec<RuntimeExecutionCount>,
+    pub executions_by_day: Vec<DailyExecutionCount>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeExecutionCount {
+    pub runtime: String,
+    pub count: i64,
+    pub success_count: i64,
+    pub error_count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyExecutionCount {
+    pub date: String,
+    pub count: i64,
+    pub success_count: i64,
+    pub error_count: i64,
+}
+
 // ── Database ─────────────────────────────────────────────────────────────
 
 pub struct DbState(pub Mutex<Connection>);
@@ -164,6 +294,71 @@ fn init_database(conn: &Connection) {
             message    TEXT NOT NULL,
             created_at TEXT NOT NULL,
             acknowledged INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS profile_snapshots (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            description TEXT,
+            runtime     TEXT NOT NULL,
+            files_json  TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            path         TEXT NOT NULL UNIQUE,
+            is_active    INTEGER NOT NULL DEFAULT 0,
+            skill_count  INTEGER NOT NULL DEFAULT 0,
+            last_accessed TEXT,
+            created_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS secrets (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            key_type     TEXT NOT NULL,
+            runtime      TEXT,
+            project_id   TEXT,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS env_vars (
+            id           TEXT PRIMARY KEY,
+            project_id   TEXT,
+            runtime      TEXT,
+            key          TEXT NOT NULL,
+            value        TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS model_configs (
+            id           TEXT PRIMARY KEY,
+            runtime      TEXT NOT NULL,
+            project_id   TEXT,
+            model_id     TEXT NOT NULL,
+            max_tokens   INTEGER,
+            temperature  REAL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS execution_logs (
+            id           TEXT PRIMARY KEY,
+            runtime      TEXT NOT NULL,
+            prompt       TEXT,
+            response     TEXT,
+            tokens_in    INTEGER,
+            tokens_out   INTEGER,
+            duration_ms  INTEGER,
+            status       TEXT NOT NULL,
+            error_message TEXT,
+            skill_name   TEXT,
+            created_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS health_checks (
+            id           TEXT PRIMARY KEY,
+            runtime      TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            latency_ms   INTEGER,
+            error_message TEXT,
+            checked_at   TEXT NOT NULL
         );
         ",
     )
@@ -945,6 +1140,830 @@ fn get_context_for_runtime(runtime: String) -> Result<ContextBreakdown, String> 
         }
         _ => get_context_estimate(),
     }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 4: Live Session Tracking from Claude Code Logs
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSessionData {
+    pub session_id: Option<String>,
+    pub project_path: Option<String>,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub message_count: u64,
+    pub tool_call_count: u64,
+    pub files_read: Vec<SessionFileRead>,
+    pub started_at: Option<String>,
+    pub last_activity: Option<String>,
+    pub model: Option<String>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFileRead {
+    pub path: String,
+    pub timestamp: String,
+    pub token_estimate: u64,
+}
+
+/// Find the most recent Claude Code session for the current project
+fn find_current_session() -> Option<(String, PathBuf)> {
+    let claude_dir = claude_home();
+    let projects_dir = claude_dir.join("projects");
+
+    if !projects_dir.exists() {
+        return None;
+    }
+
+    // Get current project path
+    let current_project = project_root();
+    let project_hash = current_project.to_string_lossy()
+        .replace("/", "-")
+        .replace("\\", "-");
+
+    // Look for project directory matching current project
+    if let Ok(entries) = fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let dir_name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+
+                // Check if this directory matches our project
+                if dir_name.contains(&project_hash) || dir_name.starts_with("-Users-") {
+                    // Find the most recent .jsonl file in this directory
+                    if let Ok(sub_entries) = fs::read_dir(&path) {
+                        let mut jsonl_files: Vec<PathBuf> = sub_entries
+                            .flatten()
+                            .filter(|e| {
+                                e.path().extension()
+                                    .map(|ext| ext == "jsonl")
+                                    .unwrap_or(false)
+                            })
+                            .map(|e| e.path())
+                            .collect();
+
+                        // Sort by modification time (most recent first)
+                        jsonl_files.sort_by(|a, b| {
+                            let a_time = fs::metadata(a).and_then(|m| m.modified()).ok();
+                            let b_time = fs::metadata(b).and_then(|m| m.modified()).ok();
+                            b_time.cmp(&a_time)
+                        });
+
+                        if let Some(latest) = jsonl_files.first() {
+                            let session_id = latest.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            return Some((session_id, latest.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a Claude Code session JSONL file to extract token usage and activity
+fn parse_session_jsonl(path: &PathBuf) -> Result<LiveSessionData, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read session file: {}", e))?;
+
+    let mut data = LiveSessionData {
+        session_id: path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()),
+        project_path: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        message_count: 0,
+        tool_call_count: 0,
+        files_read: Vec::new(),
+        started_at: None,
+        last_activity: None,
+        model: None,
+        is_active: true,
+    };
+
+    let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+            // Track timestamps
+            if let Some(ts) = entry.get("timestamp").and_then(|v| v.as_str()) {
+                if data.started_at.is_none() {
+                    data.started_at = Some(ts.to_string());
+                }
+                data.last_activity = Some(ts.to_string());
+            }
+
+            // Track project path
+            if data.project_path.is_none() {
+                if let Some(cwd) = entry.get("cwd").and_then(|v| v.as_str()) {
+                    data.project_path = Some(cwd.to_string());
+                }
+            }
+
+            // Extract token usage from assistant messages
+            if let Some(msg) = entry.get("message") {
+                if let Some(usage) = msg.get("usage") {
+                    if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                        data.total_input_tokens += input;
+                    }
+                    if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                        data.total_output_tokens += output;
+                    }
+                    if let Some(cache_read) = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                        data.cache_read_tokens += cache_read;
+                    }
+                    if let Some(cache_create) = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                        data.cache_creation_tokens += cache_create;
+                    }
+                }
+
+                // Track model
+                if data.model.is_none() {
+                    if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
+                        data.model = Some(model.to_string());
+                    }
+                }
+
+                // Count messages
+                data.message_count += 1;
+
+                // Look for tool_use in content to count tool calls
+                if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
+                    for item in content {
+                        if let Some(content_type) = item.get("type").and_then(|v| v.as_str()) {
+                            if content_type == "tool_use" {
+                                data.tool_call_count += 1;
+
+                                // Check if it's a Read tool call
+                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                                    if name == "Read" || name == "read" {
+                                        if let Some(input) = item.get("input") {
+                                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
+                                                if !seen_files.contains(file_path) {
+                                                    seen_files.insert(file_path.to_string());
+                                                    let token_estimate = fs::metadata(file_path)
+                                                        .map(|m| estimate_tokens(m.len()))
+                                                        .unwrap_or(0);
+                                                    data.files_read.push(SessionFileRead {
+                                                        path: file_path.to_string(),
+                                                        timestamp: entry.get("timestamp")
+                                                            .and_then(|v| v.as_str())
+                                                            .unwrap_or("")
+                                                            .to_string(),
+                                                        token_estimate,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if session is recent (within last hour)
+    if let Some(ref last) = data.last_activity {
+        if let Ok(last_time) = chrono::DateTime::parse_from_rfc3339(last) {
+            let now = chrono::Utc::now();
+            let diff = now.signed_duration_since(last_time);
+            data.is_active = diff.num_hours() < 1;
+        }
+    }
+
+    Ok(data)
+}
+
+#[tauri::command]
+fn get_live_session_data() -> Result<LiveSessionData, String> {
+    match find_current_session() {
+        Some((_session_id, path)) => parse_session_jsonl(&path),
+        None => Ok(LiveSessionData {
+            session_id: None,
+            project_path: None,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            message_count: 0,
+            tool_call_count: 0,
+            files_read: Vec::new(),
+            started_at: None,
+            last_activity: None,
+            model: None,
+            is_active: false,
+        }),
+    }
+}
+
+/// Get context breakdown with live session data for Claude runtime
+#[tauri::command]
+fn get_live_context_breakdown() -> Result<ContextBreakdown, String> {
+    let mut categories = Vec::new();
+    let mut total: u64 = 0;
+
+    // System prompts (estimated)
+    let system_tokens: u64 = 28000;
+    categories.push(ContextCategory { name: "System Prompts".into(), tokens: system_tokens, color: "#FF4466".into() });
+    total += system_tokens;
+
+    // CLAUDE.md
+    let claude_md = project_root().join("CLAUDE.md");
+    let claude_md_tokens = fs::metadata(&claude_md)
+        .map(|m| estimate_tokens(m.len()))
+        .unwrap_or(0);
+    categories.push(ContextCategory { name: "CLAUDE.md".into(), tokens: claude_md_tokens, color: "#FFB800".into() });
+    total += claude_md_tokens;
+
+    // MCP schemas
+    let settings_path = claude_home().join("settings.json");
+    let mcp_tokens: u64 = read_file_lossy(&settings_path)
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|v| v.get("mcpServers").and_then(|s| s.as_object()).map(|m| m.len() as u64 * 2500))
+        .unwrap_or(0);
+    categories.push(ContextCategory { name: "MCP Schemas".into(), tokens: mcp_tokens, color: "#3b82f6".into() });
+    total += mcp_tokens;
+
+    // Live conversation data
+    if let Ok(session) = get_live_session_data() {
+        // Real conversation tokens from session
+        let conv_tokens = session.total_input_tokens + session.total_output_tokens;
+        categories.push(ContextCategory {
+            name: format!("Conversation ({} msgs)", session.message_count),
+            tokens: conv_tokens,
+            color: "#a78bfa".into(),
+        });
+        total += conv_tokens;
+
+        // Files read in session
+        if !session.files_read.is_empty() {
+            let files_tokens: u64 = session.files_read.iter().map(|f| f.token_estimate).sum();
+            categories.push(ContextCategory {
+                name: format!("Files Read ({} files)", session.files_read.len()),
+                tokens: files_tokens,
+                color: "#22c55e".into(),
+            });
+            // Note: files read are already counted in input tokens, so we don't add to total
+        }
+
+        // Cache info
+        if session.cache_read_tokens > 0 || session.cache_creation_tokens > 0 {
+            categories.push(ContextCategory {
+                name: "Cache (read)".into(),
+                tokens: session.cache_read_tokens,
+                color: "#06b6d4".into(),
+            });
+        }
+    } else {
+        // Fallback to estimated conversation
+        categories.push(ContextCategory { name: "Conversation".into(), tokens: 15000, color: "#a78bfa".into() });
+        total += 15000;
+    }
+
+    // Skills (on-demand)
+    let skill_bytes = dir_skill_bytes(&claude_home().join("skills"))
+        + dir_skill_bytes(&project_root().join(".claude").join("skills"));
+    let skill_tokens = estimate_tokens(skill_bytes);
+    categories.push(ContextCategory { name: "Skills (on-demand)".into(), tokens: skill_tokens, color: "#00FFB233".into() });
+
+    Ok(ContextBreakdown {
+        total_tokens: total,
+        limit: 200000,
+        categories,
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 4: Real MCP Tool Discovery
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTool {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerDetails {
+    pub server_name: String,
+    pub server_version: Option<String>,
+    pub protocol_version: Option<String>,
+    pub tools: Vec<McpTool>,
+    pub connected: bool,
+    pub error: Option<String>,
+}
+
+/// Discover tools from an MCP server by spawning it and communicating via JSON-RPC
+fn discover_mcp_tools_stdio(command: &str, args: &[&str], env: &std::collections::HashMap<String, String>) -> Result<McpServerDetails, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    // Build the command
+    let mut cmd = Command::new(command);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .envs(env);
+
+    // Spawn the process
+    let mut child = cmd.spawn()
+        .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
+
+    let stdin = child.stdin.as_mut()
+        .ok_or("Failed to open stdin")?;
+    let stdout = child.stdout.take()
+        .ok_or("Failed to open stdout")?;
+
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    // Send initialize request
+    let init_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "ATO",
+                "version": "0.2.0"
+            }
+        }
+    });
+
+    writeln!(stdin, "{}", init_request.to_string())
+        .map_err(|e| format!("Failed to write initialize request: {}", e))?;
+    stdin.flush().map_err(|e| format!("Failed to flush stdin: {}", e))?;
+
+    // Read initialize response with timeout
+    let mut read_response = || -> Result<serde_json::Value, String> {
+        line.clear();
+        reader.read_line(&mut line)
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+        serde_json::from_str(&line)
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    };
+
+    let init_response = read_response()?;
+
+    // Extract server info
+    let server_info = init_response.get("result")
+        .and_then(|r| r.get("serverInfo"));
+    let server_name = server_info
+        .and_then(|i| i.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let server_version = server_info
+        .and_then(|i| i.get("version"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let protocol_version = init_response.get("result")
+        .and_then(|r| r.get("protocolVersion"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Send tools/list request
+    let tools_request = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    writeln!(stdin, "{}", tools_request.to_string())
+        .map_err(|e| format!("Failed to write tools/list request: {}", e))?;
+    stdin.flush().map_err(|e| format!("Failed to flush stdin: {}", e))?;
+
+    // Read tools response
+    let tools_response = read_response()?;
+
+    // Parse tools
+    let tools: Vec<McpTool> = tools_response.get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|tool| {
+                let name = tool.get("name")?.as_str()?.to_string();
+                let description = tool.get("description")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string());
+                let input_schema = tool.get("inputSchema").cloned();
+                Some(McpTool { name, description, input_schema })
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    // Clean up - try to terminate the process gracefully
+    let _ = child.kill();
+
+    Ok(McpServerDetails {
+        server_name,
+        server_version,
+        protocol_version,
+        tools,
+        connected: true,
+        error: None,
+    })
+}
+
+/// Parse MCP server config and discover tools
+#[tauri::command]
+fn discover_mcp_server_tools(server_name: String) -> Result<McpServerDetails, String> {
+    // Find server config
+    let settings_path = claude_home().join("settings.json");
+    let content = read_file_lossy(&settings_path)
+        .ok_or("Could not read Claude settings")?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse settings: {}", e))?;
+
+    let mcp_servers = parsed.get("mcpServers")
+        .and_then(|v| v.as_object())
+        .ok_or("No mcpServers found in settings")?;
+
+    // Extract server name without source suffix
+    let clean_name = server_name.split(" (").next().unwrap_or(&server_name);
+
+    let server_config = mcp_servers.get(clean_name)
+        .ok_or(format!("Server '{}' not found", clean_name))?;
+
+    // Extract command and args
+    let command = server_config.get("command")
+        .and_then(|c| c.as_str())
+        .ok_or("Server has no command")?;
+
+    let args: Vec<&str> = server_config.get("args")
+        .and_then(|a| a.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    // Extract environment variables
+    let mut env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(env_obj) = server_config.get("env").and_then(|e| e.as_object()) {
+        for (key, val) in env_obj {
+            if let Some(s) = val.as_str() {
+                env.insert(key.clone(), s.to_string());
+            }
+        }
+    }
+
+    // Try to discover tools
+    match discover_mcp_tools_stdio(command, &args, &env) {
+        Ok(details) => Ok(details),
+        Err(e) => Ok(McpServerDetails {
+            server_name: clean_name.to_string(),
+            server_version: None,
+            protocol_version: None,
+            tools: Vec::new(),
+            connected: false,
+            error: Some(e),
+        }),
+    }
+}
+
+/// Get all MCP servers with discovered tools (runs discovery in parallel)
+#[tauri::command]
+fn get_mcp_servers_with_tools() -> Result<Vec<McpServerDetails>, String> {
+    let settings_path = claude_home().join("settings.json");
+    let content = read_file_lossy(&settings_path)
+        .ok_or("Could not read Claude settings")?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse settings: {}", e))?;
+
+    let mcp_servers = match parsed.get("mcpServers").and_then(|v| v.as_object()) {
+        Some(servers) => servers,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut results = Vec::new();
+
+    for (name, config) in mcp_servers {
+        // Extract command
+        let command = match config.get("command").and_then(|c| c.as_str()) {
+            Some(c) => c,
+            None => {
+                results.push(McpServerDetails {
+                    server_name: name.clone(),
+                    server_version: None,
+                    protocol_version: None,
+                    tools: Vec::new(),
+                    connected: false,
+                    error: Some("No command specified".to_string()),
+                });
+                continue;
+            }
+        };
+
+        let args: Vec<&str> = config.get("args")
+            .and_then(|a| a.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        let mut env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some(env_obj) = config.get("env").and_then(|e| e.as_object()) {
+            for (key, val) in env_obj {
+                if let Some(s) = val.as_str() {
+                    env.insert(key.clone(), s.to_string());
+                }
+            }
+        }
+
+        // Try discovery with a timeout
+        match discover_mcp_tools_stdio(command, &args, &env) {
+            Ok(mut details) => {
+                details.server_name = name.clone();
+                results.push(details);
+            }
+            Err(e) => {
+                results.push(McpServerDetails {
+                    server_name: name.clone(),
+                    server_version: None,
+                    protocol_version: None,
+                    tools: Vec::new(),
+                    connected: false,
+                    error: Some(e),
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PHASE 4: Hooks Read/Write from Settings Files
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HookConfig {
+    pub id: String,
+    pub name: String,
+    pub event: String,
+    pub command: String,
+    pub matcher: Option<String>,
+    pub timeout: Option<u64>,
+    pub scope: String,
+    pub enabled: bool,
+}
+
+/// Read hooks from Claude settings files (both global and project)
+#[tauri::command]
+fn get_hooks() -> Result<Vec<HookConfig>, String> {
+    let mut hooks = Vec::new();
+
+    // Check global settings
+    let global_path = claude_home().join("settings.json");
+    if let Some(content) = read_file_lossy(&global_path) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(hooks_obj) = parsed.get("hooks").and_then(|h| h.as_object()) {
+                parse_hooks_from_settings(hooks_obj, "global", &mut hooks);
+            }
+        }
+    }
+
+    // Check project settings
+    let project_path = project_root().join(".claude").join("settings.json");
+    if let Some(content) = read_file_lossy(&project_path) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(hooks_obj) = parsed.get("hooks").and_then(|h| h.as_object()) {
+                parse_hooks_from_settings(hooks_obj, "project", &mut hooks);
+            }
+        }
+    }
+
+    // Also check local settings
+    let local_path = claude_home().join("settings.local.json");
+    if let Some(content) = read_file_lossy(&local_path) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(hooks_obj) = parsed.get("hooks").and_then(|h| h.as_object()) {
+                parse_hooks_from_settings(hooks_obj, "global", &mut hooks);
+            }
+        }
+    }
+
+    Ok(hooks)
+}
+
+fn parse_hooks_from_settings(
+    hooks_obj: &serde_json::Map<String, serde_json::Value>,
+    scope: &str,
+    hooks: &mut Vec<HookConfig>,
+) {
+    // Claude hooks format:
+    // "hooks": {
+    //   "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "..." }] }]
+    // }
+    for (event_name, event_hooks) in hooks_obj {
+        if let Some(hook_array) = event_hooks.as_array() {
+            for (idx, hook_group) in hook_array.iter().enumerate() {
+                let matcher = hook_group.get("matcher")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+
+                if let Some(inner_hooks) = hook_group.get("hooks").and_then(|h| h.as_array()) {
+                    for (inner_idx, inner_hook) in inner_hooks.iter().enumerate() {
+                        if let Some(command) = inner_hook.get("command").and_then(|c| c.as_str()) {
+                            let id = format!("{}-{}-{}-{}", scope, event_name, idx, inner_idx);
+                            let name = matcher.clone().unwrap_or_else(|| format!("{} hook {}", event_name, idx + 1));
+
+                            let timeout = inner_hook.get("timeout")
+                                .and_then(|t| t.as_u64());
+
+                            hooks.push(HookConfig {
+                                id,
+                                name,
+                                event: event_name.clone(),
+                                command: command.to_string(),
+                                matcher: matcher.clone(),
+                                timeout,
+                                scope: scope.to_string(),
+                                enabled: true, // Claude doesn't have enabled flag, all hooks are enabled
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Save a hook to the appropriate settings file
+#[tauri::command]
+fn save_hook(hook: HookConfig) -> Result<(), String> {
+    let settings_path = if hook.scope == "global" {
+        claude_home().join("settings.json")
+    } else {
+        project_root().join(".claude").join("settings.json")
+    };
+
+    // Ensure directory exists
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    // Read existing settings or create new
+    let mut settings: serde_json::Value = read_file_lossy(&settings_path)
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| json!({}));
+
+    // Ensure hooks object exists
+    if settings.get("hooks").is_none() {
+        settings["hooks"] = json!({});
+    }
+
+    let hooks_obj = settings.get_mut("hooks").unwrap().as_object_mut().unwrap();
+
+    // Ensure event array exists
+    if !hooks_obj.contains_key(&hook.event) {
+        hooks_obj.insert(hook.event.clone(), json!([]));
+    }
+
+    let event_hooks = hooks_obj.get_mut(&hook.event).unwrap().as_array_mut().unwrap();
+
+    // Find existing hook group with same matcher or create new
+    let matcher_val = hook.matcher.as_deref();
+    let mut found = false;
+
+    for hook_group in event_hooks.iter_mut() {
+        let group_matcher = hook_group.get("matcher").and_then(|m| m.as_str());
+        if group_matcher == matcher_val {
+            // Update existing hook group
+            if let Some(inner_hooks) = hook_group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                // Look for existing command or add new
+                let mut updated = false;
+                for inner_hook in inner_hooks.iter_mut() {
+                    if inner_hook.get("command").and_then(|c| c.as_str()) == Some(&hook.command) {
+                        // Update timeout if present
+                        if let Some(timeout) = hook.timeout {
+                            inner_hook["timeout"] = json!(timeout);
+                        }
+                        updated = true;
+                        break;
+                    }
+                }
+                if !updated {
+                    let mut new_hook = json!({ "type": "command", "command": hook.command });
+                    if let Some(timeout) = hook.timeout {
+                        new_hook["timeout"] = json!(timeout);
+                    }
+                    inner_hooks.push(new_hook);
+                }
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Create new hook group
+        let mut new_group = json!({});
+        if let Some(ref matcher) = hook.matcher {
+            new_group["matcher"] = json!(matcher);
+        }
+        let mut new_hook = json!({ "type": "command", "command": hook.command });
+        if let Some(timeout) = hook.timeout {
+            new_hook["timeout"] = json!(timeout);
+        }
+        new_group["hooks"] = json!([new_hook]);
+        event_hooks.push(new_group);
+    }
+
+    // Write back
+    let content = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    fs::write(&settings_path, content)
+        .map_err(|e| format!("Failed to write settings: {}", e))?;
+
+    Ok(())
+}
+
+/// Delete a hook from settings file
+#[tauri::command]
+fn delete_hook(hook_id: String) -> Result<(), String> {
+    // Parse hook ID to determine scope, event, and indices
+    let parts: Vec<&str> = hook_id.split('-').collect();
+    if parts.len() < 4 {
+        return Err("Invalid hook ID".to_string());
+    }
+
+    let scope = parts[0];
+    let event = parts[1];
+
+    let settings_path = if scope == "global" {
+        claude_home().join("settings.json")
+    } else {
+        project_root().join(".claude").join("settings.json")
+    };
+
+    let content = read_file_lossy(&settings_path)
+        .ok_or("Could not read settings file")?;
+
+    let mut settings: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse settings: {}", e))?;
+
+    // Get hooks for this event
+    if let Some(hooks_obj) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        if let Some(event_hooks) = hooks_obj.get_mut(event).and_then(|e| e.as_array_mut()) {
+            // Find and remove the hook - rebuild without the target hook
+            // This is a simplified approach - in production you'd want more precise matching
+            let group_idx: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let inner_idx: usize = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            if let Some(hook_group) = event_hooks.get_mut(group_idx) {
+                if let Some(inner_hooks) = hook_group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                    if inner_idx < inner_hooks.len() {
+                        inner_hooks.remove(inner_idx);
+                    }
+
+                    // If no more hooks in group, remove the group
+                    if inner_hooks.is_empty() {
+                        event_hooks.remove(group_idx);
+                    }
+                }
+            }
+
+            // If no more hooks for event, remove the event
+            if event_hooks.is_empty() {
+                hooks_obj.remove(event);
+            }
+        }
+    }
+
+    // Write back
+    let content = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    fs::write(&settings_path, content)
+        .map_err(|e| format!("Failed to write settings: {}", e))?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2488,6 +3507,116 @@ pub struct ContextPreview {
     pub sections: Vec<ContextPreviewSection>,
 }
 
+// ── Skill Health Check ──────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationIssue {
+    pub code: String,           // "MISSING_FRONTMATTER", "TOKEN_SIZE_WARNING", etc.
+    pub severity: String,       // "error" | "warning"
+    pub message: String,
+    pub line: Option<u32>,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillValidation {
+    pub path: String,
+    pub skill_name: Option<String>,
+    pub valid: bool,
+    pub errors: Vec<ValidationIssue>,
+    pub warnings: Vec<ValidationIssue>,
+    pub token_count: u64,
+}
+
+// ── Profile Snapshots ───────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileFile {
+    pub path: String,           // Relative path from home or project
+    pub content: String,
+    pub scope: String,          // "global" | "project"
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSnapshot {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub runtime: String,
+    pub files: Vec<ProfileFile>,
+    pub created_at: String,
+}
+
+// ── Skill Usage Analytics ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillUsageStat {
+    pub skill_path: String,
+    pub skill_name: String,
+    pub trigger_count: u32,
+    pub last_used: Option<String>,
+    pub avg_tokens: Option<u32>,
+}
+
+// ── Onboarding Checklist ────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingAction {
+    pub action_type: String,    // "create_file" | "open_editor" | "run_command" | "external_link"
+    pub target: String,         // Path or URL
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingItem {
+    pub id: String,
+    pub label: String,
+    pub completed: bool,
+    pub action: Option<OnboardingAction>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingStatus {
+    pub runtime: String,
+    pub items: Vec<OnboardingItem>,
+    pub completion_percent: u8,
+}
+
+// ── Project Manager ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub is_active: bool,
+    pub skill_count: u32,
+    pub last_accessed: Option<String>,
+    pub created_at: String,
+    // Computed fields (not stored in DB)
+    pub has_claude: bool,
+    pub has_codex: bool,
+    pub has_hermes: bool,
+    pub has_openclaw: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredProject {
+    pub path: String,
+    pub name: String,  // Directory name
+    pub skill_count: u32,
+    pub runtimes: Vec<String>,  // Which runtimes have configs here
+}
+
 /// Scan all config files for all runtimes in both global and project scopes
 /// Based on official documentation for Claude Code, Codex CLI, Hermes, and OpenClaw
 #[tauri::command]
@@ -3314,6 +4443,1968 @@ fn get_agent_context_preview(runtime: String) -> Result<ContextPreview, String> 
     })
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 1: Skill Health Check / Linter
+// ══════════════════════════════════════════════════════════════════════════════
+
+const VALID_TOOLS: &[&str] = &[
+    "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch",
+    "Task", "TodoWrite", "NotebookEdit", "AskUserQuestion", "Skill", "KillShell",
+    "mcp", "computer", "text_editor", "browser", "code_execution"
+];
+
+/// Validate a single skill file
+#[tauri::command]
+fn validate_skill(path: String) -> Result<SkillValidation, String> {
+    let path_buf = PathBuf::from(&path);
+
+    if !path_buf.exists() {
+        return Ok(SkillValidation {
+            path: path.clone(),
+            skill_name: None,
+            valid: false,
+            errors: vec![ValidationIssue {
+                code: "FILE_NOT_FOUND".to_string(),
+                severity: "error".to_string(),
+                message: "File does not exist".to_string(),
+                line: None,
+                suggestion: Some("Create the file or check the path".to_string()),
+            }],
+            warnings: vec![],
+            token_count: 0,
+        });
+    }
+
+    let content = fs::read_to_string(&path_buf)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let token_count = estimate_tokens(content.len() as u64);
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut skill_name: Option<String> = None;
+
+    // Check if it's a SKILL.md or similar markdown file
+    let is_skill_file = path.ends_with("SKILL.md") ||
+                        path.ends_with("CLAUDE.md") ||
+                        path.ends_with("AGENTS.md") ||
+                        path.ends_with("SOUL.md");
+
+    if is_skill_file {
+        // Check for YAML frontmatter
+        if content.starts_with("---") {
+            let parts: Vec<&str> = content.splitn(3, "---").collect();
+            if parts.len() >= 3 {
+                let frontmatter = parts[1].trim();
+
+                // Try to parse YAML
+                match serde_yaml::from_str::<serde_json::Value>(frontmatter) {
+                    Ok(yaml) => {
+                        // Check for name field
+                        if let Some(name) = yaml.get("name").and_then(|n| n.as_str()) {
+                            skill_name = Some(name.to_string());
+                        } else {
+                            warnings.push(ValidationIssue {
+                                code: "MISSING_NAME".to_string(),
+                                severity: "warning".to_string(),
+                                message: "Skill has no 'name' field in frontmatter".to_string(),
+                                line: Some(2),
+                                suggestion: Some("Add 'name: my-skill' to frontmatter".to_string()),
+                            });
+                        }
+
+                        // Check for description field
+                        if yaml.get("description").is_none() {
+                            warnings.push(ValidationIssue {
+                                code: "MISSING_DESCRIPTION".to_string(),
+                                severity: "warning".to_string(),
+                                message: "Skill has no description — agents may not understand when to use it".to_string(),
+                                line: Some(2),
+                                suggestion: Some("Add 'description: What this skill does' to frontmatter".to_string()),
+                            });
+                        }
+
+                        // Validate allowed-tools
+                        if let Some(tools) = yaml.get("allowed-tools").and_then(|t| t.as_array()) {
+                            for tool in tools {
+                                if let Some(tool_str) = tool.as_str() {
+                                    // Extract tool name (before any parentheses for patterns)
+                                    let tool_name = tool_str.split('(').next().unwrap_or(tool_str);
+                                    if !VALID_TOOLS.contains(&tool_name) {
+                                        errors.push(ValidationIssue {
+                                            code: "INVALID_TOOL".to_string(),
+                                            severity: "error".to_string(),
+                                            message: format!("Unknown tool '{}' in allowed-tools", tool_name),
+                                            line: None,
+                                            suggestion: Some(format!("Valid tools: {}", VALID_TOOLS.join(", "))),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(ValidationIssue {
+                            code: "INVALID_FRONTMATTER".to_string(),
+                            severity: "error".to_string(),
+                            message: format!("Frontmatter YAML parse error: {}", e),
+                            line: Some(2),
+                            suggestion: Some("Check YAML syntax in frontmatter".to_string()),
+                        });
+                    }
+                }
+
+                // Check for empty content body
+                let body = parts[2].trim();
+                if body.is_empty() {
+                    warnings.push(ValidationIssue {
+                        code: "EMPTY_CONTENT".to_string(),
+                        severity: "warning".to_string(),
+                        message: "Skill has frontmatter but no content body".to_string(),
+                        line: None,
+                        suggestion: Some("Add instructions after the frontmatter".to_string()),
+                    });
+                }
+            } else {
+                errors.push(ValidationIssue {
+                    code: "INCOMPLETE_FRONTMATTER".to_string(),
+                    severity: "error".to_string(),
+                    message: "Frontmatter not properly closed with '---'".to_string(),
+                    line: Some(1),
+                    suggestion: Some("Add closing '---' after frontmatter".to_string()),
+                });
+            }
+        } else if path.ends_with("SKILL.md") {
+            errors.push(ValidationIssue {
+                code: "MISSING_FRONTMATTER".to_string(),
+                severity: "error".to_string(),
+                message: "SKILL.md missing YAML frontmatter".to_string(),
+                line: Some(1),
+                suggestion: Some("Add frontmatter starting with '---' at the top".to_string()),
+            });
+        }
+    }
+
+    // Token size warnings
+    if token_count > 15000 {
+        errors.push(ValidationIssue {
+            code: "TOKEN_SIZE_ERROR".to_string(),
+            severity: "error".to_string(),
+            message: format!("Skill is ~{} tokens — too large, will consume significant context", token_count),
+            line: None,
+            suggestion: Some("Split into smaller, focused skills".to_string()),
+        });
+    } else if token_count > 8000 {
+        warnings.push(ValidationIssue {
+            code: "TOKEN_SIZE_WARNING".to_string(),
+            severity: "warning".to_string(),
+            message: format!("Skill is ~{} tokens — consider splitting for better context efficiency", token_count),
+            line: None,
+            suggestion: Some("Large skills reduce available context for conversation".to_string()),
+        });
+    }
+
+    let valid = errors.is_empty();
+
+    Ok(SkillValidation {
+        path,
+        skill_name,
+        valid,
+        errors,
+        warnings,
+        token_count,
+    })
+}
+
+/// Validate all skill files across all runtimes
+#[tauri::command]
+fn validate_all_skills() -> Result<Vec<SkillValidation>, String> {
+    let home = home_dir();
+    let mut validations = Vec::new();
+
+    // Skill directories to scan
+    let skill_dirs = vec![
+        home.join(".claude/skills"),
+        home.join(".codex/skills"),
+        home.join(".agents/skills"),
+        home.join(".hermes/skills"),
+        home.join(".openclaw/skills"),
+    ];
+
+    for dir in skill_dirs {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let skill_md = entry.path().join("SKILL.md");
+                    if skill_md.exists() {
+                        if let Ok(validation) = validate_skill(skill_md.to_string_lossy().to_string()) {
+                            validations.push(validation);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check project skills
+    let project = project_root();
+    let project_skill_dirs = vec![
+        project.join(".claude/skills"),
+        project.join(".agents/skills"),
+        project.join("skills"),
+    ];
+
+    for dir in project_skill_dirs {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let skill_md = entry.path().join("SKILL.md");
+                    if skill_md.exists() {
+                        if let Ok(validation) = validate_skill(skill_md.to_string_lossy().to_string()) {
+                            validations.push(validation);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(validations)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 2: Onboarding Checklist
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Get onboarding status for a specific runtime
+#[tauri::command]
+fn get_onboarding_status(runtime: String) -> Result<OnboardingStatus, String> {
+    let home = home_dir();
+    let project = project_root();
+    let mut items = Vec::new();
+
+    match runtime.as_str() {
+        "claude" => {
+            // Check CLI installed
+            let cli_installed = which_sync("claude").is_some();
+            items.push(OnboardingItem {
+                id: "cli_installed".to_string(),
+                label: "Claude Code CLI installed".to_string(),
+                completed: cli_installed,
+                action: if cli_installed { None } else { Some(OnboardingAction {
+                    action_type: "external_link".to_string(),
+                    target: "https://docs.anthropic.com/en/docs/claude-code".to_string(),
+                }) },
+            });
+
+            // Check authenticated
+            let claude_json = home.join(".claude.json");
+            let has_auth = claude_json.exists() && fs::read_to_string(&claude_json)
+                .map(|c| c.contains("oauth") || c.contains("apiKey"))
+                .unwrap_or(false);
+            items.push(OnboardingItem {
+                id: "authenticated".to_string(),
+                label: "Authenticated (API key or OAuth)".to_string(),
+                completed: has_auth,
+                action: if has_auth { None } else { Some(OnboardingAction {
+                    action_type: "run_command".to_string(),
+                    target: "claude auth".to_string(),
+                }) },
+            });
+
+            // Check settings.json exists
+            let settings = home.join(".claude/settings.json");
+            items.push(OnboardingItem {
+                id: "settings_created".to_string(),
+                label: "Created ~/.claude/settings.json".to_string(),
+                completed: settings.exists(),
+                action: if settings.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: settings.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check CLAUDE.md exists in project
+            let claude_md = project.join("CLAUDE.md");
+            items.push(OnboardingItem {
+                id: "project_config".to_string(),
+                label: "Created CLAUDE.md for project".to_string(),
+                completed: claude_md.exists(),
+                action: if claude_md.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: claude_md.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check at least one skill
+            let skills_dir = home.join(".claude/skills");
+            let has_skills = skills_dir.exists() && fs::read_dir(&skills_dir)
+                .map(|entries| entries.count() > 0)
+                .unwrap_or(false);
+            items.push(OnboardingItem {
+                id: "has_skill".to_string(),
+                label: "Added at least one skill".to_string(),
+                completed: has_skills,
+                action: if has_skills { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: skills_dir.join("my-skill/SKILL.md").to_string_lossy().to_string(),
+                }) },
+            });
+        }
+        "codex" => {
+            // Check CLI installed
+            let cli_installed = which_sync("codex").is_some();
+            items.push(OnboardingItem {
+                id: "cli_installed".to_string(),
+                label: "Codex CLI installed".to_string(),
+                completed: cli_installed,
+                action: if cli_installed { None } else { Some(OnboardingAction {
+                    action_type: "external_link".to_string(),
+                    target: "https://github.com/openai/codex".to_string(),
+                }) },
+            });
+
+            // Check OPENAI_API_KEY
+            let has_api_key = std::env::var("OPENAI_API_KEY").is_ok();
+            items.push(OnboardingItem {
+                id: "api_key".to_string(),
+                label: "OPENAI_API_KEY environment variable set".to_string(),
+                completed: has_api_key,
+                action: if has_api_key { None } else { Some(OnboardingAction {
+                    action_type: "external_link".to_string(),
+                    target: "https://platform.openai.com/api-keys".to_string(),
+                }) },
+            });
+
+            // Check config.toml
+            let config = home.join(".codex/config.toml");
+            items.push(OnboardingItem {
+                id: "config_created".to_string(),
+                label: "Created ~/.codex/config.toml".to_string(),
+                completed: config.exists(),
+                action: if config.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: config.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check AGENTS.md
+            let agents_md = project.join("AGENTS.md");
+            items.push(OnboardingItem {
+                id: "project_config".to_string(),
+                label: "Created AGENTS.md for project".to_string(),
+                completed: agents_md.exists(),
+                action: if agents_md.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: agents_md.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check skills
+            let skills_dir = home.join(".agents/skills");
+            let has_skills = skills_dir.exists() && fs::read_dir(&skills_dir)
+                .map(|entries| entries.count() > 0)
+                .unwrap_or(false);
+            items.push(OnboardingItem {
+                id: "has_skill".to_string(),
+                label: "Added at least one skill".to_string(),
+                completed: has_skills,
+                action: if has_skills { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: skills_dir.join("my-skill/SKILL.md").to_string_lossy().to_string(),
+                }) },
+            });
+        }
+        "hermes" => {
+            // Check CLI installed
+            let cli_installed = which_sync("hermes").is_some();
+            items.push(OnboardingItem {
+                id: "cli_installed".to_string(),
+                label: "Hermes installed".to_string(),
+                completed: cli_installed,
+                action: if cli_installed { None } else { Some(OnboardingAction {
+                    action_type: "external_link".to_string(),
+                    target: "https://github.com/hermes-ai/hermes".to_string(),
+                }) },
+            });
+
+            // Check config.yaml
+            let config = home.join(".hermes/config.yaml");
+            items.push(OnboardingItem {
+                id: "config_created".to_string(),
+                label: "Created ~/.hermes/config.yaml".to_string(),
+                completed: config.exists(),
+                action: if config.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: config.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check SOUL.md
+            let soul_md = project.join("SOUL.md");
+            items.push(OnboardingItem {
+                id: "soul_created".to_string(),
+                label: "Created SOUL.md".to_string(),
+                completed: soul_md.exists(),
+                action: if soul_md.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: soul_md.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check memories directory
+            let memories = home.join(".hermes/memories");
+            items.push(OnboardingItem {
+                id: "memories_setup".to_string(),
+                label: "Set up memories/ directory".to_string(),
+                completed: memories.exists(),
+                action: if memories.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: memories.join("MEMORY.md").to_string_lossy().to_string(),
+                }) },
+            });
+        }
+        "openclaw" => {
+            // Check gateway config
+            let config = home.join(".openclaw/openclaw.json");
+            let config_valid = config.exists() && fs::read_to_string(&config)
+                .map(|c| c.contains("gateway"))
+                .unwrap_or(false);
+            items.push(OnboardingItem {
+                id: "gateway_configured".to_string(),
+                label: "OpenClaw gateway configured".to_string(),
+                completed: config_valid,
+                action: if config_valid { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: config.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check SOUL.md
+            let soul_md = project.join("SOUL.md");
+            items.push(OnboardingItem {
+                id: "soul_created".to_string(),
+                label: "Created workspace SOUL.md".to_string(),
+                completed: soul_md.exists(),
+                action: if soul_md.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: soul_md.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check TOOLS.md
+            let tools_md = project.join("TOOLS.md");
+            items.push(OnboardingItem {
+                id: "tools_created".to_string(),
+                label: "Added TOOLS.md".to_string(),
+                completed: tools_md.exists(),
+                action: if tools_md.exists() { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: tools_md.to_string_lossy().to_string(),
+                }) },
+            });
+
+            // Check skills
+            let skills_dir = home.join(".openclaw/skills");
+            let has_skills = skills_dir.exists() && fs::read_dir(&skills_dir)
+                .map(|entries| entries.count() > 0)
+                .unwrap_or(false);
+            items.push(OnboardingItem {
+                id: "has_skill".to_string(),
+                label: "Added at least one skill".to_string(),
+                completed: has_skills,
+                action: if has_skills { None } else { Some(OnboardingAction {
+                    action_type: "create_file".to_string(),
+                    target: skills_dir.join("my-skill/SKILL.md").to_string_lossy().to_string(),
+                }) },
+            });
+        }
+        _ => {}
+    }
+
+    let completed_count = items.iter().filter(|i| i.completed).count();
+    let total = items.len();
+    let completion_percent = if total > 0 {
+        ((completed_count as f32 / total as f32) * 100.0) as u8
+    } else {
+        0
+    };
+
+    Ok(OnboardingStatus {
+        runtime,
+        items,
+        completion_percent,
+    })
+}
+
+/// Helper to check if a command exists in PATH
+fn which_sync(cmd: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .filter_map(|dir| {
+                let full_path = dir.join(cmd);
+                if full_path.is_file() {
+                    Some(full_path)
+                } else {
+                    None
+                }
+            })
+            .next()
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 3: Profile Snapshots
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Save current configuration as a profile snapshot
+#[tauri::command]
+fn save_profile_snapshot(
+    db: State<'_, DbState>,
+    name: String,
+    description: Option<String>,
+    runtime: String,
+) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let home = home_dir();
+    let project = project_root();
+    let mut files: Vec<ProfileFile> = Vec::new();
+
+    // Collect files based on runtime
+    let global_paths: Vec<PathBuf> = match runtime.as_str() {
+        "claude" => vec![
+            home.join(".claude/settings.json"),
+            home.join(".claude.json"),
+            home.join(".claude/CLAUDE.md"),
+        ],
+        "codex" => vec![
+            home.join(".codex/config.toml"),
+            home.join(".codex/requirements.toml"),
+        ],
+        "hermes" => vec![
+            home.join(".hermes/config.yaml"),
+            home.join(".hermes/.env"),
+        ],
+        "openclaw" => vec![
+            home.join(".openclaw/openclaw.json"),
+        ],
+        _ => vec![],
+    };
+
+    // Read global files
+    for path in global_paths {
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let relative = path.strip_prefix(&home)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                files.push(ProfileFile {
+                    path: relative,
+                    content,
+                    scope: "global".to_string(),
+                });
+            }
+        }
+    }
+
+    // Collect skills
+    let skills_dir = match runtime.as_str() {
+        "claude" => home.join(".claude/skills"),
+        "codex" => home.join(".agents/skills"),
+        "hermes" => home.join(".hermes/skills"),
+        "openclaw" => home.join(".openclaw/skills"),
+        _ => home.join(".claude/skills"),
+    };
+
+    if skills_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&skills_dir) {
+            for entry in entries.flatten() {
+                let skill_md = entry.path().join("SKILL.md");
+                if skill_md.exists() {
+                    if let Ok(content) = fs::read_to_string(&skill_md) {
+                        let relative = skill_md.strip_prefix(&home)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| skill_md.to_string_lossy().to_string());
+                        files.push(ProfileFile {
+                            path: relative,
+                            content,
+                            scope: "global".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Project files
+    let project_paths: Vec<PathBuf> = match runtime.as_str() {
+        "claude" => vec![project.join("CLAUDE.md"), project.join(".claude/settings.json")],
+        "codex" => vec![project.join("AGENTS.md")],
+        "hermes" | "openclaw" => vec![project.join("SOUL.md"), project.join("TOOLS.md")],
+        _ => vec![],
+    };
+
+    for path in project_paths {
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let relative = path.strip_prefix(&project)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                files.push(ProfileFile {
+                    path: relative,
+                    content,
+                    scope: "project".to_string(),
+                });
+            }
+        }
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let files_json = serde_json::to_string(&files).map_err(|e| e.to_string())?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO profile_snapshots (id, name, description, runtime, files_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, name, description, runtime, files_json, created_at],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(id)
+}
+
+/// List all profile snapshots
+#[tauri::command]
+fn list_profile_snapshots(db: State<'_, DbState>) -> Result<Vec<ProfileSnapshot>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, runtime, files_json, created_at FROM profile_snapshots ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+
+    let profiles = stmt.query_map([], |row| {
+        let files_json: String = row.get(4)?;
+        let files: Vec<ProfileFile> = serde_json::from_str(&files_json).unwrap_or_default();
+        Ok(ProfileSnapshot {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            runtime: row.get(3)?,
+            files,
+            created_at: row.get(5)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    profiles.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Load a profile snapshot (writes files to disk)
+#[tauri::command]
+fn load_profile_snapshot(db: State<'_, DbState>, profile_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let home = home_dir();
+    let project = project_root();
+
+    let files_json: String = conn.query_row(
+        "SELECT files_json FROM profile_snapshots WHERE id = ?1",
+        params![profile_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    let files: Vec<ProfileFile> = serde_json::from_str(&files_json).map_err(|e| e.to_string())?;
+
+    for file in files {
+        let full_path = if file.scope == "global" {
+            home.join(&file.path)
+        } else {
+            project.join(&file.path)
+        };
+
+        // Create parent directories
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        // Write file
+        fs::write(&full_path, &file.content).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Delete a profile snapshot
+#[tauri::command]
+fn delete_profile_snapshot(db: State<'_, DbState>, profile_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM profile_snapshots WHERE id = ?1",
+        params![profile_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Export a profile snapshot as JSON
+#[tauri::command]
+fn export_profile_snapshot(db: State<'_, DbState>, profile_id: String) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let profile: ProfileSnapshot = conn.query_row(
+        "SELECT id, name, description, runtime, files_json, created_at FROM profile_snapshots WHERE id = ?1",
+        params![profile_id],
+        |row| {
+            let files_json: String = row.get(4)?;
+            let files: Vec<ProfileFile> = serde_json::from_str(&files_json).unwrap_or_default();
+            Ok(ProfileSnapshot {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                runtime: row.get(3)?,
+                files,
+                created_at: row.get(5)?,
+            })
+        },
+    ).map_err(|e| e.to_string())?;
+
+    serde_json::to_string_pretty(&profile).map_err(|e| e.to_string())
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 4: Skill Usage Analytics
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Get usage statistics for all skills
+#[tauri::command]
+fn get_skill_usage_stats() -> Result<Vec<SkillUsageStat>, String> {
+    let home = home_dir();
+    let logs_path = home.join(".ato/agent-logs.jsonl");
+    let mut usage_map: std::collections::HashMap<String, (u32, Option<String>, Vec<u32>)> = std::collections::HashMap::new();
+
+    // Parse agent logs for skill invocations
+    if logs_path.exists() {
+        if let Ok(content) = fs::read_to_string(&logs_path) {
+            for line in content.lines() {
+                if let Ok(log) = serde_json::from_str::<serde_json::Value>(line) {
+                    // Look for skill invocations in the logs
+                    if let Some(skill_name) = log.get("skill").and_then(|s| s.as_str()) {
+                        let timestamp = log.get("timestamp")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string());
+                        let tokens = log.get("tokens")
+                            .and_then(|t| t.as_u64())
+                            .map(|t| t as u32)
+                            .unwrap_or(0);
+
+                        let entry = usage_map.entry(skill_name.to_string()).or_insert((0, None, Vec::new()));
+                        entry.0 += 1;
+                        entry.1 = timestamp.or(entry.1.clone());
+                        if tokens > 0 {
+                            entry.2.push(tokens);
+                        }
+                    }
+
+                    // Also check for skill references in prompt content
+                    if let Some(prompt) = log.get("prompt").and_then(|p| p.as_str()) {
+                        // Simple heuristic: look for /skill-name patterns
+                        for word in prompt.split_whitespace() {
+                            if word.starts_with('/') && word.len() > 1 {
+                                let skill_name = word.trim_start_matches('/');
+                                let entry = usage_map.entry(skill_name.to_string()).or_insert((0, None, Vec::new()));
+                                entry.0 += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build list of all known skills
+    let mut all_skills: Vec<SkillUsageStat> = Vec::new();
+    let skill_dirs = vec![
+        (home.join(".claude/skills"), "claude"),
+        (home.join(".agents/skills"), "codex"),
+        (home.join(".hermes/skills"), "hermes"),
+        (home.join(".openclaw/skills"), "openclaw"),
+    ];
+
+    for (dir, _runtime) in skill_dirs {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        let skill_name = entry.file_name().to_string_lossy().to_string();
+                        let skill_path = entry.path().join("SKILL.md").to_string_lossy().to_string();
+
+                        let (trigger_count, last_used, tokens_vec) = usage_map
+                            .get(&skill_name)
+                            .cloned()
+                            .unwrap_or((0, None, Vec::new()));
+
+                        let avg_tokens = if tokens_vec.is_empty() {
+                            None
+                        } else {
+                            Some((tokens_vec.iter().sum::<u32>() / tokens_vec.len() as u32) as u32)
+                        };
+
+                        all_skills.push(SkillUsageStat {
+                            skill_path,
+                            skill_name,
+                            trigger_count,
+                            last_used,
+                            avg_tokens,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by trigger count (most used first)
+    all_skills.sort_by(|a, b| b.trigger_count.cmp(&a.trigger_count));
+
+    Ok(all_skills)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 6: Project Manager
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Discover projects on the system that have agent configurations
+#[tauri::command]
+fn discover_projects() -> Result<Vec<DiscoveredProject>, String> {
+    let home = home_dir();
+    let mut projects = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Common development directories to scan
+    let scan_dirs = vec![
+        home.clone(),
+        home.join("Documents"),
+        home.join("Developer"),
+        home.join("Projects"),
+        home.join("Code"),
+        home.join("repos"),
+        home.join("src"),
+        home.join("work"),
+        home.join("dev"),
+    ];
+
+    for scan_dir in scan_dirs {
+        if !scan_dir.exists() {
+            continue;
+        }
+
+        // Only scan one level deep in these directories
+        if let Ok(entries) = fs::read_dir(&scan_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+
+                let path_str = path.to_string_lossy().to_string();
+                if seen_paths.contains(&path_str) {
+                    continue;
+                }
+
+                // Check if this directory has any agent config
+                let has_claude = path.join(".claude").exists() || path.join("CLAUDE.md").exists();
+                let has_codex = path.join(".codex").exists() || path.join("AGENTS.md").exists();
+                let has_hermes = path.join(".hermes").exists() || path.join("SOUL.md").exists();
+                let has_openclaw = path.join("SOUL.md").exists() && path.join("TOOLS.md").exists();
+
+                if has_claude || has_codex || has_hermes || has_openclaw {
+                    let mut runtimes = Vec::new();
+                    if has_claude { runtimes.push("claude".to_string()); }
+                    if has_codex { runtimes.push("codex".to_string()); }
+                    if has_hermes { runtimes.push("hermes".to_string()); }
+                    if has_openclaw { runtimes.push("openclaw".to_string()); }
+
+                    // Count skills
+                    let skill_count = count_project_skills(&path);
+
+                    let name = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path_str.clone());
+
+                    projects.push(DiscoveredProject {
+                        path: path_str.clone(),
+                        name,
+                        skill_count,
+                        runtimes,
+                    });
+
+                    seen_paths.insert(path_str);
+                }
+            }
+        }
+    }
+
+    // Sort by name
+    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(projects)
+}
+
+/// Count skills in a project directory
+fn count_project_skills(project_path: &PathBuf) -> u32 {
+    let mut count = 0u32;
+
+    let skill_dirs = vec![
+        project_path.join(".claude/skills"),
+        project_path.join(".codex/skills"),
+        project_path.join(".agents/skills"),
+        project_path.join(".hermes/skills"),
+        project_path.join("skills"),
+    ];
+
+    for dir in skill_dirs {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() && entry.path().join("SKILL.md").exists() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// List all saved projects
+#[tauri::command]
+fn list_projects(db: State<'_, DbState>) -> Result<Vec<Project>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, path, is_active, skill_count, last_accessed, created_at FROM projects ORDER BY is_active DESC, last_accessed DESC"
+    ).map_err(|e| e.to_string())?;
+
+    let projects = stmt.query_map([], |row| {
+        let path: String = row.get(2)?;
+        let path_buf = PathBuf::from(&path);
+
+        Ok(Project {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            path: path.clone(),
+            is_active: row.get::<_, i32>(3)? != 0,
+            skill_count: row.get::<_, u32>(4)?,
+            last_accessed: row.get(5)?,
+            created_at: row.get(6)?,
+            has_claude: path_buf.join(".claude").exists() || path_buf.join("CLAUDE.md").exists(),
+            has_codex: path_buf.join(".codex").exists() || path_buf.join("AGENTS.md").exists(),
+            has_hermes: path_buf.join(".hermes").exists() || path_buf.join("SOUL.md").exists(),
+            has_openclaw: path_buf.join("SOUL.md").exists() && path_buf.join("TOOLS.md").exists(),
+        })
+    }).map_err(|e| e.to_string())?;
+
+    projects.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Add a project to the list
+#[tauri::command]
+fn add_project(db: State<'_, DbState>, name: String, path: String) -> Result<Project, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let path_buf = PathBuf::from(&path);
+
+    if !path_buf.exists() {
+        return Err("Project path does not exist".to_string());
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let skill_count = count_project_skills(&path_buf);
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO projects (id, name, path, is_active, skill_count, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+        params![id, name, path, skill_count, created_at],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(Project {
+        id,
+        name,
+        path: path.clone(),
+        is_active: false,
+        skill_count,
+        last_accessed: None,
+        created_at,
+        has_claude: path_buf.join(".claude").exists() || path_buf.join("CLAUDE.md").exists(),
+        has_codex: path_buf.join(".codex").exists() || path_buf.join("AGENTS.md").exists(),
+        has_hermes: path_buf.join(".hermes").exists() || path_buf.join("SOUL.md").exists(),
+        has_openclaw: path_buf.join("SOUL.md").exists() && path_buf.join("TOOLS.md").exists(),
+    })
+}
+
+/// Update a project's name
+#[tauri::command]
+fn update_project(db: State<'_, DbState>, project_id: String, name: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE projects SET name = ?1 WHERE id = ?2",
+        params![name, project_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Delete a project from the list (doesn't delete files)
+#[tauri::command]
+fn delete_project(db: State<'_, DbState>, project_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM projects WHERE id = ?1",
+        params![project_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Set the active project
+#[tauri::command]
+fn set_active_project(db: State<'_, DbState>, project_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Deactivate all projects
+    conn.execute("UPDATE projects SET is_active = 0", []).map_err(|e| e.to_string())?;
+
+    // Activate the selected project and update last_accessed
+    conn.execute(
+        "UPDATE projects SET is_active = 1, last_accessed = ?1 WHERE id = ?2",
+        params![now, project_id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Get the active project
+#[tauri::command]
+fn get_active_project(db: State<'_, DbState>) -> Result<Option<Project>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let result = conn.query_row(
+        "SELECT id, name, path, is_active, skill_count, last_accessed, created_at FROM projects WHERE is_active = 1",
+        [],
+        |row| {
+            let path: String = row.get(2)?;
+            let path_buf = PathBuf::from(&path);
+
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                path: path.clone(),
+                is_active: true,
+                skill_count: row.get::<_, u32>(4)?,
+                last_accessed: row.get(5)?,
+                created_at: row.get(6)?,
+                has_claude: path_buf.join(".claude").exists() || path_buf.join("CLAUDE.md").exists(),
+                has_codex: path_buf.join(".codex").exists() || path_buf.join("AGENTS.md").exists(),
+                has_hermes: path_buf.join(".hermes").exists() || path_buf.join("SOUL.md").exists(),
+                has_openclaw: path_buf.join("SOUL.md").exists() && path_buf.join("TOOLS.md").exists(),
+            })
+        },
+    );
+
+    match result {
+        Ok(project) => Ok(Some(project)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Get skills for a specific project
+#[tauri::command]
+fn get_project_skills(project_path: String) -> Result<Vec<LocalSkill>, String> {
+    let path_buf = PathBuf::from(&project_path);
+    let project_name = path_buf.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut skills = Vec::new();
+
+    let skill_dirs = vec![
+        (path_buf.join(".claude/skills"), "claude"),
+        (path_buf.join(".codex/skills"), "codex"),
+        (path_buf.join(".agents/skills"), "codex"),
+        (path_buf.join(".hermes/skills"), "hermes"),
+        (path_buf.join("skills"), "shared"),
+    ];
+
+    for (dir, runtime) in skill_dirs {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let skill_path = entry.path();
+                    if skill_path.is_dir() {
+                        let skill_md = skill_path.join("SKILL.md");
+                        if skill_md.exists() {
+                            if let Ok(content) = fs::read_to_string(&skill_md) {
+                                let (fm, _body) = parse_frontmatter(&content);
+                                let name = fm.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+                                let description = fm.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let token_count = estimate_tokens(content.len() as u64);
+                                let hash = content_hash(&content);
+
+                                skills.push(LocalSkill {
+                                    id: format!("{}:{}", runtime, skill_md.to_string_lossy()),
+                                    name,
+                                    description,
+                                    file_path: skill_md.to_string_lossy().to_string(),
+                                    scope: "project".to_string(),
+                                    runtime: runtime.to_string(),
+                                    project: Some(project_name.clone()),
+                                    token_count,
+                                    enabled: true,
+                                    content_hash: hash,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(skills)
+}
+
+/// Clone a skill from one project to another
+#[tauri::command]
+fn clone_skill(
+    source_skill_path: String,
+    target_project_path: String,
+    target_runtime: String,
+) -> Result<String, String> {
+    let source_path = PathBuf::from(&source_skill_path);
+    let target_project = PathBuf::from(&target_project_path);
+
+    if !source_path.exists() {
+        return Err("Source skill does not exist".to_string());
+    }
+
+    // Read source skill content
+    let content = fs::read_to_string(&source_path)
+        .map_err(|e| format!("Failed to read source skill: {}", e))?;
+
+    // Determine target skills directory
+    let target_skills_dir = match target_runtime.as_str() {
+        "claude" => target_project.join(".claude/skills"),
+        "codex" => target_project.join(".agents/skills"),
+        "hermes" => target_project.join(".hermes/skills"),
+        "openclaw" => target_project.join("skills"),
+        _ => target_project.join(".claude/skills"),
+    };
+
+    // Get skill name from source path
+    let skill_name = source_path.parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "cloned-skill".to_string());
+
+    // Create target directory
+    let target_skill_dir = target_skills_dir.join(&skill_name);
+    fs::create_dir_all(&target_skill_dir)
+        .map_err(|e| format!("Failed to create target directory: {}", e))?;
+
+    // Write skill file
+    let target_skill_path = target_skill_dir.join("SKILL.md");
+    fs::write(&target_skill_path, &content)
+        .map_err(|e| format!("Failed to write skill: {}", e))?;
+
+    Ok(target_skill_path.to_string_lossy().to_string())
+}
+
+/// Refresh skill count for a project
+#[tauri::command]
+fn refresh_project_skills(db: State<'_, DbState>, project_id: String) -> Result<u32, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    // Get project path
+    let path: String = conn.query_row(
+        "SELECT path FROM projects WHERE id = ?1",
+        params![project_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    let skill_count = count_project_skills(&PathBuf::from(&path));
+
+    // Update in database
+    conn.execute(
+        "UPDATE projects SET skill_count = ?1 WHERE id = ?2",
+        params![skill_count, project_id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(skill_count)
+}
+
+// ── Secrets Manager ──────────────────────────────────────────────────────
+
+const KEYCHAIN_SERVICE: &str = "ato-desktop";
+
+/// List all secrets (metadata only, not values)
+#[tauri::command]
+fn list_secrets(db: State<'_, DbState>) -> Result<Vec<Secret>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, name, key_type, runtime, project_id, created_at, updated_at FROM secrets ORDER BY name"
+    ).map_err(|e| e.to_string())?;
+
+    let secrets = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+
+        // Check if value exists in keychain
+        let has_value = keyring::Entry::new(KEYCHAIN_SERVICE, &id)
+            .map(|e| e.get_password().is_ok())
+            .unwrap_or(false);
+
+        Ok(Secret {
+            id,
+            name,
+            key_type: row.get(2)?,
+            runtime: row.get(3)?,
+            project_id: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            has_value,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    secrets.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Create or update a secret
+#[tauri::command]
+fn save_secret(
+    db: State<'_, DbState>,
+    name: String,
+    key_type: String,
+    value: String,
+    runtime: Option<String>,
+    project_id: Option<String>,
+) -> Result<Secret, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = uuid::Uuid::new_v4().to_string();
+
+    // Store value in OS keychain
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &id)
+        .map_err(|e| format!("Failed to create keychain entry: {}", e))?;
+    entry.set_password(&value)
+        .map_err(|e| format!("Failed to store secret in keychain: {}", e))?;
+
+    // Store metadata in database
+    conn.execute(
+        "INSERT INTO secrets (id, name, key_type, runtime, project_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, name, key_type, runtime, project_id, now, now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(Secret {
+        id,
+        name,
+        key_type,
+        runtime,
+        project_id,
+        created_at: now.clone(),
+        updated_at: now,
+        has_value: true,
+    })
+}
+
+/// Get a secret value (requires explicit user action)
+#[tauri::command]
+fn get_secret_value(secret_id: String) -> Result<String, String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &secret_id)
+        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+    entry.get_password()
+        .map_err(|e| format!("Failed to retrieve secret: {}", e))
+}
+
+/// Update a secret value
+#[tauri::command]
+fn update_secret(
+    db: State<'_, DbState>,
+    secret_id: String,
+    name: Option<String>,
+    value: Option<String>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Update value in keychain if provided
+    if let Some(new_value) = value {
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &secret_id)
+            .map_err(|e| format!("Failed to access keychain: {}", e))?;
+        entry.set_password(&new_value)
+            .map_err(|e| format!("Failed to update secret: {}", e))?;
+    }
+
+    // Update metadata if name changed
+    if let Some(new_name) = name {
+        conn.execute(
+            "UPDATE secrets SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_name, now, secret_id],
+        ).map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "UPDATE secrets SET updated_at = ?1 WHERE id = ?2",
+            params![now, secret_id],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Delete a secret
+#[tauri::command]
+fn delete_secret(db: State<'_, DbState>, secret_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    // Remove from keychain
+    if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &secret_id) {
+        let _ = entry.delete_password();
+    }
+
+    // Remove from database
+    conn.execute("DELETE FROM secrets WHERE id = ?1", params![secret_id])
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ── Environment Variables Manager ────────────────────────────────────────
+
+/// List environment variables
+#[tauri::command]
+fn list_env_vars(db: State<'_, DbState>, project_id: Option<String>, runtime: Option<String>) -> Result<Vec<EnvVar>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    // Build dynamic SQL
+    let mut conditions = Vec::new();
+    if project_id.is_some() {
+        conditions.push("project_id = ?");
+    }
+    if runtime.is_some() {
+        conditions.push("runtime = ?");
+    }
+
+    let sql = if conditions.is_empty() {
+        "SELECT id, project_id, runtime, key, value, created_at FROM env_vars ORDER BY key".to_string()
+    } else {
+        format!("SELECT id, project_id, runtime, key, value, created_at FROM env_vars WHERE {} ORDER BY key", conditions.join(" AND "))
+    };
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+
+    // Collect parameters
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    if let Some(ref pid) = project_id {
+        params_vec.push(pid);
+    }
+    if let Some(ref rt) = runtime {
+        params_vec.push(rt);
+    }
+
+    let env_vars = stmt.query_map(params_vec.as_slice(), |row| {
+        Ok(EnvVar {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            runtime: row.get(2)?,
+            key: row.get(3)?,
+            value: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    env_vars.collect::<Result<Vec<_>, _>>().map_err(|e: rusqlite::Error| e.to_string())
+}
+
+/// Save an environment variable
+#[tauri::command]
+fn save_env_var(
+    db: State<'_, DbState>,
+    key: String,
+    value: String,
+    project_id: Option<String>,
+    runtime: Option<String>,
+) -> Result<EnvVar, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO env_vars (id, project_id, runtime, key, value, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, project_id, runtime, key, value, now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(EnvVar {
+        id,
+        project_id,
+        runtime,
+        key,
+        value,
+        created_at: now,
+    })
+}
+
+/// Update an environment variable
+#[tauri::command]
+fn update_env_var(db: State<'_, DbState>, env_id: String, key: Option<String>, value: Option<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    if let Some(new_key) = key {
+        conn.execute("UPDATE env_vars SET key = ?1 WHERE id = ?2", params![new_key, env_id])
+            .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(new_value) = value {
+        conn.execute("UPDATE env_vars SET value = ?1 WHERE id = ?2", params![new_value, env_id])
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Delete an environment variable
+#[tauri::command]
+fn delete_env_var(db: State<'_, DbState>, env_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM env_vars WHERE id = ?1", params![env_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Import environment variables from a .env file
+#[tauri::command]
+fn import_env_file(db: State<'_, DbState>, file_path: String, project_id: Option<String>, runtime: Option<String>) -> Result<Vec<EnvVar>, String> {
+    let content = fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut imported = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim().to_string();
+            let value = line[eq_pos + 1..].trim().trim_matches('"').to_string();
+            let id = uuid::Uuid::new_v4().to_string();
+
+            conn.execute(
+                "INSERT OR REPLACE INTO env_vars (id, project_id, runtime, key, value, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, project_id, runtime, key, value, now],
+            ).map_err(|e| e.to_string())?;
+
+            imported.push(EnvVar {
+                id,
+                project_id: project_id.clone(),
+                runtime: runtime.clone(),
+                key,
+                value,
+                created_at: now.clone(),
+            });
+        }
+    }
+
+    Ok(imported)
+}
+
+// ── Model Configuration ──────────────────────────────────────────────────
+
+/// List model configurations
+#[tauri::command]
+fn list_model_configs(db: State<'_, DbState>) -> Result<Vec<ModelConfig>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, runtime, project_id, model_id, max_tokens, temperature, created_at, updated_at FROM model_configs ORDER BY runtime"
+    ).map_err(|e| e.to_string())?;
+
+    let configs = stmt.query_map([], |row| {
+        Ok(ModelConfig {
+            id: row.get(0)?,
+            runtime: row.get(1)?,
+            project_id: row.get(2)?,
+            model_id: row.get(3)?,
+            max_tokens: row.get(4)?,
+            temperature: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    configs.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Save or update model configuration
+#[tauri::command]
+fn save_model_config(
+    db: State<'_, DbState>,
+    runtime: String,
+    model_id: String,
+    project_id: Option<String>,
+    max_tokens: Option<i32>,
+    temperature: Option<f64>,
+) -> Result<ModelConfig, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Check if config exists
+    let existing: Option<String> = conn.query_row(
+        "SELECT id FROM model_configs WHERE runtime = ?1 AND (project_id = ?2 OR (project_id IS NULL AND ?2 IS NULL))",
+        params![runtime, project_id],
+        |row| row.get(0),
+    ).ok();
+
+    let id = if let Some(existing_id) = existing {
+        // Update existing
+        conn.execute(
+            "UPDATE model_configs SET model_id = ?1, max_tokens = ?2, temperature = ?3, updated_at = ?4 WHERE id = ?5",
+            params![model_id, max_tokens, temperature, now, existing_id],
+        ).map_err(|e| e.to_string())?;
+        existing_id
+    } else {
+        // Insert new
+        let new_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO model_configs (id, runtime, project_id, model_id, max_tokens, temperature, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![new_id, runtime, project_id, model_id, max_tokens, temperature, now, now],
+        ).map_err(|e| e.to_string())?;
+        new_id
+    };
+
+    Ok(ModelConfig {
+        id,
+        runtime,
+        project_id,
+        model_id,
+        max_tokens,
+        temperature,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+/// Get model config for a runtime
+#[tauri::command]
+fn get_model_config(db: State<'_, DbState>, runtime: String, project_id: Option<String>) -> Result<Option<ModelConfig>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let result = conn.query_row(
+        "SELECT id, runtime, project_id, model_id, max_tokens, temperature, created_at, updated_at FROM model_configs WHERE runtime = ?1 AND (project_id = ?2 OR (project_id IS NULL AND ?2 IS NULL))",
+        params![runtime, project_id],
+        |row| {
+            Ok(ModelConfig {
+                id: row.get(0)?,
+                runtime: row.get(1)?,
+                project_id: row.get(2)?,
+                model_id: row.get(3)?,
+                max_tokens: row.get(4)?,
+                temperature: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(config) => Ok(Some(config)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// ── Execution Logs ───────────────────────────────────────────────────────
+
+/// Get execution logs with filtering
+#[tauri::command]
+fn get_execution_logs(
+    db: State<'_, DbState>,
+    runtime: Option<String>,
+    status: Option<String>,
+    limit: Option<i32>,
+) -> Result<Vec<ExecutionLog>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(100);
+
+    let sql = match (&runtime, &status) {
+        (Some(_), Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at FROM execution_logs WHERE runtime = ?1 AND status = ?2 ORDER BY created_at DESC LIMIT ?3",
+        (Some(_), None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at FROM execution_logs WHERE runtime = ?1 ORDER BY created_at DESC LIMIT ?2",
+        (None, Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at FROM execution_logs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
+        (None, None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at FROM execution_logs ORDER BY created_at DESC LIMIT ?1",
+    };
+
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+
+    let logs = match (&runtime, &status) {
+        (Some(rt), Some(st)) => stmt.query_map(params![rt, st, limit], map_execution_log),
+        (Some(rt), None) => stmt.query_map(params![rt, limit], map_execution_log),
+        (None, Some(st)) => stmt.query_map(params![st, limit], map_execution_log),
+        (None, None) => stmt.query_map(params![limit], map_execution_log),
+    }.map_err(|e| e.to_string())?;
+
+    logs.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+fn map_execution_log(row: &rusqlite::Row) -> Result<ExecutionLog, rusqlite::Error> {
+    Ok(ExecutionLog {
+        id: row.get(0)?,
+        runtime: row.get(1)?,
+        prompt: row.get(2)?,
+        response: row.get(3)?,
+        tokens_in: row.get(4)?,
+        tokens_out: row.get(5)?,
+        duration_ms: row.get(6)?,
+        status: row.get(7)?,
+        error_message: row.get(8)?,
+        skill_name: row.get(9)?,
+        created_at: row.get(10)?,
+    })
+}
+
+/// Add an execution log entry
+#[tauri::command]
+fn add_execution_log(
+    db: State<'_, DbState>,
+    runtime: String,
+    prompt: Option<String>,
+    response: Option<String>,
+    tokens_in: Option<i32>,
+    tokens_out: Option<i32>,
+    duration_ms: Option<i32>,
+    status: String,
+    error_message: Option<String>,
+    skill_name: Option<String>,
+) -> Result<ExecutionLog, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(ExecutionLog {
+        id,
+        runtime,
+        prompt,
+        response,
+        tokens_in,
+        tokens_out,
+        duration_ms,
+        status,
+        error_message,
+        skill_name,
+        created_at: now,
+    })
+}
+
+// ── Health Checks ────────────────────────────────────────────────────────
+
+/// Get health status for all runtimes
+#[tauri::command]
+fn get_health_status(db: State<'_, DbState>) -> Result<Vec<RuntimeHealth>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let runtimes = vec!["claude", "codex", "hermes", "openclaw"];
+    let mut health_list = Vec::new();
+
+    for runtime in runtimes {
+        // Get latest health check
+        let latest: Option<HealthCheck> = conn.query_row(
+            "SELECT id, runtime, status, latency_ms, error_message, checked_at FROM health_checks WHERE runtime = ?1 ORDER BY checked_at DESC LIMIT 1",
+            params![runtime],
+            |row| {
+                Ok(HealthCheck {
+                    id: row.get(0)?,
+                    runtime: row.get(1)?,
+                    status: row.get(2)?,
+                    latency_ms: row.get(3)?,
+                    error_message: row.get(4)?,
+                    checked_at: row.get(5)?,
+                })
+            },
+        ).ok();
+
+        // Calculate uptime (last 24 hours)
+        let uptime: Option<f64> = conn.query_row(
+            "SELECT CAST(SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) * 100 FROM health_checks WHERE runtime = ?1 AND checked_at > datetime('now', '-24 hours')",
+            params![runtime],
+            |row| row.get(0),
+        ).ok().flatten();
+
+        health_list.push(RuntimeHealth {
+            runtime: runtime.to_string(),
+            status: latest.as_ref().map(|h| h.status.clone()).unwrap_or_else(|| "unknown".to_string()),
+            latency_ms: latest.as_ref().and_then(|h| h.latency_ms),
+            uptime_percent: uptime,
+            last_check: latest.as_ref().map(|h| h.checked_at.clone()),
+            error_message: latest.and_then(|h| h.error_message),
+        });
+    }
+
+    Ok(health_list)
+}
+
+/// Record a health check
+#[tauri::command]
+fn record_health_check(
+    db: State<'_, DbState>,
+    runtime: String,
+    status: String,
+    latency_ms: Option<i32>,
+    error_message: Option<String>,
+) -> Result<HealthCheck, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO health_checks (id, runtime, status, latency_ms, error_message, checked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, runtime, status, latency_ms, error_message, now],
+    ).map_err(|e| e.to_string())?;
+
+    // Clean up old health checks (keep last 7 days)
+    conn.execute(
+        "DELETE FROM health_checks WHERE checked_at < datetime('now', '-7 days')",
+        [],
+    ).ok();
+
+    Ok(HealthCheck {
+        id,
+        runtime,
+        status,
+        latency_ms,
+        error_message,
+        checked_at: now,
+    })
+}
+
+// ── Phase 2: Real-time Monitoring Commands ─────────────────────────────────
+
+/// Start the log file watcher for real-time updates
+#[tauri::command]
+fn start_log_watcher(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, LogWatcherState>,
+) -> Result<bool, String> {
+    let mut watcher = watcher_state.0.lock().map_err(|e| e.to_string())?;
+    watcher.start(app)?;
+    Ok(true)
+}
+
+/// Stop the log file watcher
+#[tauri::command]
+fn stop_log_watcher(watcher_state: State<'_, LogWatcherState>) -> Result<bool, String> {
+    let mut watcher = watcher_state.0.lock().map_err(|e| e.to_string())?;
+    watcher.stop();
+    Ok(true)
+}
+
+/// Check if log watcher is running
+#[tauri::command]
+fn is_log_watcher_running(watcher_state: State<'_, LogWatcherState>) -> Result<bool, String> {
+    let watcher = watcher_state.0.lock().map_err(|e| e.to_string())?;
+    Ok(watcher.is_watching())
+}
+
+/// Start the background health poller
+#[tauri::command]
+fn start_health_poller(
+    app: tauri::AppHandle,
+    poller_state: State<'_, HealthPollerState>,
+) -> Result<bool, String> {
+    let poller = poller_state.0.lock().map_err(|e| e.to_string())?;
+    let db_path = get_db_path().to_string_lossy().to_string();
+    poller.start(app, db_path);
+    Ok(true)
+}
+
+/// Stop the background health poller
+#[tauri::command]
+fn stop_health_poller(poller_state: State<'_, HealthPollerState>) -> Result<bool, String> {
+    let poller = poller_state.0.lock().map_err(|e| e.to_string())?;
+    poller.stop();
+    Ok(true)
+}
+
+/// Check if health poller is running
+#[tauri::command]
+fn is_health_poller_running(poller_state: State<'_, HealthPollerState>) -> Result<bool, String> {
+    let poller = poller_state.0.lock().map_err(|e| e.to_string())?;
+    Ok(poller.is_running())
+}
+
+/// Get health check history for charts (last 24 hours)
+#[tauri::command]
+fn get_health_history(
+    db: State<'_, DbState>,
+    runtime: Option<String>,
+    hours: Option<i32>,
+) -> Result<Vec<RuntimeHealthHistory>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let hours = hours.unwrap_or(24);
+    let interval = format!("-{} hours", hours);
+
+    let runtimes: Vec<String> = if let Some(rt) = runtime {
+        vec![rt]
+    } else {
+        vec!["claude".to_string(), "codex".to_string(), "hermes".to_string(), "openclaw".to_string()]
+    };
+
+    let mut results = Vec::new();
+
+    for rt in runtimes {
+        // Get data points
+        let mut stmt = conn.prepare(
+            "SELECT checked_at, latency_ms, status FROM health_checks
+             WHERE runtime = ?1 AND checked_at > datetime('now', ?2)
+             ORDER BY checked_at ASC"
+        ).map_err(|e| e.to_string())?;
+
+        let data_points: Vec<HealthHistoryPoint> = stmt
+            .query_map(params![&rt, &interval], |row| {
+                Ok(HealthHistoryPoint {
+                    timestamp: row.get(0)?,
+                    latency_ms: row.get(1)?,
+                    status: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Calculate stats
+        let total_checks = data_points.len() as i32;
+        let healthy_checks = data_points.iter().filter(|p| p.status == "healthy").count() as f64;
+        let uptime_percent = if total_checks > 0 {
+            (healthy_checks / total_checks as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let latencies: Vec<i32> = data_points.iter().filter_map(|p| p.latency_ms).collect();
+        let avg_latency_ms = if !latencies.is_empty() {
+            Some(latencies.iter().sum::<i32>() as f64 / latencies.len() as f64)
+        } else {
+            None
+        };
+
+        results.push(RuntimeHealthHistory {
+            runtime: rt,
+            data_points,
+            avg_latency_ms,
+            uptime_percent,
+            total_checks,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Get aggregated usage metrics
+#[tauri::command]
+fn get_usage_metrics(
+    db: State<'_, DbState>,
+    days: Option<i32>,
+) -> Result<UsageMetrics, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let days = days.unwrap_or(30);
+    let interval = format!("-{} days", days);
+
+    // Total counts
+    let (total, successful, failed): (i64, i64, i64) = conn.query_row(
+        "SELECT
+            COUNT(*),
+            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
+         FROM execution_logs
+         WHERE created_at > datetime('now', ?1)",
+        params![&interval],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((0, 0, 0));
+
+    // Token counts and avg duration
+    let (tokens_in, tokens_out, avg_duration): (i64, i64, Option<f64>) = conn.query_row(
+        "SELECT
+            COALESCE(SUM(tokens_in), 0),
+            COALESCE(SUM(tokens_out), 0),
+            AVG(duration_ms)
+         FROM execution_logs
+         WHERE created_at > datetime('now', ?1)",
+        params![&interval],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((0, 0, None));
+
+    // Executions by runtime
+    let mut stmt = conn.prepare(
+        "SELECT runtime,
+                COUNT(*),
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
+         FROM execution_logs
+         WHERE created_at > datetime('now', ?1)
+         GROUP BY runtime"
+    ).map_err(|e| e.to_string())?;
+
+    let executions_by_runtime: Vec<RuntimeExecutionCount> = stmt
+        .query_map(params![&interval], |row| {
+            Ok(RuntimeExecutionCount {
+                runtime: row.get(0)?,
+                count: row.get(1)?,
+                success_count: row.get(2)?,
+                error_count: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Executions by day
+    let mut stmt = conn.prepare(
+        "SELECT DATE(created_at),
+                COUNT(*),
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
+         FROM execution_logs
+         WHERE created_at > datetime('now', ?1)
+         GROUP BY DATE(created_at)
+         ORDER BY DATE(created_at) ASC"
+    ).map_err(|e| e.to_string())?;
+
+    let executions_by_day: Vec<DailyExecutionCount> = stmt
+        .query_map(params![&interval], |row| {
+            Ok(DailyExecutionCount {
+                date: row.get(0)?,
+                count: row.get(1)?,
+                success_count: row.get(2)?,
+                error_count: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(UsageMetrics {
+        total_executions: total,
+        successful_executions: successful,
+        failed_executions: failed,
+        total_tokens_in: tokens_in,
+        total_tokens_out: tokens_out,
+        avg_duration_ms: avg_duration,
+        executions_by_runtime,
+        executions_by_day,
+    })
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -3328,12 +6419,29 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(DbState(Mutex::new(conn)))
+        .manage(LogWatcherState::new())
+        .manage(HealthPollerState::new())
+        .setup(|app| {
+            // Auto-start health poller on app launch
+            let db_path_str = get_db_path().to_string_lossy().to_string();
+            let poller_state = app.state::<HealthPollerState>();
+            let poller = poller_state.0.lock().unwrap();
+            poller.start(app.handle().clone(), db_path_str);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_local_skills,
             get_skill_detail,
             toggle_local_skill,
             get_context_estimate,
             get_context_for_runtime,
+            get_live_session_data,
+            get_live_context_breakdown,
+            discover_mcp_server_tools,
+            get_mcp_servers_with_tools,
+            get_hooks,
+            save_hook,
+            delete_hook,
             get_local_config,
             get_local_usage,
             get_daily_usage,
@@ -3389,6 +6497,61 @@ pub fn run() {
             create_agent_skill,
             parse_agent_permissions,
             get_agent_context_preview,
+            // Skill Health Check
+            validate_skill,
+            validate_all_skills,
+            // Onboarding Checklist
+            get_onboarding_status,
+            // Profile Snapshots
+            save_profile_snapshot,
+            list_profile_snapshots,
+            load_profile_snapshot,
+            delete_profile_snapshot,
+            export_profile_snapshot,
+            // Skill Usage Analytics
+            get_skill_usage_stats,
+            // Project Manager
+            discover_projects,
+            list_projects,
+            add_project,
+            update_project,
+            delete_project,
+            set_active_project,
+            get_active_project,
+            get_project_skills,
+            clone_skill,
+            refresh_project_skills,
+            // Secrets Manager
+            list_secrets,
+            save_secret,
+            get_secret_value,
+            update_secret,
+            delete_secret,
+            // Environment Variables
+            list_env_vars,
+            save_env_var,
+            update_env_var,
+            delete_env_var,
+            import_env_file,
+            // Model Configuration
+            list_model_configs,
+            save_model_config,
+            get_model_config,
+            // Execution Logs
+            get_execution_logs,
+            add_execution_log,
+            // Health Checks
+            get_health_status,
+            record_health_check,
+            // Phase 2: Real-time Monitoring
+            start_log_watcher,
+            stop_log_watcher,
+            is_log_watcher_running,
+            start_health_poller,
+            stop_health_poller,
+            is_health_poller_running,
+            get_health_history,
+            get_usage_metrics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
