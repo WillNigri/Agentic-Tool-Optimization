@@ -47,6 +47,15 @@
 - Skill packs (collections) with import/export as JSON
 - Update notifications for installed skills
 
+### v0.8.0 — Advanced Automation
+- Webhook triggers (inbound) with path/method/secret configuration
+- Parallel node execution with group tracking
+- Error handling nodes (try-catch, retry with exponential backoff)
+- Variables and data passing between nodes (set, get, transform, jq expressions)
+- Workflow templates (4 built-in: Webhook to Slack, Parallel Deploy, Error Handling, Data Transform)
+- New node types: parallel, try-catch, retry, variable, template
+- Enhanced execution state with runId, trigger payload, parallel groups, retry tracking
+
 ---
 
 ## Upcoming
@@ -60,13 +69,6 @@
 - Notification preferences per event type
 - Desktop UI for managing notification channels
 - Events: cron failures, health alerts, team invitations, sync conflicts
-
-### v0.8.0 — Advanced Automation
-- Webhook triggers (inbound)
-- Parallel node execution
-- Error handling nodes (try/catch/retry per step)
-- Variables and data passing between nodes
-- Workflow templates
 
 ### v1.0.0 — Production Ready
 - Apple code signing & notarization

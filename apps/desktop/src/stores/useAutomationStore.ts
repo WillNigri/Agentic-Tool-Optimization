@@ -7,6 +7,8 @@ import type {
   ConnectingState,
   ExecutionState,
   ExecutionNodeStatus,
+  WorkflowTemplate,
+  WorkflowVariables,
 } from "@/components/automation/types";
 
 // ---------------------------------------------------------------------------
@@ -166,10 +168,31 @@ interface AutomationStore {
 
   // Execution
   execution: ExecutionState;
-  startExecution: () => void;
+  startExecution: (triggeredBy?: "manual" | "webhook" | "cron" | "api", payload?: unknown) => void;
   updateNodeExecStatus: (nodeId: string, status: ExecutionNodeStatus) => void;
   appendOutput: (text: string) => void;
   finishExecution: (error?: string) => void;
+
+  // v0.8.0: Templates
+  templates: WorkflowTemplate[];
+  loadTemplates: (templates: WorkflowTemplate[]) => void;
+  createFromTemplate: (templateId: string, name: string) => void;
+
+  // v0.8.0: Variables
+  setVariable: (name: string, value: unknown) => void;
+  getVariable: (name: string) => unknown;
+
+  // v0.8.0: Parallel execution
+  startParallelGroup: (groupId: string, nodeIds: string[]) => void;
+  completeParallelNode: (groupId: string, nodeId: string, failed?: boolean) => void;
+
+  // v0.8.0: Retry tracking
+  incrementRetry: (nodeId: string) => number;
+  getRetryCount: (nodeId: string) => number;
+
+  // v0.8.0: Webhook management
+  generateWebhookPath: (workflowId: string) => string;
+  updateWorkflowWebhook: (workflowId: string, webhookId: string, webhookPath: string) => void;
 }
 
 let idCounter = 0;
@@ -340,13 +363,29 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
     output: "",
   },
 
-  startExecution: () =>
+  startExecution: (triggeredBy = "manual", payload) =>
     set({
       execution: {
         running: true,
         nodeStatuses: {},
         output: "",
         startedAt: Date.now(),
+        runId: `run-${Date.now()}`,
+        triggeredBy,
+        triggerPayload: payload,
+        variables: {
+          $trigger: payload as Record<string, unknown> || {},
+          $env: {},
+          $workflow: {
+            id: get().activeWorkflowId,
+            name: get().getActiveWorkflow().name,
+            runId: `run-${Date.now()}`,
+            startedAt: new Date().toISOString(),
+          },
+        },
+        nodeOutputs: {},
+        nodeRetries: {},
+        parallelGroups: {},
       },
     }),
 
@@ -366,5 +405,139 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   finishExecution: (error) =>
     set((s) => ({
       execution: { ...s.execution, running: false, error },
+    })),
+
+  // v0.8.0: Templates
+  templates: [],
+
+  loadTemplates: (templates) => set({ templates }),
+
+  createFromTemplate: (templateId, name) => {
+    const template = get().templates.find((t) => t.id === templateId);
+    if (!template) return;
+
+    const id = `workflow-${Date.now()}`;
+    const newWorkflow: Workflow = {
+      id,
+      name,
+      description: template.description,
+      enabled: false,
+      runCount: 0,
+      errorCount: 0,
+      nodes: template.nodes.map((n) => ({
+        ...n,
+        id: `${n.id}-${Date.now()}`, // Unique IDs for new workflow
+        stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+      })),
+      edges: template.edges.map((e) => ({
+        ...e,
+        from: `${e.from}-${Date.now()}`,
+        to: `${e.to}-${Date.now()}`,
+      })),
+      fromTemplateId: templateId,
+    };
+
+    set((s) => ({
+      workflows: [...s.workflows, newWorkflow],
+      activeWorkflowId: id,
+      dirty: true,
+    }));
+  },
+
+  // v0.8.0: Variables
+  setVariable: (name, value) =>
+    set((s) => ({
+      execution: {
+        ...s.execution,
+        variables: {
+          ...s.execution.variables,
+          [name]: value,
+        } as WorkflowVariables,
+      },
+    })),
+
+  getVariable: (name) => {
+    const vars = get().execution.variables;
+    return vars ? vars[name] : undefined;
+  },
+
+  // v0.8.0: Parallel execution
+  startParallelGroup: (groupId, nodeIds) =>
+    set((s) => ({
+      execution: {
+        ...s.execution,
+        parallelGroups: {
+          ...s.execution.parallelGroups,
+          [groupId]: {
+            nodeIds,
+            completedIds: [],
+            failedIds: [],
+          },
+        },
+      },
+    })),
+
+  completeParallelNode: (groupId, nodeId, failed = false) =>
+    set((s) => {
+      const group = s.execution.parallelGroups?.[groupId];
+      if (!group) return s;
+
+      return {
+        execution: {
+          ...s.execution,
+          parallelGroups: {
+            ...s.execution.parallelGroups,
+            [groupId]: {
+              ...group,
+              completedIds: failed
+                ? group.completedIds
+                : [...group.completedIds, nodeId],
+              failedIds: failed
+                ? [...group.failedIds, nodeId]
+                : group.failedIds,
+            },
+          },
+        },
+      };
+    }),
+
+  // v0.8.0: Retry tracking
+  incrementRetry: (nodeId) => {
+    const current = get().execution.nodeRetries?.[nodeId] || 0;
+    const next = current + 1;
+    set((s) => ({
+      execution: {
+        ...s.execution,
+        nodeRetries: {
+          ...s.execution.nodeRetries,
+          [nodeId]: next,
+        },
+      },
+    }));
+    return next;
+  },
+
+  getRetryCount: (nodeId) => {
+    return get().execution.nodeRetries?.[nodeId] || 0;
+  },
+
+  // v0.8.0: Webhook management
+  generateWebhookPath: (workflowId) => {
+    const workflow = get().workflows.find((w) => w.id === workflowId);
+    const slug = (workflow?.name || workflowId)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .substring(0, 32);
+    return `/webhook/${slug}-${Date.now().toString(36)}`;
+  },
+
+  updateWorkflowWebhook: (workflowId, webhookId, webhookPath) =>
+    set((s) => ({
+      dirty: true,
+      workflows: s.workflows.map((w) =>
+        w.id === workflowId
+          ? { ...w, webhookId, webhookPath }
+          : w
+      ),
     })),
 }));

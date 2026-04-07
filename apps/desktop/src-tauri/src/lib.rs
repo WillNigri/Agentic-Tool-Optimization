@@ -6405,6 +6405,209 @@ fn get_usage_metrics(
     })
 }
 
+// ── v0.8.0: Workflow Webhooks & Templates ─────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowWebhook {
+    pub id: String,
+    pub workflow_id: String,
+    pub path: String,
+    pub method: String,
+    pub secret: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+    pub last_triggered_at: Option<String>,
+    pub trigger_count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTemplate {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub tags: Vec<String>,
+    pub version: String,
+    pub is_built_in: bool,
+    pub nodes: serde_json::Value,
+    pub edges: serde_json::Value,
+}
+
+/// Register a webhook for a workflow
+#[tauri::command]
+fn register_workflow_webhook(
+    state: State<DbState>,
+    workflow_id: String,
+    path: String,
+    method: String,
+    secret: Option<String>,
+) -> Result<WorkflowWebhook, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Ensure table exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS workflow_webhooks (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            method TEXT NOT NULL DEFAULT 'POST',
+            secret TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_triggered_at TEXT,
+            trigger_count INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    let id = format!("wh-{}", chrono::Utc::now().timestamp_millis());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO workflow_webhooks (id, workflow_id, path, method, secret, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![&id, &workflow_id, &path, &method, &secret, &now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(WorkflowWebhook {
+        id,
+        workflow_id,
+        path,
+        method,
+        secret,
+        enabled: true,
+        created_at: now,
+        last_triggered_at: None,
+        trigger_count: 0,
+    })
+}
+
+/// List all registered webhooks
+#[tauri::command]
+fn list_workflow_webhooks(state: State<DbState>) -> Result<Vec<WorkflowWebhook>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Ensure table exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS workflow_webhooks (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            method TEXT NOT NULL DEFAULT 'POST',
+            secret TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_triggered_at TEXT,
+            trigger_count INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, workflow_id, path, method, secret, enabled, created_at, last_triggered_at, trigger_count
+         FROM workflow_webhooks
+         ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+
+    let webhooks = stmt
+        .query_map([], |row| {
+            Ok(WorkflowWebhook {
+                id: row.get(0)?,
+                workflow_id: row.get(1)?,
+                path: row.get(2)?,
+                method: row.get(3)?,
+                secret: row.get(4)?,
+                enabled: row.get::<_, i32>(5)? == 1,
+                created_at: row.get(6)?,
+                last_triggered_at: row.get(7)?,
+                trigger_count: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(webhooks)
+}
+
+/// Delete a webhook
+#[tauri::command]
+fn delete_workflow_webhook(state: State<DbState>, webhook_id: String) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM workflow_webhooks WHERE id = ?1",
+        params![&webhook_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Toggle webhook enabled state
+#[tauri::command]
+fn toggle_workflow_webhook(state: State<DbState>, webhook_id: String, enabled: bool) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE workflow_webhooks SET enabled = ?1 WHERE id = ?2",
+        params![if enabled { 1 } else { 0 }, &webhook_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// List built-in workflow templates
+#[tauri::command]
+fn list_workflow_templates() -> Result<Vec<WorkflowTemplate>, String> {
+    // Built-in templates defined in Rust (matching frontend templates)
+    let templates = vec![
+        WorkflowTemplate {
+            id: "tpl-webhook-to-slack".to_string(),
+            name: "Webhook to Slack".to_string(),
+            description: "Receive webhook, process with Claude, post to Slack".to_string(),
+            category: "Notifications".to_string(),
+            tags: vec!["webhook".to_string(), "slack".to_string(), "notifications".to_string()],
+            version: "1.0.0".to_string(),
+            is_built_in: true,
+            nodes: serde_json::json!([]),
+            edges: serde_json::json!([]),
+        },
+        WorkflowTemplate {
+            id: "tpl-parallel-deploy".to_string(),
+            name: "Parallel Deployment".to_string(),
+            description: "Deploy to multiple environments in parallel with retry".to_string(),
+            category: "CI/CD".to_string(),
+            tags: vec!["parallel".to_string(), "deployment".to_string(), "retry".to_string()],
+            version: "1.0.0".to_string(),
+            is_built_in: true,
+            nodes: serde_json::json!([]),
+            edges: serde_json::json!([]),
+        },
+        WorkflowTemplate {
+            id: "tpl-error-handling".to_string(),
+            name: "Error Handling Pipeline".to_string(),
+            description: "Process data with error handling and fallback".to_string(),
+            category: "Data Processing".to_string(),
+            tags: vec!["error-handling".to_string(), "try-catch".to_string(), "fallback".to_string()],
+            version: "1.0.0".to_string(),
+            is_built_in: true,
+            nodes: serde_json::json!([]),
+            edges: serde_json::json!([]),
+        },
+        WorkflowTemplate {
+            id: "tpl-data-transform".to_string(),
+            name: "Data Transform Pipeline".to_string(),
+            description: "Transform data with variables and conditional logic".to_string(),
+            category: "Data Processing".to_string(),
+            tags: vec!["variables".to_string(), "transform".to_string(), "decision".to_string()],
+            version: "1.0.0".to_string(),
+            is_built_in: true,
+            nodes: serde_json::json!([]),
+            edges: serde_json::json!([]),
+        },
+    ];
+
+    Ok(templates)
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -6552,6 +6755,12 @@ pub fn run() {
             is_health_poller_running,
             get_health_history,
             get_usage_metrics,
+            // v0.8.0: Workflow Webhooks & Templates
+            register_workflow_webhook,
+            list_workflow_webhooks,
+            delete_workflow_webhook,
+            toggle_workflow_webhook,
+            list_workflow_templates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

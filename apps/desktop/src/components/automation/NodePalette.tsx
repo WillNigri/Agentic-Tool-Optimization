@@ -13,6 +13,9 @@ const CATEGORIES = [
   { key: "triggers" as const, labelKey: "automation.builder.triggers" },
   { key: "services" as const, labelKey: "automation.builder.services" },
   { key: "actions" as const, labelKey: "automation.builder.actions" },
+  // v0.8.0: New categories
+  { key: "flow-control" as const, labelKey: "automation.builder.flowControl" },
+  { key: "variables" as const, labelKey: "automation.builder.variables" },
 ];
 
 export default function NodePalette({ onDragStart }: NodePaletteProps) {

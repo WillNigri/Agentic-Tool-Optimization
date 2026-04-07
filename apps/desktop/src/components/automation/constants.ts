@@ -18,6 +18,13 @@ import {
   Filter,
   Cpu,
   Bell,
+  // v0.8.0: New icons for advanced nodes
+  Webhook,
+  GitMerge,
+  ShieldAlert,
+  RefreshCw,
+  Variable,
+  LayoutTemplate,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +48,12 @@ export const TYPE_COLORS: Record<string, string> = {
   action: "#a78bfa",
   output: "#00FFB2",
   service: "#f97316",
+  // v0.8.0: New node type colors
+  parallel: "#06b6d4",    // Cyan for parallel execution
+  "try-catch": "#ef4444", // Red for error handling
+  retry: "#f59e0b",       // Amber for retry
+  variable: "#8b5cf6",    // Purple for variables
+  template: "#6366f1",    // Indigo for templates
 };
 
 export const SERVICE_COLORS: Record<string, string> = {
@@ -74,4 +87,13 @@ export const NODE_ICONS: Record<string, React.ElementType> = {
   action: Play,
   output: CheckCircle,
   service: Globe,
+  // v0.8.0: New node type icons
+  parallel: GitMerge,
+  "try-catch": ShieldAlert,
+  retry: RefreshCw,
+  variable: Variable,
+  template: LayoutTemplate,
 };
+
+// v0.8.0: Webhook-specific icon
+export const WEBHOOK_ICON = Webhook;

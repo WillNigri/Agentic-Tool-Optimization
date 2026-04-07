@@ -1,4 +1,4 @@
-import type { ServiceAction, NodeTemplate } from "./types";
+import type { ServiceAction, NodeTemplate, RetryConfig } from "./types";
 
 // ---------------------------------------------------------------------------
 // Service catalog — each service has actions with typed param schemas
@@ -156,9 +156,28 @@ export const SERVICE_ACTIONS: Record<string, ServiceAction[]> = {
 // Node templates for the palette
 // ---------------------------------------------------------------------------
 
+// Default retry configuration
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxAttempts: 3,
+  backoffType: "exponential",
+  initialDelayMs: 1000,
+  maxDelayMs: 30000,
+};
+
 export const NODE_TEMPLATES: NodeTemplate[] = [
   // Triggers
-  { type: "trigger", label: "Webhook", description: "HTTP webhook trigger", category: "triggers" },
+  {
+    type: "trigger",
+    label: "Webhook",
+    description: "HTTP webhook trigger",
+    category: "triggers",
+    defaultConfig: {
+      webhook: {
+        path: "",
+        method: "POST",
+      },
+    },
+  },
   { type: "trigger", service: "cron", label: "Cron / Schedule", description: "Time-based trigger (linked to Cron Monitor)", category: "triggers" },
   { type: "trigger", label: "File Watcher", description: "File change trigger", category: "triggers" },
   { type: "trigger", label: "Manual", description: "Manual trigger", category: "triggers" },
@@ -177,4 +196,91 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
   { type: "process", label: "Filter / Transform", description: "Filter or transform data", category: "actions" },
   { type: "decision", label: "Decision", description: "Conditional branching", category: "actions" },
   { type: "output", label: "Notify", description: "Send notification", category: "actions" },
+
+  // v0.8.0: Flow Control
+  {
+    type: "parallel",
+    label: "Parallel",
+    description: "Execute branches in parallel",
+    category: "flow-control",
+  },
+  {
+    type: "try-catch",
+    label: "Try / Catch",
+    description: "Error handling wrapper",
+    category: "flow-control",
+  },
+  {
+    type: "retry",
+    label: "Retry",
+    description: "Retry on failure with backoff",
+    category: "flow-control",
+    defaultRetryConfig: DEFAULT_RETRY_CONFIG,
+  },
+
+  // v0.8.0: Variables
+  {
+    type: "variable",
+    label: "Set Variable",
+    description: "Set or transform a variable",
+    category: "variables",
+  },
+  {
+    type: "template",
+    label: "Template",
+    description: "Use a reusable template",
+    category: "variables",
+  },
+];
+
+// v0.8.0: Service actions for webhook triggers
+SERVICE_ACTIONS.webhook = [
+  {
+    id: "http_trigger",
+    label: "HTTP Webhook",
+    description: "Receive HTTP requests to trigger workflow",
+    params: [
+      { key: "path", label: "Path", type: "text", placeholder: "/my-workflow", required: true },
+      { key: "method", label: "Method", type: "select", options: ["GET", "POST", "PUT", "DELETE"] },
+      { key: "secret", label: "Secret (optional)", type: "text", placeholder: "HMAC secret for validation" },
+    ],
+  },
+];
+
+// v0.8.0: Service actions for variable operations
+SERVICE_ACTIONS.variable = [
+  {
+    id: "set",
+    label: "Set Variable",
+    description: "Set a variable value",
+    params: [
+      { key: "name", label: "Variable Name", type: "text", placeholder: "myVar", required: true },
+      { key: "value", label: "Value", type: "textarea", placeholder: "Value or expression", required: true },
+    ],
+  },
+  {
+    id: "transform",
+    label: "Transform",
+    description: "Transform data using jq expression",
+    params: [
+      { key: "input", label: "Input Variable", type: "text", placeholder: "$trigger.data", required: true },
+      { key: "expression", label: "jq Expression", type: "textarea", placeholder: ".items | map(.name)", required: true },
+      { key: "output", label: "Output Variable", type: "text", placeholder: "result", required: true },
+    ],
+  },
+];
+
+// v0.8.0: Service actions for retry configuration
+SERVICE_ACTIONS.retry = [
+  {
+    id: "configure",
+    label: "Configure Retry",
+    description: "Configure retry behavior for wrapped nodes",
+    params: [
+      { key: "maxAttempts", label: "Max Attempts", type: "text", placeholder: "3", required: true },
+      { key: "backoffType", label: "Backoff Type", type: "select", options: ["fixed", "exponential", "linear"] },
+      { key: "initialDelayMs", label: "Initial Delay (ms)", type: "text", placeholder: "1000" },
+      { key: "maxDelayMs", label: "Max Delay (ms)", type: "text", placeholder: "30000" },
+    ],
+  },
 ];

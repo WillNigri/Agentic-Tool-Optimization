@@ -1427,3 +1427,79 @@ export interface UsageMetrics {
 export async function getUsageMetrics(days?: number): Promise<UsageMetrics> {
   return invoke<UsageMetrics>('get_usage_metrics', { days });
 }
+
+// ---- v0.8.0: Workflow Webhooks ----
+
+export interface WorkflowWebhook {
+  id: string;
+  workflowId: string;
+  path: string;
+  method: string;
+  secret: string | null;
+  enabled: boolean;
+  createdAt: string;
+  lastTriggeredAt: string | null;
+  triggerCount: number;
+}
+
+/**
+ * Register a webhook for a workflow
+ */
+export async function registerWorkflowWebhook(
+  workflowId: string,
+  path: string,
+  method: string,
+  secret?: string
+): Promise<WorkflowWebhook> {
+  return invoke<WorkflowWebhook>('register_workflow_webhook', {
+    workflowId,
+    path,
+    method,
+    secret,
+  });
+}
+
+/**
+ * List all registered webhooks
+ */
+export async function listWorkflowWebhooks(): Promise<WorkflowWebhook[]> {
+  return invoke<WorkflowWebhook[]>('list_workflow_webhooks');
+}
+
+/**
+ * Delete a webhook
+ */
+export async function deleteWorkflowWebhook(webhookId: string): Promise<void> {
+  return invoke<void>('delete_workflow_webhook', { webhookId });
+}
+
+/**
+ * Toggle webhook enabled state
+ */
+export async function toggleWorkflowWebhook(
+  webhookId: string,
+  enabled: boolean
+): Promise<void> {
+  return invoke<void>('toggle_workflow_webhook', { webhookId, enabled });
+}
+
+// ---- v0.8.0: Workflow Templates ----
+
+export interface WorkflowTemplateInfo {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  version: string;
+  isBuiltIn: boolean;
+  nodes: unknown;
+  edges: unknown;
+}
+
+/**
+ * List available workflow templates
+ */
+export async function listWorkflowTemplates(): Promise<WorkflowTemplateInfo[]> {
+  return invoke<WorkflowTemplateInfo[]>('list_workflow_templates');
+}
