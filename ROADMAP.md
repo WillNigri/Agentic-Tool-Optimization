@@ -56,19 +56,20 @@
 - New node types: parallel, try-catch, retry, variable, template
 - Enhanced execution state with runId, trigger payload, parallel groups, retry tracking
 
+### v0.5.5 — Notifications & Integrations
+- Notifications service with provider abstraction (Tauri backend)
+- Slack webhook integration (Block Kit formatting)
+- Discord webhook integration (embed support)
+- Telegram bot integration (Markdown formatting)
+- Email notifications (SMTP - placeholder, requires lettre crate)
+- Notification preferences per event type (8 event types)
+- Desktop UI for managing notification channels (existing component, now connected to backend)
+- SQLite persistence for channel configurations
+- Test notification functionality
+
 ---
 
 ## Upcoming
-
-### v0.5.5 — Notifications & Integrations
-- Notifications service with provider abstraction
-- Slack webhook integration
-- Discord webhook integration
-- Telegram bot integration
-- Email notifications (SMTP)
-- Notification preferences per event type
-- Desktop UI for managing notification channels
-- Events: cron failures, health alerts, team invitations, sync conflicts
 
 ### v1.0.0 — Production Ready
 - Apple code signing & notarization

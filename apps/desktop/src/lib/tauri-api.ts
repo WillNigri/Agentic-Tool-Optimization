@@ -1503,3 +1503,80 @@ export interface WorkflowTemplateInfo {
 export async function listWorkflowTemplates(): Promise<WorkflowTemplateInfo[]> {
   return invoke<WorkflowTemplateInfo[]>('list_workflow_templates');
 }
+
+// ---- v0.5.5: Notifications ----
+
+export interface NotificationChannel {
+  id: string;
+  provider: string;
+  name: string;
+  config: Record<string, string>;
+  events: string[];
+  enabled: boolean;
+  createdAt: string;
+  lastSentAt: string | null;
+}
+
+export interface SendNotificationRequest {
+  eventType: string;
+  title: string;
+  message: string;
+  data?: unknown;
+}
+
+export interface NotificationResult {
+  channelId: string;
+  success: boolean;
+  error: string | null;
+}
+
+/**
+ * Save a notification channel configuration
+ */
+export async function saveNotificationChannel(
+  channel: NotificationChannel
+): Promise<NotificationChannel> {
+  return invoke<NotificationChannel>('save_notification_channel', { channel });
+}
+
+/**
+ * List all notification channels
+ */
+export async function listNotificationChannels(): Promise<NotificationChannel[]> {
+  return invoke<NotificationChannel[]>('list_notification_channels');
+}
+
+/**
+ * Delete a notification channel
+ */
+export async function deleteNotificationChannel(channelId: string): Promise<void> {
+  return invoke<void>('delete_notification_channel', { channelId });
+}
+
+/**
+ * Toggle notification channel enabled state
+ */
+export async function toggleNotificationChannel(
+  channelId: string,
+  enabled: boolean
+): Promise<void> {
+  return invoke<void>('toggle_notification_channel', { channelId, enabled });
+}
+
+/**
+ * Send a notification to all matching channels
+ */
+export async function sendNotification(
+  request: SendNotificationRequest
+): Promise<NotificationResult[]> {
+  return invoke<NotificationResult[]>('send_notification', { request });
+}
+
+/**
+ * Test a notification channel configuration
+ */
+export async function testNotificationChannel(
+  channel: NotificationChannel
+): Promise<NotificationResult> {
+  return invoke<NotificationResult>('test_notification_channel', { channel });
+}

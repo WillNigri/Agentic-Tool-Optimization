@@ -24,6 +24,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { useCloudStore } from '../../stores/useCloudStore';
+import * as tauriApi from '../../lib/tauri-api';
 
 // Provider icons (using simple representations)
 const SlackIcon = () => (
@@ -154,17 +155,38 @@ function AddProviderModal({ provider, onSave, onCancel, existingConfig }: AddPro
     setTesting(true);
     setTestResult(null);
 
-    // Simulate test - in real implementation, call API
-    await new Promise(resolve => setTimeout(resolve, 1500));
-
-    // For now, just validate fields are filled
+    // Validate required fields first
     const requiredFields = provider.fields.filter(f => !f.label.includes('optional'));
     const missingFields = requiredFields.filter(f => !config[f.name]);
 
     if (missingFields.length > 0) {
       setTestResult({ success: false, message: `Missing: ${missingFields.map(f => f.label).join(', ')}` });
-    } else {
-      setTestResult({ success: true, message: 'Configuration looks good! (Test message would be sent)' });
+      setTesting(false);
+      return;
+    }
+
+    try {
+      // Build test channel object
+      const testChannel: tauriApi.NotificationChannel = {
+        id: existingConfig?.id || `test-${Date.now()}`,
+        provider: provider.id,
+        name,
+        config,
+        events,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        lastSentAt: null,
+      };
+
+      const result = await tauriApi.testNotificationChannel(testChannel);
+
+      if (result.success) {
+        setTestResult({ success: true, message: 'Test notification sent successfully!' });
+      } else {
+        setTestResult({ success: false, message: result.error || 'Failed to send test notification' });
+      }
+    } catch (err) {
+      setTestResult({ success: false, message: err instanceof Error ? err.message : 'Test failed' });
     }
 
     setTesting(false);
@@ -332,36 +354,84 @@ export default function NotificationsSettings() {
 
   // Load configs on mount
   useEffect(() => {
-    // TODO: Load from API
-    // For now, load from localStorage
-    const stored = localStorage.getItem('ato_notification_configs');
-    if (stored) {
+    async function loadChannels() {
+      setIsLoading(true);
       try {
-        setConfigs(JSON.parse(stored));
-      } catch {
-        // ignore
+        const channels = await tauriApi.listNotificationChannels();
+        setConfigs(channels.map(ch => ({
+          id: ch.id,
+          provider: ch.provider,
+          name: ch.name,
+          config: ch.config,
+          events: ch.events,
+          enabled: ch.enabled,
+        })));
+      } catch (err) {
+        console.error('Failed to load notification channels:', err);
+        // Fallback to localStorage for browser dev mode
+        const stored = localStorage.getItem('ato_notification_configs');
+        if (stored) {
+          try {
+            setConfigs(JSON.parse(stored));
+          } catch {
+            // ignore
+          }
+        }
       }
+      setIsLoading(false);
     }
+    loadChannels();
   }, []);
 
-  // Save configs
-  const saveConfigs = (newConfigs: NotificationConfig[]) => {
+  // Save configs (to both Tauri and localStorage for fallback)
+  const saveConfigs = async (newConfigs: NotificationConfig[]) => {
     setConfigs(newConfigs);
     localStorage.setItem('ato_notification_configs', JSON.stringify(newConfigs));
-    // TODO: Sync to cloud API when authenticated
   };
 
-  const handleAddConfig = (config: Omit<NotificationConfig, 'id'>) => {
+  const handleAddConfig = async (config: Omit<NotificationConfig, 'id'>) => {
     const newConfig: NotificationConfig = {
       ...config,
       id: `${config.provider}_${Date.now()}`,
     };
+
+    try {
+      await tauriApi.saveNotificationChannel({
+        id: newConfig.id,
+        provider: newConfig.provider,
+        name: newConfig.name,
+        config: newConfig.config,
+        events: newConfig.events,
+        enabled: newConfig.enabled,
+        createdAt: new Date().toISOString(),
+        lastSentAt: null,
+      });
+    } catch (err) {
+      console.error('Failed to save notification channel:', err);
+    }
+
     saveConfigs([...configs, newConfig]);
     setAddingProvider(null);
   };
 
-  const handleUpdateConfig = (config: Omit<NotificationConfig, 'id'>) => {
+  const handleUpdateConfig = async (config: Omit<NotificationConfig, 'id'>) => {
     if (!editingConfig) return;
+
+    try {
+      await tauriApi.saveNotificationChannel({
+        id: editingConfig.id,
+        provider: config.provider,
+        name: config.name,
+        config: config.config,
+        events: config.events,
+        enabled: config.enabled,
+        createdAt: new Date().toISOString(),
+        lastSentAt: null,
+      });
+    } catch (err) {
+      console.error('Failed to update notification channel:', err);
+    }
+
     const updated = configs.map(c =>
       c.id === editingConfig.id ? { ...config, id: editingConfig.id } : c
     );
@@ -369,14 +439,32 @@ export default function NotificationsSettings() {
     setEditingConfig(null);
   };
 
-  const handleDeleteConfig = (id: string) => {
+  const handleDeleteConfig = async (id: string) => {
     if (!confirm('Delete this notification channel?')) return;
+
+    try {
+      await tauriApi.deleteNotificationChannel(id);
+    } catch (err) {
+      console.error('Failed to delete notification channel:', err);
+    }
+
     saveConfigs(configs.filter(c => c.id !== id));
   };
 
-  const handleToggleConfig = (id: string) => {
+  const handleToggleConfig = async (id: string) => {
+    const config = configs.find(c => c.id === id);
+    if (!config) return;
+
+    const newEnabled = !config.enabled;
+
+    try {
+      await tauriApi.toggleNotificationChannel(id, newEnabled);
+    } catch (err) {
+      console.error('Failed to toggle notification channel:', err);
+    }
+
     const updated = configs.map(c =>
-      c.id === id ? { ...c, enabled: !c.enabled } : c
+      c.id === id ? { ...c, enabled: newEnabled } : c
     );
     saveConfigs(updated);
   };
