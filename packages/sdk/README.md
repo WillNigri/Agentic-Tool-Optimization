@@ -1,17 +1,17 @@
-# @agentic-tool-optimization/sdk
+# @ato-sdk/js
 
 Auto-capture LLM traces for [ATO](https://agentictool.ai). Works with Anthropic, OpenAI, and any LLM provider.
 
 ## Install
 
 ```bash
-npm install @agentic-tool-optimization/sdk
+npm install @ato-sdk/js
 ```
 
 ## Quick Start
 
 ```typescript
-import { init } from '@agentic-tool-optimization/sdk';
+import { init } from '@ato-sdk/js';
 
 // Initialize with your ATO API key
 init({ apiKey: 'your-ato-api-key' });
@@ -21,7 +21,7 @@ init({ apiKey: 'your-ato-api-key' });
 
 ```typescript
 import Anthropic from '@anthropic-ai/sdk';
-import { wrapAnthropic } from '@agentic-tool-optimization/sdk/anthropic';
+import { wrapAnthropic } from '@ato-sdk/js/anthropic';
 
 const client = wrapAnthropic(new Anthropic());
 
@@ -37,7 +37,7 @@ const msg = await client.messages.create({
 
 ```typescript
 import OpenAI from 'openai';
-import { wrapOpenAI } from '@agentic-tool-optimization/sdk/openai';
+import { wrapOpenAI } from '@ato-sdk/js/openai';
 
 const client = wrapOpenAI(new OpenAI());
 
@@ -81,8 +81,8 @@ init({
 For custom LLM providers:
 
 ```typescript
-import { capture, generateTraceId } from '@agentic-tool-optimization/sdk';
-import { calculateCost } from '@agentic-tool-optimization/sdk';
+import { capture, generateTraceId } from '@ato-sdk/js';
+import { calculateCost } from '@ato-sdk/js';
 
 capture({
   id: generateTraceId(),
@@ -105,7 +105,7 @@ capture({
 Built-in pricing for 60+ models:
 
 ```typescript
-import { calculateCost } from '@agentic-tool-optimization/sdk';
+import { calculateCost } from '@ato-sdk/js';
 
 calculateCost('claude-sonnet-4-6', 1000, 500);  // $0.0105
 calculateCost('gpt-4o', 1000, 500);             // $0.0075

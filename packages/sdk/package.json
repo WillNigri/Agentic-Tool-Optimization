@@ -1,5 +1,5 @@
 {
-  "name": "@agentic-tool-optimization/sdk",
+  "name": "@ato-sdk/js",
   "version": "0.1.0",
   "description": "Auto-capture LLM traces for ATO — works with Anthropic, OpenAI, and any LLM provider",
   "main": "dist/index.js",
