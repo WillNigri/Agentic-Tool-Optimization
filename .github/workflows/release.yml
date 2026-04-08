@@ -106,7 +106,7 @@ jobs:
           ARM_SHA: ${{ steps.sha.outputs.arm_sha }}
           X64_SHA: ${{ steps.sha.outputs.x64_sha }}
         run: |
-          gh repo clone WillNigri/homebrew-ato /tmp/homebrew-ato
+          git clone https://x-access-token:${GH_TOKEN}@github.com/WillNigri/homebrew-ato.git /tmp/homebrew-ato
           cat > /tmp/homebrew-ato/Casks/ato.rb << 'CASK'
           cask "ato" do
             version "VERSION_PLACEHOLDER"
