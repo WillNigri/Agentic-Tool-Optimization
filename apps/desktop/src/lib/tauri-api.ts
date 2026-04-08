@@ -1718,3 +1718,150 @@ export async function trackFeatureUsage(
     ...metadata,
   });
 }
+
+// ---- Audit Logging ----
+
+export interface AuditLogEntry {
+  id: string;
+  action: string;
+  resourceType: string;
+  resourceId?: string;
+  resourceName?: string;
+  details?: string;
+  createdAt: string;
+}
+
+export async function addAuditLog(
+  action: string,
+  resourceType: string,
+  resourceId?: string,
+  resourceName?: string,
+  details?: string,
+): Promise<AuditLogEntry> {
+  return invoke<AuditLogEntry>('add_audit_log', {
+    action, resourceType, resourceId, resourceName, details,
+  });
+}
+
+export async function getAuditLogs(params?: {
+  action?: string;
+  resourceType?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AuditLogEntry[]> {
+  return invoke<AuditLogEntry[]>('get_audit_logs', params ?? {});
+}
+
+export async function getAuditLogStats(): Promise<{
+  total: number;
+  today: number;
+  thisWeek: number;
+  topActions: Array<{ action: string; count: number }>;
+}> {
+  return invoke('get_audit_log_stats');
+}
+
+export async function clearAuditLogs(beforeDate?: string): Promise<number> {
+  return invoke<number>('clear_audit_logs', { beforeDate });
+}
+
+// ---- LLM API Key Management ----
+
+export interface LlmApiKey {
+  id: string;
+  provider: string;
+  name: string;
+  keyPreview: string;
+  projectId?: string;
+  runtime?: string;
+  isActive: boolean;
+  lastUsed?: string;
+  usageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function saveLlmApiKey(
+  provider: string,
+  name: string,
+  apiKey: string,
+  projectId?: string,
+  runtime?: string,
+): Promise<LlmApiKey> {
+  return invoke<LlmApiKey>('save_llm_api_key', { provider, name, apiKey, projectId, runtime });
+}
+
+export async function listLlmApiKeys(params?: {
+  provider?: string;
+  projectId?: string;
+}): Promise<LlmApiKey[]> {
+  return invoke<LlmApiKey[]>('list_llm_api_keys', params ?? {});
+}
+
+export async function getLlmApiKeyValue(id: string): Promise<string> {
+  return invoke<string>('get_llm_api_key_value', { id });
+}
+
+export async function rotateLlmApiKey(id: string, newKey: string): Promise<LlmApiKey> {
+  return invoke<LlmApiKey>('rotate_llm_api_key', { id, newKey });
+}
+
+export async function toggleLlmApiKey(id: string, isActive: boolean): Promise<void> {
+  return invoke<void>('toggle_llm_api_key', { id, isActive });
+}
+
+export async function deleteLlmApiKey(id: string): Promise<void> {
+  return invoke<void>('delete_llm_api_key', { id });
+}
+
+// ---- Real-time Agent Monitoring ----
+
+export interface AgentSession {
+  id: string;
+  runtime: string;
+  status: string;
+  prompt?: string;
+  tokensIn: number;
+  tokensOut: number;
+  durationMs?: number;
+  skillName?: string;
+  startedAt: string;
+  endedAt?: string;
+}
+
+export interface MonitoringAlert {
+  id: string;
+  level: string;
+  message: string;
+  runtime?: string;
+  createdAt: string;
+}
+
+export interface MonitoringSnapshot {
+  activeSessions: AgentSession[];
+  recentSessions: AgentSession[];
+  totalTokensToday: number;
+  totalSessionsToday: number;
+  errorsToday: number;
+  avgDurationMs: number;
+  runtimesOnline: string[];
+  runtimesOffline: string[];
+  tokenRatePerHour: number;
+  alerts: MonitoringAlert[];
+}
+
+export interface TokenTimelineEntry {
+  hour: string;
+  runtime: string;
+  tokensIn: number;
+  tokensOut: number;
+  sessions: number;
+}
+
+export async function getMonitoringSnapshot(): Promise<MonitoringSnapshot> {
+  return invoke<MonitoringSnapshot>('get_monitoring_snapshot');
+}
+
+export async function getTokenTimeline(hours?: number): Promise<TokenTimelineEntry[]> {
+  return invoke<TokenTimelineEntry[]>('get_token_timeline', { hours });
+}

@@ -260,6 +260,80 @@ pub struct DailyExecutionCount {
     pub error_count: i64,
 }
 
+// ── Audit Logging Types ─────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditLogEntry {
+    pub id: String,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub resource_name: Option<String>,
+    pub details: Option<String>,
+    pub created_at: String,
+}
+
+// ── LLM API Key Types ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmApiKey {
+    pub id: String,
+    pub provider: String,
+    pub name: String,
+    pub key_preview: String,
+    pub project_id: Option<String>,
+    pub runtime: Option<String>,
+    pub is_active: bool,
+    pub last_used: Option<String>,
+    pub usage_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// ── Real-time Monitoring Types ─────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub id: String,
+    pub runtime: String,
+    pub status: String,
+    pub prompt: Option<String>,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub duration_ms: Option<i64>,
+    pub skill_name: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitoringSnapshot {
+    pub active_sessions: Vec<AgentSession>,
+    pub recent_sessions: Vec<AgentSession>,
+    pub total_tokens_today: i64,
+    pub total_sessions_today: i64,
+    pub errors_today: i64,
+    pub avg_duration_ms: f64,
+    pub runtimes_online: Vec<String>,
+    pub runtimes_offline: Vec<String>,
+    pub token_rate_per_hour: f64,
+    pub alerts: Vec<MonitoringAlert>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitoringAlert {
+    pub id: String,
+    pub level: String,
+    pub message: String,
+    pub runtime: Option<String>,
+    pub created_at: String,
+}
+
 // ── Database ─────────────────────────────────────────────────────────────
 
 pub struct DbState(pub Mutex<Connection>);
@@ -366,6 +440,34 @@ fn init_database(conn: &Connection) {
             error_message TEXT,
             checked_at   TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id            TEXT PRIMARY KEY,
+            action        TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id   TEXT,
+            resource_name TEXT,
+            details       TEXT,
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
+        CREATE TABLE IF NOT EXISTS llm_api_keys (
+            id            TEXT PRIMARY KEY,
+            provider      TEXT NOT NULL,
+            name          TEXT NOT NULL,
+            key_preview   TEXT NOT NULL,
+            encrypted_key TEXT NOT NULL,
+            project_id    TEXT,
+            runtime       TEXT,
+            is_active     INTEGER NOT NULL DEFAULT 1,
+            last_used     TEXT,
+            usage_count   INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_keys_provider ON llm_api_keys(provider);
+        CREATE INDEX IF NOT EXISTS idx_llm_keys_project ON llm_api_keys(project_id);
         ",
     )
     .expect("Failed to initialize database tables");
@@ -7249,6 +7351,459 @@ fn get_analytics_summary(
     }))
 }
 
+// ── Audit Logging Commands ──────────────────────────────────────────────
+
+#[tauri::command]
+fn add_audit_log(
+    db: State<'_, DbState>,
+    action: String,
+    resource_type: String,
+    resource_id: Option<String>,
+    resource_name: Option<String>,
+    details: Option<String>,
+) -> Result<AuditLogEntry, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO audit_logs (id, action, resource_type, resource_id, resource_name, details, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, action, resource_type, resource_id, resource_name, details, now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(AuditLogEntry {
+        id, action, resource_type, resource_id, resource_name, details, created_at: now,
+    })
+}
+
+#[tauri::command]
+fn get_audit_logs(
+    db: State<'_, DbState>,
+    action: Option<String>,
+    resource_type: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<AuditLogEntry>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(100);
+    let offset = offset.unwrap_or(0);
+
+    let mut sql = String::from(
+        "SELECT id, action, resource_type, resource_id, resource_name, details, created_at
+         FROM audit_logs WHERE 1=1"
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut param_idx = 1;
+
+    if let Some(ref a) = action {
+        sql.push_str(&format!(" AND action = ?{}", param_idx));
+        param_values.push(Box::new(a.clone()));
+        param_idx += 1;
+    }
+    if let Some(ref rt) = resource_type {
+        sql.push_str(&format!(" AND resource_type = ?{}", param_idx));
+        param_values.push(Box::new(rt.clone()));
+        param_idx += 1;
+    }
+
+    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{} OFFSET ?{}", param_idx, param_idx + 1));
+    param_values.push(Box::new(limit));
+    param_values.push(Box::new(offset));
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(AuditLogEntry {
+            id: row.get(0)?,
+            action: row.get(1)?,
+            resource_type: row.get(2)?,
+            resource_id: row.get(3)?,
+            resource_name: row.get(4)?,
+            details: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut logs = Vec::new();
+    for row in rows {
+        logs.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(logs)
+}
+
+#[tauri::command]
+fn get_audit_log_stats(
+    db: State<'_, DbState>,
+) -> Result<serde_json::Value, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM audit_logs", [], |row| row.get(0)).unwrap_or(0);
+    let today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_logs WHERE created_at > datetime('now', '-1 day')", [], |row| row.get(0)
+    ).unwrap_or(0);
+    let this_week: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_logs WHERE created_at > datetime('now', '-7 days')", [], |row| row.get(0)
+    ).unwrap_or(0);
+
+    let mut stmt = conn.prepare(
+        "SELECT action, COUNT(*) as cnt FROM audit_logs GROUP BY action ORDER BY cnt DESC LIMIT 10"
+    ).map_err(|e| e.to_string())?;
+    let top_actions: Vec<serde_json::Value> = stmt.query_map([], |row| {
+        Ok(json!({ "action": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)? }))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    Ok(json!({ "total": total, "today": today, "thisWeek": this_week, "topActions": top_actions }))
+}
+
+#[tauri::command]
+fn clear_audit_logs(
+    db: State<'_, DbState>,
+    before_date: Option<String>,
+) -> Result<u64, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let deleted = if let Some(date) = before_date {
+        conn.execute("DELETE FROM audit_logs WHERE created_at < ?1", params![date])
+    } else {
+        conn.execute("DELETE FROM audit_logs", [])
+    }.map_err(|e| e.to_string())?;
+    Ok(deleted as u64)
+}
+
+// ── LLM API Key Management Commands ────────────────────────────────────
+
+fn mask_api_key(key: &str) -> String {
+    if key.len() <= 8 {
+        return "*".repeat(key.len());
+    }
+    let prefix = &key[..4];
+    let suffix = &key[key.len()-4..];
+    format!("{}...{}", prefix, suffix)
+}
+
+fn simple_encrypt(key: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose};
+    general_purpose::STANDARD.encode(key.as_bytes())
+}
+
+fn simple_decrypt(encrypted: &str) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose};
+    let bytes = general_purpose::STANDARD.decode(encrypted)
+        .map_err(|e| format!("Decryption failed: {}", e))?;
+    String::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8: {}", e))
+}
+
+#[tauri::command]
+fn save_llm_api_key(
+    db: State<'_, DbState>,
+    provider: String,
+    name: String,
+    api_key: String,
+    project_id: Option<String>,
+    runtime: Option<String>,
+) -> Result<LlmApiKey, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let key_preview = mask_api_key(&api_key);
+    let encrypted = simple_encrypt(&api_key);
+
+    conn.execute(
+        "INSERT INTO llm_api_keys (id, provider, name, key_preview, encrypted_key, project_id, runtime, is_active, usage_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, ?8)",
+        params![id, provider, name, key_preview, encrypted, project_id, runtime, now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(LlmApiKey {
+        id, provider, name, key_preview, project_id, runtime,
+        is_active: true, last_used: None, usage_count: 0,
+        created_at: now.clone(), updated_at: now,
+    })
+}
+
+#[tauri::command]
+fn list_llm_api_keys(
+    db: State<'_, DbState>,
+    provider: Option<String>,
+    project_id: Option<String>,
+) -> Result<Vec<LlmApiKey>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let mut sql = String::from(
+        "SELECT id, provider, name, key_preview, project_id, runtime, is_active, last_used, usage_count, created_at, updated_at
+         FROM llm_api_keys WHERE 1=1"
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(ref p) = provider {
+        sql.push_str(&format!(" AND provider = ?{}", idx));
+        param_values.push(Box::new(p.clone()));
+        idx += 1;
+    }
+    if let Some(ref pid) = project_id {
+        sql.push_str(&format!(" AND project_id = ?{}", idx));
+        param_values.push(Box::new(pid.clone()));
+        idx += 1;
+    }
+    let _ = idx;
+    sql.push_str(" ORDER BY created_at DESC");
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(LlmApiKey {
+            id: row.get(0)?,
+            provider: row.get(1)?,
+            name: row.get(2)?,
+            key_preview: row.get(3)?,
+            project_id: row.get(4)?,
+            runtime: row.get(5)?,
+            is_active: row.get::<_, i32>(6)? != 0,
+            last_used: row.get(7)?,
+            usage_count: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut keys = Vec::new();
+    for row in rows {
+        keys.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(keys)
+}
+
+#[tauri::command]
+fn get_llm_api_key_value(
+    db: State<'_, DbState>,
+    id: String,
+) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let encrypted: String = conn.query_row(
+        "SELECT encrypted_key FROM llm_api_keys WHERE id = ?1",
+        params![id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE llm_api_keys SET last_used = ?1, usage_count = usage_count + 1, updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    ).map_err(|e| e.to_string())?;
+
+    simple_decrypt(&encrypted)
+}
+
+#[tauri::command]
+fn rotate_llm_api_key(
+    db: State<'_, DbState>,
+    id: String,
+    new_key: String,
+) -> Result<LlmApiKey, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let key_preview = mask_api_key(&new_key);
+    let encrypted = simple_encrypt(&new_key);
+
+    conn.execute(
+        "UPDATE llm_api_keys SET encrypted_key = ?1, key_preview = ?2, updated_at = ?3 WHERE id = ?4",
+        params![encrypted, key_preview, now, id],
+    ).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, provider, name, key_preview, project_id, runtime, is_active, last_used, usage_count, created_at, updated_at
+         FROM llm_api_keys WHERE id = ?1"
+    ).map_err(|e| e.to_string())?;
+
+    stmt.query_row(params![id], |row| {
+        Ok(LlmApiKey {
+            id: row.get(0)?, provider: row.get(1)?, name: row.get(2)?,
+            key_preview: row.get(3)?, project_id: row.get(4)?, runtime: row.get(5)?,
+            is_active: row.get::<_, i32>(6)? != 0, last_used: row.get(7)?,
+            usage_count: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)?,
+        })
+    }).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_llm_api_key(
+    db: State<'_, DbState>,
+    id: String,
+    is_active: bool,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE llm_api_keys SET is_active = ?1, updated_at = ?2 WHERE id = ?3",
+        params![is_active as i32, now, id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_llm_api_key(
+    db: State<'_, DbState>,
+    id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM llm_api_keys WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Real-time Agent Monitoring Commands ─────────────────────────────────
+
+#[tauri::command]
+fn get_monitoring_snapshot(
+    db: State<'_, DbState>,
+) -> Result<MonitoringSnapshot, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let mut active_stmt = conn.prepare(
+        "SELECT id, runtime, status, prompt, tokens_in, tokens_out, duration_ms, skill_name, created_at
+         FROM execution_logs WHERE status = 'running' ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+
+    let active_sessions: Vec<AgentSession> = active_stmt.query_map([], |row| {
+        Ok(AgentSession {
+            id: row.get(0)?, runtime: row.get(1)?, status: row.get(2)?,
+            prompt: row.get(3)?, tokens_in: row.get::<_, i64>(4).unwrap_or(0),
+            tokens_out: row.get::<_, i64>(5).unwrap_or(0), duration_ms: row.get(6)?,
+            skill_name: row.get(7)?, started_at: row.get(8)?, ended_at: None,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    let mut recent_stmt = conn.prepare(
+        "SELECT id, runtime, status, prompt, tokens_in, tokens_out, duration_ms, skill_name, created_at
+         FROM execution_logs WHERE status != 'running' ORDER BY created_at DESC LIMIT 20"
+    ).map_err(|e| e.to_string())?;
+
+    let recent_sessions: Vec<AgentSession> = recent_stmt.query_map([], |row| {
+        Ok(AgentSession {
+            id: row.get(0)?, runtime: row.get(1)?, status: row.get(2)?,
+            prompt: row.get(3)?, tokens_in: row.get::<_, i64>(4).unwrap_or(0),
+            tokens_out: row.get::<_, i64>(5).unwrap_or(0), duration_ms: row.get(6)?,
+            skill_name: row.get(7)?, started_at: row.get(8)?, ended_at: None,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    let total_tokens_today: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0) FROM execution_logs WHERE created_at > datetime('now', '-1 day')",
+        [], |row| row.get(0)
+    ).unwrap_or(0);
+
+    let total_sessions_today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM execution_logs WHERE created_at > datetime('now', '-1 day')",
+        [], |row| row.get(0)
+    ).unwrap_or(0);
+
+    let errors_today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM execution_logs WHERE status = 'error' AND created_at > datetime('now', '-1 day')",
+        [], |row| row.get(0)
+    ).unwrap_or(0);
+
+    let avg_duration_ms: f64 = conn.query_row(
+        "SELECT COALESCE(AVG(duration_ms), 0) FROM execution_logs WHERE duration_ms IS NOT NULL AND created_at > datetime('now', '-1 day')",
+        [], |row| row.get(0)
+    ).unwrap_or(0.0);
+
+    let tokens_last_hour: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0) FROM execution_logs WHERE created_at > datetime('now', '-1 hour')",
+        [], |row| row.get(0)
+    ).unwrap_or(0);
+    let token_rate_per_hour = tokens_last_hour as f64;
+
+    let mut online_runtimes = Vec::new();
+    let mut offline_runtimes = Vec::new();
+    let mut health_stmt = conn.prepare(
+        "SELECT runtime, status FROM health_checks
+         WHERE rowid IN (SELECT MAX(rowid) FROM health_checks GROUP BY runtime)"
+    ).map_err(|e| e.to_string())?;
+
+    let _ = health_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .for_each(|(runtime, status)| {
+        if status == "healthy" || status == "online" {
+            online_runtimes.push(runtime);
+        } else {
+            offline_runtimes.push(runtime);
+        }
+    });
+
+    let mut alerts = Vec::new();
+    if errors_today > 5 {
+        alerts.push(MonitoringAlert {
+            id: uuid::Uuid::new_v4().to_string(), level: "warning".to_string(),
+            message: format!("{} errors in the last 24 hours", errors_today),
+            runtime: None, created_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+    if token_rate_per_hour > 100000.0 {
+        alerts.push(MonitoringAlert {
+            id: uuid::Uuid::new_v4().to_string(), level: "warning".to_string(),
+            message: format!("High token usage: {:.0} tokens/hour", token_rate_per_hour),
+            runtime: None, created_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+    for rt in &offline_runtimes {
+        alerts.push(MonitoringAlert {
+            id: uuid::Uuid::new_v4().to_string(), level: "error".to_string(),
+            message: format!("{} runtime is offline", rt),
+            runtime: Some(rt.clone()), created_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    Ok(MonitoringSnapshot {
+        active_sessions, recent_sessions, total_tokens_today, total_sessions_today,
+        errors_today, avg_duration_ms, runtimes_online: online_runtimes,
+        runtimes_offline: offline_runtimes, token_rate_per_hour, alerts,
+    })
+}
+
+#[tauri::command]
+fn get_token_timeline(
+    db: State<'_, DbState>,
+    hours: Option<u32>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let hours = hours.unwrap_or(24);
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) as hour,
+                runtime,
+                COALESCE(SUM(tokens_in), 0) as total_in,
+                COALESCE(SUM(tokens_out), 0) as total_out,
+                COUNT(*) as session_count
+         FROM execution_logs
+         WHERE created_at > datetime('now', '-{} hours')
+         GROUP BY hour, runtime
+         ORDER BY hour ASC",
+        hours
+    )).map_err(|e| e.to_string())?;
+
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |row| {
+        Ok(json!({
+            "hour": row.get::<_, String>(0)?,
+            "runtime": row.get::<_, String>(1)?,
+            "tokensIn": row.get::<_, i64>(2).unwrap_or(0),
+            "tokensOut": row.get::<_, i64>(3).unwrap_or(0),
+            "sessions": row.get::<_, i64>(4).unwrap_or(0)
+        }))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    Ok(rows)
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -7417,6 +7972,21 @@ pub fn run() {
             get_queued_events,
             export_telemetry_events,
             get_analytics_summary,
+            // v1.0.0: Audit Logging
+            add_audit_log,
+            get_audit_logs,
+            get_audit_log_stats,
+            clear_audit_logs,
+            // v1.0.0: LLM API Key Management
+            save_llm_api_key,
+            list_llm_api_keys,
+            get_llm_api_key_value,
+            rotate_llm_api_key,
+            toggle_llm_api_key,
+            delete_llm_api_key,
+            // v1.0.0: Real-time Agent Monitoring
+            get_monitoring_snapshot,
+            get_token_timeline,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

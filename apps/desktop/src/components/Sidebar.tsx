@@ -23,6 +23,9 @@ import {
   Users,
   RefreshCw,
   BellRing,
+  Shield,
+  Key,
+  MonitorDot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
@@ -30,7 +33,7 @@ import { useTranslation } from "react-i18next";
 import { useCronStore } from "@/stores/useCronStore";
 import LoginModal from "./LoginModal";
 
-export type Section = "context" | "skills" | "projects" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications";
+export type Section = "context" | "skills" | "projects" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications" | "audit" | "llm-keys" | "agent-monitor";
 
 interface SidebarProps {
   active: Section;
@@ -54,6 +57,9 @@ const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: s
   { id: "teams", labelKey: "nav.teams", icon: Users },
   { id: "sync", labelKey: "nav.sync", icon: RefreshCw },
   { id: "notifications", labelKey: "nav.notifications", icon: BellRing },
+  { id: "agent-monitor", labelKey: "nav.agentMonitor", icon: MonitorDot },
+  { id: "llm-keys", labelKey: "nav.llmKeys", icon: Key },
+  { id: "audit", labelKey: "nav.audit", icon: Shield },
   { id: "secrets", labelKey: "nav.secrets", icon: KeyRound },
   { id: "env", labelKey: "nav.env", icon: FileCode },
   { id: "models", labelKey: "nav.models", icon: Cpu },

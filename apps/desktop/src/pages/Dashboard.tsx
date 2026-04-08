@@ -21,6 +21,9 @@ import CloudAuth from "@/components/CloudAuth";
 import TeamWorkspaces from "@/components/TeamWorkspaces";
 import SkillSync from "@/components/SkillSync";
 import NotificationsSettings from "@/components/NotificationsSettings";
+import AuditLog from "@/components/AuditLog/AuditLog";
+import LlmApiKeys from "@/components/LlmApiKeys/LlmApiKeys";
+import AgentMonitor from "@/components/AgentMonitor/AgentMonitor";
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
@@ -39,6 +42,9 @@ const PANELS: Record<Section, React.ComponentType> = {
   teams: TeamWorkspaces,
   sync: SkillSync,
   notifications: NotificationsSettings,
+  audit: AuditLog,
+  "llm-keys": LlmApiKeys,
+  "agent-monitor": AgentMonitor,
   secrets: SecretsManager,
   env: EnvManager,
   models: ModelConfig,
