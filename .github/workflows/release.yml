@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   build:
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +32,11 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -72,3 +79,68 @@ jobs:
           args: --target ${{ matrix.target }}
           includeUpdaterJson: true
           updaterJsonKeepUniversal: true
+
+  update-homebrew:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - name: Wait for release assets
+        run: sleep 30
+
+      - name: Get SHA256 checksums
+        id: sha
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ARM_URL="https://github.com/WillNigri/Agentic-Tool-Optimization/releases/download/${TAG}/ATO_${VERSION}_aarch64.dmg"
+          X64_URL="https://github.com/WillNigri/Agentic-Tool-Optimization/releases/download/${TAG}/ATO_${VERSION}_x64.dmg"
+          echo "arm_sha=$(curl -sL "$ARM_URL" | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "x64_sha=$(curl -sL "$X64_URL" | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ github.ref_name }}
+          ARM_SHA: ${{ steps.sha.outputs.arm_sha }}
+          X64_SHA: ${{ steps.sha.outputs.x64_sha }}
+        run: |
+          gh repo clone WillNigri/homebrew-ato /tmp/homebrew-ato
+          cat > /tmp/homebrew-ato/Casks/ato.rb << 'CASK'
+          cask "ato" do
+            version "VERSION_PLACEHOLDER"
+
+            on_arm do
+              sha256 "ARM_SHA_PLACEHOLDER"
+              url "https://github.com/WillNigri/Agentic-Tool-Optimization/releases/download/TAG_PLACEHOLDER/ATO_#{version}_aarch64.dmg"
+            end
+
+            on_intel do
+              sha256 "X64_SHA_PLACEHOLDER"
+              url "https://github.com/WillNigri/Agentic-Tool-Optimization/releases/download/TAG_PLACEHOLDER/ATO_#{version}_x64.dmg"
+            end
+
+            name "ATO"
+            desc "Control panel for AI coding tools — manage skills, agents, and LLM configurations"
+            homepage "https://agentictool.ai"
+
+            app "ATO.app"
+
+            zap trash: [
+              "~/.ato",
+              "~/Library/Application Support/ai.agenticsearchoptimization.ato",
+              "~/Library/Caches/ai.agenticsearchoptimization.ato",
+            ]
+          end
+          CASK
+          sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" /tmp/homebrew-ato/Casks/ato.rb
+          sed -i '' "s/TAG_PLACEHOLDER/${TAG}/g" /tmp/homebrew-ato/Casks/ato.rb
+          sed -i '' "s/ARM_SHA_PLACEHOLDER/${ARM_SHA}/g" /tmp/homebrew-ato/Casks/ato.rb
+          sed -i '' "s/X64_SHA_PLACEHOLDER/${X64_SHA}/g" /tmp/homebrew-ato/Casks/ato.rb
+          cd /tmp/homebrew-ato
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/ato.rb
+          git commit -m "chore: bump ATO to ${TAG}"
+          git push
