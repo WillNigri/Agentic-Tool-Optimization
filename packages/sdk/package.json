@@ -1,0 +1,63 @@
+{
+  "name": "@ato/sdk",
+  "version": "0.1.0",
+  "description": "Auto-capture LLM traces for ATO — works with Anthropic, OpenAI, and any LLM provider",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./anthropic": {
+      "import": "./dist/anthropic.mjs",
+      "require": "./dist/anthropic.js",
+      "types": "./dist/anthropic.d.ts"
+    },
+    "./openai": {
+      "import": "./dist/openai.mjs",
+      "require": "./dist/openai.js",
+      "types": "./dist/openai.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/anthropic.ts src/openai.ts --format cjs,esm --dts --clean",
+    "dev": "tsup src/index.ts src/anthropic.ts src/openai.ts --format cjs,esm --dts --watch"
+  },
+  "keywords": [
+    "ato",
+    "llm",
+    "observability",
+    "tracing",
+    "anthropic",
+    "openai",
+    "claude",
+    "gpt",
+    "ai",
+    "monitoring",
+    "cost-tracking"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WillNigri/Agentic-Tool-Optimization"
+  },
+  "homepage": "https://agentictool.ai",
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.20.0",
+    "openai": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": { "optional": true },
+    "openai": { "optional": true }
+  }
+}
