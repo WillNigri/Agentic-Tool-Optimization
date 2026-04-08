@@ -96,7 +96,7 @@ const PROVIDERS = [
   },
   {
     id: 'email',
-    name: 'Email',
+    name: 'Email (SMTP)',
     icon: () => <Mail size={20} />,
     color: '#EA4335',
     fields: [
@@ -105,10 +105,12 @@ const PROVIDERS = [
       { name: 'authUser', label: 'Username', type: 'text', placeholder: 'you@example.com' },
       { name: 'authPass', label: 'Password', type: 'password', placeholder: 'App password' },
       { name: 'from', label: 'From Address', type: 'email', placeholder: 'notifications@example.com' },
+      { name: 'fromName', label: 'From Name', type: 'text', placeholder: 'ATO Notifications' },
       { name: 'to', label: 'To Address', type: 'email', placeholder: 'you@example.com' },
+      { name: 'useTls', label: 'Use TLS', type: 'checkbox', placeholder: '' },
     ],
     helpUrl: 'https://support.google.com/mail/answer/185833',
-    helpText: 'Use an App Password for Gmail or SMTP credentials',
+    helpText: 'Use an App Password for Gmail or SMTP credentials from your email provider',
   },
 ];
 
@@ -249,14 +251,28 @@ function AddProviderModal({ provider, onSave, onCancel, existingConfig }: AddPro
 
             {provider.fields.map(field => (
               <div key={field.name}>
-                <label className="block text-xs text-neutral-400 mb-1">{field.label}</label>
-                <input
-                  type={field.type === 'password' && !showSecrets ? 'password' : field.type === 'password' ? 'text' : field.type}
-                  value={config[field.name] || ''}
-                  onChange={e => handleFieldChange(field.name, e.target.value)}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg focus:border-blue-500 focus:outline-none text-sm"
-                  placeholder={field.placeholder}
-                />
+                {field.type === 'checkbox' ? (
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config[field.name] === 'true'}
+                      onChange={e => handleFieldChange(field.name, e.target.checked ? 'true' : 'false')}
+                      className="w-4 h-4 rounded border-neutral-600 bg-neutral-700 text-cyan-500 focus:ring-cyan-500"
+                    />
+                    <span className="text-sm">{field.label}</span>
+                  </label>
+                ) : (
+                  <>
+                    <label className="block text-xs text-neutral-400 mb-1">{field.label}</label>
+                    <input
+                      type={field.type === 'password' && !showSecrets ? 'password' : field.type === 'password' ? 'text' : field.type}
+                      value={config[field.name] || ''}
+                      onChange={e => handleFieldChange(field.name, e.target.value)}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg focus:border-blue-500 focus:outline-none text-sm"
+                      placeholder={field.placeholder}
+                    />
+                  </>
+                )}
               </div>
             ))}
 

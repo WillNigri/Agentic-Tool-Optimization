@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   LineChart,
   Line,
@@ -24,9 +24,27 @@ import {
   Zap,
   Clock,
   Activity,
+  Users,
+  Folder,
+  Bell,
+  Bot,
+  Calendar,
+  Settings,
+  Eye,
+  EyeOff,
+  Database,
+  Download,
 } from "lucide-react";
 import { getUsageSummary, getDailyUsage, getBurnRate } from "@/lib/api";
-import { getUsageMetrics } from "@/lib/tauri-api";
+import {
+  getUsageMetrics,
+  getAnalyticsSummary,
+  getTelemetrySettings,
+  updateTelemetrySettings,
+  exportTelemetryEvents,
+  getQueuedEvents,
+  trackAppLaunch,
+} from "@/lib/tauri-api";
 import { formatNumber, formatCurrency, cn } from "@/lib/utils";
 
 const RUNTIME_COLORS: Record<string, string> = {
@@ -43,7 +61,9 @@ const STATUS_COLORS = {
 
 export default function UsageAnalytics() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [metricsRange, setMetricsRange] = useState<number>(30);
+  const [showTelemetrySettings, setShowTelemetrySettings] = useState(false);
 
   const { data: summary, isLoading: loadingSummary } = useQuery({
     queryKey: ["usage-summary"],
@@ -65,6 +85,38 @@ export default function UsageAnalytics() {
     queryFn: () => getUsageMetrics(metricsRange),
   });
 
+  // App Analytics Summary
+  const { data: appSummary } = useQuery({
+    queryKey: ["analytics-summary"],
+    queryFn: getAnalyticsSummary,
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+
+  // Telemetry Settings
+  const { data: telemetrySettings } = useQuery({
+    queryKey: ["telemetry-settings"],
+    queryFn: getTelemetrySettings,
+  });
+
+  const { data: queuedEvents } = useQuery({
+    queryKey: ["queued-events"],
+    queryFn: getQueuedEvents,
+    enabled: showTelemetrySettings,
+  });
+
+  const toggleTelemetryMutation = useMutation({
+    mutationFn: ({ enabled, endpoint }: { enabled: boolean; endpoint?: string }) =>
+      updateTelemetrySettings(enabled, endpoint),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["telemetry-settings"] });
+    },
+  });
+
+  // Track app launch on mount
+  useEffect(() => {
+    trackAppLaunch().catch(() => {/* ignore errors */});
+  }, []);
+
   const isLoading = loadingSummary || loadingDaily;
 
   if (isLoading) {
@@ -73,12 +125,155 @@ export default function UsageAnalytics() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold mb-1">{t('analytics.title')}</h2>
-        <p className="text-cs-muted text-sm">
-          {t('analytics.subtitle')}
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold mb-1">{t('analytics.title')}</h2>
+          <p className="text-cs-muted text-sm">
+            {t('analytics.subtitle')}
+          </p>
+        </div>
+        <button
+          onClick={() => setShowTelemetrySettings(!showTelemetrySettings)}
+          className="flex items-center gap-2 px-3 py-2 text-sm rounded-lg bg-cs-border/50 hover:bg-cs-border transition-colors"
+        >
+          <Settings size={16} />
+          Telemetry Settings
+        </button>
       </div>
+
+      {/* Telemetry Settings Panel */}
+      {showTelemetrySettings && telemetrySettings && (
+        <div className="card border-cs-accent/30">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-medium flex items-center gap-2">
+              <Database size={16} className="text-cs-accent" />
+              Telemetry & Analytics Settings
+            </h3>
+            <button
+              onClick={() => setShowTelemetrySettings(false)}
+              className="text-cs-muted hover:text-cs-text"
+            >
+              <XCircle size={18} />
+            </button>
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 bg-cs-bg rounded-lg border border-cs-border">
+              <div>
+                <p className="font-medium">Enable Telemetry</p>
+                <p className="text-xs text-cs-muted mt-1">
+                  Help improve ATO by sharing anonymous usage data
+                </p>
+              </div>
+              <button
+                onClick={() => toggleTelemetryMutation.mutate({
+                  enabled: !telemetrySettings.enabled,
+                  endpoint: telemetrySettings.endpoint ?? undefined,
+                })}
+                className={cn(
+                  "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+                  telemetrySettings.enabled ? "bg-cs-accent" : "bg-cs-border"
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                    telemetrySettings.enabled ? "translate-x-6" : "translate-x-1"
+                  )}
+                />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-sm">
+              <div className="p-3 bg-cs-bg rounded-lg border border-cs-border">
+                <p className="text-cs-muted text-xs">Device ID</p>
+                <p className="font-mono text-xs mt-1 truncate">{telemetrySettings.deviceId}</p>
+              </div>
+              <div className="p-3 bg-cs-bg rounded-lg border border-cs-border">
+                <p className="text-cs-muted text-xs">Status</p>
+                <p className="mt-1 flex items-center gap-1">
+                  {telemetrySettings.enabled ? (
+                    <>
+                      <Eye size={14} className="text-green-400" />
+                      <span className="text-green-400">Active</span>
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff size={14} className="text-cs-muted" />
+                      <span className="text-cs-muted">Disabled</span>
+                    </>
+                  )}
+                </p>
+              </div>
+              <div className="p-3 bg-cs-bg rounded-lg border border-cs-border">
+                <p className="text-cs-muted text-xs">Queued Events</p>
+                <p className="mt-1">{queuedEvents?.length ?? 0}</p>
+              </div>
+            </div>
+
+            {queuedEvents && queuedEvents.length > 0 && (
+              <button
+                onClick={async () => {
+                  try {
+                    const path = `${Date.now()}-telemetry-export.json`;
+                    const count = await exportTelemetryEvents(path);
+                    alert(`Exported ${count} events`);
+                  } catch (e) {
+                    console.error('Export failed:', e);
+                  }
+                }}
+                className="flex items-center gap-2 px-3 py-2 text-sm bg-cs-border/50 hover:bg-cs-border rounded-lg transition-colors"
+              >
+                <Download size={14} />
+                Export Events
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* App Overview Cards */}
+      {appSummary && (
+        <div className="card">
+          <h3 className="text-sm font-medium text-cs-muted mb-4 flex items-center gap-2">
+            <Users size={16} className="text-cs-accent" />
+            App Usage Overview
+          </h3>
+          <div className="grid grid-cols-5 gap-4">
+            <OverviewCard
+              icon={<Folder size={18} />}
+              label="Skills"
+              value={appSummary.skills}
+              color="text-orange-400"
+            />
+            <OverviewCard
+              icon={<Bot size={18} />}
+              label="Workflows"
+              value={appSummary.workflows}
+              color="text-purple-400"
+            />
+            <OverviewCard
+              icon={<Bell size={18} />}
+              label="Notifications"
+              value={appSummary.notificationChannels}
+              color="text-blue-400"
+            />
+            <OverviewCard
+              icon={<Calendar size={18} />}
+              label="Cron Jobs"
+              value={appSummary.cronJobs}
+              color="text-green-400"
+            />
+            <OverviewCard
+              icon={<Zap size={18} />}
+              label="Recent Runs"
+              value={appSummary.recentExecutions}
+              color="text-cs-accent"
+              subtext="Last 7 days"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Summary cards */}
       {summary && (
@@ -556,6 +751,29 @@ function MetricCard({
       </p>
       <p className="text-xs text-cs-muted">{label}</p>
       {subtext && <p className="text-xs text-cs-muted mt-1">{subtext}</p>}
+    </div>
+  );
+}
+
+function OverviewCard({
+  icon,
+  label,
+  value,
+  color,
+  subtext,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number;
+  color: string;
+  subtext?: string;
+}) {
+  return (
+    <div className="text-center p-4 rounded-lg bg-cs-bg border border-cs-border">
+      <div className={cn("flex justify-center mb-2", color)}>{icon}</div>
+      <p className="text-2xl font-semibold">{formatNumber(value)}</p>
+      <p className="text-xs text-cs-muted">{label}</p>
+      {subtext && <p className="text-xs text-cs-muted/70 mt-1">{subtext}</p>}
     </div>
   );
 }

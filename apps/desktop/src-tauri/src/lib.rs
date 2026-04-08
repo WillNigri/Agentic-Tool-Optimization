@@ -1,6 +1,7 @@
 mod openclaw_ws;
 mod log_watcher;
 mod health_poller;
+mod telemetry;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,11 @@ use std::sync::Mutex;
 use tauri::{State, Manager};
 use log_watcher::LogWatcherState;
 use health_poller::HealthPollerState;
+use lettre::{
+    Message, SmtpTransport, Transport,
+    message::{header::ContentType, Mailbox},
+    transport::smtp::authentication::Credentials,
+};
 
 // ── Types matching frontend expectations ─────────────────────────────────
 
@@ -6943,19 +6949,118 @@ async fn send_email_notification(
     channel: &NotificationChannel,
     request: &SendNotificationRequest,
 ) -> Result<(), String> {
-    // Email requires lettre crate which would need to be added to Cargo.toml
-    // For now, return a placeholder error
-    let _host = channel.config.get("host")
+    // Extract SMTP configuration
+    let host = channel.config.get("host")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing host in Email config".to_string())?;
+        .ok_or_else(|| "Missing SMTP host in Email config".to_string())?;
 
-    let _to = channel.config.get("to")
+    let port = channel.config.get("port")
+        .map(|v| {
+            // Handle both number and string values
+            v.as_u64().unwrap_or_else(|| {
+                v.as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(587)
+            })
+        })
+        .unwrap_or(587) as u16;
+
+    let username = channel.config.get("authUser")
+        .or_else(|| channel.config.get("username"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing SMTP username in Email config".to_string())?;
+
+    let password = channel.config.get("authPass")
+        .or_else(|| channel.config.get("password"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing SMTP password in Email config".to_string())?;
+
+    let from_email = channel.config.get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or(username);
+
+    let from_name = channel.config.get("fromName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ATO Notifications");
+
+    let to_email = channel.config.get("to")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing 'to' address in Email config".to_string())?;
 
-    // TODO: Implement SMTP sending with lettre crate
-    // For now, we'll just validate the config
-    Err("Email notifications require additional setup. Please use Slack, Discord, or Telegram.".to_string())
+    let use_tls = channel.config.get("useTls")
+        .map(|v| {
+            // Handle both boolean and string values
+            v.as_bool().unwrap_or_else(|| {
+                v.as_str().map(|s| s == "true").unwrap_or(true)
+            })
+        })
+        .unwrap_or(true);
+
+    // Build HTML email body
+    let html_body = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #e5e5e5; padding: 20px; }}
+        .container {{ max-width: 600px; margin: 0 auto; background: #111116; border-radius: 8px; padding: 24px; border: 1px solid #222; }}
+        .header {{ color: #00FFB2; font-size: 24px; font-weight: 600; margin-bottom: 16px; }}
+        .event-badge {{ display: inline-block; background: #00FFB2; color: #0a0a0f; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-bottom: 16px; }}
+        .content {{ color: #b3b3b3; line-height: 1.6; }}
+        .footer {{ margin-top: 24px; padding-top: 16px; border-top: 1px solid #222; color: #666; font-size: 12px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="event-badge">{}</div>
+        <div class="header">{}</div>
+        <div class="content">{}</div>
+        <div class="footer">Sent by ATO (Agentic Tool Optimization)</div>
+    </div>
+</body>
+</html>"#,
+        request.event_type.to_uppercase(),
+        request.title,
+        request.message.replace("\n", "<br>")
+    );
+
+    // Parse email addresses
+    let from_mailbox: Mailbox = format!("{} <{}>", from_name, from_email)
+        .parse()
+        .map_err(|e| format!("Invalid 'from' email address: {}", e))?;
+
+    let to_mailbox: Mailbox = to_email
+        .parse()
+        .map_err(|e| format!("Invalid 'to' email address: {}", e))?;
+
+    // Build the email message
+    let email = Message::builder()
+        .from(from_mailbox)
+        .to(to_mailbox)
+        .subject(format!("[ATO] {}", request.title))
+        .header(ContentType::TEXT_HTML)
+        .body(html_body)
+        .map_err(|e| format!("Failed to build email: {}", e))?;
+
+    // Build SMTP transport with credentials
+    let creds = Credentials::new(username.to_string(), password.to_string());
+
+    let mailer = if use_tls {
+        SmtpTransport::starttls_relay(host)
+            .map_err(|e| format!("Failed to create SMTP transport: {}", e))?
+            .port(port)
+            .credentials(creds)
+            .build()
+    } else {
+        SmtpTransport::builder_dangerous(host)
+            .port(port)
+            .credentials(creds)
+            .build()
+    };
+
+    // Send the email
+    mailer.send(&email)
+        .map_err(|e| format!("Failed to send email: {}", e))?;
+
+    Ok(())
 }
 
 /// Test a notification channel configuration
@@ -6983,6 +7088,167 @@ async fn test_notification_channel(channel: NotificationChannel) -> Result<Notif
     })
 }
 
+// ── Telemetry Commands ───────────────────────────────────────────────────
+
+use telemetry::{TelemetryState, TelemetryEvent, TelemetrySettings};
+
+/// Get telemetry settings
+#[tauri::command]
+fn get_telemetry_settings(
+    state: State<'_, TelemetryState>,
+) -> Result<TelemetrySettings, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+/// Update telemetry settings
+#[tauri::command]
+fn update_telemetry_settings(
+    state: State<'_, TelemetryState>,
+    enabled: bool,
+    endpoint: Option<String>,
+) -> Result<TelemetrySettings, String> {
+    let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+    settings.enabled = enabled;
+    settings.endpoint = endpoint;
+
+    // Persist to config file
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("ato");
+    let _ = std::fs::create_dir_all(&config_dir);
+    let settings_path = config_dir.join("telemetry.json");
+    let _ = std::fs::write(&settings_path, serde_json::to_string_pretty(&*settings).unwrap_or_default());
+
+    Ok(settings.clone())
+}
+
+/// Track a telemetry event
+#[tauri::command]
+async fn track_event(
+    state: State<'_, TelemetryState>,
+    event_type: String,
+    properties: std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+
+    if !settings.enabled {
+        return Ok(()); // Telemetry disabled, silently ignore
+    }
+
+    let event = TelemetryEvent {
+        event_type,
+        properties,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        session_id: state.session_id.clone(),
+        device_id: settings.device_id.clone(),
+    };
+
+    // If endpoint configured, send immediately
+    if let Some(endpoint) = &settings.endpoint {
+        let endpoint = endpoint.clone();
+        drop(settings); // Release the lock before async operation
+
+        state.client
+            .post(&endpoint)
+            .json(&event)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        // Queue for later if no endpoint
+        let mut queue = state.events_queue.lock().map_err(|e| e.to_string())?;
+        queue.push(event);
+
+        // Keep queue bounded
+        if queue.len() > 1000 {
+            queue.drain(0..500);
+        }
+    }
+
+    Ok(())
+}
+
+/// Get queued telemetry events (for debugging/export)
+#[tauri::command]
+fn get_queued_events(
+    state: State<'_, TelemetryState>,
+) -> Result<Vec<TelemetryEvent>, String> {
+    let queue = state.events_queue.lock().map_err(|e| e.to_string())?;
+    Ok(queue.clone())
+}
+
+/// Export telemetry events to JSON file
+#[tauri::command]
+fn export_telemetry_events(
+    state: State<'_, TelemetryState>,
+    path: String,
+) -> Result<usize, String> {
+    let queue = state.events_queue.lock().map_err(|e| e.to_string())?;
+    let count = queue.len();
+
+    let json = serde_json::to_string_pretty(&*queue)
+        .map_err(|e| format!("Failed to serialize events: {}", e))?;
+
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    Ok(count)
+}
+
+/// Get aggregated usage statistics for analytics dashboard
+#[tauri::command]
+fn get_analytics_summary(
+    db: State<'_, DbState>,
+) -> Result<serde_json::Value, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    // Get skill counts
+    let skill_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM skills",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    // Get workflow counts
+    let workflow_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM workflows",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    // Get notification channel counts
+    let channel_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM notification_channels WHERE enabled = 1",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    // Get cron job counts
+    let cron_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    // Get recent execution counts (last 7 days)
+    let recent_executions: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cron_executions WHERE executed_at > datetime('now', '-7 days')",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    Ok(json!({
+        "skills": skill_count,
+        "workflows": workflow_count,
+        "notificationChannels": channel_count,
+        "cronJobs": cron_count,
+        "recentExecutions": recent_executions,
+        "sessionId": uuid::Uuid::new_v4().to_string(),
+        "generatedAt": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -6999,6 +7265,7 @@ pub fn run() {
         .manage(DbState(Mutex::new(conn)))
         .manage(LogWatcherState::new())
         .manage(HealthPollerState::new())
+        .manage(TelemetryState::new())
         .setup(|app| {
             // Auto-start health poller on app launch
             let db_path_str = get_db_path().to_string_lossy().to_string();
@@ -7143,6 +7410,13 @@ pub fn run() {
             toggle_notification_channel,
             send_notification,
             test_notification_channel,
+            // v1.0.0: Telemetry & Analytics
+            get_telemetry_settings,
+            update_telemetry_settings,
+            track_event,
+            get_queued_events,
+            export_telemetry_events,
+            get_analytics_summary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1580,3 +1580,141 @@ export async function testNotificationChannel(
 ): Promise<NotificationResult> {
   return invoke<NotificationResult>('test_notification_channel', { channel });
 }
+
+// ---- Telemetry & Analytics (v1.0.0) ----
+
+export interface TelemetrySettings {
+  enabled: boolean;
+  deviceId: string;
+  endpoint: string | null;
+}
+
+export interface TelemetryEvent {
+  eventType: string;
+  properties: Record<string, unknown>;
+  timestamp: string;
+  sessionId: string;
+  deviceId: string;
+}
+
+export interface AnalyticsSummary {
+  skills: number;
+  workflows: number;
+  notificationChannels: number;
+  cronJobs: number;
+  recentExecutions: number;
+  sessionId: string;
+  generatedAt: string;
+}
+
+/**
+ * Get telemetry settings
+ */
+export async function getTelemetrySettings(): Promise<TelemetrySettings> {
+  return invoke<TelemetrySettings>('get_telemetry_settings');
+}
+
+/**
+ * Update telemetry settings
+ */
+export async function updateTelemetrySettings(
+  enabled: boolean,
+  endpoint?: string | null
+): Promise<TelemetrySettings> {
+  return invoke<TelemetrySettings>('update_telemetry_settings', { enabled, endpoint });
+}
+
+/**
+ * Track a telemetry event (only if telemetry is enabled)
+ */
+export async function trackEvent(
+  eventType: string,
+  properties: Record<string, unknown> = {}
+): Promise<void> {
+  return invoke<void>('track_event', { eventType, properties });
+}
+
+/**
+ * Get queued telemetry events
+ */
+export async function getQueuedEvents(): Promise<TelemetryEvent[]> {
+  return invoke<TelemetryEvent[]>('get_queued_events');
+}
+
+/**
+ * Export telemetry events to a JSON file
+ */
+export async function exportTelemetryEvents(path: string): Promise<number> {
+  return invoke<number>('export_telemetry_events', { path });
+}
+
+/**
+ * Get analytics summary for the dashboard
+ */
+export async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
+  return invoke<AnalyticsSummary>('get_analytics_summary');
+}
+
+// ---- Tracking Helper Functions ----
+
+/**
+ * Standard event types for consistency
+ */
+export const TelemetryEventTypes = {
+  APP_LAUNCHED: 'app_launched',
+  APP_CLOSED: 'app_closed',
+  SIGNUP_STARTED: 'signup_started',
+  SIGNUP_COMPLETED: 'signup_completed',
+  LOGIN_COMPLETED: 'login_completed',
+  SKILL_CREATED: 'skill_created',
+  SKILL_INSTALLED: 'skill_installed',
+  SKILL_EXECUTED: 'skill_executed',
+  AUTOMATION_CREATED: 'automation_created',
+  AUTOMATION_EXECUTED: 'automation_executed',
+  RUNTIME_CONNECTED: 'runtime_connected',
+  NOTIFICATION_SENT: 'notification_sent',
+  SETTINGS_CHANGED: 'settings_changed',
+  FEATURE_USED: 'feature_used',
+  ERROR_OCCURRED: 'error_occurred',
+} as const;
+
+/**
+ * Track app launch event
+ */
+export async function trackAppLaunch(): Promise<void> {
+  return trackEvent(TelemetryEventTypes.APP_LAUNCHED, {
+    platform: navigator.platform,
+    userAgent: navigator.userAgent,
+    language: navigator.language,
+    screenWidth: window.screen.width,
+    screenHeight: window.screen.height,
+  });
+}
+
+/**
+ * Track signup event
+ */
+export async function trackSignup(
+  method: 'github' | 'email' | 'other',
+  success: boolean
+): Promise<void> {
+  return trackEvent(success ? TelemetryEventTypes.SIGNUP_COMPLETED : TelemetryEventTypes.SIGNUP_STARTED, {
+    method,
+    success,
+  });
+}
+
+/**
+ * Track feature usage
+ */
+export async function trackFeatureUsage(
+  feature: string,
+  action: string,
+  metadata?: Record<string, unknown>
+): Promise<void> {
+  return trackEvent(TelemetryEventTypes.FEATURE_USED, {
+    feature,
+    action,
+    ...metadata,
+  });
+}
