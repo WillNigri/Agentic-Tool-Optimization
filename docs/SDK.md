@@ -1,4 +1,4 @@
-# @ato/sdk — Developer Documentation
+# @agentic-tool-optimization/sdk — Developer Documentation
 
 Auto-capture LLM traces for [ATO](https://agentictool.ai). Works with Anthropic, OpenAI, and any LLM provider.
 
@@ -7,7 +7,7 @@ Auto-capture LLM traces for [ATO](https://agentictool.ai). Works with Anthropic,
 ## Installation
 
 ```bash
-npm install @ato/sdk
+npm install @agentic-tool-optimization/sdk
 ```
 
 The SDK has **optional peer dependencies** — install only what you use:
@@ -27,7 +27,7 @@ npm install openai
 ### 1. Initialize
 
 ```typescript
-import { init } from '@ato/sdk';
+import { init } from '@agentic-tool-optimization/sdk';
 
 init({
   apiKey: 'ato_your_api_key',  // Get from app.agentictool.ai/settings
@@ -40,7 +40,7 @@ init({
 
 ```typescript
 import Anthropic from '@anthropic-ai/sdk';
-import { wrapAnthropic } from '@ato/sdk/anthropic';
+import { wrapAnthropic } from '@agentic-tool-optimization/sdk/anthropic';
 
 const anthropic = wrapAnthropic(new Anthropic());
 
@@ -56,7 +56,7 @@ const message = await anthropic.messages.create({
 
 ```typescript
 import OpenAI from 'openai';
-import { wrapOpenAI } from '@ato/sdk/openai';
+import { wrapOpenAI } from '@agentic-tool-optimization/sdk/openai';
 
 const openai = wrapOpenAI(new OpenAI());
 
@@ -93,7 +93,7 @@ const stream = await openai.chat.completions.create({
 ## Configuration
 
 ```typescript
-import { init } from '@ato/sdk';
+import { init } from '@agentic-tool-optimization/sdk';
 
 const client = init({
   // Required for cloud sync
@@ -164,7 +164,7 @@ Every LLM call automatically records:
 Built-in pricing for **60+ models** across 7 providers:
 
 ```typescript
-import { calculateCost } from '@ato/sdk';
+import { calculateCost } from '@agentic-tool-optimization/sdk';
 
 // Returns cost in USD
 calculateCost('claude-sonnet-4-6', 1000, 500);           // $0.0105
@@ -194,8 +194,8 @@ Pricing is updated regularly. If a model isn't found, cost returns `0`.
 For custom providers or non-standard integrations:
 
 ```typescript
-import { capture, generateTraceId } from '@ato/sdk';
-import { calculateCost } from '@ato/sdk';
+import { capture, generateTraceId } from '@agentic-tool-optimization/sdk';
+import { calculateCost } from '@agentic-tool-optimization/sdk';
 
 capture({
   id: generateTraceId(),
@@ -220,7 +220,7 @@ capture({
 ## Lifecycle
 
 ```typescript
-import { init, flush, shutdown } from '@ato/sdk';
+import { init, flush, shutdown } from '@agentic-tool-optimization/sdk';
 
 // Initialize at app startup
 init({ apiKey: 'ato_key' });
@@ -239,8 +239,8 @@ await shutdown();
 For serverless environments, flush before the function exits:
 
 ```typescript
-import { init, flush } from '@ato/sdk';
-import { wrapAnthropic } from '@ato/sdk/anthropic';
+import { init, flush } from '@agentic-tool-optimization/sdk';
+import { wrapAnthropic } from '@agentic-tool-optimization/sdk/anthropic';
 import Anthropic from '@anthropic-ai/sdk';
 
 init({ apiKey: process.env.ATO_API_KEY });
@@ -271,7 +271,7 @@ Traces sent to ATO Cloud are visible at **[app.agentictool.ai](https://app.agent
 
 ## API Reference
 
-### Exports from `@ato/sdk`
+### Exports from `@agentic-tool-optimization/sdk`
 
 | Export | Type | Description |
 |--------|------|-------------|
@@ -285,13 +285,13 @@ Traces sent to ATO Cloud are visible at **[app.agentictool.ai](https://app.agent
 | `MODEL_PRICING` | Object | Full pricing table |
 | `AtoClient` | Class | Client class for advanced usage |
 
-### Exports from `@ato/sdk/anthropic`
+### Exports from `@agentic-tool-optimization/sdk/anthropic`
 
 | Export | Type | Description |
 |--------|------|-------------|
 | `wrapAnthropic(client)` | Function | Wrap an Anthropic client |
 
-### Exports from `@ato/sdk/openai`
+### Exports from `@agentic-tool-optimization/sdk/openai`
 
 | Export | Type | Description |
 |--------|------|-------------|
