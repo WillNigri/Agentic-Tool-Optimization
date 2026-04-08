@@ -7232,10 +7232,14 @@ async fn track_event(
     event_type: String,
     properties: std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    // Extract all needed data from the lock, then drop it before any .await
+    let (enabled, device_id, endpoint) = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        (settings.enabled, settings.device_id.clone(), settings.endpoint.clone())
+    };
 
-    if !settings.enabled {
-        return Ok(()); // Telemetry disabled, silently ignore
+    if !enabled {
+        return Ok(());
     }
 
     let event = TelemetryEvent {
@@ -7243,14 +7247,10 @@ async fn track_event(
         properties,
         timestamp: chrono::Utc::now().to_rfc3339(),
         session_id: state.session_id.clone(),
-        device_id: settings.device_id.clone(),
+        device_id,
     };
 
-    // If endpoint configured, send immediately
-    if let Some(endpoint) = &settings.endpoint {
-        let endpoint = endpoint.clone();
-        drop(settings); // Release the lock before async operation
-
+    if let Some(endpoint) = endpoint {
         state.client
             .post(&endpoint)
             .json(&event)
@@ -7258,11 +7258,9 @@ async fn track_event(
             .await
             .map_err(|e| e.to_string())?;
     } else {
-        // Queue for later if no endpoint
         let mut queue = state.events_queue.lock().map_err(|e| e.to_string())?;
         queue.push(event);
 
-        // Keep queue bounded
         if queue.len() > 1000 {
             queue.drain(0..500);
         }
