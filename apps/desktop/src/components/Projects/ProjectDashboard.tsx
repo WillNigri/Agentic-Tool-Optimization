@@ -205,7 +205,7 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
       )}
 
       {/* Section tabs */}
-      <nav className="flex flex-wrap gap-1 border-b border-cs-border py-2">
+      <nav className="flex flex-wrap gap-1 border-b border-cs-border py-2" aria-label="Project sections" role="tablist">
         {populatedSections.map((s) => {
           const active = currentSectionValid ? selectedSection === s.id : s === populatedSections[0];
           return (

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AlertTriangle, Check, Loader2, Shield, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -37,6 +38,7 @@ export default function SaveConfirmDialog({
   onCancel,
   saving,
 }: SaveConfirmDialogProps) {
+  const { t } = useTranslation();
   const [preview, setPreview] = useState<WritePreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +82,7 @@ export default function SaveConfirmDialog({
             </div>
             <div>
               <h3 className="text-sm font-semibold">
-                {globalScope ? "Review global config change" : "Confirm save"}
+                {globalScope ? t("editor.reviewGlobalChange", "Review global config change") : t("editor.confirmSave", "Confirm save")}
               </h3>
               <p className="mt-0.5 text-[11px] text-cs-muted font-mono truncate max-w-[480px]">
                 {filePath}
@@ -100,7 +102,7 @@ export default function SaveConfirmDialog({
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {loading && (
             <div className="flex items-center justify-center py-10 text-cs-muted text-xs gap-2">
-              <Loader2 size={14} className="animate-spin" /> Computing diff…
+              <Loader2 size={14} className="animate-spin" /> {t("editor.computingDiff", "Computing diff…")}
             </div>
           )}
 
@@ -129,7 +131,7 @@ export default function SaveConfirmDialog({
 
               {hasValidationErrors && (
                 <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2">
-                  <p className="mb-1.5 text-xs font-semibold text-red-300">Schema validation failed</p>
+                  <p className="mb-1.5 text-xs font-semibold text-red-300">{t("editor.schemaFailed", "Schema validation failed")}</p>
                   <ul className="space-y-1 text-[11px] text-red-300/90">
                     {validation!.errors.map((err, i) => (
                       <li key={i} className="font-mono">
@@ -142,13 +144,13 @@ export default function SaveConfirmDialog({
 
               {validation?.valid && (
                 <div className="mb-3 flex items-center gap-1.5 text-[11px] text-cs-success">
-                  <Check size={12} /> Schema validation passed
+                  <Check size={12} /> {t("editor.schemaPass", "Schema validation passed")}
                 </div>
               )}
 
               {preview.diff.length === 0 ? (
                 <div className="rounded-lg border border-cs-border bg-cs-bg/50 px-3 py-6 text-center text-xs text-cs-muted">
-                  Files are identical.
+                  {t("editor.noChanges", "Files are identical.")}
                 </div>
               ) : (
                 <div className="rounded-lg border border-cs-border bg-cs-bg overflow-hidden">

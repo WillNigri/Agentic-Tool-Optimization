@@ -1,29 +1,32 @@
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
+import { Loader2 } from "lucide-react";
 import Sidebar, { type Section } from "@/components/Sidebar";
-import ContextVisualizer from "@/components/ContextVisualizer";
-import SkillsManager from "@/components/SkillsManager";
-import UsageAnalytics from "@/components/UsageAnalytics";
-import McpDashboard from "@/components/McpDashboard";
-import RuntimeSettings from "@/components/RuntimeSettings";
-import SubagentsManager from "@/components/SubagentsManager";
-import HooksManager from "@/components/HooksManager";
-import AutomationFlow from "@/components/AutomationFlow";
-import CronDashboard from "@/components/cron/CronDashboard";
 import PromptBar from "@/components/PromptBar";
 import SetupWizard from "@/components/SetupWizard";
-import { AgentManager, ProjectManager } from "@/components/AgentManager";
-import { SecretsManager } from "@/components/SecretsManager";
-import { EnvManager } from "@/components/EnvManager";
-import { ModelConfig } from "@/components/ModelConfig";
-import { LogViewer } from "@/components/LogViewer";
-import { HealthDashboard } from "@/components/HealthDashboard";
-import CloudAuth from "@/components/CloudAuth";
-import TeamWorkspaces from "@/components/TeamWorkspaces";
-import SkillSync from "@/components/SkillSync";
-import NotificationsSettings from "@/components/NotificationsSettings";
-import AuditLog from "@/components/AuditLog/AuditLog";
-import LlmApiKeys from "@/components/LlmApiKeys/LlmApiKeys";
-import AgentMonitor from "@/components/AgentMonitor/AgentMonitor";
+
+const ContextVisualizer = lazy(() => import("@/components/ContextVisualizer"));
+const SkillsManager = lazy(() => import("@/components/SkillsManager"));
+const UsageAnalytics = lazy(() => import("@/components/UsageAnalytics"));
+const McpDashboard = lazy(() => import("@/components/McpDashboard"));
+const RuntimeSettings = lazy(() => import("@/components/RuntimeSettings"));
+const SubagentsManager = lazy(() => import("@/components/SubagentsManager"));
+const HooksManager = lazy(() => import("@/components/HooksManager"));
+const AutomationFlow = lazy(() => import("@/components/AutomationFlow"));
+const CronDashboard = lazy(() => import("@/components/cron/CronDashboard"));
+const AgentManager = lazy(() => import("@/components/AgentManager").then(m => ({ default: m.AgentManager })));
+const ProjectManager = lazy(() => import("@/components/AgentManager").then(m => ({ default: m.ProjectManager })));
+const SecretsManager = lazy(() => import("@/components/SecretsManager").then(m => ({ default: m.SecretsManager })));
+const EnvManager = lazy(() => import("@/components/EnvManager").then(m => ({ default: m.EnvManager })));
+const ModelConfig = lazy(() => import("@/components/ModelConfig").then(m => ({ default: m.ModelConfig })));
+const LogViewer = lazy(() => import("@/components/LogViewer").then(m => ({ default: m.LogViewer })));
+const HealthDashboard = lazy(() => import("@/components/HealthDashboard").then(m => ({ default: m.HealthDashboard })));
+const CloudAuth = lazy(() => import("@/components/CloudAuth"));
+const TeamWorkspaces = lazy(() => import("@/components/TeamWorkspaces"));
+const SkillSync = lazy(() => import("@/components/SkillSync"));
+const NotificationsSettings = lazy(() => import("@/components/NotificationsSettings"));
+const AuditLog = lazy(() => import("@/components/AuditLog/AuditLog"));
+const LlmApiKeys = lazy(() => import("@/components/LlmApiKeys/LlmApiKeys"));
+const AgentMonitor = lazy(() => import("@/components/AgentMonitor/AgentMonitor"));
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
@@ -79,7 +82,9 @@ export default function Dashboard() {
       <Sidebar active={section} onNavigate={setSection} />
       <div className="flex-1 flex flex-col overflow-hidden">
         <main className={isFullWidth ? "flex-1 overflow-hidden" : "flex-1 overflow-y-auto p-6"}>
-          <Panel />
+          <Suspense fallback={<div className="flex items-center justify-center h-32"><Loader2 size={24} className="animate-spin text-cs-muted" /></div>}>
+            <Panel />
+          </Suspense>
         </main>
         <PromptBar />
       </div>

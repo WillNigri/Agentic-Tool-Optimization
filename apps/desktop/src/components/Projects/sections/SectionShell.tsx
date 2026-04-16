@@ -22,7 +22,7 @@ export default function SectionShell({
   className,
 }: SectionShellProps) {
   return (
-    <section className={cn("rounded-xl border border-cs-border bg-cs-card", className)}>
+    <section className={cn("rounded-xl border border-cs-border bg-cs-card", className)} aria-label={title}>
       <header className="flex items-start justify-between gap-3 border-b border-cs-border px-4 py-3">
         <div className="flex items-start gap-3 min-w-0">
           <div className="mt-0.5 rounded-md bg-cs-accent/10 p-1.5 text-cs-accent shrink-0">
