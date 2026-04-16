@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Box, ExternalLink, Edit3, Save, X, Loader2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { writeSandboxConfig, type SandboxConfig } from "@/lib/api";
@@ -23,6 +24,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
 };
 
 export default function SandboxSection({ config, projectPath, onOpenSource, onCreate }: SandboxSectionProps) {
+  const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<SandboxConfig>(config ?? DEFAULT_CONFIG);
   const queryClient = useQueryClient();
@@ -43,8 +45,8 @@ export default function SandboxSection({ config, projectPath, onOpenSource, onCr
   return (
     <SectionShell
       icon={Box}
-      title="Sandbox"
-      subtitle="OpenAI Agents SDK execution sandbox configuration"
+      title={t("projects.sandbox", "Sandbox")}
+      subtitle={t("projects.sandboxSubtitle", "OpenAI Agents SDK execution sandbox configuration")}
       actions={config && !editing && (
         <div className="flex items-center gap-2">
           <button onClick={startEdit} className="flex items-center gap-1 text-[10px] text-cs-muted hover:text-cs-accent"><Edit3 size={10} /> Edit</button>
@@ -54,8 +56,8 @@ export default function SandboxSection({ config, projectPath, onOpenSource, onCr
     >
       {!config && !editing ? (
         <EmptyRow
-          message="No sandbox configuration found. Sandbox isolates agent execution in Docker containers with network + filesystem policies."
-          actionLabel={onCreate ? "Create sandbox config" : undefined}
+          message={t("projects.sandboxEmpty", "No sandbox configuration found. Sandbox isolates agent execution in Docker containers with network + filesystem policies.")}
+          actionLabel={onCreate ? t("projects.sandboxCreate", "Create sandbox config") : undefined}
           onAction={onCreate}
         />
       ) : (

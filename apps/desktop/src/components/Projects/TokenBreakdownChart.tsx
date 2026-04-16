@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { BarChart3 } from "lucide-react";
 import type { ProjectBundle } from "@/lib/api";
@@ -33,6 +34,7 @@ function sumSkillTokens(list: { tokenCount: number; enabled: boolean }[]): numbe
 }
 
 export default function TokenBreakdownChart({ bundle }: TokenBreakdownChartProps) {
+  const { t } = useTranslation();
   const slices = useMemo<Slice[]>(() => {
     const raw: Slice[] = [
       { name: "Memory", value: sumTokens(bundle.memoryFiles), color: COLORS.memory },
@@ -49,12 +51,12 @@ export default function TokenBreakdownChart({ bundle }: TokenBreakdownChartProps
   return (
     <SectionShell
       icon={BarChart3}
-      title="Token breakdown"
-      subtitle="Estimated tokens this project's config would consume when loaded"
+      title={t("projects.tokenBreakdown", "Token breakdown")}
+      subtitle={t("projects.tokenBreakdownSubtitle", "Estimated tokens this project's config would consume when loaded")}
       count={total > 0 ? `~${total.toLocaleString()} tok` : "—"}
     >
       {slices.length === 0 ? (
-        <EmptyRow message="No measurable tokens yet. Add some CLAUDE.md content and skills to see breakdown." />
+        <EmptyRow message={t("projects.tokenBreakdownEmpty", "No measurable tokens yet. Add some CLAUDE.md content and skills to see breakdown.")} />
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           <div className="h-56">

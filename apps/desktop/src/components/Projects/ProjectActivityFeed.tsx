@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { Clock, FileEdit, Loader2 } from "lucide-react";
 import { getAuditLogs, type AuditLogEntry } from "@/lib/api";
 import SectionShell, { EmptyRow } from "./sections/SectionShell";
@@ -41,6 +42,7 @@ function relativeTime(iso: string): string {
 }
 
 export default function ProjectActivityFeed({ projectPath }: ProjectActivityFeedProps) {
+  const { t } = useTranslation();
   const { data: logs = [], isLoading } = useQuery({
     queryKey: ["audit-logs-file-write", projectPath],
     queryFn: () => getAuditLogs({ action: "file_write", limit: 100 }),
@@ -62,8 +64,8 @@ export default function ProjectActivityFeed({ projectPath }: ProjectActivityFeed
   return (
     <SectionShell
       icon={Clock}
-      title="Recent edits"
-      subtitle="Last 15 file writes (this project + inherited globals)"
+      title={t("projects.recentEdits", "Recent edits")}
+      subtitle={t("projects.recentEditsSubtitle", "Last 15 file writes (this project + inherited globals)")}
       count={projectLogs.length}
     >
       {isLoading ? (
@@ -71,7 +73,7 @@ export default function ProjectActivityFeed({ projectPath }: ProjectActivityFeed
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : projectLogs.length === 0 ? (
-        <EmptyRow message="No edits yet. Changes you save will appear here." />
+        <EmptyRow message={t("projects.recentEditsEmpty", "No edits yet. Changes you save will appear here.")} />
       ) : (
         <ul className="space-y-1.5">
           {projectLogs.map((log) => (

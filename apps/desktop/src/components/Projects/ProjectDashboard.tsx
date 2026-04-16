@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -75,6 +76,7 @@ const RUNTIME_META: Record<Runtime, { label: string; color: "orange" | "green" |
 };
 
 export default function ProjectDashboard({ project, onBack }: ProjectDashboardProps) {
+  const { t } = useTranslation();
   const { selectedSection, setSelectedSection } = useProjectStore();
   const [openFile, setOpenFile] = useState<string | null>(null);
 
@@ -161,7 +163,7 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
             onClick={onBack}
             className="mt-0.5 flex items-center gap-1.5 rounded-md border border-cs-border px-2.5 py-1 text-xs text-cs-muted transition-colors hover:bg-cs-border/50 hover:text-cs-text"
           >
-            <ArrowLeft size={12} /> Projects
+            <ArrowLeft size={12} /> {t("projects.backToProjects", "Projects")}
           </button>
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold">{project.name}</h1>
@@ -272,8 +274,8 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
                 <TokenBreakdownChart bundle={data} />
                 <SectionShell
                   icon={BookOpen}
-                  title="Memory"
-                  subtitle="CLAUDE.md files Claude reads on start — hierarchy: user → project → nested"
+                  title={t("projects.memory", "Memory")}
+                  subtitle={t("projects.memorySubtitle", "CLAUDE.md files Claude reads on start — hierarchy: user \u2192 project \u2192 nested")}
                   count={data.memoryFiles.filter((f) => f.exists).length}
                 >
                   <FileRefList
@@ -292,8 +294,8 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
             {selectedSection === "subagents" && (
               <SectionShell
                 icon={Bot}
-                title="Subagents"
-                subtitle=".claude/agents/*.md (global + project)"
+                title={t("projects.subagents", "Subagents")}
+                subtitle={t("projects.subagentsSubtitle", ".claude/agents/*.md (global + project)")}
                 count={data.subagents.filter((f) => f.exists).length}
               >
                 <FileRefList
@@ -307,8 +309,8 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
             {selectedSection === "commands" && (
               <SectionShell
                 icon={Terminal}
-                title="Commands"
-                subtitle=".claude/commands/*.md (global + project)"
+                title={t("projects.commands", "Commands")}
+                subtitle={t("projects.commandsSubtitle", ".claude/commands/*.md (global + project)")}
                 count={data.commands.filter((f) => f.exists).length}
               >
                 <FileRefList
@@ -349,8 +351,8 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
             {(selectedSection === "hooks" || selectedSection === "permissions" || selectedSection === "mcp") && (
               <SectionShell
                 icon={Settings2}
-                title="Settings files"
-                subtitle="Source of truth for hooks, permissions, and MCP"
+                title={t("projects.settingsFiles", "Settings files")}
+                subtitle={t("projects.settingsFilesSubtitle", "Source of truth for hooks, permissions, and MCP")}
                 count={data.settingsFiles.filter((f) => f.exists).length}
               >
                 <FileRefList

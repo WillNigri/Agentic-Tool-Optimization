@@ -9547,4 +9547,162 @@ mod tests {
         assert_eq!(f.size_bytes, 0);
         assert_eq!(f.token_estimate, 0);
     }
+
+    #[test]
+    fn test_file_ref_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.md");
+        fs::write(&file, "hello world").unwrap();
+        let f = file_ref("test.md", file, "project");
+        assert!(f.exists);
+        assert_eq!(f.size_bytes, 11);
+        assert_eq!(f.token_estimate, 2);
+        assert_eq!(f.scope, "project");
+    }
+
+    #[test]
+    fn test_backup_file_creates_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.json");
+        fs::write(&file, r#"{"key": "value"}"#).unwrap();
+        let result = backup_file(&file);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_backup_file_nonexistent() {
+        let result = backup_file(&PathBuf::from("/nonexistent/file.txt"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parse_sandbox_config_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parse_sandbox_config(&dir.path().to_path_buf()).is_none());
+    }
+
+    #[test]
+    fn test_parse_sandbox_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        fs::create_dir_all(&codex).unwrap();
+        fs::write(codex.join("sandbox.json"), r#"{"sandbox":{"enabled":true,"network_isolation":true,"filesystem_policy":"read-only","timeout_secs":300}}"#).unwrap();
+        let c = parse_sandbox_config(&dir.path().to_path_buf()).unwrap();
+        assert!(c.enabled);
+        assert!(c.network_isolation);
+        assert_eq!(c.filesystem_policy, "read-only");
+        assert_eq!(c.timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn test_parse_approval_policies_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parse_approval_policies(&dir.path().to_path_buf()).is_empty());
+    }
+
+    #[test]
+    fn test_parse_approval_policies_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        fs::create_dir_all(&codex).unwrap();
+        fs::write(codex.join("policies.json"), r#"{"approvalPolicies":{"file_write":"on-request","shell":"never"}}"#).unwrap();
+        let r = parse_approval_policies(&dir.path().to_path_buf());
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn test_collect_hooks_from_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("settings.json");
+        fs::write(&s, r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo pre"}]}]}}"#).unwrap();
+        let r = collect_hooks_from_settings(&s, "project");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].event, "PreToolUse");
+        assert_eq!(r[0].command, "echo pre");
+    }
+
+    #[test]
+    fn test_parse_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("settings.json");
+        fs::write(&s, r#"{"permissions":{"allow":["Read","Bash"],"deny":["Write"]}}"#).unwrap();
+        let r = parse_permissions_from_settings(&s, "user");
+        assert_eq!(r.allow, vec!["Read", "Bash"]);
+        assert_eq!(r.deny, vec!["Write"]);
+        assert!(r.ask.is_empty());
+    }
+
+    #[test]
+    fn test_parse_mcp_stdio() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("s.json");
+        fs::write(&s, r#"{"mcpServers":{"fs":{"command":"npx","args":["mcp-fs"]}}}"#).unwrap();
+        let r = parse_mcp_from_settings(&s, "user");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].kind, "stdio");
+    }
+
+    #[test]
+    fn test_parse_mcp_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("s.json");
+        fs::write(&s, r#"{"mcpServers":{"api":{"url":"https://mcp.example.com"}}}"#).unwrap();
+        let r = parse_mcp_from_settings(&s, "project");
+        assert_eq!(r[0].kind, "http");
+    }
+
+    #[test]
+    fn test_nested_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("packages").join("core");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("CLAUDE.md"), "nested").unwrap();
+        let r = list_nested_claude_md(&dir.path().to_path_buf(), 4);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].scope, "nested");
+    }
+
+    #[test]
+    fn test_nested_claude_md_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a").join("b").join("c").join("d").join("e");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("CLAUDE.md"), "too deep").unwrap();
+        assert!(list_nested_claude_md(&dir.path().to_path_buf(), 3).is_empty());
+    }
+
+    #[test]
+    fn test_directory_resolves_to_skill_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("my-skill");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "# My Skill").unwrap();
+        let r = read_agent_config_file(skill.to_string_lossy().to_string()).unwrap();
+        assert!(r.raw.contains("My Skill"));
+        assert!(r.path.ends_with("SKILL.md"));
+    }
+
+    #[test]
+    fn test_directory_no_skill_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let r = read_agent_config_file(empty.to_string_lossy().to_string());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_validate_env_bad_value() {
+        let r = validate_settings_json(r#"{"env":{"K":123}}"#.to_string()).unwrap();
+        assert!(!r.valid);
+    }
+
+    #[test]
+    fn test_diff_empty_to_content() {
+        let (_, added, removed) = compute_diff("", "line1\nline2");
+        assert_eq!(added, 2);
+        assert_eq!(removed, 0);
+    }
 }

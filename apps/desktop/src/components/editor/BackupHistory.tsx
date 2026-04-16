@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { History, RotateCcw, Loader2, ChevronDown, ChevronRight, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,7 @@ function formatTimestamp(unix: number): string {
 }
 
 export default function BackupHistory({ filePath, currentHash, onRestored }: BackupHistoryProps) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -57,7 +59,7 @@ export default function BackupHistory({ filePath, currentHash, onRestored }: Bac
       >
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <History size={12} />
-        <span className="flex-1">Backup history</span>
+        <span className="flex-1">{t("editor.backupHistory", "Backup history")}</span>
         {expanded && backups.length > 0 && (
           <span className="text-[10px] text-cs-muted">{backups.length} backup{backups.length === 1 ? "" : "s"}</span>
         )}
@@ -71,7 +73,7 @@ export default function BackupHistory({ filePath, currentHash, onRestored }: Bac
             </div>
           ) : backups.length === 0 ? (
             <p className="px-1 py-2 text-[11px] text-cs-muted">
-              No backups yet. Each save automatically creates one in ~/.ato/backups/.
+              {t("editor.noBackups", "No backups yet. Each save automatically creates one in ~/.ato/backups/.")}
             </p>
           ) : (
             <ul className="space-y-1">

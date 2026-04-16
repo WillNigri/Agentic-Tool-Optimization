@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ShieldAlert, Plus, Trash2, Edit3, Save, X, Loader2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { writeApprovalPolicies, type ApprovalPolicy } from "@/lib/api";
@@ -22,6 +23,7 @@ const POLICY_COLORS: Record<string, string> = {
 const POLICY_OPTIONS = ["always", "on-request", "untrusted", "never", "granular"];
 
 export default function ApprovalPoliciesSection({ policies, projectPath, onCreate }: ApprovalPoliciesSectionProps) {
+  const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<ApprovalPolicy[]>(policies);
   const queryClient = useQueryClient();
@@ -54,8 +56,8 @@ export default function ApprovalPoliciesSection({ policies, projectPath, onCreat
   return (
     <SectionShell
       icon={ShieldAlert}
-      title="Approval Policies"
-      subtitle="Per-tool approval rules for OpenAI Agents SDK"
+      title={t("projects.policies", "Approval Policies")}
+      subtitle={t("projects.policiesSubtitle", "Per-tool approval rules for OpenAI Agents SDK")}
       count={policies.length}
       actions={policies.length > 0 && !editing && (
         <button onClick={startEdit} className="flex items-center gap-1 text-[10px] text-cs-muted hover:text-cs-accent"><Edit3 size={10} /> Edit</button>
@@ -63,8 +65,8 @@ export default function ApprovalPoliciesSection({ policies, projectPath, onCreat
     >
       {policies.length === 0 && !editing ? (
         <EmptyRow
-          message="No approval policies configured. Policies control which tools agents can use without asking."
-          actionLabel={onCreate ? "Create policies.json" : undefined}
+          message={t("projects.policiesEmpty", "No approval policies configured. Policies control which tools agents can use without asking.")}
+          actionLabel={onCreate ? t("projects.policiesCreate", "Create policies.json") : undefined}
           onAction={onCreate}
         />
       ) : (
