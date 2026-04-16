@@ -124,7 +124,7 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
     return () => {
       unlisten?.();
       import("@tauri-apps/api/core").then(({ invoke }) => {
-        invoke("stop_watching_project").catch(() => {});
+        invoke("stop_watching_project", { projectPath: project.path }).catch(() => {});
       }).catch(() => {});
     };
   }, [project.path, queryClient]);

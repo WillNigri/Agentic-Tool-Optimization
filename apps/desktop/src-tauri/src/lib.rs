@@ -4658,28 +4658,50 @@ fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
     })
 }
 
-// ── Project File Watcher ────────────────────────────────────────────────────
+// ── Project File Watcher (per-project) ──────────────────────────────────────
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 
-static PROJECT_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static WATCHER_MAP: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+
+fn get_watcher_map() -> std::sync::MutexGuard<'static, Option<HashMap<String, bool>>> {
+    let mut guard = WATCHER_MAP.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(HashMap::new());
+    }
+    guard
+}
 
 #[tauri::command]
 fn watch_project_files(app: tauri::AppHandle, project_path: String) -> Result<(), String> {
-    if PROJECT_WATCHER_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(());
+    {
+        let mut map = get_watcher_map();
+        let map = map.as_mut().unwrap();
+        if map.get(&project_path) == Some(&true) {
+            return Ok(());
+        }
+        map.insert(project_path.clone(), true);
     }
+
     let path = PathBuf::from(&project_path);
     if !path.exists() {
-        PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
+        let mut map = get_watcher_map();
+        map.as_mut().unwrap().remove(&project_path);
         return Err("Project path does not exist".to_string());
     }
+
+    let watched_path = project_path.clone();
     std::thread::spawn(move || {
         use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
             Ok(w) => w,
-            Err(_) => { PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst); return; }
+            Err(_) => {
+                let mut map = get_watcher_map();
+                map.as_mut().unwrap().remove(&watched_path);
+                return;
+            }
         };
         let watch_paths = [
             path.join(".claude"),
@@ -4697,11 +4719,17 @@ fn watch_project_files(app: tauri::AppHandle, project_path: String) -> Result<()
             }
         }
         let mut last_emit = std::time::Instant::now();
-        while PROJECT_WATCHER_ACTIVE.load(Ordering::SeqCst) {
+        loop {
+            let active = {
+                let map = get_watcher_map();
+                map.as_ref().unwrap().get(&watched_path) == Some(&true)
+            };
+            if !active { break; }
+
             match rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(Ok(_event)) => {
                     if last_emit.elapsed() > std::time::Duration::from_millis(500) {
-                        let _ = app.emit("project-files-changed", &project_path);
+                        let _ = app.emit("project-files-changed", &watched_path);
                         last_emit = std::time::Instant::now();
                     }
                 }
@@ -4710,14 +4738,21 @@ fn watch_project_files(app: tauri::AppHandle, project_path: String) -> Result<()
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
+        let mut map = get_watcher_map();
+        map.as_mut().unwrap().remove(&watched_path);
     });
     Ok(())
 }
 
 #[tauri::command]
-fn stop_watching_project() {
-    PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
+fn stop_watching_project(project_path: Option<String>) {
+    let mut map = get_watcher_map();
+    if let Some(map) = map.as_mut() {
+        match project_path {
+            Some(path) => { map.remove(&path); }
+            None => { map.clear(); }
+        }
+    }
 }
 
 /// Parse TOML content using the full toml crate (handles nested tables, arrays, inline tables, etc.)
