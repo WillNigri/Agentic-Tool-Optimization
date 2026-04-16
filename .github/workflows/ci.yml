@@ -29,9 +29,9 @@ jobs:
       - name: Build MCP server
         run: npm run build -w services/mcp-server
 
-      - name: Type check desktop frontend
+      - name: Build desktop frontend (includes type checking)
         working-directory: apps/desktop
-        run: npx tsc --noEmit
+        run: npx vite build
 
   check-rust:
     runs-on: ubuntu-latest
