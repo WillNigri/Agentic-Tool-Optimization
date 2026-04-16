@@ -6,7 +6,7 @@ import { getSkillDetail, getSkills, updateSkill, deleteSkill, type SkillDetail }
 import { cn } from "@/lib/utils";
 import { ModelTag, StatusTag, TokenTag } from "./SkillMetaTags";
 import { analyzeSkillConflicts, getConflictsForSkill } from "@/lib/skill-similarity";
-import { shareSkill, promptAgent } from "@/lib/tauri-api";
+import { shareSkill, promptAgent } from "@/lib/api";
 import PublishSkillModal from "./PublishSkillModal";
 
 // Anthropic official guideline: keep SKILL.md under 500 lines

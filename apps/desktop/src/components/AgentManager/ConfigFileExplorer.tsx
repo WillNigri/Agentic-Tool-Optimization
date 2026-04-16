@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAgentConfigStore } from "@/stores/useAgentConfigStore";
-import type { AgentConfigFile } from "@/lib/tauri-api";
+import type { AgentConfigFile } from "@/lib/api";
 
 interface Props {
   isLoading: boolean;

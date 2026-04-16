@@ -25,7 +25,7 @@ import {
   toggleLlmApiKey,
   deleteLlmApiKey,
   type LlmApiKey,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const LLM_PROVIDERS = [

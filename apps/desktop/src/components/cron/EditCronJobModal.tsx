@@ -2,7 +2,7 @@ import { useState } from "react";
 import { X, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CronJob } from "./types";
-import { openclawEditCronJob } from "@/lib/tauri-api";
+import { openclawEditCronJob } from "@/lib/api";
 
 interface EditCronJobModalProps {
   job: CronJob;

@@ -8,7 +8,7 @@ import {
   readAgentConfigFile,
   writeAgentConfigFile,
   type AgentConfigRuntime,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 import ExportModal from "./ExportModal";
 
 export default function ConfigFileEditor() {

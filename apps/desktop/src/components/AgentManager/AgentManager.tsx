@@ -22,7 +22,7 @@ import {
   type AgentConfigRuntime,
   type AgentConfigFile,
   type ProfileSnapshot,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 import ConfigFileExplorer from "./ConfigFileExplorer";
 import ConfigFileEditor from "./ConfigFileEditor";
 import PermissionMatrix from "./PermissionMatrix";

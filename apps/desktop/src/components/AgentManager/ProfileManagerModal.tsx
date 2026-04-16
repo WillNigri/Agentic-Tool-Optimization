@@ -17,7 +17,7 @@ import {
   loadProfileSnapshot,
   exportProfileSnapshot,
   type ProfileSnapshot,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 interface Props {
   onClose: () => void;

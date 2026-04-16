@@ -32,7 +32,7 @@ import {
   getHealthHistory,
   type RuntimeHealth,
   type RuntimeHealthHistory,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 const RUNTIME_CONFIG = {
   claude: {

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { X, Save, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { saveProfileSnapshot, type AgentConfigRuntime } from "@/lib/tauri-api";
+import { saveProfileSnapshot, type AgentConfigRuntime } from "@/lib/api";
 
 interface Props {
   currentRuntime: AgentConfigRuntime;

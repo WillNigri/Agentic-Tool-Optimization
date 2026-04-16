@@ -24,7 +24,7 @@ import {
   listProjects,
   type EnvVar,
   type Project,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 const RUNTIMES = [
   { value: "", label: "All Runtimes" },

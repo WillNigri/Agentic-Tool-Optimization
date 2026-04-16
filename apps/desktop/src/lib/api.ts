@@ -443,5 +443,7 @@ export async function getAuditLogs(params?: { action?: string; resourceType?: st
 
 // ---- Pass-through for commands without mock needs ----
 
-export { discoverProjects, addProject, updateProject, deleteProject, setActiveProject } from './tauri-api';
-export { createAgentSkill } from './tauri-api';
+// ---- Wildcard re-export for all remaining tauri-api functions ----
+// Functions already defined above (with mock fallback) take precedence over this re-export.
+// This ensures every legacy component finds its imports without manual enumeration.
+export * from './tauri-api';

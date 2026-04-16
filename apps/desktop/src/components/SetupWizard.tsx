@@ -14,9 +14,9 @@ import {
   Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { queryAgentStatus, detectAgentRuntimes, setRuntimePath } from "@/lib/tauri-api";
+import { queryAgentStatus, detectAgentRuntimes, setRuntimePath } from "@/lib/api";
 import type { AgentRuntime, OpenClawConfig } from "@/components/cron/types";
-import type { AgentStatus } from "@/lib/tauri-api";
+import type { AgentStatus } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types

@@ -9,7 +9,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { listProfileSnapshots, type ProfileSnapshot } from "@/lib/tauri-api";
+import { listProfileSnapshots, type ProfileSnapshot } from "@/lib/api";
 
 interface Props {
   onSaveProfile: () => void;

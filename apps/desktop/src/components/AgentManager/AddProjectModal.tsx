@@ -14,7 +14,7 @@ import {
   addProject,
   discoverProjects,
   type DiscoveredProject,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 interface Props {
   discoveredProjects?: DiscoveredProject[];

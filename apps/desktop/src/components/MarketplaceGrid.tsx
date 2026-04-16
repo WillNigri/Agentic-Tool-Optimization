@@ -8,7 +8,7 @@ import {
   type MarketplaceSkill,
   type MarketplaceCategory,
 } from "@/lib/marketplace-mock";
-import { installMarketplaceSkill } from "@/lib/tauri-api";
+import { installMarketplaceSkill } from "@/lib/api";
 import MarketplaceSkillDetail from "./MarketplaceSkillDetail";
 
 export default function MarketplaceGrid() {

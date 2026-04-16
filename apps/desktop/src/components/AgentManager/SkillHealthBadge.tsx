@@ -1,6 +1,6 @@
 import { CheckCircle, AlertTriangle, XCircle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { SkillValidation } from "@/lib/tauri-api";
+import type { SkillValidation } from "@/lib/api";
 
 interface Props {
   validation?: SkillValidation | null;

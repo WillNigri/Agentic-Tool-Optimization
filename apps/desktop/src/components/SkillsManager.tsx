@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe, FolderKanban } from "lucide-react";
 import { getSkills, toggleSkill, type Skill } from "@/lib/api";
-import { openclawListSkills, listProjects, type Project } from "@/lib/tauri-api";
+import { openclawListSkills, listProjects, type Project } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
 import { analyzeSkillConflicts, type SkillConflict } from "@/lib/skill-similarity";
 import SkillDetailPanel from "./SkillDetailPanel";

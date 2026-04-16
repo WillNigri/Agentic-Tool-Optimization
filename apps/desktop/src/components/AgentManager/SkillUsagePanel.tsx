@@ -9,7 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getSkillUsageStats, type SkillUsageStat } from "@/lib/tauri-api";
+import { getSkillUsageStats, type SkillUsageStat } from "@/lib/api";
 
 export default function SkillUsagePanel() {
   const { t } = useTranslation();

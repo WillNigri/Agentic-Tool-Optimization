@@ -7,8 +7,8 @@ import {
   RefreshCw, Save, Wifi, WifiOff, Settings2, FileText, ExternalLink,
   FileCheck, FileX,
 } from "lucide-react";
-import { detectAgentRuntimes, queryAllAgentStatuses } from "@/lib/tauri-api";
-import * as tauriApi from "@/lib/tauri-api";
+import { detectAgentRuntimes, queryAllAgentStatuses } from "@/lib/api";
+import * as tauriApi from "@/lib/api";
 import { getConfigFiles } from "@/lib/api";
 import FileViewer from "./FileViewer";
 

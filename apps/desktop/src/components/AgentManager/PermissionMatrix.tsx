@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Check, AlertTriangle, X, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAgentConfigStore } from "@/stores/useAgentConfigStore";
-import { parseAgentPermissions, type AgentPermission } from "@/lib/tauri-api";
+import { parseAgentPermissions, type AgentPermission } from "@/lib/api";
 
 const TOOLS = [
   { name: "Bash", description: "Execute shell commands" },

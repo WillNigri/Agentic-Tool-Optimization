@@ -36,7 +36,7 @@ import { useAuthStore } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
 import { useCronStore } from "@/stores/useCronStore";
 import { useProjectStore } from "@/stores/useProjectStore";
-import { listProjects } from "@/lib/tauri-api";
+import { listProjects } from "@/lib/api";
 import LoginModal from "./LoginModal";
 
 export type Section = "context" | "skills" | "projects" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications" | "audit" | "llm-keys" | "agent-monitor";

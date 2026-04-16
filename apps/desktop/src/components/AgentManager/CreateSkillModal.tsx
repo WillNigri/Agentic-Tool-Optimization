@@ -7,7 +7,7 @@ import {
   createAgentSkill,
   type AgentConfigRuntime,
   type AgentConfigScope,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 interface Props {
   onClose: () => void;

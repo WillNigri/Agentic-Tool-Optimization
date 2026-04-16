@@ -44,7 +44,7 @@ import {
   exportTelemetryEvents,
   getQueuedEvents,
   trackAppLaunch,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 import { formatNumber, formatCurrency, cn } from "@/lib/utils";
 
 const RUNTIME_COLORS: Record<string, string> = {

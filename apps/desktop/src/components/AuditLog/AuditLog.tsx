@@ -17,7 +17,7 @@ import {
   Zap,
   AlertTriangle,
 } from "lucide-react";
-import { getAuditLogs, getAuditLogStats, clearAuditLogs, type AuditLogEntry } from "@/lib/tauri-api";
+import { getAuditLogs, getAuditLogStats, clearAuditLogs, type AuditLogEntry } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const ACTION_ICONS: Record<string, any> = {

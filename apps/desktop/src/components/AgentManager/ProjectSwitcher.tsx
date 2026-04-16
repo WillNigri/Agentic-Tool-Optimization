@@ -15,7 +15,7 @@ import {
   getActiveProject,
   setActiveProject,
   type Project,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 interface Props {
   onManageProjects: () => void;

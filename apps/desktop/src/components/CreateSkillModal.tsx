@@ -3,8 +3,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { X, Sparkles, Loader2 } from "lucide-react";
 import { createSkill, type CreateSkillData } from "@/lib/api";
-import type { SkillScope } from "@/lib/tauri-api";
-import { promptAgent } from "@/lib/tauri-api";
+import type { SkillScope } from "@/lib/api";
+import { promptAgent } from "@/lib/api";
 import type { AgentRuntime } from "@/components/cron/types";
 
 const AVAILABLE_TOOLS = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Agent"];

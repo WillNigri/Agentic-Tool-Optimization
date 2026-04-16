@@ -17,7 +17,7 @@ import {
   cloneSkill,
   type Project,
   type AgentConfigRuntime,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 interface Props {
   targetProject: Project;

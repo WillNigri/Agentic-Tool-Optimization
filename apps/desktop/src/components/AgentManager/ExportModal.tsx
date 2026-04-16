@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { X, Download, Copy, Check, ArrowRight, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { readAgentConfigFile, type AgentConfigRuntime } from "@/lib/tauri-api";
+import { readAgentConfigFile, type AgentConfigRuntime } from "@/lib/api";
 
 interface Props {
   sourcePath: string;

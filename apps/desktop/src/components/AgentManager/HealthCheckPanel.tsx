@@ -10,7 +10,7 @@ import {
   Lightbulb,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { validateSkill, validateAllSkills, type SkillValidation, type ValidationIssue } from "@/lib/tauri-api";
+import { validateSkill, validateAllSkills, type SkillValidation, type ValidationIssue } from "@/lib/api";
 
 interface Props {
   selectedPath?: string | null;

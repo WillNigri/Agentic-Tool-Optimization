@@ -11,10 +11,10 @@ import NodePalette from "./automation/NodePalette";
 import NodeConfigPanel from "./automation/NodeConfigPanel";
 import FlowCanvas from "./automation/FlowCanvas";
 import ExecutionOverlay from "./automation/ExecutionOverlay";
-import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/tauri-api";
+import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
-import type { SkillDetail } from "@/lib/tauri-api";
+import type { SkillDetail } from "@/lib/api";
 import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./automation/types";
 
 export default function AutomationFlow() {

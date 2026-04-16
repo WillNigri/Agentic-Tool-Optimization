@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Send, Bot, X, Loader2, ChevronUp, ChevronDown, Sparkles, Terminal, AlertCircle, Cpu, Server, Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { promptAgent } from "@/lib/tauri-api";
+import { promptAgent } from "@/lib/api";
 import type { AgentRuntime } from "@/components/cron/types";
 import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
 

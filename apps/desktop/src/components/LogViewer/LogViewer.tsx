@@ -22,7 +22,7 @@ import {
   stopLogWatcher,
   isLogWatcherRunning,
   type ExecutionLog,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 const STATUS_ICONS = {
   success: CheckCircle,

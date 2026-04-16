@@ -17,7 +17,7 @@ import {
   createAgentSkill,
   type AgentConfigRuntime,
   type OnboardingItem,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 interface Props {
   onClose: () => void;

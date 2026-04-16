@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import type { CronJob, CronExecution, AgentRuntime } from "./types";
 import ExecutionTimeline from "./ExecutionTimeline";
 import { cronToHuman, formatRelativeTime } from "@/lib/cron-utils";
-import { openclawRunCronJob } from "@/lib/tauri-api";
+import { openclawRunCronJob } from "@/lib/api";
 import EditCronJobModal from "./EditCronJobModal";
 
 const RUNTIME_ICON: Record<AgentRuntime, typeof Terminal> = {

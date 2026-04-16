@@ -23,7 +23,7 @@ import {
   updateSecret,
   deleteSecret,
   type Secret,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 
 const KEY_TYPES = [
   { value: "api_key", label: "API Key", icon: Key },

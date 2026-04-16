@@ -13,7 +13,7 @@ import {
   listModelConfigs,
   saveModelConfig,
   type ModelConfig as ModelConfigType,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
 import OllamaProvider from "./OllamaProvider";
 
 const MODELS = {

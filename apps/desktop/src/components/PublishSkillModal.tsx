@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { X, Upload } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MARKETPLACE_CATEGORIES, type MarketplaceCategory } from "@/lib/marketplace-mock";
-import { publishSkill } from "@/lib/tauri-api";
+import { publishSkill } from "@/lib/api";
 
 interface PublishSkillModalProps {
   skillId: string;
