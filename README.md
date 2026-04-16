@@ -1,6 +1,6 @@
 # ATO — Agentic Tool Optimization
 
-The **multi-LLM control panel** for AI coding tools. One dashboard to manage **Claude Code**, **Codex**, **OpenClaw**, and **Hermes** — skills, API keys, costs, agent monitoring, and automation across all runtimes.
+The **multi-runtime control panel** for AI coding tools. One dashboard to manage **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, and **Ollama** — skills, configs, sandboxes, policies, API keys, costs, agent monitoring, and automation across all runtimes.
 
 **[Website](https://agentictool.ai)** | **[Web Dashboard](https://app.agentictool.ai)** | **[SDK Docs](docs/SDK.md)** | **[npm](https://www.npmjs.com/package/@ato-sdk/js)**
 
@@ -71,6 +71,24 @@ Built-in pricing for **60+ models** across 7 providers. [Full SDK docs](docs/SDK
 
 ## What You Get
 
+### Projects Dashboard (NEW)
+Project-centric view: click a project and see **everything** — CLAUDE.md memory hierarchy (user → project → nested), skills, subagents, commands, hooks, permissions, MCP servers. Runtime switcher for multi-runtime projects. File watcher auto-refreshes when config files change on disk. Token breakdown chart shows estimated context usage. Empty sections collapse behind "+N more" with inline Create buttons to scaffold new configs.
+
+### Inline Config Editor
+CodeMirror 6 editor with syntax highlighting (JSON, Markdown, YAML, TOML), schema validation for `settings.json`, content-hash conflict detection, automatic timestamped backups (`~/.ato/backups/`), unified diff preview before save, and full audit logging. Two-step confirmation for global config changes.
+
+### OpenAI Agents SDK Support
+Sandbox configuration viewer + editor (network isolation, filesystem policy, timeout, port allowlist, snapshot toggle). Approval policies manager (per-tool rules with add/remove/edit). Writes back to `.codex/sandbox.json` and `.codex/policies.json`.
+
+### Gemini CLI / ADK Support
+Detects `.gemini/`, `GEMINI.md`, `root_agent.yaml`. Visual agent tree: parses `root_agent.yaml` into cards showing agent name, model, instruction, sub-agents, and tools. Inline editing for all config files.
+
+### Ollama Provider
+Auto-detects local Ollama server. Model picker showing all installed models with parameter size and quantization. Copy OpenAI-compatible endpoint (`localhost:11434/v1`) for use with any runtime. Environment config viewer (OLLAMA_HOST, GPU settings).
+
+### Backup + Restore
+Every file edit automatically creates a timestamped backup in `~/.ato/backups/` (auto-pruned after 30 days). Backup history panel per file with one-click restore. Restores go through the same safety pipeline (hash check, backup, audit).
+
 ### Cost Dashboard
 Per-model, per-provider, per-day cost breakdowns. See burn rate, daily timeline, team-wide spend. Auto-calculated from SDK traces.
 
@@ -81,10 +99,10 @@ Store, rotate, and scope API keys for Anthropic, OpenAI, Google, Mistral, Groq, 
 Track active agent sessions, token consumption, error rates, and runtime health across all your AI coding tools. Basic stats free, real-time 3s auto-refresh in Pro.
 
 ### Audit Log
-Complete trail of every action — skill changes, key rotations, config updates, cron triggers. Filterable, exportable to JSON.
+Complete trail of every action — skill changes, key rotations, config updates, file writes with diff stats. Filterable, activity feed on Projects dashboard.
 
 ### Skills Manager + Marketplace
-Per-runtime tabs (Claude / Codex / OpenClaw / Hermes). Browse marketplace, AI-powered skill creation, conflict detection, recursive directory scanning.
+Per-runtime tabs (Claude / Codex / OpenClaw / Hermes / Gemini). Browse marketplace, AI-powered skill creation, conflict detection, recursive directory scanning.
 
 ### Automation Builder
 Visual workflow editor. Auto-detects flows from skill headers. Per-node runtime selection — mix Claude + Codex in one workflow.
@@ -102,12 +120,19 @@ Create subagents with runtime selection. Runtime-specific config (SSH for OpenCl
 
 ## Supported Runtimes
 
-| Runtime | Provider | Send Prompts | Health Check | Skills Directory |
-|---------|----------|:---:|:---:|------------------|
-| **Claude** | Anthropic | `claude --print` | MCP + auth | `~/.claude/skills/` |
-| **Codex** | OpenAI | `codex --print` | version + API | `~/.codex/skills/` |
-| **OpenClaw** | OpenClaw | SSH `openclaw exec` | SSH health | `~/.openclaw/skills/` |
-| **Hermes** | NousResearch | `hermes --execute` | version + /health | `~/.hermes/skills/` |
+| Runtime | Provider | Config Files | Skills Directory | Special Features |
+|---------|----------|-------------|------------------|-----------------|
+| **Claude Code** | Anthropic | `CLAUDE.md`, `.claude/settings.json`, `.mcp.json` | `~/.claude/skills/` | Memory hierarchy, hooks, permissions, MCP, subagents, commands |
+| **Codex / OpenAI Agents SDK** | OpenAI | `AGENTS.md`, `.codex/config.toml`, `codex.json` | `~/.codex/skills/` | Sandbox config, approval policies, visual TOML editor |
+| **Gemini CLI / ADK** | Google | `GEMINI.md`, `.gemini/settings.json`, `root_agent.yaml` | `.gemini/agents/` | Visual agent tree (sub-agents + tools from YAML) |
+| **OpenClaw** | OpenClaw | `SOUL.md`, `TOOLS.md`, `openclaw.json` | `~/.openclaw/skills/` | Parsed soul card + tools grid |
+| **Hermes** | NousResearch | `SOUL.md`, `config.yaml`, `memories/*.md` | `~/.hermes/skills/` | Full memory file scanning |
+
+### Model Providers
+
+| Provider | Integration | Features |
+|----------|------------|----------|
+| **Ollama** | Auto-detect `localhost:11434` | Model picker, GPU config, copy OpenAI-compatible endpoint |
 
 ---
 
@@ -184,6 +209,7 @@ api.agentictool.ai         # 7 microservices on Railway
 | Agent logs | `~/.ato/agent-logs.jsonl` |
 | Workflows | `~/.ato/workflows/` |
 | Cron jobs | `~/.ato/cron-jobs.json` |
+| File backups | `~/.ato/backups/` (auto-pruned >30 days) |
 
 ---
 
@@ -211,6 +237,7 @@ Requires [Rust](https://rustup.rs/) and [Tauri 2 prerequisites](https://v2.tauri
 
 | Version | Highlights |
 |---------|-----------|
+| **v1.1.0** | Projects dashboard, 6 runtime support (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES), 18 Rust unit tests |
 | **v1.0.0** | SDK (`@ato-sdk/js`), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, rate limiting, Homebrew tap |
 | v0.8.0 | Agent Configuration Manager, advanced automation |
 | v0.7.0 | Marketplace backend, dynamic workflows |
@@ -226,8 +253,11 @@ Requires [Rust](https://rustup.rs/) and [Tauri 2 prerequisites](https://v2.tauri
 - **Parameterized SQL** — all queries use parameterized statements
 - **API keys** — encrypted locally, never sent externally
 - **SSH** — OpenClaw uses key-based auth (paths only, not key contents)
-- **Validation** — all inputs validated with Zod schemas
+- **Validation** — all inputs validated with Zod schemas; settings.json schema validation with inline lint
 - **Rate limiting** — tiered (global/auth/API/sensitive) on cloud endpoints
+- **Conflict detection** — SHA-256 content hashing prevents overwriting concurrent edits
+- **Auto-backup** — every file write creates a timestamped backup, restorable from the UI
+- **Audit trail** — every file write logged with diff stats and backup path
 
 ## Contributing
 

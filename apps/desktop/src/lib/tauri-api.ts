@@ -754,6 +754,50 @@ export interface ParsedConfigFile {
   format: 'yaml-frontmatter' | 'json' | 'toml' | 'yaml' | 'markdown' | 'unknown';
   content: unknown;
   raw: string;
+  contentHash: string;
+  lastModified: number | null;
+  sizeBytes: number;
+}
+
+export interface DiffLine {
+  kind: 'add' | 'remove' | 'context';
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+}
+
+export interface ValidationError {
+  field: string;
+  message: string;
+  line: number | null;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: ValidationError[];
+}
+
+export interface WriteResult {
+  path: string;
+  newHash: string;
+  bytesWritten: number;
+  backupPath: string | null;
+  addedLines: number;
+  removedLines: number;
+}
+
+export interface WritePreview {
+  diff: DiffLine[];
+  addedLines: number;
+  removedLines: number;
+  currentHash: string;
+  newHash: string;
+  validation: ValidationResult | null;
+}
+
+export interface WriteOptions {
+  expectedHash?: string;
+  skipValidation?: boolean;
 }
 
 export interface AgentPermission {
@@ -794,10 +838,146 @@ export async function readAgentConfigFile(path: string): Promise<ParsedConfigFil
 }
 
 /**
- * Write a config file back to disk
+ * Write a config file back to disk with safety guarantees:
+ * - content-hash conflict detection (pass expectedHash from the last read)
+ * - automatic timestamped backup to ~/.ato/backups/
+ * - audit_logs SQLite entry
+ * - schema validation for settings.json (pass skipValidation to bypass)
  */
-export async function writeAgentConfigFile(path: string, content: string): Promise<void> {
-  return invoke('write_agent_config_file', { path, content });
+export async function writeAgentConfigFile(
+  path: string,
+  content: string,
+  options: WriteOptions = {}
+): Promise<WriteResult> {
+  return invoke<WriteResult>('write_agent_config_file', {
+    path,
+    content,
+    expectedHash: options.expectedHash ?? null,
+    skipValidation: options.skipValidation ?? null,
+  });
+}
+
+/**
+ * Dry-run: preview diff + validation for a pending write without touching disk.
+ */
+export async function previewWriteAgentConfigFile(
+  path: string,
+  newContent: string
+): Promise<WritePreview> {
+  return invoke<WritePreview>('preview_write_agent_config_file', { path, newContent });
+}
+
+/**
+ * Validate a settings.json file content. Permissive on unknown keys.
+ */
+export async function validateSettingsJson(content: string): Promise<ValidationResult> {
+  return invoke<ValidationResult>('validate_settings_json', { content });
+}
+
+export interface BackupEntry {
+  backupPath: string;
+  originalFilename: string;
+  timestamp: number;
+  sha8: string;
+  sizeBytes: number;
+}
+
+/**
+ * List backups in ~/.ato/backups/. Pass originalPath to filter to that file only.
+ */
+export async function listBackups(originalPath?: string): Promise<BackupEntry[]> {
+  return invoke<BackupEntry[]>('list_backups', { originalPath: originalPath ?? null });
+}
+
+/**
+ * Restore a backup to its original location. Goes through the same safety pipeline
+ * (hash check + backup-current + audit) as a regular save.
+ */
+// ── Ollama Provider ─────────────────────────────────────────────────────
+
+export interface OllamaStatus {
+  running: boolean;
+  version: string | null;
+  endpoint: string;
+}
+
+export interface OllamaModel {
+  name: string;
+  size: number;
+  digest: string;
+  modifiedAt: string;
+  parameterSize: string | null;
+  quantization: string | null;
+}
+
+export interface OllamaConfig {
+  host: string | null;
+  modelsDir: string | null;
+  keepAlive: string | null;
+  flashAttention: string | null;
+  cudaVisibleDevices: string | null;
+  numParallel: string | null;
+}
+
+export async function detectOllama(): Promise<OllamaStatus> {
+  return invoke<OllamaStatus>('detect_ollama');
+}
+
+export async function listOllamaModels(endpoint?: string): Promise<OllamaModel[]> {
+  return invoke<OllamaModel[]>('list_ollama_models', { endpoint: endpoint ?? null });
+}
+
+export async function getOllamaConfig(): Promise<OllamaConfig> {
+  return invoke<OllamaConfig>('get_ollama_config');
+}
+
+export async function writeSandboxConfig(projectPath: string, config: SandboxConfig): Promise<WriteResult> {
+  return invoke<WriteResult>('write_sandbox_config', { projectPath, config });
+}
+
+export async function writeApprovalPolicies(projectPath: string, policies: ApprovalPolicy[]): Promise<WriteResult> {
+  return invoke<WriteResult>('write_approval_policies', { projectPath, policies });
+}
+
+export async function writeTomlConfig(path: string, value: unknown): Promise<WriteResult> {
+  return invoke<WriteResult>('write_toml_config', { path, value });
+}
+
+// ── OpenClaw Workspace ──────────────────────────────────────────────────────
+
+export interface OpenClawWorkspace {
+  soul: { name: string | null; role: string | null; traits: string[]; rawContent: string };
+  tools: { name: string; description: string }[];
+}
+
+export async function parseOpenclawWorkspace(projectPath: string): Promise<OpenClawWorkspace> {
+  return invoke<OpenClawWorkspace>('parse_openclaw_workspace', { projectPath });
+}
+
+// ── Gemini Agent Definition ─────────────────────────────────────────────────
+
+export interface GeminiAgentDef {
+  name: string | null;
+  model: string | null;
+  instruction: string | null;
+  subAgents: { name: string; model: string | null; description: string | null }[];
+  tools: { name: string; kind: string | null }[];
+}
+
+export async function parseGeminiAgent(path: string): Promise<GeminiAgentDef> {
+  return invoke<GeminiAgentDef>('parse_gemini_agent', { path });
+}
+
+export async function restoreBackup(
+  backupPath: string,
+  targetPath: string,
+  expectedHash?: string,
+): Promise<WriteResult> {
+  return invoke<WriteResult>('restore_backup', {
+    backupPath,
+    targetPath,
+    expectedHash: expectedHash ?? null,
+  });
 }
 
 /**
@@ -987,6 +1167,7 @@ export interface Project {
   hasCodex: boolean;
   hasHermes: boolean;
   hasOpenclaw: boolean;
+  hasGemini: boolean;
 }
 
 export interface DiscoveredProject {
@@ -1008,6 +1189,90 @@ export async function discoverProjects(): Promise<DiscoveredProject[]> {
  */
 export async function listProjects(): Promise<Project[]> {
   return invoke<Project[]>('list_projects');
+}
+
+// ── Project Bundle (Projects Dashboard) ─────────────────────────────────────
+
+export interface ProjectFileRef {
+  label: string;
+  path: string;
+  scope: 'user' | 'project' | 'nested';
+  exists: boolean;
+  sizeBytes: number;
+  tokenEstimate: number;
+  lastModified: number | null;
+}
+
+export interface ProjectHookSummary {
+  event: string;
+  matcher: string | null;
+  command: string;
+  scope: 'user' | 'project';
+}
+
+export interface ProjectMcpSummary {
+  name: string;
+  kind: 'stdio' | 'http' | 'sse' | 'unknown';
+  commandOrUrl: string;
+  scope: 'user' | 'project';
+}
+
+export interface ProjectPermissions {
+  allow: string[];
+  deny: string[];
+  ask: string[];
+  scope: string;
+}
+
+export interface ProjectBundle {
+  projectPath: string;
+  projectName: string;
+  hasClaude: boolean;
+  hasCodex: boolean;
+  hasHermes: boolean;
+  hasOpenclaw: boolean;
+  memoryFiles: ProjectFileRef[];
+  subagents: ProjectFileRef[];
+  commands: ProjectFileRef[];
+  settingsFiles: ProjectFileRef[];
+  skills: LocalSkill[];
+  hooks: ProjectHookSummary[];
+  permissionsUser: ProjectPermissions;
+  permissionsProject: ProjectPermissions;
+  mcpServers: ProjectMcpSummary[];
+  codexFiles: ProjectFileRef[];
+  codexSkills: LocalSkill[];
+  openclawFiles: ProjectFileRef[];
+  openclawSkills: LocalSkill[];
+  hermesFiles: ProjectFileRef[];
+  hermesSkills: LocalSkill[];
+  geminiFiles: ProjectFileRef[];
+  geminiSkills: LocalSkill[];
+  sandboxConfig: SandboxConfig | null;
+  approvalPolicies: ApprovalPolicy[];
+}
+
+export interface SandboxConfig {
+  enabled: boolean;
+  networkIsolation: boolean;
+  allowedPorts: number[];
+  filesystemPolicy: string;
+  timeoutSecs: number | null;
+  snapshotEnabled: boolean;
+  sourcePath: string;
+}
+
+export interface ApprovalPolicy {
+  toolName: string;
+  policy: string;
+  scope: string;
+}
+
+/**
+ * Full per-project bundle: memory hierarchy, skills, subagents, commands, hooks, permissions, MCP.
+ */
+export async function getProjectBundle(projectPath: string): Promise<ProjectBundle> {
+  return invoke<ProjectBundle>('get_project_bundle', { projectPath });
 }
 
 /**

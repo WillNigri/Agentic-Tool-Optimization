@@ -9,7 +9,7 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{State, Manager};
+use tauri::{State, Manager, Emitter};
 use log_watcher::LogWatcherState;
 use health_poller::HealthPollerState;
 use lettre::{
@@ -477,6 +477,10 @@ fn init_database(conn: &Connection) {
 
 fn claude_home() -> PathBuf {
     home_dir().join(".claude")
+}
+
+fn gemini_home() -> PathBuf {
+    home_dir().join(".gemini")
 }
 
 /// Find the project root by walking up from CWD looking for .git or .claude/
@@ -3588,6 +3592,44 @@ pub struct ParsedConfigFile {
     pub format: String,          // "yaml-frontmatter" | "json" | "toml" | "yaml" | "markdown"
     pub content: serde_json::Value,  // Parsed content as JSON
     pub raw: String,             // Original file content
+    pub content_hash: String,    // SHA-256 of raw content (hex) for conflict detection
+    pub last_modified: Option<u64>, // Unix seconds
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteResult {
+    pub path: String,
+    pub new_hash: String,
+    pub bytes_written: u64,
+    pub backup_path: Option<String>,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLine {
+    pub kind: String, // "add" | "remove" | "context"
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationError {
+    pub field: String,
+    pub message: String,
+    pub line: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub errors: Vec<ValidationError>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -3714,6 +3756,7 @@ pub struct Project {
     pub has_codex: bool,
     pub has_hermes: bool,
     pub has_openclaw: bool,
+    pub has_gemini: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -4067,12 +4110,477 @@ fn chrono_lite(unix_secs: u64) -> String {
     format!("{}", unix_secs)
 }
 
-/// Read and parse a config file, handling different formats
+/// SHA-256 hex digest of a byte slice
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Copy a file to ~/.ato/backups/<timestamp>-<sha8>-<filename>. Returns backup path.
+/// Silently prunes backups older than 30 days on every call.
+fn backup_file(path: &PathBuf) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let backups_dir = home_dir().join(".ato").join("backups");
+    fs::create_dir_all(&backups_dir).map_err(|e| format!("backup dir: {}", e))?;
+
+    let content = fs::read(path).map_err(|e| format!("read for backup: {}", e))?;
+    let hash = sha256_hex(&content);
+    let sha8 = &hash[..8];
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let backup_name = format!("{}-{}-{}", ts, sha8, filename);
+    let backup_path = backups_dir.join(&backup_name);
+    fs::write(&backup_path, &content).map_err(|e| format!("write backup: {}", e))?;
+
+    // Prune >30d old (best-effort, ignore errors)
+    let cutoff = ts.saturating_sub(30 * 24 * 60 * 60);
+    if let Ok(entries) = fs::read_dir(&backups_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(ts_str) = name_str.split('-').next() {
+                if let Ok(entry_ts) = ts_str.parse::<u64>() {
+                    if entry_ts < cutoff {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(backup_path.to_string_lossy().to_string()))
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupEntry {
+    pub backup_path: String,
+    pub original_filename: String,
+    pub timestamp: u64,         // Unix seconds
+    pub sha8: String,           // First 8 chars of SHA-256
+    pub size_bytes: u64,
+}
+
+/// List all backups in ~/.ato/backups/. If `original_path` is provided, filter to
+/// backups whose filename matches that path's basename.
+#[tauri::command]
+fn list_backups(original_path: Option<String>) -> Result<Vec<BackupEntry>, String> {
+    let backups_dir = home_dir().join(".ato").join("backups");
+    if !backups_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let filter_name = original_path.as_ref().and_then(|p| {
+        PathBuf::from(p).file_name().and_then(|n| n.to_str()).map(String::from)
+    });
+
+    let mut entries: Vec<BackupEntry> = Vec::new();
+    if let Ok(dir) = fs::read_dir(&backups_dir) {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Expected format: <timestamp>-<sha8>-<filename>
+            let parts: Vec<&str> = name.splitn(3, '-').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+            let Ok(timestamp) = parts[0].parse::<u64>() else { continue };
+            let sha8 = parts[1].to_string();
+            let original_filename = parts[2].to_string();
+
+            if let Some(ref want) = filter_name {
+                if &original_filename != want {
+                    continue;
+                }
+            }
+
+            let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            entries.push(BackupEntry {
+                backup_path: path.to_string_lossy().to_string(),
+                original_filename,
+                timestamp,
+                sha8,
+                size_bytes,
+            });
+        }
+    }
+
+    // Newest first
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(entries)
+}
+
+/// Restore a backup by copying its contents to `target_path`. Goes through the
+/// same safety pipeline (hash check, backup-current, audit) as a regular write.
+#[tauri::command]
+fn restore_backup(
+    db: State<'_, DbState>,
+    backup_path: String,
+    target_path: String,
+    expected_hash: Option<String>,
+) -> Result<WriteResult, String> {
+    let backup_pb = PathBuf::from(&backup_path);
+    let content = fs::read_to_string(&backup_pb)
+        .map_err(|e| format!("Failed to read backup: {}", e))?;
+    write_agent_config_file(db, target_path, content, expected_hash, Some(true))
+}
+
+// ── Ollama Provider ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaStatus {
+    pub running: bool,
+    pub version: Option<String>,
+    pub endpoint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaModel {
+    pub name: String,
+    pub size: u64,
+    pub digest: String,
+    pub modified_at: String,
+    pub parameter_size: Option<String>,
+    pub quantization: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaConfig {
+    pub host: Option<String>,
+    pub models_dir: Option<String>,
+    pub keep_alive: Option<String>,
+    pub flash_attention: Option<String>,
+    pub cuda_visible_devices: Option<String>,
+    pub num_parallel: Option<String>,
+}
+
+#[tauri::command]
+async fn detect_ollama() -> Result<OllamaStatus, String> {
+    let endpoint = std::env::var("OLLAMA_HOST")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let url = format!("{}/api/version", endpoint);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let version = body.get("version").and_then(|v| v.as_str()).map(String::from);
+            Ok(OllamaStatus { running: true, version, endpoint })
+        }
+        _ => Ok(OllamaStatus { running: false, version: None, endpoint }),
+    }
+}
+
+#[tauri::command]
+async fn list_ollama_models(endpoint: Option<String>) -> Result<Vec<OllamaModel>, String> {
+    let base = endpoint.unwrap_or_else(|| {
+        std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
+    });
+    let url = format!("{}/api/tags", base);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&url).send().await
+        .map_err(|e| format!("Failed to reach Ollama: {}", e))?;
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Invalid response: {}", e))?;
+
+    let models = body.get("models").and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|m| {
+                let name = m.get("name").and_then(|v| v.as_str())?;
+                Some(OllamaModel {
+                    name: name.to_string(),
+                    size: m.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+                    digest: m.get("digest").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    modified_at: m.get("modified_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    parameter_size: m.get("details")
+                        .and_then(|d| d.get("parameter_size"))
+                        .and_then(|v| v.as_str()).map(String::from),
+                    quantization: m.get("details")
+                        .and_then(|d| d.get("quantization_level"))
+                        .and_then(|v| v.as_str()).map(String::from),
+                })
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    Ok(models)
+}
+
+#[tauri::command]
+fn get_ollama_config() -> OllamaConfig {
+    OllamaConfig {
+        host: std::env::var("OLLAMA_HOST").ok(),
+        models_dir: std::env::var("OLLAMA_MODELS").ok(),
+        keep_alive: std::env::var("OLLAMA_KEEP_ALIVE").ok(),
+        flash_attention: std::env::var("OLLAMA_FLASH_ATTENTION").ok(),
+        cuda_visible_devices: std::env::var("CUDA_VISIBLE_DEVICES").ok(),
+        num_parallel: std::env::var("OLLAMA_NUM_PARALLEL").ok(),
+    }
+}
+
+/// Simple line-by-line diff. Marks every line add/remove/context using LCS-free approach:
+/// finds longest common prefix/suffix then marks the middle chunks.
+fn compute_diff(old: &str, new: &str) -> (Vec<DiffLine>, usize, usize) {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    // Longest common prefix
+    let mut prefix = 0;
+    while prefix < old_lines.len() && prefix < new_lines.len() && old_lines[prefix] == new_lines[prefix] {
+        prefix += 1;
+    }
+    // Longest common suffix (bounded)
+    let mut suffix = 0;
+    while suffix < old_lines.len() - prefix
+        && suffix < new_lines.len() - prefix
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let mut diff = Vec::new();
+    let context_lines = 3usize;
+
+    // Leading context
+    let leading_start = prefix.saturating_sub(context_lines);
+    for i in leading_start..prefix {
+        diff.push(DiffLine {
+            kind: "context".to_string(),
+            old_line: Some(i + 1),
+            new_line: Some(i + 1),
+            text: old_lines[i].to_string(),
+        });
+    }
+
+    // Removals
+    let old_end = old_lines.len() - suffix;
+    for i in prefix..old_end {
+        diff.push(DiffLine {
+            kind: "remove".to_string(),
+            old_line: Some(i + 1),
+            new_line: None,
+            text: old_lines[i].to_string(),
+        });
+    }
+
+    // Additions
+    let new_end = new_lines.len() - suffix;
+    for i in prefix..new_end {
+        diff.push(DiffLine {
+            kind: "add".to_string(),
+            old_line: None,
+            new_line: Some(i + 1),
+            text: new_lines[i].to_string(),
+        });
+    }
+
+    // Trailing context
+    let trailing_end = (old_end + context_lines).min(old_lines.len());
+    for i in old_end..trailing_end {
+        diff.push(DiffLine {
+            kind: "context".to_string(),
+            old_line: Some(i + 1),
+            new_line: Some(new_end + (i - old_end) + 1),
+            text: old_lines[i].to_string(),
+        });
+    }
+
+    let added = new_end.saturating_sub(prefix);
+    let removed = old_end.saturating_sub(prefix);
+    (diff, added, removed)
+}
+
+/// Validate Claude Code `settings.json` shape. Permissive on unknown keys;
+/// strict on known structure (permissions, hooks, mcpServers, env).
+#[tauri::command]
+fn validate_settings_json(content: String) -> Result<ValidationResult, String> {
+    let mut errors = Vec::new();
+
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            errors.push(ValidationError {
+                field: "$".to_string(),
+                message: format!("Invalid JSON: {}", e),
+                line: Some(e.line()),
+            });
+            return Ok(ValidationResult { valid: false, errors });
+        }
+    };
+
+    if !value.is_object() {
+        errors.push(ValidationError {
+            field: "$".to_string(),
+            message: "Root must be an object".to_string(),
+            line: None,
+        });
+        return Ok(ValidationResult { valid: false, errors });
+    }
+
+    let obj = value.as_object().unwrap();
+
+    // permissions: { allow?: string[], deny?: string[], ask?: string[] }
+    if let Some(perms) = obj.get("permissions") {
+        if !perms.is_object() {
+            errors.push(ValidationError {
+                field: "permissions".to_string(),
+                message: "Must be an object".to_string(),
+                line: None,
+            });
+        } else {
+            for key in ["allow", "deny", "ask"] {
+                if let Some(arr) = perms.get(key) {
+                    if !arr.is_array() {
+                        errors.push(ValidationError {
+                            field: format!("permissions.{}", key),
+                            message: "Must be an array of strings".to_string(),
+                            line: None,
+                        });
+                    } else if let Some(items) = arr.as_array() {
+                        for (i, item) in items.iter().enumerate() {
+                            if !item.is_string() {
+                                errors.push(ValidationError {
+                                    field: format!("permissions.{}[{}]", key, i),
+                                    message: "Must be a string".to_string(),
+                                    line: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // hooks: { [event]: [{ matcher, hooks: [{ type, command }] }] }
+    if let Some(hooks) = obj.get("hooks") {
+        if !hooks.is_object() {
+            errors.push(ValidationError {
+                field: "hooks".to_string(),
+                message: "Must be an object keyed by event name".to_string(),
+                line: None,
+            });
+        }
+    }
+
+    // mcpServers: { [name]: { command, args?, env? } | { url, ... } }
+    if let Some(mcp) = obj.get("mcpServers") {
+        if !mcp.is_object() {
+            errors.push(ValidationError {
+                field: "mcpServers".to_string(),
+                message: "Must be an object keyed by server name".to_string(),
+                line: None,
+            });
+        } else if let Some(servers) = mcp.as_object() {
+            for (name, server) in servers {
+                if !server.is_object() {
+                    errors.push(ValidationError {
+                        field: format!("mcpServers.{}", name),
+                        message: "Each MCP server must be an object".to_string(),
+                        line: None,
+                    });
+                    continue;
+                }
+                let so = server.as_object().unwrap();
+                let has_command = so.get("command").map(|v| v.is_string()).unwrap_or(false);
+                let has_url = so.get("url").map(|v| v.is_string()).unwrap_or(false);
+                if !has_command && !has_url {
+                    errors.push(ValidationError {
+                        field: format!("mcpServers.{}", name),
+                        message: "Must have either 'command' (stdio) or 'url' (http/sse)".to_string(),
+                        line: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // env: { [key]: string }
+    if let Some(env) = obj.get("env") {
+        if !env.is_object() {
+            errors.push(ValidationError {
+                field: "env".to_string(),
+                message: "Must be an object of string values".to_string(),
+                line: None,
+            });
+        } else if let Some(vars) = env.as_object() {
+            for (key, val) in vars {
+                if !val.is_string() {
+                    errors.push(ValidationError {
+                        field: format!("env.{}", key),
+                        message: "Env values must be strings".to_string(),
+                        line: None,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(ValidationResult { valid: errors.is_empty(), errors })
+}
+
+/// Preview the diff + validation for a pending write without touching disk.
+#[tauri::command]
+fn preview_write_agent_config_file(path: String, new_content: String) -> Result<serde_json::Value, String> {
+    let path_buf = PathBuf::from(&path);
+    let old_content = if path_buf.exists() {
+        fs::read_to_string(&path_buf).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let (diff, added, removed) = compute_diff(&old_content, &new_content);
+    let current_hash = sha256_hex(old_content.as_bytes());
+    let new_hash = sha256_hex(new_content.as_bytes());
+
+    let mut validation: Option<ValidationResult> = None;
+    let fname = path_buf.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if fname == "settings.json" || fname == "settings.local.json" {
+        validation = Some(validate_settings_json(new_content.clone())?);
+    }
+
+    Ok(json!({
+        "diff": diff,
+        "addedLines": added,
+        "removedLines": removed,
+        "currentHash": current_hash,
+        "newHash": new_hash,
+        "validation": validation,
+    }))
+}
+
+/// Read and parse a config file, handling different formats.
+/// Returns content_hash (SHA-256) for conflict detection.
 #[tauri::command]
 fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
     let path_buf = PathBuf::from(&path);
     let content = fs::read_to_string(&path_buf)
         .map_err(|e| format!("Failed to read file: {}", e))?;
+    let metadata = fs::metadata(&path_buf).ok();
+    let last_modified = metadata
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+    let content_hash = sha256_hex(content.as_bytes());
 
     let extension = path_buf.extension()
         .and_then(|e| e.to_str())
@@ -4081,21 +4589,23 @@ fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
     let (format, parsed) = match extension {
         "json" => {
             let value: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| format!("Invalid JSON: {}", e))?;
+                .unwrap_or_else(|_| {
+                    // Tolerate invalid JSON at read time so users can fix it in the editor.
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("raw".to_string(), serde_json::Value::String(content.clone()));
+                    serde_json::Value::Object(obj)
+                });
             ("json".to_string(), value)
         }
         "toml" => {
-            // Simple TOML parsing - convert to JSON-like structure
-            let parsed = parse_simple_toml(&content);
+            let parsed = parse_toml_to_json(&content);
             ("toml".to_string(), parsed)
         }
         "yaml" | "yml" => {
-            // Simple YAML parsing
             let parsed = parse_simple_yaml(&content);
             ("yaml".to_string(), parsed)
         }
         "md" => {
-            // Check for YAML frontmatter
             if content.trim_start().starts_with("---") {
                 let (frontmatter, body) = parse_frontmatter(&content);
                 let mut obj = serde_json::Map::new();
@@ -4120,80 +4630,93 @@ fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
         format,
         content: parsed,
         raw: content,
+        content_hash,
+        last_modified,
+        size_bytes,
     })
 }
 
-/// Simple TOML parser (without full toml crate dependency)
-fn parse_simple_toml(content: &str) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    let mut current_section = String::new();
+// ── Project File Watcher ────────────────────────────────────────────────────
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
+use std::sync::atomic::{AtomicBool, Ordering};
 
-        // Section header
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            current_section = trimmed[1..trimmed.len()-1].to_string();
-            if !obj.contains_key(&current_section) {
-                obj.insert(current_section.clone(), serde_json::Value::Object(serde_json::Map::new()));
-            }
-            continue;
-        }
+static PROJECT_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-        // Key = value
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim().to_string();
-            let value_str = trimmed[eq_pos+1..].trim();
-            let value = parse_toml_value(value_str);
-
-            if current_section.is_empty() {
-                obj.insert(key, value);
-            } else if let Some(section) = obj.get_mut(&current_section) {
-                if let serde_json::Value::Object(ref mut section_map) = section {
-                    section_map.insert(key, value);
-                }
-            }
-        }
+#[tauri::command]
+fn watch_project_files(app: tauri::AppHandle, project_path: String) -> Result<(), String> {
+    if PROJECT_WATCHER_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Ok(());
     }
-
-    serde_json::Value::Object(obj)
+    let path = PathBuf::from(&project_path);
+    if !path.exists() {
+        PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
+        return Err("Project path does not exist".to_string());
+    }
+    std::thread::spawn(move || {
+        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+            Ok(w) => w,
+            Err(_) => { PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst); return; }
+        };
+        let watch_paths = [
+            path.join(".claude"),
+            path.join(".codex"),
+            path.join(".gemini"),
+            path.join(".mcp.json"),
+            path.join("CLAUDE.md"),
+            path.join("GEMINI.md"),
+            path.join("AGENTS.md"),
+        ];
+        for wp in &watch_paths {
+            if wp.exists() {
+                let mode = if wp.is_dir() { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+                let _ = watcher.watch(wp, mode);
+            }
+        }
+        let mut last_emit = std::time::Instant::now();
+        while PROJECT_WATCHER_ACTIVE.load(Ordering::SeqCst) {
+            match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(Ok(_event)) => {
+                    if last_emit.elapsed() > std::time::Duration::from_millis(500) {
+                        let _ = app.emit("project-files-changed", &project_path);
+                        last_emit = std::time::Instant::now();
+                    }
+                }
+                Ok(Err(_)) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
+    });
+    Ok(())
 }
 
-fn parse_toml_value(s: &str) -> serde_json::Value {
-    // Handle quoted strings
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        return serde_json::Value::String(s[1..s.len()-1].to_string());
-    }
-    // Handle booleans
-    if s == "true" {
-        return serde_json::Value::Bool(true);
-    }
-    if s == "false" {
-        return serde_json::Value::Bool(false);
-    }
-    // Handle numbers
-    if let Ok(n) = s.parse::<i64>() {
-        return serde_json::Value::Number(n.into());
-    }
-    if let Ok(n) = s.parse::<f64>() {
-        if let Some(num) = serde_json::Number::from_f64(n) {
-            return serde_json::Value::Number(num);
+#[tauri::command]
+fn stop_watching_project() {
+    PROJECT_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// Parse TOML content using the full toml crate (handles nested tables, arrays, inline tables, etc.)
+fn parse_toml_to_json(content: &str) -> serde_json::Value {
+    match content.parse::<toml::Value>() {
+        Ok(val) => serde_json::to_value(val).unwrap_or_default(),
+        Err(_) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("_parse_error".to_string(), serde_json::Value::String("Invalid TOML".to_string()));
+            obj.insert("raw".to_string(), serde_json::Value::String(content.to_string()));
+            serde_json::Value::Object(obj)
         }
     }
-    // Handle arrays (simple case)
-    if s.starts_with('[') && s.ends_with(']') {
-        let inner = s[1..s.len()-1].trim();
-        let items: Vec<serde_json::Value> = inner
-            .split(',')
-            .map(|item| parse_toml_value(item.trim()))
-            .collect();
-        return serde_json::Value::Array(items);
-    }
-    // Default to string
-    serde_json::Value::String(s.to_string())
+}
+
+/// Convert a JSON value back to TOML string
+fn json_to_toml(value: &serde_json::Value) -> Result<String, String> {
+    let toml_val: toml::Value = serde_json::from_value(value.clone())
+        .map_err(|e| format!("Cannot convert to TOML: {}", e))?;
+    toml::to_string_pretty(&toml_val)
+        .map_err(|e| format!("Cannot serialize TOML: {}", e))
 }
 
 /// Simple YAML parser (basic key-value pairs)
@@ -4261,18 +4784,102 @@ fn parse_yaml_value(s: &str) -> serde_json::Value {
     serde_json::Value::String(s.to_string())
 }
 
-/// Write a config file back to disk
+/// Write a config file back to disk with company-grade safety:
+/// - content-hash conflict detection (reject if on-disk file changed since read)
+/// - automatic timestamped backup to ~/.ato/backups/
+/// - audit log entry in audit_logs SQLite table
+/// - optional pre-write validation for known schemas (settings.json)
 #[tauri::command]
-fn write_agent_config_file(path: String, content: String) -> Result<(), String> {
-    // Create parent directories if needed
+fn write_agent_config_file(
+    db: State<'_, DbState>,
+    path: String,
+    content: String,
+    expected_hash: Option<String>,
+    skip_validation: Option<bool>,
+) -> Result<WriteResult, String> {
     let path_buf = PathBuf::from(&path);
+
+    // 1. Conflict detection: if caller provided expected_hash, verify current on-disk matches.
+    let (current_content, current_hash) = if path_buf.exists() {
+        let c = fs::read_to_string(&path_buf)
+            .map_err(|e| format!("Failed to read current file: {}", e))?;
+        let h = sha256_hex(c.as_bytes());
+        (c, h)
+    } else {
+        (String::new(), sha256_hex(&[]))
+    };
+
+    if let Some(expected) = &expected_hash {
+        if expected != &current_hash {
+            return Err(format!(
+                "CONFLICT: file changed on disk since it was loaded (expected hash {}, found {}). Reload before saving.",
+                &expected[..8], &current_hash[..8]
+            ));
+        }
+    }
+
+    // 2. Schema validation for settings.json (skippable via flag for escape hatch).
+    let skip = skip_validation.unwrap_or(false);
+    if !skip {
+        let fname = path_buf.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if fname == "settings.json" || fname == "settings.local.json" {
+            let result = validate_settings_json(content.clone())?;
+            if !result.valid {
+                let msgs: Vec<String> = result.errors.iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect();
+                return Err(format!("VALIDATION_FAILED: {}", msgs.join("; ")));
+            }
+        }
+    }
+
+    // 3. Create parent dirs if needed
     if let Some(parent) = path_buf.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
-    fs::write(&path, &content)
-        .map_err(|e| format!("Failed to write file: {}", e))
+    // 4. Backup current contents before overwriting (no-op if file doesn't exist yet)
+    let backup_path = backup_file(&path_buf)?;
+
+    // 5. Write
+    fs::write(&path_buf, &content)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    let new_hash = sha256_hex(content.as_bytes());
+    let (_, added, removed) = compute_diff(&current_content, &content);
+    let bytes_written = content.as_bytes().len() as u64;
+
+    // 6. Audit log
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let fname = path_buf.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let details = json!({
+            "path": &path,
+            "oldHash": current_hash,
+            "newHash": new_hash,
+            "addedLines": added,
+            "removedLines": removed,
+            "bytesWritten": bytes_written,
+            "backupPath": backup_path,
+        }).to_string();
+        let _ = conn.execute(
+            "INSERT INTO audit_logs (id, action, resource_type, resource_id, resource_name, details, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, "file_write", "config_file", Some(&path), Some(&fname), Some(details), now],
+        );
+    }
+
+    Ok(WriteResult {
+        path,
+        new_hash,
+        bytes_written,
+        backup_path,
+        added_lines: added,
+        removed_lines: removed,
+    })
 }
 
 /// Create a new skill file from template
@@ -5416,11 +6023,13 @@ fn discover_projects() -> Result<Vec<DiscoveredProject>, String> {
                 let has_codex = path.join(".codex").exists() || path.join("AGENTS.md").exists();
                 let has_hermes = path.join(".hermes").exists() || path.join("SOUL.md").exists();
                 let has_openclaw = path.join("SOUL.md").exists() && path.join("TOOLS.md").exists();
+                let has_gemini = path.join(".gemini").exists() || path.join("GEMINI.md").exists();
 
-                if has_claude || has_codex || has_hermes || has_openclaw {
+                if has_claude || has_codex || has_hermes || has_openclaw || has_gemini {
                     let mut runtimes = Vec::new();
                     if has_claude { runtimes.push("claude".to_string()); }
                     if has_codex { runtimes.push("codex".to_string()); }
+                    if has_gemini { runtimes.push("gemini".to_string()); }
                     if has_hermes { runtimes.push("hermes".to_string()); }
                     if has_openclaw { runtimes.push("openclaw".to_string()); }
 
@@ -5501,10 +6110,747 @@ fn list_projects(db: State<'_, DbState>) -> Result<Vec<Project>, String> {
             has_codex: path_buf.join(".codex").exists() || path_buf.join("AGENTS.md").exists(),
             has_hermes: path_buf.join(".hermes").exists() || path_buf.join("SOUL.md").exists(),
             has_openclaw: path_buf.join("SOUL.md").exists() && path_buf.join("TOOLS.md").exists(),
+            has_gemini: path_buf.join(".gemini").exists() || path_buf.join("GEMINI.md").exists(),
         })
     }).map_err(|e| e.to_string())?;
 
     projects.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+// ── Project Bundle (all-in-one view for Projects dashboard) ─────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileRef {
+    pub label: String,
+    pub path: String,
+    pub scope: String,        // "user" | "project" | "nested"
+    pub exists: bool,
+    pub size_bytes: u64,
+    pub token_estimate: u64,
+    pub last_modified: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectHookSummary {
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub scope: String,   // "user" | "project"
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMcpSummary {
+    pub name: String,
+    pub kind: String,        // "stdio" | "http" | "sse" | "unknown"
+    pub command_or_url: String,
+    pub scope: String,       // "user" | "project"
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPermissions {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub ask: Vec<String>,
+    pub scope: String,       // "user" | "project" | "merged"
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBundle {
+    pub project_path: String,
+    pub project_name: String,
+    pub has_claude: bool,
+    pub has_codex: bool,
+    pub has_hermes: bool,
+    pub has_openclaw: bool,
+    pub has_gemini: bool,
+
+    pub memory_files: Vec<ProjectFileRef>,     // CLAUDE.md hierarchy (user, project, nested)
+    pub subagents: Vec<ProjectFileRef>,         // .claude/agents/*.md (global + project)
+    pub commands: Vec<ProjectFileRef>,          // .claude/commands/*.md (global + project)
+    pub settings_files: Vec<ProjectFileRef>,    // settings.json, settings.local.json, .mcp.json
+
+    pub skills: Vec<LocalSkill>,                // Filtered to this project + inherited globals
+    pub hooks: Vec<ProjectHookSummary>,
+    pub permissions_user: ProjectPermissions,
+    pub permissions_project: ProjectPermissions,
+    pub mcp_servers: Vec<ProjectMcpSummary>,
+
+    // Per-runtime file bundles for Codex / OpenClaw / Hermes
+    pub codex_files: Vec<ProjectFileRef>,       // AGENTS.md (user+project), config.toml (user+project)
+    pub codex_skills: Vec<LocalSkill>,
+    pub openclaw_files: Vec<ProjectFileRef>,    // SOUL.md, TOOLS.md, workspace AGENTS.md, openclaw.json
+    pub openclaw_skills: Vec<LocalSkill>,
+    pub hermes_files: Vec<ProjectFileRef>,      // SOUL.md, memories/MEMORY.md, memories/USER.md, config.yaml
+    pub hermes_skills: Vec<LocalSkill>,
+
+    // Gemini CLI / ADK
+    pub gemini_files: Vec<ProjectFileRef>,     // GEMINI.md, settings.json, root_agent.yaml
+    pub gemini_skills: Vec<LocalSkill>,
+
+    // OpenAI Agents SDK (extends Codex)
+    pub sandbox_config: Option<SandboxConfig>,
+    pub approval_policies: Vec<ApprovalPolicy>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxConfig {
+    pub enabled: bool,
+    pub network_isolation: bool,
+    pub allowed_ports: Vec<u16>,
+    pub filesystem_policy: String,
+    pub timeout_secs: Option<u64>,
+    pub snapshot_enabled: bool,
+    pub source_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicy {
+    pub tool_name: String,
+    pub policy: String,
+    pub scope: String,
+}
+
+fn file_ref(label: &str, path: PathBuf, scope: &str) -> ProjectFileRef {
+    let metadata = fs::metadata(&path).ok();
+    let exists = metadata.is_some();
+    let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+    let last_modified = metadata
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    ProjectFileRef {
+        label: label.to_string(),
+        path: path.to_string_lossy().to_string(),
+        scope: scope.to_string(),
+        exists,
+        size_bytes,
+        token_estimate: estimate_tokens(size_bytes),
+        last_modified,
+    }
+}
+
+fn list_nested_claude_md(project_path: &PathBuf, max_depth: u32) -> Vec<ProjectFileRef> {
+    let mut out = Vec::new();
+    fn walk(dir: &PathBuf, root: &PathBuf, depth: u32, max_depth: u32, out: &mut Vec<ProjectFileRef>) {
+        if depth > max_depth {
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || name == "node_modules" || name == "target" || name == "dist" {
+                    continue;
+                }
+                if p.is_dir() {
+                    walk(&p, root, depth + 1, max_depth, out);
+                } else if name == "CLAUDE.md" && depth > 0 {
+                    let rel = p.strip_prefix(root).map(|r| r.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| p.to_string_lossy().to_string());
+                    out.push(file_ref(&rel, p.clone(), "nested"));
+                }
+            }
+        }
+    }
+    walk(project_path, project_path, 0, max_depth, &mut out);
+    out
+}
+
+fn list_dir_md_files(dir: &PathBuf, scope: &str) -> Vec<ProjectFileRef> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    if ext == "md" {
+                        let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("unnamed").to_string();
+                        out.push(file_ref(&name, p, scope));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    out
+}
+
+fn parse_permissions_from_settings(path: &PathBuf, scope: &str) -> ProjectPermissions {
+    let mut out = ProjectPermissions { scope: scope.to_string(), ..Default::default() };
+    if !path.exists() {
+        return out;
+    }
+    let Ok(text) = fs::read_to_string(path) else { return out };
+    let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(&text) else { return out };
+    if let Some(perms) = value.get("permissions") {
+        for (key, dest) in [("allow", &mut out.allow), ("deny", &mut out.deny), ("ask", &mut out.ask)] {
+            if let Some(arr) = perms.get(key).and_then(|v| v.as_array()) {
+                *dest = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            }
+        }
+    }
+    out
+}
+
+fn parse_mcp_from_settings(path: &PathBuf, scope: &str) -> Vec<ProjectMcpSummary> {
+    let mut out = Vec::new();
+    if !path.exists() {
+        return out;
+    }
+    let Ok(text) = fs::read_to_string(path) else { return out };
+    let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(&text) else { return out };
+    // .mcp.json keys servers at root under "mcpServers" OR is the object itself. Support both.
+    let servers_obj = value.get("mcpServers").cloned().unwrap_or(value.clone());
+    if let Some(map) = servers_obj.as_object() {
+        for (name, cfg) in map {
+            let (kind, command_or_url) = if let Some(cmd) = cfg.get("command").and_then(|v| v.as_str()) {
+                ("stdio", cmd.to_string())
+            } else if let Some(url) = cfg.get("url").and_then(|v| v.as_str()) {
+                let kind = if cfg.get("type").and_then(|v| v.as_str()) == Some("sse") { "sse" } else { "http" };
+                (kind, url.to_string())
+            } else {
+                ("unknown", String::new())
+            };
+            out.push(ProjectMcpSummary {
+                name: name.clone(),
+                kind: kind.to_string(),
+                command_or_url,
+                scope: scope.to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn collect_hooks_from_settings(path: &PathBuf, scope: &str) -> Vec<ProjectHookSummary> {
+    let mut out = Vec::new();
+    if !path.exists() {
+        return out;
+    }
+    let Ok(text) = fs::read_to_string(path) else { return out };
+    let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(&text) else { return out };
+    let Some(hooks) = value.get("hooks").and_then(|v| v.as_object()) else { return out };
+    for (event, triggers) in hooks {
+        if let Some(arr) = triggers.as_array() {
+            for trigger in arr {
+                let matcher = trigger.get("matcher").and_then(|v| v.as_str()).map(String::from);
+                if let Some(hook_arr) = trigger.get("hooks").and_then(|v| v.as_array()) {
+                    for h in hook_arr {
+                        if let Some(cmd) = h.get("command").and_then(|v| v.as_str()) {
+                            out.push(ProjectHookSummary {
+                                event: event.clone(),
+                                matcher: matcher.clone(),
+                                command: cmd.to_string(),
+                                scope: scope.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn parse_sandbox_config(project_path: &PathBuf) -> Option<SandboxConfig> {
+    // Look for sandbox config in config.toml or codex.json
+    let candidates = [
+        project_path.join(".codex").join("sandbox.json"),
+        project_path.join("codex.json"),
+    ];
+    for path in &candidates {
+        if !path.exists() { continue; }
+        let Ok(text) = fs::read_to_string(path) else { continue };
+        let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(&text) else { continue };
+        let sandbox = value.get("sandbox").unwrap_or(&value);
+        if sandbox.is_object() {
+            return Some(SandboxConfig {
+                enabled: sandbox.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                network_isolation: sandbox.get("network_isolation")
+                    .or_else(|| sandbox.get("networkIsolation"))
+                    .and_then(|v| v.as_bool()).unwrap_or(false),
+                allowed_ports: sandbox.get("allowed_ports")
+                    .or_else(|| sandbox.get("allowedPorts"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u16)).collect())
+                    .unwrap_or_default(),
+                filesystem_policy: sandbox.get("filesystem_policy")
+                    .or_else(|| sandbox.get("filesystemPolicy"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("read-write").to_string(),
+                timeout_secs: sandbox.get("timeout_secs")
+                    .or_else(|| sandbox.get("timeoutSecs"))
+                    .and_then(|v| v.as_u64()),
+                snapshot_enabled: sandbox.get("snapshot_enabled")
+                    .or_else(|| sandbox.get("snapshotEnabled"))
+                    .and_then(|v| v.as_bool()).unwrap_or(false),
+                source_path: path.to_string_lossy().to_string(),
+            });
+        }
+    }
+    // Also check config.toml for [sandbox] section
+    let toml_path = project_path.join(".codex").join("config.toml");
+    if toml_path.exists() {
+        if let Ok(text) = fs::read_to_string(&toml_path) {
+            let parsed = parse_toml_to_json(&text);
+            if let Some(sandbox) = parsed.get("sandbox") {
+                return Some(SandboxConfig {
+                    enabled: sandbox.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                    network_isolation: sandbox.get("network_isolation").and_then(|v| v.as_bool()).unwrap_or(false),
+                    allowed_ports: Vec::new(),
+                    filesystem_policy: sandbox.get("filesystem_policy").and_then(|v| v.as_str()).unwrap_or("read-write").to_string(),
+                    timeout_secs: sandbox.get("timeout_secs").and_then(|v| v.as_u64()),
+                    snapshot_enabled: sandbox.get("snapshot_enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                    source_path: toml_path.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn parse_approval_policies(project_path: &PathBuf) -> Vec<ApprovalPolicy> {
+    let mut out = Vec::new();
+    let candidates = [
+        (project_path.join(".codex").join("policies.json"), "project"),
+        (home_dir().join(".codex").join("policies.json"), "user"),
+        (project_path.join("codex.json"), "project"),
+    ];
+    for (path, scope) in &candidates {
+        if !path.exists() { continue; }
+        let Ok(text) = fs::read_to_string(path) else { continue };
+        let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(&text) else { continue };
+        let policies = value.get("approval_policies")
+            .or_else(|| value.get("approvalPolicies"))
+            .or_else(|| value.get("policies"));
+        if let Some(policies) = policies.and_then(|v| v.as_object()) {
+            for (tool, policy_val) in policies {
+                let policy_str = policy_val.as_str()
+                    .unwrap_or_else(|| policy_val.get("level").and_then(|v| v.as_str()).unwrap_or("on-request"));
+                out.push(ApprovalPolicy {
+                    tool_name: tool.clone(),
+                    policy: policy_str.to_string(),
+                    scope: scope.to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Write sandbox config to .codex/sandbox.json via the safe write pipeline.
+#[tauri::command]
+fn write_sandbox_config(
+    db: State<'_, DbState>,
+    project_path: String,
+    config: SandboxConfig,
+) -> Result<WriteResult, String> {
+    let dest = PathBuf::from(&project_path).join(".codex").join("sandbox.json");
+    let content = serde_json::to_string_pretty(&json!({
+        "sandbox": {
+            "enabled": config.enabled,
+            "network_isolation": config.network_isolation,
+            "filesystem_policy": config.filesystem_policy,
+            "timeout_secs": config.timeout_secs,
+            "snapshot_enabled": config.snapshot_enabled,
+            "allowed_ports": config.allowed_ports,
+        }
+    })).unwrap_or_default();
+    write_agent_config_file(db, dest.to_string_lossy().to_string(), content + "\n", None, Some(true))
+}
+
+/// Write approval policies to .codex/policies.json via the safe write pipeline.
+#[tauri::command]
+fn write_approval_policies(
+    db: State<'_, DbState>,
+    project_path: String,
+    policies: Vec<ApprovalPolicy>,
+) -> Result<WriteResult, String> {
+    let dest = PathBuf::from(&project_path).join(".codex").join("policies.json");
+    let mut map = serde_json::Map::new();
+    for p in &policies {
+        map.insert(p.tool_name.clone(), serde_json::Value::String(p.policy.clone()));
+    }
+    let content = serde_json::to_string_pretty(&json!({
+        "approvalPolicies": serde_json::Value::Object(map)
+    })).unwrap_or_default();
+    write_agent_config_file(db, dest.to_string_lossy().to_string(), content + "\n", None, Some(true))
+}
+
+/// Write a TOML config file from JSON value via the safe write pipeline.
+#[tauri::command]
+fn write_toml_config(
+    db: State<'_, DbState>,
+    path: String,
+    value: serde_json::Value,
+) -> Result<WriteResult, String> {
+    let content = json_to_toml(&value)?;
+    write_agent_config_file(db, path, content, None, Some(true))
+}
+
+// ── OpenClaw Workspace Parsing ──────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawWorkspace {
+    pub soul: OpenClawSoul,
+    pub tools: Vec<OpenClawTool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawSoul {
+    pub name: Option<String>,
+    pub role: Option<String>,
+    pub traits: Vec<String>,
+    pub raw_content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawTool {
+    pub name: String,
+    pub description: String,
+}
+
+#[tauri::command]
+fn parse_openclaw_workspace(project_path: String) -> Result<OpenClawWorkspace, String> {
+    let pb = PathBuf::from(&project_path);
+    let openclaw_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
+
+    // SOUL.md — check project then global
+    let soul_path = if pb.join("SOUL.md").exists() { pb.join("SOUL.md") }
+        else { openclaw_home.join("workspace").join("SOUL.md") };
+    let soul_raw = read_file_lossy(&soul_path).unwrap_or_default();
+    let mut soul = OpenClawSoul { name: None, role: None, traits: Vec::new(), raw_content: soul_raw.clone() };
+    // Parse frontmatter or first heading
+    for line in soul_raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ") { soul.name = Some(trimmed[2..].trim().to_string()); }
+        if trimmed.to_lowercase().starts_with("role:") { soul.role = Some(trimmed[5..].trim().to_string()); }
+        if trimmed.starts_with("- ") && soul.name.is_some() { soul.traits.push(trimmed[2..].trim().to_string()); }
+    }
+
+    // TOOLS.md — parse ## headings as tool names
+    let tools_path = if pb.join("TOOLS.md").exists() { pb.join("TOOLS.md") }
+        else { openclaw_home.join("workspace").join("TOOLS.md") };
+    let tools_raw = read_file_lossy(&tools_path).unwrap_or_default();
+    let mut tools = Vec::new();
+    let mut current_tool: Option<String> = None;
+    let mut current_desc = String::new();
+    for line in tools_raw.lines() {
+        if line.starts_with("## ") {
+            if let Some(name) = current_tool.take() {
+                tools.push(OpenClawTool { name, description: current_desc.trim().to_string() });
+            }
+            current_tool = Some(line[3..].trim().to_string());
+            current_desc = String::new();
+        } else if current_tool.is_some() {
+            current_desc.push_str(line.trim());
+            current_desc.push(' ');
+        }
+    }
+    if let Some(name) = current_tool {
+        tools.push(OpenClawTool { name, description: current_desc.trim().to_string() });
+    }
+
+    Ok(OpenClawWorkspace { soul, tools })
+}
+
+// ── Gemini Agent YAML Parsing ──────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiAgentDef {
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub instruction: Option<String>,
+    pub sub_agents: Vec<GeminiSubAgent>,
+    pub tools: Vec<GeminiToolRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiSubAgent {
+    pub name: String,
+    pub model: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiToolRef {
+    pub name: String,
+    pub kind: Option<String>,
+}
+
+#[tauri::command]
+fn parse_gemini_agent(path: String) -> Result<GeminiAgentDef, String> {
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read: {}", e))?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Invalid YAML: {}", e))?;
+
+    let name = value.get("name").and_then(|v| v.as_str()).map(String::from);
+    let model = value.get("model").and_then(|v| v.as_str()).map(String::from);
+    let instruction = value.get("instruction").and_then(|v| v.as_str()).map(|s| {
+        if s.len() > 200 { format!("{}…", &s[..200]) } else { s.to_string() }
+    });
+
+    let sub_agents = value.get("sub_agents")
+        .or_else(|| value.get("subAgents"))
+        .and_then(|v| v.as_sequence())
+        .map(|seq| seq.iter().filter_map(|a| {
+            let name = a.get("name").or_else(|| a.get("agent")).and_then(|v| v.as_str())?;
+            Some(GeminiSubAgent {
+                name: name.to_string(),
+                model: a.get("model").and_then(|v| v.as_str()).map(String::from),
+                description: a.get("description").and_then(|v| v.as_str()).map(String::from),
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    let tools = value.get("tools")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| seq.iter().filter_map(|t| {
+            if let Some(s) = t.as_str() {
+                return Some(GeminiToolRef { name: s.to_string(), kind: None });
+            }
+            let name = t.get("name").and_then(|v| v.as_str())?;
+            let kind = t.get("type").and_then(|v| v.as_str()).map(String::from);
+            Some(GeminiToolRef { name: name.to_string(), kind })
+        }).collect())
+        .unwrap_or_default();
+
+    Ok(GeminiAgentDef { name, model, instruction, sub_agents, tools })
+}
+
+/// Full per-project bundle: memory hierarchy, skills, subagents, commands, hooks, permissions, MCP.
+/// Claude Code-first; other runtimes in Batch 3.
+#[tauri::command]
+fn get_project_bundle(
+    db: State<'_, DbState>,
+    project_path: String,
+) -> Result<ProjectBundle, String> {
+    let project_pb = PathBuf::from(&project_path);
+    if !project_pb.exists() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+    let project_name = project_pb.file_name()
+        .and_then(|n| n.to_str())
+        .map(String::from)
+        .unwrap_or_else(|| project_path.clone());
+
+    let home = home_dir();
+
+    // Runtime detection (same logic as list_projects)
+    let has_claude = project_pb.join(".claude").exists() || project_pb.join("CLAUDE.md").exists();
+    let has_codex = project_pb.join(".codex").exists() || project_pb.join("AGENTS.md").exists();
+    let has_hermes = project_pb.join(".hermes").exists() || project_pb.join("SOUL.md").exists();
+    let has_openclaw = project_pb.join("SOUL.md").exists() && project_pb.join("TOOLS.md").exists();
+    let has_gemini = project_pb.join(".gemini").exists() || project_pb.join("GEMINI.md").exists();
+
+    // Memory files: user CLAUDE.md, project CLAUDE.md, nested CLAUDE.md
+    let mut memory_files = Vec::new();
+    memory_files.push(file_ref("~/.claude/CLAUDE.md", home.join(".claude").join("CLAUDE.md"), "user"));
+    memory_files.push(file_ref("CLAUDE.md", project_pb.join("CLAUDE.md"), "project"));
+    memory_files.extend(list_nested_claude_md(&project_pb, 4));
+
+    // Subagents
+    let mut subagents = Vec::new();
+    subagents.extend(list_dir_md_files(&home.join(".claude").join("agents"), "user"));
+    subagents.extend(list_dir_md_files(&project_pb.join(".claude").join("agents"), "project"));
+
+    // Commands
+    let mut commands = Vec::new();
+    commands.extend(list_dir_md_files(&home.join(".claude").join("commands"), "user"));
+    commands.extend(list_dir_md_files(&project_pb.join(".claude").join("commands"), "project"));
+
+    // Settings files
+    let user_settings = home.join(".claude").join("settings.json");
+    let user_settings_local = home.join(".claude").join("settings.local.json");
+    let project_settings = project_pb.join(".claude").join("settings.json");
+    let project_settings_local = project_pb.join(".claude").join("settings.local.json");
+    let project_mcp = project_pb.join(".mcp.json");
+
+    let mut settings_files = Vec::new();
+    settings_files.push(file_ref("~/.claude/settings.json", user_settings.clone(), "user"));
+    settings_files.push(file_ref("~/.claude/settings.local.json", user_settings_local, "user"));
+    settings_files.push(file_ref(".claude/settings.json", project_settings.clone(), "project"));
+    settings_files.push(file_ref(".claude/settings.local.json", project_settings_local, "project"));
+    settings_files.push(file_ref(".mcp.json", project_mcp.clone(), "project"));
+
+    // Skills (global Claude + project Claude)
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut skills = Vec::new();
+    skills.extend(collect_skills_for_project(
+        &home.join(".claude").join("skills"), "personal", "claude", None, &conn,
+    ));
+    skills.extend(collect_skills_for_project(
+        &project_pb.join(".claude").join("skills"), "project", "claude",
+        Some(&project_name),
+        &conn,
+    ));
+    drop(conn);
+
+    // Hooks from settings.json (user + project)
+    let mut hooks = Vec::new();
+    hooks.extend(collect_hooks_from_settings(&user_settings, "user"));
+    hooks.extend(collect_hooks_from_settings(&project_settings, "project"));
+
+    // Permissions (user + project, separate)
+    let permissions_user = parse_permissions_from_settings(&user_settings, "user");
+    let permissions_project = parse_permissions_from_settings(&project_settings, "project");
+
+    // MCP: from user settings.json .mcpServers + project .mcp.json
+    let mut mcp_servers = Vec::new();
+    mcp_servers.extend(parse_mcp_from_settings(&user_settings, "user"));
+    mcp_servers.extend(parse_mcp_from_settings(&project_mcp, "project"));
+
+    // ── Codex ────────────────────────────────────────────────────────────
+    let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
+        .unwrap_or_else(|_| home.join(".codex").to_string_lossy().to_string()));
+    let mut codex_files = Vec::new();
+    codex_files.push(file_ref("~/.codex/AGENTS.md", codex_home.join("AGENTS.md"), "user"));
+    codex_files.push(file_ref("~/.codex/config.toml", codex_home.join("config.toml"), "user"));
+    codex_files.push(file_ref("AGENTS.md", project_pb.join("AGENTS.md"), "project"));
+    codex_files.push(file_ref(".codex/config.toml", project_pb.join(".codex").join("config.toml"), "project"));
+
+    let conn2 = db.0.lock().map_err(|e| e.to_string())?;
+    let mut codex_skills = Vec::new();
+    codex_skills.extend(collect_skills_for_project(
+        &codex_home.join("skills"), "personal", "codex", None, &conn2,
+    ));
+    codex_skills.extend(collect_skills_for_project(
+        &home.join(".agents").join("skills"), "personal", "codex", None, &conn2,
+    ));
+    codex_skills.extend(collect_skills_for_project(
+        &project_pb.join(".codex").join("skills"), "project", "codex",
+        Some(&project_name), &conn2,
+    ));
+    codex_skills.extend(collect_skills_for_project(
+        &project_pb.join(".agents").join("skills"), "project", "codex",
+        Some(&project_name), &conn2,
+    ));
+
+    // ── OpenClaw ─────────────────────────────────────────────────────────
+    let openclaw_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home.join(".openclaw").to_string_lossy().to_string()));
+    let openclaw_workspace = openclaw_home.join("workspace");
+    let mut openclaw_files = Vec::new();
+    openclaw_files.push(file_ref("~/.openclaw/openclaw.json", openclaw_home.join("openclaw.json"), "user"));
+    openclaw_files.push(file_ref("~/.openclaw/workspace/SOUL.md", openclaw_workspace.join("SOUL.md"), "user"));
+    openclaw_files.push(file_ref("~/.openclaw/workspace/TOOLS.md", openclaw_workspace.join("TOOLS.md"), "user"));
+    openclaw_files.push(file_ref("~/.openclaw/workspace/AGENTS.md", openclaw_workspace.join("AGENTS.md"), "user"));
+    openclaw_files.push(file_ref("SOUL.md", project_pb.join("SOUL.md"), "project"));
+    openclaw_files.push(file_ref("TOOLS.md", project_pb.join("TOOLS.md"), "project"));
+
+    let mut openclaw_skills = Vec::new();
+    openclaw_skills.extend(collect_skills_for_project(
+        &openclaw_home.join("skills"), "personal", "openclaw", None, &conn2,
+    ));
+    openclaw_skills.extend(collect_skills_for_project(
+        &project_pb.join(".openclaw").join("skills"), "project", "openclaw",
+        Some(&project_name), &conn2,
+    ));
+    openclaw_skills.extend(collect_skills_for_project(
+        &project_pb.join("skills"), "project", "openclaw",
+        Some(&project_name), &conn2,
+    ));
+
+    // ── Hermes ───────────────────────────────────────────────────────────
+    let hermes_home = home.join(".hermes");
+    let mut hermes_files = Vec::new();
+    hermes_files.push(file_ref("~/.hermes/SOUL.md", hermes_home.join("SOUL.md"), "user"));
+    hermes_files.push(file_ref("~/.hermes/config.yaml", hermes_home.join("config.yaml"), "user"));
+    hermes_files.push(file_ref("~/.hermes/memories/MEMORY.md", hermes_home.join("memories").join("MEMORY.md"), "user"));
+    hermes_files.push(file_ref("~/.hermes/memories/USER.md", hermes_home.join("memories").join("USER.md"), "user"));
+    // Scan for additional memory files beyond MEMORY.md and USER.md
+    let memories_dir = hermes_home.join("memories");
+    if memories_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&memories_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if p.is_file() && name.ends_with(".md") && name != "MEMORY.md" && name != "USER.md" {
+                        hermes_files.push(file_ref(
+                            &format!("~/.hermes/memories/{}", name),
+                            p, "user",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut hermes_skills = Vec::new();
+    hermes_skills.extend(collect_skills_for_project(
+        &hermes_home.join("skills"), "personal", "hermes", None, &conn2,
+    ));
+    hermes_skills.extend(collect_skills_for_project(
+        &project_pb.join(".hermes").join("skills"), "project", "hermes",
+        Some(&project_name), &conn2,
+    ));
+
+    // ── Gemini CLI / ADK ─────────────────────────────────────────────────
+    let gemini_hm = gemini_home();
+    let mut gemini_files = Vec::new();
+    gemini_files.push(file_ref("~/.gemini/GEMINI.md", gemini_hm.join("GEMINI.md"), "user"));
+    gemini_files.push(file_ref("~/.gemini/settings.json", gemini_hm.join("settings.json"), "user"));
+    gemini_files.push(file_ref("GEMINI.md", project_pb.join("GEMINI.md"), "project"));
+    gemini_files.push(file_ref(".gemini/settings.json", project_pb.join(".gemini").join("settings.json"), "project"));
+    gemini_files.push(file_ref("root_agent.yaml", project_pb.join("root_agent.yaml"), "project"));
+
+    // Gemini skills/agents (not yet a convention — check .gemini/agents/ if present)
+    let mut gemini_skills = Vec::new();
+    gemini_skills.extend(collect_skills_for_project(
+        &project_pb.join(".gemini").join("agents"), "project", "gemini",
+        Some(&project_name), &conn2,
+    ));
+
+    drop(conn2);
+
+    // ── OpenAI Agents SDK (enriches Codex) ───────────────────────────────
+    let sandbox_config = if has_codex { parse_sandbox_config(&project_pb) } else { None };
+    let approval_policies = if has_codex { parse_approval_policies(&project_pb) } else { Vec::new() };
+
+    Ok(ProjectBundle {
+        project_path,
+        project_name,
+        has_claude,
+        has_codex,
+        has_hermes,
+        has_openclaw,
+        has_gemini,
+        memory_files,
+        subagents,
+        commands,
+        settings_files,
+        skills,
+        hooks,
+        permissions_user,
+        permissions_project,
+        mcp_servers,
+        codex_files,
+        codex_skills,
+        openclaw_files,
+        openclaw_skills,
+        hermes_files,
+        hermes_skills,
+        gemini_files,
+        gemini_skills,
+        sandbox_config,
+        approval_policies,
+    })
 }
 
 /// Add a project to the list
@@ -5538,6 +6884,7 @@ fn add_project(db: State<'_, DbState>, name: String, path: String) -> Result<Pro
         has_codex: path_buf.join(".codex").exists() || path_buf.join("AGENTS.md").exists(),
         has_hermes: path_buf.join(".hermes").exists() || path_buf.join("SOUL.md").exists(),
         has_openclaw: path_buf.join("SOUL.md").exists() && path_buf.join("TOOLS.md").exists(),
+        has_gemini: path_buf.join(".gemini").exists() || path_buf.join("GEMINI.md").exists(),
     })
 }
 
@@ -5605,6 +6952,7 @@ fn get_active_project(db: State<'_, DbState>) -> Result<Option<Project>, String>
                 has_codex: path_buf.join(".codex").exists() || path_buf.join("AGENTS.md").exists(),
                 has_hermes: path_buf.join(".hermes").exists() || path_buf.join("SOUL.md").exists(),
                 has_openclaw: path_buf.join("SOUL.md").exists() && path_buf.join("TOOLS.md").exists(),
+                has_gemini: path_buf.join(".gemini").exists() || path_buf.join("GEMINI.md").exists(),
             })
         },
     );
@@ -7892,6 +9240,21 @@ pub fn run() {
             scan_agent_config_files,
             read_agent_config_file,
             write_agent_config_file,
+            preview_write_agent_config_file,
+            validate_settings_json,
+            get_project_bundle,
+            list_backups,
+            restore_backup,
+            detect_ollama,
+            list_ollama_models,
+            get_ollama_config,
+            write_sandbox_config,
+            write_approval_policies,
+            write_toml_config,
+            parse_openclaw_workspace,
+            parse_gemini_agent,
+            watch_project_files,
+            stop_watching_project,
             create_agent_skill,
             parse_agent_permissions,
             get_agent_context_preview,
@@ -7988,4 +9351,143 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sha256_hex() {
+        let hash = sha256_hex(b"hello world");
+        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+    }
+
+    #[test]
+    fn test_sha256_hex_empty() {
+        let hash = sha256_hex(b"");
+        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
+    #[test]
+    fn test_compute_diff_identical() {
+        let (diff, added, removed) = compute_diff("hello\nworld", "hello\nworld");
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
+        assert!(diff.is_empty() || diff.iter().all(|d| d.kind == "context"));
+    }
+
+    #[test]
+    fn test_compute_diff_addition() {
+        let (diff, added, removed) = compute_diff("line1\nline3", "line1\nline2\nline3");
+        // prefix/suffix algorithm: "line1" is common prefix, "line3" is common suffix,
+        // middle is "nothing" (old) vs "line2" (new) → 1 added, 0 removed
+        assert_eq!(added, 1);
+        assert_eq!(removed, 0);
+        assert!(diff.iter().any(|d| d.kind == "add"));
+    }
+
+    #[test]
+    fn test_compute_diff_removal() {
+        let (diff, added, removed) = compute_diff("a\nb\nc", "a\nc");
+        assert!(removed > 0);
+        assert!(diff.iter().any(|d| d.kind == "remove"));
+    }
+
+    #[test]
+    fn test_validate_settings_json_valid() {
+        let result = validate_settings_json(r#"{"permissions": {"allow": ["Read"]}}"#.to_string()).unwrap();
+        assert!(result.valid);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_validate_settings_json_invalid_json() {
+        let result = validate_settings_json("not json".to_string()).unwrap();
+        assert!(!result.valid);
+        assert!(!result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_validate_settings_json_bad_permissions() {
+        let result = validate_settings_json(r#"{"permissions": "bad"}"#.to_string()).unwrap();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.field == "permissions"));
+    }
+
+    #[test]
+    fn test_validate_settings_json_bad_mcp_server() {
+        let result = validate_settings_json(
+            r#"{"mcpServers": {"test": {"noCommand": true}}}"#.to_string()
+        ).unwrap();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.field.contains("mcpServers")));
+    }
+
+    #[test]
+    fn test_validate_settings_json_valid_mcp() {
+        let result = validate_settings_json(
+            r#"{"mcpServers": {"fs": {"command": "npx", "args": ["mcp-fs"]}}}"#.to_string()
+        ).unwrap();
+        assert!(result.valid);
+    }
+
+    #[test]
+    fn test_validate_settings_json_unknown_keys_ok() {
+        let result = validate_settings_json(
+            r#"{"customKey": "value", "another": 42}"#.to_string()
+        ).unwrap();
+        assert!(result.valid);
+    }
+
+    #[test]
+    fn test_parse_toml_to_json_basic() {
+        let result = parse_toml_to_json("[model]\nname = \"gpt-4\"\ntemperature = 0.7\n");
+        let model = result.get("model").unwrap();
+        assert_eq!(model.get("name").unwrap().as_str().unwrap(), "gpt-4");
+        assert!((model.get("temperature").unwrap().as_f64().unwrap() - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_toml_to_json_nested() {
+        let result = parse_toml_to_json("[a.b]\nc = true\n");
+        assert_eq!(result["a"]["b"]["c"].as_bool().unwrap(), true);
+    }
+
+    #[test]
+    fn test_parse_toml_to_json_array() {
+        let result = parse_toml_to_json("ports = [80, 443, 8080]\n");
+        let ports = result["ports"].as_array().unwrap();
+        assert_eq!(ports.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_toml_to_json_invalid() {
+        let result = parse_toml_to_json("this is not toml [[[");
+        assert!(result.get("_parse_error").is_some());
+    }
+
+    #[test]
+    fn test_json_to_toml_roundtrip() {
+        let json = serde_json::json!({"model": {"name": "gpt-4", "temperature": 0.7}});
+        let toml_str = json_to_toml(&json).unwrap();
+        assert!(toml_str.contains("gpt-4"));
+        let back = parse_toml_to_json(&toml_str);
+        assert_eq!(back["model"]["name"].as_str().unwrap(), "gpt-4");
+    }
+
+    #[test]
+    fn test_estimate_tokens() {
+        assert_eq!(estimate_tokens(400), 100);
+        assert_eq!(estimate_tokens(0), 0);
+        assert_eq!(estimate_tokens(3), 0);
+    }
+
+    #[test]
+    fn test_file_ref_nonexistent() {
+        let f = file_ref("test", PathBuf::from("/nonexistent/path/file.md"), "user");
+        assert!(!f.exists);
+        assert_eq!(f.size_bytes, 0);
+        assert_eq!(f.token_estimate, 0);
+    }
 }

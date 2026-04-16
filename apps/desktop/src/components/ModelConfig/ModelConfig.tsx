@@ -14,6 +14,7 @@ import {
   saveModelConfig,
   type ModelConfig as ModelConfigType,
 } from "@/lib/tauri-api";
+import OllamaProvider from "./OllamaProvider";
 
 const MODELS = {
   claude: [
@@ -283,6 +284,9 @@ export default function ModelConfig() {
           Changes here affect all new conversations but not ongoing ones.
         </p>
       </div>
+
+      {/* Ollama local provider */}
+      <OllamaProvider />
     </div>
   );
 }

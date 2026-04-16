@@ -1,9 +1,13 @@
 import { useTranslation } from "react-i18next";
-import { X, FileText, Copy, Check, Edit3, Save, Loader2, AlertCircle } from "lucide-react";
+import { X, FileText, Copy, Check, Edit3, Save, Loader2, AlertCircle, RefreshCw, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import * as tauriApi from "@/lib/tauri-api";
+import * as tauriApi from "@/lib/api";
+import SaveConfirmDialog from "./editor/SaveConfirmDialog";
+import BackupHistory from "./editor/BackupHistory";
+
+const ATOEditor = lazy(() => import("./editor/ATOEditor"));
 
 interface FileViewerProps {
   filePath: string;
@@ -18,40 +22,44 @@ export default function FileViewer({ filePath, onClose, readOnly = false }: File
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState<null | { added: number; removed: number; backup: string | null }>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Read file content from Tauri
-  const { data: fileContent, isLoading, error } = useQuery({
-    queryKey: ["context-file", filePath],
-    queryFn: () => tauriApi.readContextFile(filePath),
+  // Read file content via the safe agent-config path so we get a content hash.
+  const { data: parsed, isLoading, error } = useQuery({
+    queryKey: ["config-file", filePath],
+    queryFn: () => tauriApi.readAgentConfigFile(filePath),
     retry: false,
   });
 
-  // Update edited content when file content loads
+  const fileContent = parsed?.raw ?? "";
+  const expectedHash = parsed?.contentHash;
+
   useEffect(() => {
-    if (fileContent) {
-      setEditedContent(fileContent);
-    }
-  }, [fileContent]);
+    if (parsed) setEditedContent(parsed.raw);
+  }, [parsed]);
 
   const content = isEditing ? editedContent : fileContent;
   const lineCount = content ? content.split("\n").length : 0;
   const hasChanges = isEditing && editedContent !== fileContent;
 
-  // Save mutation
   const saveMutation = useMutation({
     mutationFn: async () => {
-      await tauriApi.writeContextFile(filePath, editedContent);
+      return await tauriApi.writeAgentConfigFile(filePath, editedContent, {
+        expectedHash,
+      });
     },
-    onSuccess: () => {
-      setSaveSuccess(true);
+    onSuccess: (res) => {
+      setSaveSuccess({ added: res.addedLines, removed: res.removedLines, backup: res.backupPath });
       setSaveError(null);
       setIsEditing(false);
-      queryClient.invalidateQueries({ queryKey: ["context-file", filePath] });
-      setTimeout(() => setSaveSuccess(false), 2500);
+      setConfirmOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["config-file", filePath] });
+      setTimeout(() => setSaveSuccess(null), 4000);
     },
     onError: (err) => {
-      setSaveError(err instanceof Error ? err.message : "Failed to save file");
+      setSaveError(err instanceof Error ? err.message : String(err));
+      setConfirmOpen(false);
     },
   });
 
@@ -75,15 +83,20 @@ export default function FileViewer({ filePath, onClose, readOnly = false }: File
     setSaveError(null);
   }
 
-  function handleSave() {
+  function requestSave() {
+    setSaveError(null);
+    setConfirmOpen(true);
+  }
+
+  function confirmSave() {
     saveMutation.mutate();
   }
 
-  // Determine if file is editable (config/skill files)
   const isEditable = !readOnly && (
     filePath.endsWith(".json") ||
     filePath.endsWith(".md") ||
     filePath.endsWith(".yaml") ||
+    filePath.endsWith(".yml") ||
     filePath.endsWith(".toml")
   );
 
@@ -143,7 +156,7 @@ export default function FileViewer({ filePath, onClose, readOnly = false }: File
                   Cancel
                 </button>
                 <button
-                  onClick={handleSave}
+                  onClick={requestSave}
                   disabled={saveMutation.isPending || !hasChanges}
                   className={cn(
                     "flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors",
@@ -171,23 +184,86 @@ export default function FileViewer({ filePath, onClose, readOnly = false }: File
         </div>
 
         {/* Save error */}
-        {saveError && (
-          <div className="mx-4 mt-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
-            <AlertCircle size={14} className="text-red-400 shrink-0" />
-            <p className="text-xs text-red-300">{saveError}</p>
+        {saveError && !saveError.startsWith("CONFLICT:") && !saveError.startsWith("VALIDATION_FAILED:") && (
+          <div className="mx-4 mt-4 flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+            <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+            <p className="text-xs text-red-300 break-words">{saveError}</p>
+          </div>
+        )}
+
+        {/* Conflict: file changed on disk */}
+        {saveError?.startsWith("CONFLICT:") && (
+          <div className="mx-4 mt-4 flex items-start gap-3 px-3 py-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+            <AlertTriangle size={16} className="text-yellow-400 shrink-0 mt-0.5" />
+            <div className="flex-1 text-xs text-yellow-100/90">
+              <p className="font-semibold text-yellow-300 mb-0.5">File changed on disk</p>
+              <p className="text-yellow-100/70 mb-2">
+                Someone (or another process) wrote to this file after you opened it. Reload to see the
+                latest version, or overwrite to force your changes.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setSaveError(null);
+                    queryClient.invalidateQueries({ queryKey: ["config-file", filePath] });
+                  }}
+                  className="flex items-center gap-1.5 rounded-md bg-yellow-500/20 px-2.5 py-1 text-yellow-200 hover:bg-yellow-500/30"
+                >
+                  <RefreshCw size={11} /> Reload
+                </button>
+                <button
+                  onClick={() => {
+                    setSaveError(null);
+                    tauriApi.writeAgentConfigFile(filePath, editedContent, { skipValidation: false })
+                      .then((res) => {
+                        setSaveSuccess({ added: res.addedLines, removed: res.removedLines, backup: res.backupPath });
+                        setIsEditing(false);
+                        queryClient.invalidateQueries({ queryKey: ["config-file", filePath] });
+                      })
+                      .catch((err) => setSaveError(err instanceof Error ? err.message : String(err)));
+                  }}
+                  className="flex items-center gap-1.5 rounded-md border border-yellow-500/30 px-2.5 py-1 text-yellow-200 hover:bg-yellow-500/10"
+                >
+                  Overwrite anyway
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Validation failed */}
+        {saveError?.startsWith("VALIDATION_FAILED:") && (
+          <div className="mx-4 mt-4 flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
+            <AlertTriangle size={14} className="text-red-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-red-300">
+              <p className="font-semibold mb-1">Schema validation failed</p>
+              <p className="text-red-200/70 break-words">{saveError.replace("VALIDATION_FAILED: ", "")}</p>
+            </div>
           </div>
         )}
 
         {/* Save success */}
         {saveSuccess && (
-          <div className="mx-4 mt-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-cs-success/10 border border-cs-success/20">
-            <Check size={14} className="text-cs-success shrink-0" />
-            <p className="text-xs text-cs-success">File saved successfully</p>
+          <div className="mx-4 mt-4 flex items-start gap-2 px-3 py-2 rounded-lg bg-cs-success/10 border border-cs-success/20">
+            <Check size={14} className="text-cs-success shrink-0 mt-0.5" />
+            <div className="text-xs text-cs-success">
+              <p>Saved — +{saveSuccess.added} / −{saveSuccess.removed} lines.</p>
+              {saveSuccess.backup && (
+                <p className="text-[10px] text-cs-success/70 font-mono truncate mt-0.5">
+                  Backup: {saveSuccess.backup.split("/").pop()}
+                </p>
+              )}
+            </div>
           </div>
         )}
 
+        {/* Backup history (collapsed by default) */}
+        {isEditable && parsed && (
+          <BackupHistory filePath={filePath} currentHash={expectedHash} />
+        )}
+
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-hidden p-4">
           {isLoading ? (
             <div className="flex items-center justify-center h-full">
               <Loader2 size={24} className="text-cs-muted animate-spin" />
@@ -200,23 +276,25 @@ export default function FileViewer({ filePath, onClose, readOnly = false }: File
               <p className="text-xs text-cs-muted/60 mt-1 font-mono">{filePath}</p>
             </div>
           ) : isEditing ? (
-            <textarea
-              value={editedContent}
-              onChange={(e) => setEditedContent(e.target.value)}
-              className="w-full h-full min-h-[400px] text-sm font-mono text-cs-text bg-cs-bg border border-cs-border rounded-lg p-4 resize-none focus:outline-none focus:border-cs-accent/50 focus:ring-1 focus:ring-cs-accent/20"
-              spellCheck={false}
-            />
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="text-cs-muted animate-spin" /></div>}>
+              <ATOEditor
+                value={editedContent}
+                filePath={filePath}
+                onChange={setEditedContent}
+                onSave={hasChanges ? requestSave : undefined}
+                className="h-full w-full overflow-hidden rounded-lg border border-cs-border bg-cs-bg"
+              />
+            </Suspense>
           ) : content ? (
-            <pre className="text-sm font-mono text-cs-text whitespace-pre-wrap leading-relaxed">
-              {content.split("\n").map((line, i) => (
-                <div key={i} className="flex hover:bg-cs-bg/50 -mx-2 px-2 rounded">
-                  <span className="text-cs-muted/40 select-none w-8 shrink-0 text-right mr-3 text-xs leading-relaxed">
-                    {i + 1}
-                  </span>
-                  <span className="flex-1">{line || "\u00A0"}</span>
-                </div>
-              ))}
-            </pre>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="text-cs-muted animate-spin" /></div>}>
+              <ATOEditor
+                value={content}
+                filePath={filePath}
+                readOnly
+                onChange={() => {}}
+                className="h-full w-full overflow-hidden rounded-lg border border-cs-border bg-cs-bg"
+              />
+            </Suspense>
           ) : (
             <div className="text-center py-12">
               <FileText size={32} className="text-cs-muted/30 mx-auto mb-3" />
@@ -233,6 +311,15 @@ export default function FileViewer({ filePath, onClose, readOnly = false }: File
           )}
         </div>
       </div>
+
+      <SaveConfirmDialog
+        open={confirmOpen}
+        filePath={filePath}
+        newContent={editedContent}
+        onConfirm={confirmSave}
+        onCancel={() => setConfirmOpen(false)}
+        saving={saveMutation.isPending}
+      />
     </>
   );
 }

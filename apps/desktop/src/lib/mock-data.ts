@@ -151,3 +151,72 @@ export const mockConfigFiles = [
   { path: '.claude/skills/', exists: false, scope: 'Project skills' },
   { path: 'CLAUDE.md', exists: true, scope: 'Project context' },
 ];
+
+// ── Mocks for Batches 1-5 + A-C features ──────────────────────────────────
+
+export const mockProjectBundle = {
+  projectPath: "/mock/project",
+  projectName: "Mock Project",
+  hasClaude: true, hasCodex: false, hasHermes: false, hasOpenclaw: false, hasGemini: false,
+  memoryFiles: [
+    { label: "CLAUDE.md", path: "/mock/CLAUDE.md", scope: "project" as const, exists: true, sizeBytes: 1024, tokenEstimate: 256, lastModified: Math.floor(Date.now() / 1000) },
+  ],
+  subagents: [] as { label: string; path: string; scope: string; exists: boolean; sizeBytes: number; tokenEstimate: number; lastModified: number | null }[],
+  commands: [] as typeof mockProjectBundle.subagents,
+  settingsFiles: [
+    { label: "~/.claude/settings.json", path: "/mock/.claude/settings.json", scope: "user" as const, exists: true, sizeBytes: 512, tokenEstimate: 128, lastModified: Math.floor(Date.now() / 1000) },
+  ],
+  skills: [] as typeof mockSkills,
+  hooks: [] as { event: string; matcher: string | null; command: string; scope: string }[],
+  permissionsUser: { allow: [] as string[], deny: [] as string[], ask: [] as string[], scope: "user" },
+  permissionsProject: { allow: [] as string[], deny: [] as string[], ask: [] as string[], scope: "project" },
+  mcpServers: [] as { name: string; kind: string; commandOrUrl: string; scope: string }[],
+  codexFiles: [] as typeof mockProjectBundle.subagents,
+  codexSkills: [] as typeof mockSkills,
+  openclawFiles: [] as typeof mockProjectBundle.subagents,
+  openclawSkills: [] as typeof mockSkills,
+  hermesFiles: [] as typeof mockProjectBundle.subagents,
+  hermesSkills: [] as typeof mockSkills,
+  geminiFiles: [] as typeof mockProjectBundle.subagents,
+  geminiSkills: [] as typeof mockSkills,
+  sandboxConfig: null,
+  approvalPolicies: [] as { toolName: string; policy: string; scope: string }[],
+};
+
+export const mockParsedConfigFile = {
+  path: "/mock/file.md",
+  format: "markdown" as const,
+  content: { body: "# Mock file\n\nThis is mock content for browser dev mode." },
+  raw: "# Mock file\n\nThis is mock content for browser dev mode.",
+  contentHash: "mockhash0000",
+  lastModified: Math.floor(Date.now() / 1000),
+  sizeBytes: 64,
+};
+
+export const mockWriteResult = {
+  path: "/mock/file.md",
+  newHash: "mockhash0001",
+  bytesWritten: 64,
+  backupPath: null,
+  addedLines: 0,
+  removedLines: 0,
+};
+
+export const mockWritePreview = {
+  diff: [] as { kind: string; oldLine: number | null; newLine: number | null; text: string }[],
+  addedLines: 0, removedLines: 0,
+  currentHash: "mockhash0000", newHash: "mockhash0001",
+  validation: null,
+};
+
+export const mockValidation = { valid: true, errors: [] as { field: string; message: string; line: number | null }[] };
+
+export const mockBackups = [] as { backupPath: string; originalFilename: string; timestamp: number; sha8: string; sizeBytes: number }[];
+
+export const mockOllamaStatus = { running: false, version: null, endpoint: "http://localhost:11434" };
+export const mockOllamaModels = [] as { name: string; size: number; digest: string; modifiedAt: string; parameterSize: string | null; quantization: string | null }[];
+export const mockOllamaConfig = { host: null, modelsDir: null, keepAlive: null, flashAttention: null, cudaVisibleDevices: null, numParallel: null };
+
+export const mockProjects = [
+  { id: "mock-1", name: "Mock Project", path: "/mock/project", isActive: true, skillCount: 3, lastAccessed: new Date().toISOString(), createdAt: new Date().toISOString(), hasClaude: true, hasCodex: false, hasHermes: false, hasOpenclaw: false, hasGemini: false },
+];

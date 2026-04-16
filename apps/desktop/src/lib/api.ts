@@ -10,6 +10,15 @@
 import * as tauriApi from './tauri-api';
 import * as mock from './mock-data';
 
+// Re-export all types so components can import from api.ts instead of tauri-api.ts
+export type {
+  Project, ProjectBundle, ProjectFileRef, ProjectHookSummary, ProjectMcpSummary,
+  ProjectPermissions, ParsedConfigFile, WriteResult, WritePreview, WriteOptions,
+  ValidationResult, ValidationError, DiffLine, BackupEntry, SandboxConfig,
+  ApprovalPolicy, OllamaStatus, OllamaModel, OllamaConfig, LocalSkill,
+  OpenClawWorkspace, GeminiAgentDef, AuditLogEntry,
+} from './tauri-api';
+
 const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 const API_BASE = import.meta.env.VITE_API_URL || 'https://api.agentictool.ai/api';
 
@@ -332,3 +341,107 @@ export async function getSyncStatus() {
 export async function setSyncEnabled(enabled: boolean, cloudUrl?: string) {
   if (isTauri) return tauriApi.setSyncEnabled(enabled, cloudUrl);
 }
+
+// ---- Projects (Batch 2+) ----
+
+export async function listProjects() {
+  if (isTauri) return tauriApi.listProjects();
+  return mock.mockProjects;
+}
+
+export async function getProjectBundle(projectPath: string) {
+  if (isTauri) return tauriApi.getProjectBundle(projectPath);
+  return mock.mockProjectBundle;
+}
+
+// ---- Safe File Read/Write (Batch 1+) ----
+
+export async function readAgentConfigFile(path: string) {
+  if (isTauri) return tauriApi.readAgentConfigFile(path);
+  return mock.mockParsedConfigFile;
+}
+
+export async function writeAgentConfigFile(path: string, content: string, options?: tauriApi.WriteOptions) {
+  if (isTauri) return tauriApi.writeAgentConfigFile(path, content, options);
+  return mock.mockWriteResult;
+}
+
+export async function previewWriteAgentConfigFile(path: string, newContent: string) {
+  if (isTauri) return tauriApi.previewWriteAgentConfigFile(path, newContent);
+  return mock.mockWritePreview;
+}
+
+export async function validateSettingsJson(content: string) {
+  if (isTauri) return tauriApi.validateSettingsJson(content);
+  return mock.mockValidation;
+}
+
+// ---- Backups (Batch 5) ----
+
+export async function listBackups(originalPath?: string) {
+  if (isTauri) return tauriApi.listBackups(originalPath);
+  return mock.mockBackups;
+}
+
+export async function restoreBackup(backupPath: string, targetPath: string, expectedHash?: string) {
+  if (isTauri) return tauriApi.restoreBackup(backupPath, targetPath, expectedHash);
+  return mock.mockWriteResult;
+}
+
+// ---- Ollama (Batch C) ----
+
+export async function detectOllama() {
+  if (isTauri) return tauriApi.detectOllama();
+  return mock.mockOllamaStatus;
+}
+
+export async function listOllamaModels(endpoint?: string) {
+  if (isTauri) return tauriApi.listOllamaModels(endpoint);
+  return mock.mockOllamaModels;
+}
+
+export async function getOllamaConfig() {
+  if (isTauri) return tauriApi.getOllamaConfig();
+  return mock.mockOllamaConfig;
+}
+
+// ---- Write-back commands (Batch Y) ----
+
+export async function writeSandboxConfig(projectPath: string, config: tauriApi.SandboxConfig) {
+  if (isTauri) return tauriApi.writeSandboxConfig(projectPath, config);
+  return mock.mockWriteResult;
+}
+
+export async function writeApprovalPolicies(projectPath: string, policies: tauriApi.ApprovalPolicy[]) {
+  if (isTauri) return tauriApi.writeApprovalPolicies(projectPath, policies);
+  return mock.mockWriteResult;
+}
+
+export async function writeTomlConfig(path: string, value: unknown) {
+  if (isTauri) return tauriApi.writeTomlConfig(path, value);
+  return mock.mockWriteResult;
+}
+
+// ---- Runtime parsers (Batch W) ----
+
+export async function parseOpenclawWorkspace(projectPath: string) {
+  if (isTauri) return tauriApi.parseOpenclawWorkspace(projectPath);
+  return { soul: { name: null, role: null, traits: [], rawContent: "" }, tools: [] };
+}
+
+export async function parseGeminiAgent(path: string) {
+  if (isTauri) return tauriApi.parseGeminiAgent(path);
+  return { name: null, model: null, instruction: null, subAgents: [], tools: [] };
+}
+
+// ---- Audit logs ----
+
+export async function getAuditLogs(params?: { action?: string; resourceType?: string; limit?: number; offset?: number }) {
+  if (isTauri) return tauriApi.getAuditLogs(params);
+  return [];
+}
+
+// ---- Pass-through for commands without mock needs ----
+
+export { discoverProjects, addProject, updateProject, deleteProject, setActiveProject } from './tauri-api';
+export { createAgentSkill } from './tauri-api';

@@ -24,7 +24,10 @@ import {
   setActiveProject,
   type Project,
   type DiscoveredProject,
-} from "@/lib/tauri-api";
+} from "@/lib/api";
+import { useProjectStore } from "@/stores/useProjectStore";
+import ProjectDashboard from "@/components/Projects/ProjectDashboard";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import AddProjectModal from "./AddProjectModal";
 import CloneSkillModal from "./CloneSkillModal";
 
@@ -37,6 +40,9 @@ export default function ProjectManager() {
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const activeProject = useProjectStore((s) => s.activeProject);
+  const setActiveProjectStore = useProjectStore((s) => s.setActiveProject);
+  const clearActiveProject = useProjectStore((s) => s.clearActiveProject);
 
   // Fetch projects
   const {
@@ -115,6 +121,7 @@ export default function ProjectManager() {
     if (project.hasCodex) badges.push({ name: "Codex", color: "text-green-400 bg-green-400/10" });
     if (project.hasHermes) badges.push({ name: "Hermes", color: "text-purple-400 bg-purple-400/10" });
     if (project.hasOpenclaw) badges.push({ name: "OpenClaw", color: "text-cyan-400 bg-cyan-400/10" });
+    if (project.hasGemini) badges.push({ name: "Gemini", color: "text-blue-400 bg-blue-400/10" });
     return badges;
   };
 
@@ -143,6 +150,12 @@ export default function ProjectManager() {
         </button>
       </div>
     );
+  }
+
+  if (activeProject) {
+    // Keep the stored project in sync with any fetched updates so runtime flags stay fresh.
+    const latest = projects.find((p) => p.id === activeProject.id) ?? activeProject;
+    return <ErrorBoundary><ProjectDashboard project={latest} onBack={clearActiveProject} /></ErrorBoundary>;
   }
 
   return (
@@ -223,8 +236,15 @@ export default function ProjectManager() {
             {filteredProjects.map((project) => (
               <div
                 key={project.id}
+                onClick={(e) => {
+                  // Don't open the dashboard if the click bubbled up from a button/input
+                  const target = e.target as HTMLElement;
+                  if (target.closest("button, input")) return;
+                  if (editingProject === project.id) return;
+                  setActiveProjectStore(project);
+                }}
                 className={cn(
-                  "border rounded-lg p-4 transition-colors",
+                  "border rounded-lg p-4 transition-colors cursor-pointer",
                   project.isActive
                     ? "border-cs-accent bg-cs-accent/5"
                     : "border-cs-border bg-cs-card hover:border-cs-accent/50"
@@ -325,9 +345,21 @@ export default function ProjectManager() {
 
                 {/* Actions */}
                 <div className="flex items-center gap-2 mt-3 pt-3 border-t border-cs-border">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveProjectStore(project);
+                    }}
+                    className="flex-1 px-3 py-1.5 rounded text-xs font-medium bg-cs-accent text-cs-bg hover:bg-cs-accent/90 transition-colors"
+                  >
+                    Open
+                  </button>
                   {!project.isActive && (
                     <button
-                      onClick={() => setActiveMutation.mutate(project.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveMutation.mutate(project.id);
+                      }}
                       disabled={setActiveMutation.isPending}
                       className="flex-1 px-3 py-1.5 rounded text-xs font-medium bg-cs-accent/10 text-cs-accent hover:bg-cs-accent/20 transition-colors"
                     >
@@ -335,14 +367,15 @@ export default function ProjectManager() {
                     </button>
                   )}
                   <button
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       setSelectedProject(project);
                       setShowCloneSkill(true);
                     }}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-cs-border hover:bg-cs-border/50 transition-colors"
+                    className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-cs-border hover:bg-cs-border/50 transition-colors"
                   >
                     <Copy size={12} />
-                    Clone Skill
+                    Clone
                   </button>
                 </div>
               </div>
