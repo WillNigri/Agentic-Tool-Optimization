@@ -213,6 +213,17 @@ api.agentictool.ai         # 7 microservices on Railway
 
 ---
 
+## Engineering Quality
+
+- **CI/CD**: GitHub Actions runs `cargo check` + `cargo test` + `vitest run` + `vite build` on every PR
+- **46 tests**: 35 Rust unit tests (SHA-256, diff, TOML parsing, sandbox config, permissions, hooks, MCP, backup, file resolution) + 11 frontend tests (SectionShell, ErrorBoundary) via Vitest
+- **Code splitting**: All 22 sidebar sections lazy-loaded via React.lazy — initial bundle 140KB gzipped
+- **Accessibility**: ARIA labels on navigation, section shells, dashboard tabs
+- **i18n**: Full EN/PT/ES translations via react-i18next
+- **Modular Rust**: lib.rs (979 lines) + commands.rs (8,745 lines) — types separate from commands
+
+---
+
 ## Quick Start (Development)
 
 ```bash
@@ -237,7 +248,7 @@ Requires [Rust](https://rustup.rs/) and [Tauri 2 prerequisites](https://v2.tauri
 
 | Version | Highlights |
 |---------|-----------|
-| **v1.1.0** | Projects dashboard, 6 runtime support (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES), 18 Rust unit tests |
+| **v1.1.0** | Projects dashboard, 6 runtimes (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor with conflict detection + inline lint, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES), 46 tests, CI/CD, code splitting (140KB initial), ARIA accessibility, lib.rs modular split |
 | **v1.0.0** | SDK (`@ato-sdk/js`), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, rate limiting, Homebrew tap |
 | v0.8.0 | Agent Configuration Manager, advanced automation |
 | v0.7.0 | Marketplace backend, dynamic workflows |
