@@ -4570,7 +4570,29 @@ fn preview_write_agent_config_file(path: String, new_content: String) -> Result<
 /// Returns content_hash (SHA-256) for conflict detection.
 #[tauri::command]
 fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
-    let path_buf = PathBuf::from(&path);
+    let mut path_buf = PathBuf::from(&path);
+    // If path is a directory (e.g., a skill directory), look for SKILL.md or README.md inside
+    if path_buf.is_dir() {
+        let candidates = ["SKILL.md", "README.md", "index.md"];
+        let mut found = false;
+        for candidate in &candidates {
+            let child = path_buf.join(candidate);
+            if child.exists() {
+                path_buf = child;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // List directory contents as a fallback
+            let entries: Vec<String> = fs::read_dir(&path_buf)
+                .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            return Err(format!("Path is a directory. Contents: {}", entries.join(", ")));
+        }
+    }
+    let resolved_path = path_buf.to_string_lossy().to_string();
+
     let content = fs::read_to_string(&path_buf)
         .map_err(|e| format!("Failed to read file: {}", e))?;
     let metadata = fs::metadata(&path_buf).ok();
@@ -4626,7 +4648,7 @@ fn read_agent_config_file(path: String) -> Result<ParsedConfigFile, String> {
     };
 
     Ok(ParsedConfigFile {
-        path,
+        path: resolved_path,
         format,
         content: parsed,
         raw: content,
