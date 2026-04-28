@@ -73,7 +73,7 @@ export default function Dashboard() {
   const Panel = PANELS[section];
 
   // Automation flow needs full width with no padding
-  const isFullWidth = section === "automation" || section === "workspace";
+  const isFullWidth = section === "automation";
 
   if (showSetup) {
     return <SetupWizard onComplete={() => setShowSetup(false)} />;
