@@ -29,7 +29,8 @@
     "config": "Configuration",
     "settings": "Settings",
     "logout": "Logout",
-    "cron": "Cron Monitor"
+    "cron": "Cron Monitor",
+    "workspace": "Workspace"
   },
   "auth": {
     "login": "Sign In",

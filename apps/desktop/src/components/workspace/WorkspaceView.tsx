@@ -1,11 +1,10 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, LayoutGrid } from "lucide-react";
-import { getProjectBundle, listProjects, queryAllAgentStatuses, detectOllama } from "@/lib/api";
+import { getProjectBundle, listProjects } from "@/lib/api";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
 import { useProjectStore } from "@/stores/useProjectStore";
 import WorkspaceCanvas from "./WorkspaceCanvas";
-import WorkspaceToolbar from "./WorkspaceToolbar";
 import WorkspaceDetailPanel from "./WorkspaceDetailPanel";
 
 export default function WorkspaceView() {
@@ -13,12 +12,10 @@ export default function WorkspaceView() {
   const populateFromBundle = useWorkspaceStore((s) => s.populateFromBundle);
   const nodes = useWorkspaceStore((s) => s.nodes);
   const clear = useWorkspaceStore((s) => s.clear);
-  const updateNodeStatus = useWorkspaceStore((s) => s.updateNodeStatus);
   const selectedNodeId = useWorkspaceStore((s) => s.selectedNodeId);
   const selectNode = useWorkspaceStore((s) => s.selectNode);
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null;
 
-  // Get the active project or first project
   const { data: projects = [] } = useQuery({
     queryKey: ["projects"],
     queryFn: listProjects,
@@ -35,67 +32,49 @@ export default function WorkspaceView() {
     staleTime: 10_000,
   });
 
-  // Populate workspace when bundle arrives
   useEffect(() => {
     if (bundle && nodes.length === 0) {
       populateFromBundle(bundle);
     }
   }, [bundle, nodes.length, populateFromBundle]);
 
-  // Clear workspace when project changes
   useEffect(() => {
     clear();
   }, [projectPath, clear]);
 
-  // Live health polling — update runtime node statuses every 5s
-  const { data: runtimeStatuses } = useQuery({
-    queryKey: ["agent-statuses-workspace"],
-    queryFn: queryAllAgentStatuses,
-    refetchInterval: 5_000,
-    enabled: nodes.length > 0,
-    staleTime: 3_000,
-  });
-
-  useEffect(() => {
-    if (!runtimeStatuses || !Array.isArray(runtimeStatuses)) return;
-    for (const rs of runtimeStatuses) {
-      const nodeId = `rt-${rs.runtime}`;
-      const status = rs.status === "healthy" || rs.status === "connected"
-        ? "online"
-        : rs.status === "degraded"
-        ? "busy"
-        : rs.status === "error"
-        ? "error"
-        : "offline";
-      updateNodeStatus(nodeId, status);
-    }
-  }, [runtimeStatuses, updateNodeStatus]);
-
   if (!projectPath) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-cs-muted gap-3">
-        <LayoutGrid size={48} className="opacity-30" />
-        <p className="text-sm">No project selected</p>
-        <p className="text-xs">Add a project in the Projects tab to see its workspace</p>
+      <div className="flex-1 flex flex-col items-center justify-center bg-cs-bg p-6">
+        <LayoutGrid size={48} className="text-cs-accent mb-4 opacity-30" />
+        <h2 className="text-lg font-semibold mb-2">Agent Workspace</h2>
+        <p className="text-sm text-cs-muted text-center max-w-md">
+          Select a project in the Projects tab to populate the workspace with your runtimes, skills, and MCP servers.
+        </p>
       </div>
     );
   }
 
   if (isLoading && nodes.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center bg-cs-bg">
         <Loader2 size={24} className="animate-spin text-cs-muted" />
       </div>
     );
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <WorkspaceToolbar
-        onRefresh={() => { clear(); refetch(); }}
-        isLoading={isLoading}
-        projectName={projectName}
-      />
+    <div className="flex-1 flex flex-col overflow-hidden bg-[#0a0a0f]">
+      <div className="flex items-center gap-2 px-4 py-1.5 border-b border-cs-border/60 bg-[#111118] shrink-0">
+        {projectName && <span className="text-xs font-medium text-cs-text">{projectName}</span>}
+        <span className="text-[10px] text-cs-muted">{nodes.filter((n) => !n.hidden).length} nodes</span>
+        <div className="flex-1" />
+        <button
+          onClick={() => { clear(); refetch(); }}
+          className="text-[10px] text-cs-muted hover:text-cs-text px-2 py-0.5 rounded hover:bg-cs-border/30"
+        >
+          Refresh
+        </button>
+      </div>
       <div className="flex flex-1 overflow-hidden">
         <WorkspaceCanvas />
         {selectedNode && (

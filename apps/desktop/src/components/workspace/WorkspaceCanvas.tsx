@@ -2,7 +2,28 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import { ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
-import { getConnectionPoints, buildBezierPath, screenToCanvas } from "@/components/automation/helpers";
+function wsScreenToCanvas(clientX: number, clientY: number, rect: DOMRect, pan: {x:number;y:number}, s: number) {
+  return { x: (clientX - rect.left - pan.x) / s, y: (clientY - rect.top - pan.y) / s };
+}
+function wsConnectionPoints(a: {x:number;y:number;w:number;h:number}, b: {x:number;y:number;w:number;h:number}) {
+  const ax = a.x + a.w/2, ay = a.y + a.h/2, bx = b.x + b.w/2, by = b.y + b.h/2;
+  const dx = bx - ax, dy = by - ay;
+  let x1: number, y1: number, x2: number, y2: number;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    x1 = dx > 0 ? a.x + a.w : a.x; y1 = ay;
+    x2 = dx > 0 ? b.x : b.x + b.w; y2 = by;
+  } else {
+    x1 = ax; y1 = dy > 0 ? a.y + a.h : a.y;
+    x2 = bx; y2 = dy > 0 ? b.y : b.y + b.h;
+  }
+  return { x1, y1, x2, y2 };
+}
+function wsBezier(x1:number, y1:number, x2:number, y2:number) {
+  const dx = Math.abs(x2-x1), dy = Math.abs(y2-y1);
+  const off = Math.max(dx, dy) * 0.4;
+  if (dx >= dy) return `M ${x1} ${y1} C ${x1+off} ${y1}, ${x2-off} ${y2}, ${x2} ${y2}`;
+  return `M ${x1} ${y1} C ${x1} ${y1+off}, ${x2} ${y2-off}, ${x2} ${y2}`;
+}
 import WorkspaceNodeCard from "./WorkspaceNodeCard";
 import WorkspaceMinimap from "./WorkspaceMinimap";
 
@@ -114,7 +135,7 @@ export default function WorkspaceCanvas() {
     if (draggingNodeId) {
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const pos = screenToCanvas(e.clientX, e.clientY, rect, panOffset, scale);
+      const pos = wsScreenToCanvas(e.clientX, e.clientY, rect, panOffset, scale);
       moveNode(draggingNodeId, pos.x - dragStart.x, pos.y - dragStart.y);
     }
   }
@@ -129,7 +150,7 @@ export default function WorkspaceCanvas() {
     if (!node) return;
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pos = screenToCanvas(e.clientX, e.clientY, rect, panOffset, scale);
+    const pos = wsScreenToCanvas(e.clientX, e.clientY, rect, panOffset, scale);
     setDraggingNodeId(nodeId);
     setDragStart({ x: pos.x - node.x, y: pos.y - node.y });
     e.stopPropagation();
@@ -211,10 +232,10 @@ export default function WorkspaceCanvas() {
               const toNode = visibleNodes.find((n) => n.id === edge.to);
               if (!fromNode || !toNode) return null;
 
-              const fromRect = { x: fromNode.x, y: fromNode.y, width: fromNode.width ?? 200, height: NODE_H };
-              const toRect = { x: toNode.x, y: toNode.y, width: toNode.width ?? 200, height: NODE_H };
-              const pts = getConnectionPoints(fromRect, toRect);
-              const path = buildBezierPath(pts.x1, pts.y1, pts.x2, pts.y2);
+              const a = { x: fromNode.x, y: fromNode.y, w: fromNode.width ?? 200, h: NODE_H };
+              const b = { x: toNode.x, y: toNode.y, w: toNode.width ?? 200, h: NODE_H };
+              const pts = wsConnectionPoints(a, b);
+              const path = wsBezier(pts.x1, pts.y1, pts.x2, pts.y2);
 
               const edgeColor = edge.kind === "uses-skill" ? "#00FFB2" : edge.kind === "connects-mcp" ? "#3b82f6" : "#a855f7";
 
