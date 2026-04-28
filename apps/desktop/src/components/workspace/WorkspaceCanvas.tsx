@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { getProjectBundle, listProjects, toggleSkill } from "@/lib/api";
 import { useProjectStore } from "@/stores/useProjectStore";
-import { useProjectStore as useProjectNav } from "@/stores/useProjectStore";
+import { useAuthStore } from "@/hooks/useAuth";
 import { lazy, Suspense } from "react";
 import { Plus, Command } from "lucide-react";
 import { installMarketplaceSkill } from "@/lib/api";
@@ -47,6 +47,7 @@ export default function WorkspaceCanvas() {
   const [pan, setPan] = useState({ x: 30, y: 30 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const isPro = useAuthStore((s) => s.isCloudUser);
   const [selected, setSelected] = useState<string | null>(null);
   const [openFile, setOpenFile] = useState<string | null>(null);
   const [activeRuntime, setActiveRuntime] = useState<string | null>(null);
@@ -121,8 +122,9 @@ export default function WorkspaceCanvas() {
     return () => el.removeEventListener("wheel", handleWheel);
   }, [handleWheel]);
 
-  // Listen for live agent activity
+  // Listen for live agent activity (Pro only)
   useEffect(() => {
+    if (!isPro) return;
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
@@ -138,7 +140,7 @@ export default function WorkspaceCanvas() {
       } catch {}
     })();
     return () => unlisten?.();
-  }, []);
+  }, [isPro]);
 
   // ⌘K command palette
   useEffect(() => {
@@ -216,7 +218,10 @@ export default function WorkspaceCanvas() {
     >
       {/* Toolbar */}
       <div className="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-cs-border/60 bg-cs-card/90 backdrop-blur px-1 py-0.5">
-        <button onClick={() => setShowPalette((v) => !v)} className={cn("p-1.5 rounded transition-colors", showPalette ? "text-cs-accent bg-cs-accent/10" : "text-cs-muted hover:text-cs-text")} title="Add Skills"><Plus size={14} /></button>
+        <button onClick={() => isPro ? setShowPalette((v) => !v) : alert("Skill suggestions require Pro. Sign in to unlock.")} className={cn("p-1.5 rounded transition-colors relative", showPalette ? "text-cs-accent bg-cs-accent/10" : "text-cs-muted hover:text-cs-text")} title="Add Skills">
+          <Plus size={14} />
+          {!isPro && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500 border border-[#161620]" title="Pro" />}
+        </button>
         <div className="w-px h-4 bg-cs-border/60" />
         <button onClick={() => setScale((s) => Math.max(0.2, s - 0.1))} className="p-1.5 text-cs-muted hover:text-cs-text rounded"><ZoomOut size={14} /></button>
         <span className="text-[10px] text-cs-muted font-mono w-10 text-center">{Math.round(scale * 100)}%</span>
@@ -245,7 +250,7 @@ export default function WorkspaceCanvas() {
             const x2 = to.x + to.w / 2, y2 = to.y;
             const cy1 = y1 + (y2 - y1) * 0.4, cy2 = y2 - (y2 - y1) * 0.4;
             const pathD = `M ${x1} ${y1} C ${x1} ${cy1}, ${x2} ${cy2}, ${x2} ${y2}`;
-            const edgeActive = activeRuntime && from.runtime === activeRuntime;
+            const edgeActive = isPro && activeRuntime && from.runtime === activeRuntime;
             const pathId = `edge-${edge.from}-${edge.to}`;
             return (
               <g key={pathId}>
