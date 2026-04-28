@@ -27,6 +27,7 @@ const NotificationsSettings = lazy(() => import("@/components/NotificationsSetti
 const AuditLog = lazy(() => import("@/components/AuditLog/AuditLog"));
 const LlmApiKeys = lazy(() => import("@/components/LlmApiKeys/LlmApiKeys"));
 const AgentMonitor = lazy(() => import("@/components/AgentMonitor/AgentMonitor"));
+const WorkspaceView = lazy(() => import("@/components/workspace/WorkspaceView"));
 
 const PANELS: Record<Section, React.ComponentType> = {
   context: ContextVisualizer,
@@ -35,6 +36,7 @@ const PANELS: Record<Section, React.ComponentType> = {
   subagents: SubagentsManager,
   hooks: HooksManager,
   automation: AutomationFlow,
+  workspace: WorkspaceView,
   cron: CronDashboard,
   analytics: UsageAnalytics,
   logs: LogViewer,
@@ -71,7 +73,7 @@ export default function Dashboard() {
   const Panel = PANELS[section];
 
   // Automation flow needs full width with no padding
-  const isFullWidth = section === "automation";
+  const isFullWidth = section === "automation" || section === "workspace";
 
   if (showSetup) {
     return <SetupWizard onComplete={() => setShowSetup(false)} />;

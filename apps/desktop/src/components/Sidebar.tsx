@@ -29,6 +29,7 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  LayoutGrid,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -39,7 +40,7 @@ import { useProjectStore } from "@/stores/useProjectStore";
 import { listProjects } from "@/lib/api";
 import LoginModal from "./LoginModal";
 
-export type Section = "context" | "skills" | "projects" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications" | "audit" | "llm-keys" | "agent-monitor";
+export type Section = "context" | "skills" | "projects" | "workspace" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications" | "audit" | "llm-keys" | "agent-monitor";
 
 interface SidebarProps {
   active: Section;
@@ -53,6 +54,7 @@ const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: s
   { id: "subagents", labelKey: "nav.subagents", icon: Bot },
   { id: "hooks", labelKey: "nav.hooks", icon: Webhook },
   { id: "automation", labelKey: "nav.automation", icon: Workflow },
+  { id: "workspace", labelKey: "nav.workspace", icon: LayoutGrid },
   { id: "cron", labelKey: "nav.cron", icon: Clock },
   { id: "analytics", labelKey: "nav.analytics", icon: BarChart3 },
   { id: "logs", labelKey: "nav.logs", icon: ScrollText },

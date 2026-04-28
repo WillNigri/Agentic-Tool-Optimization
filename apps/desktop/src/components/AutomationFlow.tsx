@@ -1,11 +1,8 @@
-import { useCallback, useEffect, lazy, Suspense } from "react";
+import { useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
-import { X, Globe, Activity, Workflow, Loader2 } from "lucide-react";
-import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
-
-const WorkspaceView = lazy(() => import("./workspace/WorkspaceView"));
+import { X, Globe, Activity, Workflow } from "lucide-react";
 import { TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./automation/constants";
 import { serializeWorkflowToPrompt } from "./automation/helpers";
 import { useAutomationStore } from "@/stores/useAutomationStore";
@@ -353,18 +350,6 @@ export default function AutomationFlow() {
             {t("automation.builder.newWorkflow")}
           </button>
         </div>
-      </div>
-    );
-  }
-
-  const workspaceMode = useWorkspaceStore((s) => s.mode);
-
-  if (workspaceMode === "workspace") {
-    return (
-      <div className="flex flex-col h-full w-full" style={{ background: "#0a0a0f" }}>
-        <Suspense fallback={<div className="flex-1 flex items-center justify-center"><Loader2 size={24} className="animate-spin text-cs-muted" /></div>}>
-          <WorkspaceView />
-        </Suspense>
       </div>
     );
   }
