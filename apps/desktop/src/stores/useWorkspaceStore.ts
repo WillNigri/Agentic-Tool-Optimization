@@ -110,7 +110,7 @@ function autoLayout(bundle: ProjectBundle): { nodes: WorkspaceNode[]; edges: Wor
         y: skillRowY + Math.random() * 40,
         filePath: skill.filePath,
       });
-      edges.push({ from: runtimeId, to: skillId, kind: "uses-skill" });
+      edges.push({ from: runtimeId, to: skillId, kind: "uses-skill", animated: skill.enabled });
       skillX += 170;
     }
 

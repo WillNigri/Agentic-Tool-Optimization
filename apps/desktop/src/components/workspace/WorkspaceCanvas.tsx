@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
 import { getConnectionPoints, buildBezierPath, screenToCanvas } from "@/components/automation/helpers";
 import WorkspaceNodeCard from "./WorkspaceNodeCard";
+import WorkspaceMinimap from "./WorkspaceMinimap";
 
 const NODE_H = 85;
 
@@ -33,6 +34,18 @@ export default function WorkspaceCanvas() {
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [canvasRect, setCanvasRect] = useState<DOMRect | undefined>();
+
+  // Track canvas rect for minimap
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const update = () => setCanvasRect(el.getBoundingClientRect());
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const zoomLevel = getZoomLevel(scale);
   const visibleNodes = nodes.filter((n) => !n.hidden);
@@ -57,6 +70,33 @@ export default function WorkspaceCanvas() {
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
   }, [handleWheel]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.metaKey || e.ctrlKey) && e.key === "0") { e.preventDefault(); fitAll(); }
+      if ((e.metaKey || e.ctrlKey) && e.key === "1") { e.preventDefault(); setScale(1); }
+      if (e.key === "f" && selectedNodeId) {
+        const node = visibleNodes.find((n) => n.id === selectedNodeId);
+        if (node && canvasRect) {
+          setPanOffset({
+            x: canvasRect.width / 2 - node.x * scale - (node.width ?? 200) / 2 * scale,
+            y: canvasRect.height / 2 - node.y * scale - NODE_H / 2 * scale,
+          });
+        }
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const idx = visibleNodes.findIndex((n) => n.id === selectedNodeId);
+        const next = visibleNodes[(idx + 1) % visibleNodes.length];
+        if (next) selectNode(next.id);
+      }
+      if (e.key === "Escape") selectNode(null);
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [selectedNodeId, visibleNodes, scale, canvasRect, selectNode, setScale, setPanOffset]);
 
   // Pan
   function handleMouseDown(e: React.MouseEvent) {
@@ -211,6 +251,9 @@ export default function WorkspaceCanvas() {
           ))}
         </div>
       </div>
+
+      {/* Minimap */}
+      <WorkspaceMinimap canvasRect={canvasRect} />
 
       <style>{`
         @keyframes dash {

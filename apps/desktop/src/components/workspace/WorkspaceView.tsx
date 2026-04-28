@@ -1,17 +1,22 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, LayoutGrid } from "lucide-react";
-import { getProjectBundle, listProjects } from "@/lib/api";
+import { getProjectBundle, listProjects, queryAllAgentStatuses, detectOllama } from "@/lib/api";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
 import { useProjectStore } from "@/stores/useProjectStore";
 import WorkspaceCanvas from "./WorkspaceCanvas";
 import WorkspaceToolbar from "./WorkspaceToolbar";
+import WorkspaceDetailPanel from "./WorkspaceDetailPanel";
 
 export default function WorkspaceView() {
   const activeProject = useProjectStore((s) => s.activeProject);
   const populateFromBundle = useWorkspaceStore((s) => s.populateFromBundle);
   const nodes = useWorkspaceStore((s) => s.nodes);
   const clear = useWorkspaceStore((s) => s.clear);
+  const updateNodeStatus = useWorkspaceStore((s) => s.updateNodeStatus);
+  const selectedNodeId = useWorkspaceStore((s) => s.selectedNodeId);
+  const selectNode = useWorkspaceStore((s) => s.selectNode);
+  const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null;
 
   // Get the active project or first project
   const { data: projects = [] } = useQuery({
@@ -42,6 +47,30 @@ export default function WorkspaceView() {
     clear();
   }, [projectPath, clear]);
 
+  // Live health polling — update runtime node statuses every 5s
+  const { data: runtimeStatuses } = useQuery({
+    queryKey: ["agent-statuses-workspace"],
+    queryFn: queryAllAgentStatuses,
+    refetchInterval: 5_000,
+    enabled: nodes.length > 0,
+    staleTime: 3_000,
+  });
+
+  useEffect(() => {
+    if (!runtimeStatuses || !Array.isArray(runtimeStatuses)) return;
+    for (const rs of runtimeStatuses) {
+      const nodeId = `rt-${rs.runtime}`;
+      const status = rs.status === "healthy" || rs.status === "connected"
+        ? "online"
+        : rs.status === "degraded"
+        ? "busy"
+        : rs.status === "error"
+        ? "error"
+        : "offline";
+      updateNodeStatus(nodeId, status);
+    }
+  }, [runtimeStatuses, updateNodeStatus]);
+
   if (!projectPath) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center text-cs-muted gap-3">
@@ -67,7 +96,15 @@ export default function WorkspaceView() {
         isLoading={isLoading}
         projectName={projectName}
       />
-      <WorkspaceCanvas />
+      <div className="flex flex-1 overflow-hidden">
+        <WorkspaceCanvas />
+        {selectedNode && (
+          <WorkspaceDetailPanel
+            node={selectedNode}
+            onClose={() => selectNode(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }
