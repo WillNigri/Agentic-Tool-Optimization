@@ -196,6 +196,18 @@ export default function WorkspaceCanvas() {
 
   const cw = Math.max(1600, ...nodes.map((n) => n.x + n.w + 80));
   const ch = Math.max(700, ...nodes.map((n) => n.y + n.h + 80));
+  const zoomLevel = scale < 0.5 ? "bird" : scale > 1.2 ? "focused" : "normal";
+  const [canvasRect, setCanvasRect] = useState<DOMRect | undefined>();
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const update = () => setCanvasRect(el.getBoundingClientRect());
+    update();
+    const obs = new ResizeObserver(update);
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
 
   return (
     <div className="flex-1 overflow-hidden bg-[#0a0a0f] relative" ref={canvasRef}
@@ -268,33 +280,48 @@ export default function WorkspaceCanvas() {
           const isSel = selected === node.id || multiSelect.has(node.id);
           const isActive = activeRuntime && node.runtime === activeRuntime;
           const isMulti = multiSelect.has(node.id);
+
+          const handleClick = (e: React.MouseEvent) => {
+            e.stopPropagation();
+            if (e.metaKey || e.ctrlKey) {
+              setMultiSelect((prev) => { const next = new Set(prev); next.has(node.id) ? next.delete(node.id) : next.add(node.id); return next; });
+            } else { setMultiSelect(new Set()); setSelected(node.id); }
+          };
+
+          // Bird's eye — minimal circle
+          if (zoomLevel === "bird") {
+            return (
+              <div key={node.id} className="absolute flex flex-col items-center gap-1 cursor-pointer"
+                style={{ left: node.x, top: node.y, width: node.w, animation: "nodeAppear 0.3s ease-out" }}
+                onMouseDown={(e) => startDrag(node.id, e)} onClick={handleClick}
+              >
+                <div className="w-8 h-8 rounded-full flex items-center justify-center border-2" style={{
+                  backgroundColor: `${node.color}20`, borderColor: isSel ? node.color : `${node.color}50`,
+                  boxShadow: isActive ? `0 0 12px ${node.color}50` : undefined,
+                }}>
+                  <div className={cn("w-2 h-2 rounded-full", node.active ? "bg-green-400" : "bg-gray-600")} />
+                </div>
+                <span className="text-[8px] text-cs-muted text-center truncate max-w-[60px]">{node.label}</span>
+              </div>
+            );
+          }
+
+          // Normal + Focused
           return (
             <div key={node.id}
-              onMouseDown={(e) => startDrag(node.id, e)}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (e.metaKey || e.ctrlKey) {
-                  setMultiSelect((prev) => {
-                    const next = new Set(prev);
-                    next.has(node.id) ? next.delete(node.id) : next.add(node.id);
-                    return next;
-                  });
-                } else {
-                  setMultiSelect(new Set());
-                  setSelected(node.id);
-                }
-              }}
+              onMouseDown={(e) => startDrag(node.id, e)} onClick={handleClick}
               className={cn(
                 "absolute rounded-lg border cursor-grab active:cursor-grabbing transition-all duration-300",
                 isSel && "ring-1 ring-offset-1 ring-offset-transparent",
                 isActive && "animate-pulse"
               )}
               style={{
-                left: node.x, top: node.y, width: node.w, height: node.h,
+                left: node.x, top: node.y, width: node.w, height: zoomLevel === "focused" && node.kind === "runtime" ? node.h + 30 : node.h,
                 backgroundColor: "#161620",
                 borderColor: isMulti ? "#3b82f6" : isSel ? node.color : isActive ? node.color : "#2a2a3a",
                 boxShadow: isActive ? `0 0 24px ${node.color}50` : isSel ? `0 0 16px ${node.color}30` : node.active ? `0 0 6px ${node.color}10` : undefined,
-                transition: "border-color 300ms, box-shadow 300ms",
+                transition: "border-color 300ms, box-shadow 300ms, height 200ms",
+                animation: "nodeAppear 0.3s ease-out",
               }}
             >
               <div className="h-[2px] rounded-t-lg" style={{ backgroundColor: node.color }} />
@@ -302,15 +329,26 @@ export default function WorkspaceCanvas() {
                 <div className="flex items-center gap-1.5">
                   <Icon size={12} style={{ color: node.color }} />
                   <span className="text-xs font-medium truncate flex-1">{node.label}</span>
-                  {isActive && (
-                    <span className="text-[8px] text-amber-400 animate-pulse shrink-0">working...</span>
-                  )}
+                  {isActive && <span className="text-[8px] text-amber-400 animate-pulse shrink-0">working...</span>}
                   <div className="relative shrink-0">
                     <div className={cn("w-1.5 h-1.5 rounded-full", node.active ? "bg-green-400" : "bg-gray-600")} />
                     {isActive && <div className="absolute inset-0 w-1.5 h-1.5 rounded-full bg-green-400 animate-ping" />}
                   </div>
                 </div>
                 {node.detail && <p className="text-[9px] text-cs-muted mt-0.5 truncate">{node.detail}</p>}
+                {/* Focused mode extras */}
+                {zoomLevel === "focused" && node.tokenCount && (
+                  <div className="flex items-center gap-2 mt-1.5 pt-1 border-t border-white/5">
+                    <span className="text-[8px] text-cs-muted font-mono">{node.tokenCount.toLocaleString()} tok</span>
+                    {node.runtime && <span className="text-[8px] text-cs-muted capitalize">{node.runtime}</span>}
+                  </div>
+                )}
+                {zoomLevel === "focused" && node.kind === "runtime" && (
+                  <div className="flex items-center gap-1 mt-1 pt-1 border-t border-white/5">
+                    <Sparkles size={8} className="text-cs-muted" />
+                    <span className="text-[8px] text-cs-muted">{nodes.filter((n) => n.parentId === node.id).length} skills attached</span>
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -322,6 +360,49 @@ export default function WorkspaceCanvas() {
         @keyframes nodeAppear { from { transform: scale(0); opacity: 0; } to { transform: scale(1); opacity: 1; } }
         @keyframes scorePop { 0% { transform: scale(1); } 50% { transform: scale(1.3); } 100% { transform: scale(1); } }
       `}</style>
+
+      {/* Minimap */}
+      {nodes.length > 0 && (() => {
+        const MW = 150, MH = 90;
+        const minX = Math.min(...nodes.map((n) => n.x)) - 30;
+        const minY = Math.min(...nodes.map((n) => n.y)) - 30;
+        const maxX = Math.max(...nodes.map((n) => n.x + n.w)) + 30;
+        const maxY = Math.max(...nodes.map((n) => n.y + n.h)) + 30;
+        const contentW = maxX - minX, contentH = maxY - minY;
+        const ms = Math.min(MW / contentW, MH / contentH);
+        const vpW = canvasRect ? canvasRect.width / scale * ms : 30;
+        const vpH = canvasRect ? canvasRect.height / scale * ms : 20;
+        const vpX = (-pan.x / scale - minX) * ms;
+        const vpY = (-pan.y / scale - minY) * ms;
+        return (
+          <div className="absolute bottom-3 right-3 z-10 rounded-lg border border-cs-border/60 bg-cs-card/90 backdrop-blur overflow-hidden cursor-crosshair"
+            style={{ width: MW, height: MH }}
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const cx = (e.clientX - rect.left) / ms + minX;
+              const cy = (e.clientY - rect.top) / ms + minY;
+              if (canvasRect) setPan({ x: -(cx - canvasRect.width / scale / 2) * scale, y: -(cy - canvasRect.height / scale / 2) * scale });
+            }}
+          >
+            <svg width={MW} height={MH}>
+              {nodes.map((n) => (
+                <rect key={n.id} x={(n.x - minX) * ms} y={(n.y - minY) * ms}
+                  width={Math.max(3, n.w * ms)} height={Math.max(2, n.h * ms)}
+                  rx={1} fill={n.color} fillOpacity={n.active ? 0.7 : 0.2} />
+              ))}
+              <rect x={vpX} y={vpY} width={vpW} height={vpH}
+                fill="none" stroke="#00FFB2" strokeWidth={1} strokeOpacity={0.5} rx={1} />
+            </svg>
+          </div>
+        );
+      })()}
+
+      {/* Zoom level indicator */}
+      <div className="absolute bottom-3 left-3 z-10 rounded-md bg-cs-card/80 border border-cs-border/40 px-2 py-1 text-[9px] text-cs-muted uppercase tracking-wider">
+        {zoomLevel === "bird" && "Overview"}
+        {zoomLevel === "normal" && "Workspace"}
+        {zoomLevel === "focused" && "Detail"}
+      </div>
 
       {/* Skill Palette */}
       {showPalette && (
