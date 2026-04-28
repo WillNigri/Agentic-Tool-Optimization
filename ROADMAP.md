@@ -69,14 +69,43 @@
 
 ---
 
+### v1.0.0 — Production Ready (Released April 2026)
+- SDK (`@ato-sdk/js`), web dashboard, cost tracking
+- LLM API key management, audit logging, agent monitor
+- SSO, rate limiting, Homebrew tap
+
+### v1.1.0 — Projects Dashboard + Multi-Runtime (Released April 2026)
+- Projects Dashboard with 7 Claude sections + multi-runtime switcher
+- 6 runtimes: Claude Code, Codex/OpenAI Agents SDK, Gemini CLI/ADK, OpenClaw, Hermes
+- Ollama provider: auto-detect, model picker, copy endpoint
+- CodeMirror 6 editor with conflict detection, auto-backup, audit logging
+- Sandbox config + approval policies (editable with write-back)
+- File watcher, token chart, backup/restore, i18n (EN/PT/ES)
+- 46 tests (35 Rust + 11 frontend), CI/CD, code splitting
+
+### v1.2.0 — Agent Command Center (In Progress)
+- Visual workspace canvas: drag nodes, zoom in/out, pan
+- Live execution visualization: agent activity pulses nodes, animated edge dots
+- Skill palette: drag-to-install from marketplace with suggestions
+- Command palette (⌘K): search nodes, skills, actions
+- Multi-select batch operations on skill nodes
+- Grid + Canvas dual view mode
+- Strategy game-inspired UX: semantic zoom, animated transitions
+
+---
+
 ## Upcoming
 
-### v1.0.0 — Production Ready
-- Apple code signing & notarization
-- Windows code signing
-- Auto-updater via GitHub releases
-- Documentation site
-- Plugin API for third-party extensions
+### v1.3.0 — Multiplayer + Teams
+- Real-time collaborative workspace (WebSocket via ato-cloud)
+- Team cursors on canvas (Figma-style)
+- Shared workspace layouts
+- Cross-runtime policy enforcement templates
+
+### v1.4.0 — Intelligence Layer
+- Proactive suggestions ("Your project is missing X")
+- Cost optimization alerts from SDK traces
+- Agent performance benchmarking across runtimes
 
 ---
 
