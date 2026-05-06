@@ -1907,7 +1907,7 @@ pub fn delete_skill(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn update_skill(id: String, content: String) -> Result<(), String> {
+pub fn update_skill(db: State<'_, DbState>, id: String, content: String) -> Result<(), String> {
     // Scan ALL runtime directories to find the matching skill by ID
     let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
         .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
@@ -1946,6 +1946,16 @@ pub fn update_skill(id: String, content: String) -> Result<(), String> {
                     } else {
                         path
                     };
+
+                    // Snapshot the prior contents into skill_versions before
+                    // we overwrite. Best-effort — failures don't block the
+                    // edit; the user came here to save, not to back up.
+                    if let Ok(prior) = fs::read_to_string(&write_path) {
+                        if prior != content {
+                            let _ = snapshot_skill_version(&db, &write_path.to_string_lossy(), &prior, None);
+                        }
+                    }
+
                     fs::write(&write_path, &content).map_err(|e| e.to_string())?;
                     return Ok(());
                 }
@@ -1954,6 +1964,372 @@ pub fn update_skill(id: String, content: String) -> Result<(), String> {
     }
 
     Err(format!("Skill not found: {}", id))
+}
+
+// ── Skill version history (Polish-T2) ────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillVersion {
+    pub id: String,
+    pub file_path: String,
+    pub content: String,
+    pub content_hash: String,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+fn snapshot_skill_version(
+    db: &State<'_, DbState>,
+    write_path: &str,
+    content: &str,
+    note: Option<&str>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let hash = content_hash(content);
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO skill_versions (id, file_path, content, content_hash, note, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![id, write_path, content, hash, note, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_skill_versions(
+    db: State<'_, DbState>,
+    file_path: String,
+) -> Result<Vec<SkillVersion>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, file_path, content, content_hash, note, created_at
+             FROM skill_versions
+             WHERE file_path = ?1
+             ORDER BY created_at DESC
+             LIMIT 100",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&file_path], |row| {
+            Ok(SkillVersion {
+                id: row.get(0)?,
+                file_path: row.get(1)?,
+                content: row.get(2)?,
+                content_hash: row.get(3)?,
+                note: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn restore_skill_version(
+    db: State<'_, DbState>,
+    version_id: String,
+) -> Result<(), String> {
+    // Pull the snapshot.
+    let (write_path, content) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT file_path, content FROM skill_versions WHERE id = ?1",
+            [&version_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "Skill version not found".to_string(),
+            other => other.to_string(),
+        })?
+    };
+
+    // Snapshot the current contents so the restore is itself reversible.
+    let path = PathBuf::from(&write_path);
+    if let Ok(current) = fs::read_to_string(&path) {
+        if current != content {
+            let _ = snapshot_skill_version(&db, &write_path, &current, Some("auto-snapshot before restore"));
+        }
+    }
+
+    fs::write(&path, &content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_skill_version(
+    db: State<'_, DbState>,
+    version_id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM skill_versions WHERE id = ?1", [&version_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Chat threads (v1.5 — sustained sessions) ─────────────────────────────
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThread {
+    pub id: String,
+    pub title: String,
+    pub project_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub created_at: String,
+    pub last_message_at: Option<String>,
+    pub message_count: i64,
+    pub archived: bool,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub thread_id: String,
+    pub role: String,
+    pub content: String,
+    pub runtime: Option<String>,
+    pub agent_slug: Option<String>,
+    pub metadata: Option<String>,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub fn list_chat_threads(
+    db: State<'_, DbState>,
+    project_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<ChatThread>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let cap = limit.unwrap_or(50).clamp(1, 500);
+    // When project_id is set, restrict to that project; when None, return
+    // all (global + project-scoped). NULL match in SQL is a pain — split.
+    let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match project_id {
+        Some(p) => (
+            "SELECT id, title, project_id, agent_id, created_at, last_message_at, message_count, archived
+             FROM chat_threads
+             WHERE project_id = ?1 AND archived = 0
+             ORDER BY COALESCE(last_message_at, created_at) DESC
+             LIMIT ?2",
+            vec![Box::new(p), Box::new(cap)],
+        ),
+        None => (
+            "SELECT id, title, project_id, agent_id, created_at, last_message_at, message_count, archived
+             FROM chat_threads
+             WHERE archived = 0
+             ORDER BY COALESCE(last_message_at, created_at) DESC
+             LIMIT ?1",
+            vec![Box::new(cap)],
+        ),
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| &**b).collect();
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(param_refs.iter()), |row| {
+            Ok(ChatThread {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                project_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                created_at: row.get(4)?,
+                last_message_at: row.get(5)?,
+                message_count: row.get(6)?,
+                archived: row.get::<_, i32>(7)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn create_chat_thread(
+    db: State<'_, DbState>,
+    title: String,
+    project_id: Option<String>,
+    agent_id: Option<String>,
+) -> Result<ChatThread, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let trimmed = if title.trim().is_empty() {
+        "New conversation".to_string()
+    } else {
+        title.trim().chars().take(120).collect()
+    };
+    conn.execute(
+        "INSERT INTO chat_threads (id, title, project_id, agent_id, created_at, last_message_at, message_count, archived)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, 0)",
+        params![id, trimmed, project_id, agent_id, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(ChatThread {
+        id,
+        title: trimmed,
+        project_id,
+        agent_id,
+        created_at: now,
+        last_message_at: None,
+        message_count: 0,
+        archived: false,
+    })
+}
+
+#[tauri::command]
+pub fn rename_chat_thread(
+    db: State<'_, DbState>,
+    id: String,
+    title: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let trimmed: String = title.trim().chars().take(120).collect();
+    if trimmed.is_empty() {
+        return Err("title-empty".into());
+    }
+    conn.execute(
+        "UPDATE chat_threads SET title = ?1 WHERE id = ?2",
+        params![trimmed, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_chat_thread(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // ON DELETE CASCADE on chat_messages handles the rows, but the FK is
+    // only honored when foreign_keys = ON. Defense in depth: delete both.
+    conn.execute("DELETE FROM chat_messages WHERE thread_id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM chat_threads WHERE id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_chat_thread_agent(
+    db: State<'_, DbState>,
+    id: String,
+    agent_id: Option<String>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE chat_threads SET agent_id = ?1 WHERE id = ?2",
+        params![agent_id, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_chat_messages(
+    db: State<'_, DbState>,
+    thread_id: String,
+) -> Result<Vec<ChatMessage>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at
+             FROM chat_messages
+             WHERE thread_id = ?1
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&thread_id], |row| {
+            Ok(ChatMessage {
+                id: row.get(0)?,
+                thread_id: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get(3)?,
+                runtime: row.get(4)?,
+                agent_slug: row.get(5)?,
+                metadata: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn append_chat_message(
+    db: State<'_, DbState>,
+    thread_id: String,
+    role: String,
+    content: String,
+    runtime: Option<String>,
+    agent_slug: Option<String>,
+    metadata: Option<String>,
+) -> Result<ChatMessage, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO chat_messages (id, thread_id, role, content, runtime, agent_slug, metadata, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![id, thread_id, role, content, runtime, agent_slug, metadata, now],
+    )
+    .map_err(|e| e.to_string())?;
+    // Update thread aggregate fields.
+    conn.execute(
+        "UPDATE chat_threads
+            SET last_message_at = ?1,
+                message_count = message_count + 1
+          WHERE id = ?2",
+        params![now, thread_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(ChatMessage {
+        id,
+        thread_id,
+        role,
+        content,
+        runtime,
+        agent_slug,
+        metadata,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub fn delete_chat_message(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM chat_messages WHERE id = ?1",
+            [&id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    conn.execute("DELETE FROM chat_messages WHERE id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    if let Some(tid) = thread_id {
+        // Recompute message_count rather than risk drift.
+        conn.execute(
+            "UPDATE chat_threads
+                SET message_count = (SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1)
+              WHERE id = ?1",
+            [&tid],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2211,13 +2587,30 @@ pub async fn prompt_agent(runtime: String, prompt: String, config: Option<String
     // Use the user's full shell PATH so CLIs can find node, npm, etc.
     let user_path = get_user_path();
 
+    // F5 — extract model override from config, applied as `--model X` per
+    // runtime. None → runtime default.
+    let cfg_json: Option<serde_json::Value> = config
+        .as_deref()
+        .and_then(|c| serde_json::from_str(c).ok());
+    let model_override: Option<String> = cfg_json
+        .as_ref()
+        .and_then(|c| c.get("model"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
     match runtime.as_str() {
         "claude" => {
             let claude_path = which_claude().ok_or_else(|| {
                 "Claude Code CLI not found".to_string()
             })?;
+            let mut args: Vec<String> = vec!["--print".into(), prompt.clone()];
+            if let Some(m) = &model_override {
+                args.push("--model".into());
+                args.push(m.clone());
+            }
             let output = Command::new(&claude_path)
-                .args(["--print", &prompt])
+                .args(&args)
                 .env("PATH", &user_path)
                 .output()
                 .map_err(|e| format!("Failed to run claude: {}", e))?;
@@ -2231,8 +2624,16 @@ pub async fn prompt_agent(runtime: String, prompt: String, config: Option<String
             let codex_path = which_cli("codex").ok_or_else(|| {
                 "Codex CLI not found. Install it with: npm install -g @openai/codex".to_string()
             })?;
+            // Codex's CLI shape is `codex [OPTIONS] [PROMPT]` with `exec` as
+            // the non-interactive subcommand. It does NOT accept `--print`.
+            let mut args: Vec<String> = vec!["exec".into()];
+            if let Some(m) = &model_override {
+                args.push("--model".into());
+                args.push(m.clone());
+            }
+            args.push(prompt.clone());
             let output = Command::new(&codex_path)
-                .args(["--print", &prompt])
+                .args(&args)
                 .env("PATH", &user_path)
                 .output()
                 .map_err(|e| format!("Failed to run codex: {}", e))?;
@@ -8743,3 +9144,3703 @@ pub fn get_token_timeline(
     Ok(rows)
 }
 
+// ── Agents (v1.3.0 T3) ────────────────────────────────────────────────────
+//
+// Records produced by the Create Agent wizard. Each record represents a
+// runtime-specific agent file written to disk plus metadata for fast lookup
+// from Home / Agents list.
+//
+// File-writing contract per runtime (kept minimal for v1.3.0 — Claude is the
+// canonical path; other runtimes write a stub markdown placeholder so the
+// agent record is real-on-disk, then v1.3.x ships richer per-runtime layouts):
+//
+//   claude    → ~/.claude/agents/<slug>.md
+//   codex     → ~/.codex/agents/<slug>/AGENTS.md
+//   gemini    → <project>/.gemini/agents/<slug>.yaml  (falls back to ~/.gemini)
+//   openclaw  → ~/.openclaw/agents/<slug>/SOUL.md
+//   hermes    → ~/.hermes/agents/<slug>/AGENT.md
+
+fn slugify(input: &str) -> String {
+    let s: String = input
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    // collapse repeated dashes and trim
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c == '-' {
+            if !prev_dash && !out.is_empty() {
+                out.push('-');
+            }
+            prev_dash = true;
+        } else {
+            out.push(c);
+            prev_dash = false;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn agent_file_path(runtime: &str, slug: &str) -> Result<PathBuf, String> {
+    let home = home_dir();
+    let path = match runtime {
+        "claude" => home.join(".claude").join("agents").join(format!("{}.md", slug)),
+        "codex" => home.join(".codex").join("agents").join(slug).join("AGENTS.md"),
+        "gemini" => home.join(".gemini").join("agents").join(format!("{}.yaml", slug)),
+        "openclaw" => home.join(".openclaw").join("agents").join(slug).join("SOUL.md"),
+        "hermes" => home.join(".hermes").join("agents").join(slug).join("AGENT.md"),
+        other => return Err(format!("Unsupported runtime: {}", other)),
+    };
+    Ok(path)
+}
+
+fn render_agent_file(runtime: &str, agent: &Agent) -> String {
+    match runtime {
+        "claude" => render_claude_agent(agent),
+        "codex" => render_codex_agent(agent),
+        "gemini" => render_gemini_agent(agent),
+        "openclaw" => render_openclaw_agent(agent),
+        "hermes" => render_hermes_agent(agent),
+        _ => String::new(),
+    }
+}
+
+fn render_claude_agent(agent: &Agent) -> String {
+    // Claude Code agent format: frontmatter + system prompt body.
+    // See: https://docs.claude.com/en/docs/claude-code/sub-agents
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("name: {}\n", agent.slug));
+    if let Some(desc) = &agent.description {
+        out.push_str(&format!("description: {}\n", desc));
+    }
+    if let Some(model) = &agent.model {
+        out.push_str(&format!("model: {}\n", model));
+    }
+    out.push_str("---\n\n");
+    out.push_str(&format!("# {}\n\n", agent.display_name));
+    if let Some(prompt) = &agent.system_prompt {
+        if !prompt.trim().is_empty() {
+            out.push_str(prompt);
+            out.push_str("\n");
+        }
+    }
+    if let Some(goal) = &agent.goal {
+        if agent.system_prompt.as_deref().unwrap_or("").trim().is_empty() {
+            out.push_str(&format!(
+                "You are an agent designed to: {}\n",
+                goal
+            ));
+        }
+    }
+    out
+}
+
+fn render_codex_agent(agent: &Agent) -> String {
+    // Codex / OpenAI Agents SDK uses AGENTS.md.
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", agent.display_name));
+    if let Some(desc) = &agent.description {
+        out.push_str(&format!("> {}\n\n", desc));
+    }
+    if let Some(model) = &agent.model {
+        out.push_str(&format!("**Model:** `{}`\n\n", model));
+    }
+    if let Some(prompt) = &agent.system_prompt {
+        out.push_str("## Instructions\n\n");
+        out.push_str(prompt);
+        out.push_str("\n");
+    }
+    out
+}
+
+fn render_gemini_agent(agent: &Agent) -> String {
+    // Minimal root_agent-shaped YAML; user can extend later.
+    let mut out = String::new();
+    out.push_str(&format!("name: {}\n", agent.slug));
+    out.push_str(&format!("display_name: \"{}\"\n", agent.display_name));
+    if let Some(model) = &agent.model {
+        out.push_str(&format!("model: {}\n", model));
+    } else {
+        out.push_str("model: gemini-2.0-flash-exp\n");
+    }
+    if let Some(prompt) = &agent.system_prompt {
+        out.push_str("instruction: |\n");
+        for line in prompt.lines() {
+            out.push_str(&format!("  {}\n", line));
+        }
+    } else if let Some(goal) = &agent.goal {
+        out.push_str("instruction: |\n");
+        out.push_str(&format!("  You are an agent designed to: {}\n", goal));
+    }
+    out
+}
+
+fn render_openclaw_agent(agent: &Agent) -> String {
+    // OpenClaw uses SOUL.md as the agent identity file.
+    let mut out = String::new();
+    out.push_str(&format!("# Soul: {}\n\n", agent.display_name));
+    if let Some(desc) = &agent.description {
+        out.push_str(&format!("{}\n\n", desc));
+    }
+    if let Some(prompt) = &agent.system_prompt {
+        out.push_str("## Identity\n\n");
+        out.push_str(prompt);
+        out.push_str("\n");
+    }
+    out
+}
+
+fn render_hermes_agent(agent: &Agent) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Hermes Agent: {}\n\n", agent.display_name));
+    if let Some(desc) = &agent.description {
+        out.push_str(&format!("{}\n\n", desc));
+    }
+    if let Some(prompt) = &agent.system_prompt {
+        out.push_str("## System\n\n");
+        out.push_str(prompt);
+        out.push_str("\n");
+    }
+    out
+}
+
+#[tauri::command]
+pub fn create_agent(
+    db: State<'_, DbState>,
+    display_name: String,
+    runtime: String,
+    description: Option<String>,
+    model: Option<String>,
+    project_id: Option<String>,
+    system_prompt: Option<String>,
+    permissions: Option<Vec<String>>,
+    skills: Option<Vec<String>>,
+    mcps: Option<Vec<String>>,
+    goal: Option<String>,
+    write_file: Option<bool>,
+) -> Result<Agent, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    if display_name.trim().is_empty() {
+        return Err("display_name cannot be empty".to_string());
+    }
+    let allowed = ["claude", "codex", "gemini", "openclaw", "hermes"];
+    if !allowed.contains(&runtime.as_str()) {
+        return Err(format!("Unsupported runtime: {}", runtime));
+    }
+
+    let slug = slugify(&display_name);
+    if slug.is_empty() {
+        return Err("display_name must contain at least one alphanumeric character".to_string());
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let permissions_json = permissions.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    let skills_json = skills.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    let mcps_json = mcps.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+
+    let mut agent = Agent {
+        id: id.clone(),
+        slug: slug.clone(),
+        display_name: display_name.clone(),
+        description: description.clone(),
+        runtime: runtime.clone(),
+        model: model.clone(),
+        project_id: project_id.clone(),
+        system_prompt: system_prompt.clone(),
+        permissions: permissions_json.clone(),
+        skills: skills_json.clone(),
+        mcps: mcps_json.clone(),
+        goal: goal.clone(),
+        file_path: None,
+        created_at: now.clone(),
+        last_used_at: None,
+        role_models: None,
+        memory_policy: None,
+    };
+
+    // Optionally write the agent file to disk.
+    if write_file.unwrap_or(true) {
+        let path = agent_file_path(&runtime, &slug)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create agent directory: {}", e))?;
+        }
+        let contents = render_agent_file(&runtime, &agent);
+        fs::write(&path, &contents)
+            .map_err(|e| format!("Failed to write agent file: {}", e))?;
+        agent.file_path = Some(path.to_string_lossy().to_string());
+    }
+
+    // Insert into DB.
+    conn.execute(
+        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            agent.id, agent.slug, agent.display_name, agent.description, agent.runtime, agent.model,
+            agent.project_id, agent.system_prompt, agent.permissions, agent.skills, agent.mcps,
+            agent.goal, agent.file_path, agent.created_at, agent.last_used_at
+        ],
+    ).map_err(|e| {
+        // SQLite UNIQUE violation → friendly message
+        let msg = e.to_string();
+        if msg.contains("UNIQUE") {
+            format!("An agent named \"{}\" already exists for runtime {}", slug, runtime)
+        } else {
+            msg
+        }
+    })?;
+
+    Ok(agent)
+}
+
+#[tauri::command]
+pub fn list_agents(
+    db: State<'_, DbState>,
+    runtime: Option<String>,
+    project_id: Option<String>,
+) -> Result<Vec<Agent>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let mut sql = String::from(
+        "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json FROM agents",
+    );
+    let mut conditions: Vec<&str> = Vec::new();
+    if runtime.is_some() {
+        conditions.push("runtime = ?");
+    }
+    if project_id.is_some() {
+        conditions.push("project_id = ?");
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" ORDER BY COALESCE(last_used_at, created_at) DESC");
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut bindings: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    if let Some(r) = &runtime {
+        bindings.push(r);
+    }
+    if let Some(p) = &project_id {
+        bindings.push(p);
+    }
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+            Ok(Agent {
+                id: row.get(0)?,
+                slug: row.get(1)?,
+                display_name: row.get(2)?,
+                description: row.get(3)?,
+                runtime: row.get(4)?,
+                model: row.get(5)?,
+                project_id: row.get(6)?,
+                system_prompt: row.get(7)?,
+                permissions: row.get(8)?,
+                skills: row.get(9)?,
+                mcps: row.get(10)?,
+                goal: row.get(11)?,
+                file_path: row.get(12)?,
+                created_at: row.get(13)?,
+                last_used_at: row.get(14)?,
+                role_models: row.get(15).ok(),
+                memory_policy: row.get(16).ok(),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_agent(db: State<'_, DbState>, id: String) -> Result<Agent, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json FROM agents WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Agent {
+                id: row.get(0)?,
+                slug: row.get(1)?,
+                display_name: row.get(2)?,
+                description: row.get(3)?,
+                runtime: row.get(4)?,
+                model: row.get(5)?,
+                project_id: row.get(6)?,
+                system_prompt: row.get(7)?,
+                permissions: row.get(8)?,
+                skills: row.get(9)?,
+                mcps: row.get(10)?,
+                goal: row.get(11)?,
+                file_path: row.get(12)?,
+                created_at: row.get(13)?,
+                last_used_at: row.get(14)?,
+                role_models: row.get(15).ok(),
+                memory_policy: row.get(16).ok(),
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// v1.4.0 F3 — persist memory policy JSON for the agent.
+#[tauri::command]
+pub fn update_agent_memory_policy(
+    db: State<'_, DbState>,
+    id: String,
+    policy_json: Option<String>,
+) -> Result<(), String> {
+    if let Some(ref s) = policy_json {
+        // Validate JSON shape but don't constrain content — schema lives in TS.
+        if !s.trim().is_empty() {
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|e| format!("Invalid memory_policy JSON: {}", e))?;
+        }
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agents SET memory_policy_json = ?1 WHERE id = ?2",
+        params![policy_json, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// v1.4.0 F5 — persist per-task model selection for the agent.
+#[tauri::command]
+pub fn update_agent_role_models(
+    db: State<'_, DbState>,
+    id: String,
+    role_models_json: Option<String>,
+) -> Result<(), String> {
+    if let Some(ref s) = role_models_json {
+        if !s.trim().is_empty() {
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|e| format!("Invalid role_models JSON: {}", e))?;
+        }
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agents SET role_models_json = ?1 WHERE id = ?2",
+        params![role_models_json, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_agent(db: State<'_, DbState>, id: String, delete_file: Option<bool>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    if delete_file.unwrap_or(true) {
+        if let Ok(file_path) = conn.query_row(
+            "SELECT file_path FROM agents WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            if let Some(p) = file_path {
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+
+    conn.execute("DELETE FROM agents WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn touch_agent_last_used(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE agents SET last_used_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Agent Variables (v1.4.0 F1) ──────────────────────────────────────────
+//
+// Dynamic prompt resolvers per agent. The article's central insight: prompts
+// are templates with `{var}` placeholders. Each variable has a "kind" + a
+// kind-specific config_json. At dispatch time, we resolve all variables and
+// substitute their values into the system + user prompts.
+//
+// Kinds (Free): static, env, project-path, file
+// Kinds (Pro):  db-query, mcp-call, computed
+//
+// Pro resolvers are stubbed for Wave 2.1 — they return a clearly-flagged
+// "Configure {{var}} to use Pro resolver" placeholder so the user sees that
+// the gate exists. Wave 2.2 fills in the actual Pro implementations.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentVariable {
+    pub id: String,
+    pub agent_id: String,
+    pub name: String,
+    pub kind: String,
+    /// JSON-encoded resolver config. Shape depends on `kind`:
+    ///   static       → { "value": "..." }
+    ///   env          → { "var": "OPENAI_API_KEY" }
+    ///   project-path → {}  (resolves to the active project's path)
+    ///   file         → { "path": "/abs/or/~/path", "maxBytes": 8192 }
+    ///   db-query     → { "connection": "...", "sql": "...", "column": 0 }
+    ///   mcp-call     → { "server": "...", "tool": "...", "args": {...} }
+    ///   computed     → { "expr": "..." }
+    pub config_json: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[tauri::command]
+pub fn list_agent_variables(
+    db: State<'_, DbState>,
+    agent_id: String,
+) -> Result<Vec<AgentVariable>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, agent_id, name, kind, config_json, enabled, created_at, updated_at
+             FROM agent_variables WHERE agent_id = ?1 ORDER BY name",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![agent_id], |row| {
+            Ok(AgentVariable {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                name: row.get(2)?,
+                kind: row.get(3)?,
+                config_json: row.get(4)?,
+                enabled: row.get::<_, i32>(5)? != 0,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_agent_variable(
+    db: State<'_, DbState>,
+    id: Option<String>,
+    agent_id: String,
+    name: String,
+    kind: String,
+    config_json: String,
+    enabled: Option<bool>,
+) -> Result<AgentVariable, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    if name.trim().is_empty() {
+        return Err("Variable name cannot be empty".into());
+    }
+    let allowed_kinds = ["static", "env", "project-path", "file", "db-query", "mcp-call", "computed"];
+    if !allowed_kinds.contains(&kind.as_str()) {
+        return Err(format!("Unsupported variable kind: {}", kind));
+    }
+    // Sanity-check name. Variables are referenced as {name} in prompts; allow
+    // alphanumeric + underscore so substitution stays unambiguous.
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(
+            "Variable name must contain only letters, digits, and underscores".into(),
+        );
+    }
+    // Validate config_json parses.
+    serde_json::from_str::<serde_json::Value>(&config_json)
+        .map_err(|e| format!("Invalid config JSON: {}", e))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let final_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let enabled_int: i32 = if enabled.unwrap_or(true) { 1 } else { 0 };
+
+    conn.execute(
+        "INSERT INTO agent_variables (id, agent_id, name, kind, config_json, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           kind = excluded.kind,
+           config_json = excluded.config_json,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at",
+        params![final_id, agent_id, name, kind, config_json, enabled_int, now],
+    )
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("UNIQUE") {
+            format!("Variable '{}' already exists for this agent", name)
+        } else {
+            msg
+        }
+    })?;
+
+    Ok(AgentVariable {
+        id: final_id,
+        agent_id,
+        name,
+        kind,
+        config_json,
+        enabled: enabled.unwrap_or(true),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+#[tauri::command]
+pub fn delete_agent_variable(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM agent_variables WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Resolve every variable for an agent and return name→value map.
+/// Disabled variables are skipped. Resolution failures are caught and the
+/// variable resolves to a `{var:resolution-failed}` marker so the user sees
+/// the failure in the rendered prompt rather than getting a silent miss.
+pub fn resolve_agent_variables(
+    conn: &Connection,
+    agent_id: &str,
+    active_project_path: Option<&str>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+
+    let mut stmt = match conn.prepare(
+        "SELECT name, kind, config_json FROM agent_variables
+         WHERE agent_id = ?1 AND enabled = 1",
+    ) {
+        Ok(s) => s,
+        Err(_) => return out,
+    };
+
+    let rows = match stmt.query_map(params![agent_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+
+    for row in rows.flatten() {
+        let (name, kind, config_json) = row;
+        let value = resolve_one_variable(&kind, &config_json, active_project_path)
+            .unwrap_or_else(|err| format!("{{{}:{}}}", name, err));
+        out.insert(name, value);
+    }
+    out
+}
+
+fn resolve_one_variable(
+    kind: &str,
+    config_json: &str,
+    active_project_path: Option<&str>,
+) -> Result<String, String> {
+    let cfg: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|_| "bad-config".to_string())?;
+    match kind {
+        "static" => Ok(cfg
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()),
+        "env" => {
+            let var = cfg
+                .get("var")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing-var".to_string())?;
+            std::env::var(var).map_err(|_| "env-not-set".to_string())
+        }
+        "project-path" => Ok(active_project_path
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "no-active-project".to_string())),
+        "file" => {
+            let path = cfg
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing-path".to_string())?;
+            let max_bytes = cfg
+                .get("maxBytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(8 * 1024) as usize;
+            let expanded = expand_tilde(path);
+            let contents = fs::read_to_string(&expanded).map_err(|_| "read-failed".to_string())?;
+            if contents.len() > max_bytes {
+                Ok(format!("{}…[truncated]", &contents[..max_bytes]))
+            } else {
+                Ok(contents)
+            }
+        }
+        // Pro: read-only SQLite query against a path-configured database.
+        // Tier gating happens in the UI — the resolver itself is local and
+        // just needs the file. Postgres/MySQL deferred to a follow-up.
+        "db-query" => resolve_db_query(&cfg),
+        // Pro: constrained expression evaluator. Supports literals, var refs,
+        // string concat with `+`, and basic arithmetic. No arbitrary JS.
+        "computed" => resolve_computed(&cfg, active_project_path),
+        // mcp-call still stubbed — needs an embedded MCP client. Tracked
+        // separately; ship when we wire the MCP client into Rust.
+        "mcp-call" => Err("mcp-call-not-yet-implemented".to_string()),
+        _ => Err(format!("unknown-kind-{}", kind)),
+    }
+}
+
+/// Run a read-only SELECT against a SQLite file. Refuses anything that
+/// looks like a write — we don't want a misconfigured variable to delete
+/// the user's data.
+fn resolve_db_query(cfg: &serde_json::Value) -> Result<String, String> {
+    let path = cfg
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing-path".to_string())?;
+    let sql = cfg
+        .get("sql")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing-sql".to_string())?;
+    let max_rows = cfg
+        .get("maxRows")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .min(500) as usize;
+
+    // Reject anything that isn't a SELECT/WITH. Cheap heuristic, but the
+    // OPEN_READ_ONLY flag below is the actual safety net.
+    let trimmed = sql.trim_start().to_ascii_uppercase();
+    if !(trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")) {
+        return Err("only-select-allowed".to_string());
+    }
+
+    let expanded = expand_tilde(path);
+    let conn = rusqlite::Connection::open_with_flags(
+        &expanded,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("open-failed: {}", e))?;
+
+    let mut stmt = conn.prepare(sql).map_err(|e| format!("prepare-failed: {}", e))?;
+    let col_count = stmt.column_count();
+    let col_names: Vec<String> = (0..col_count)
+        .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+        .collect();
+
+    let rows = stmt
+        .query_map([], |row| {
+            let mut obj = serde_json::Map::new();
+            for (i, name) in col_names.iter().enumerate() {
+                let val: rusqlite::types::Value = row.get(i)?;
+                let json = match val {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(n) => serde_json::Value::from(n),
+                    rusqlite::types::Value::Real(f) => serde_json::Value::from(f),
+                    rusqlite::types::Value::Text(s) => serde_json::Value::from(s),
+                    rusqlite::types::Value::Blob(_) => serde_json::Value::String("(blob)".into()),
+                };
+                obj.insert(name.clone(), json);
+            }
+            Ok(serde_json::Value::Object(obj))
+        })
+        .map_err(|e| format!("query-failed: {}", e))?;
+
+    let mut collected: Vec<serde_json::Value> = Vec::new();
+    for r in rows {
+        if collected.len() >= max_rows {
+            break;
+        }
+        collected.push(r.map_err(|e| format!("row-failed: {}", e))?);
+    }
+
+    serde_json::to_string(&collected).map_err(|e| format!("serialize-failed: {}", e))
+}
+
+/// Tiny expression evaluator. Supports:
+///   - string and number literals
+///   - variable references (`{var_name}` is replaced before evaluation)
+///   - string concat with `+`
+///   - integer/float arithmetic: + - * /
+/// Recognized identifiers: project_path() function returns the active project path.
+fn resolve_computed(
+    cfg: &serde_json::Value,
+    active_project_path: Option<&str>,
+) -> Result<String, String> {
+    let expr = cfg
+        .get("expr")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing-expr".to_string())?;
+
+    // Substitute project_path() with the active project before parsing.
+    let with_project = expr.replace(
+        "project_path()",
+        &format!("\"{}\"", active_project_path.unwrap_or("")),
+    );
+
+    eval_simple_expr(&with_project)
+}
+
+#[derive(Debug, Clone)]
+enum ExprValue {
+    Num(f64),
+    Str(String),
+}
+
+impl ExprValue {
+    fn to_render(&self) -> String {
+        match self {
+            ExprValue::Num(n) => {
+                if n.fract() == 0.0 && n.is_finite() {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            ExprValue::Str(s) => s.clone(),
+        }
+    }
+}
+
+/// Evaluator strictly limited to:
+///   literal "..." | literal '...' | number | (expr) op (expr)
+/// Operators: + - * /. Strings only support `+` (concat).
+fn eval_simple_expr(input: &str) -> Result<String, String> {
+    let tokens = tokenize_expr(input)?;
+    let mut iter = tokens.into_iter().peekable();
+    let value = parse_expr(&mut iter)?;
+    if iter.next().is_some() {
+        return Err("trailing-tokens".to_string());
+    }
+    Ok(value.to_render())
+}
+
+#[derive(Debug, Clone)]
+enum ExprToken {
+    Num(f64),
+    Str(String),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+}
+
+fn tokenize_expr(s: &str) -> Result<Vec<ExprToken>, String> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            '+' => { out.push(ExprToken::Plus); i += 1; }
+            '-' => { out.push(ExprToken::Minus); i += 1; }
+            '*' => { out.push(ExprToken::Star); i += 1; }
+            '/' => { out.push(ExprToken::Slash); i += 1; }
+            '(' => { out.push(ExprToken::LParen); i += 1; }
+            ')' => { out.push(ExprToken::RParen); i += 1; }
+            '"' | '\'' => {
+                let quote = c;
+                i += 1;
+                let mut buf = String::new();
+                while i < chars.len() && chars[i] != quote {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        buf.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        buf.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i >= chars.len() {
+                    return Err("unterminated-string".to_string());
+                }
+                i += 1; // consume closing quote
+                out.push(ExprToken::Str(buf));
+            }
+            d if d.is_ascii_digit() || d == '.' => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_ascii_digit() || chars[i] == '.')
+                {
+                    i += 1;
+                }
+                let lit: String = chars[start..i].iter().collect();
+                let n: f64 = lit.parse().map_err(|_| format!("bad-number-{}", lit))?;
+                out.push(ExprToken::Num(n));
+            }
+            _ => return Err(format!("unexpected-char-{}", c)),
+        }
+    }
+    Ok(out)
+}
+
+type ExprIter = std::iter::Peekable<std::vec::IntoIter<ExprToken>>;
+
+fn parse_expr(it: &mut ExprIter) -> Result<ExprValue, String> {
+    parse_add(it)
+}
+
+fn parse_add(it: &mut ExprIter) -> Result<ExprValue, String> {
+    let mut left = parse_mul(it)?;
+    loop {
+        match it.peek() {
+            Some(ExprToken::Plus) => {
+                it.next();
+                let right = parse_mul(it)?;
+                left = match (left, right) {
+                    (ExprValue::Num(a), ExprValue::Num(b)) => ExprValue::Num(a + b),
+                    (ExprValue::Str(a), ExprValue::Str(b)) => ExprValue::Str(format!("{}{}", a, b)),
+                    (ExprValue::Str(a), ExprValue::Num(b)) => {
+                        ExprValue::Str(format!("{}{}", a, ExprValue::Num(b).to_render()))
+                    }
+                    (ExprValue::Num(a), ExprValue::Str(b)) => {
+                        ExprValue::Str(format!("{}{}", ExprValue::Num(a).to_render(), b))
+                    }
+                };
+            }
+            Some(ExprToken::Minus) => {
+                it.next();
+                let right = parse_mul(it)?;
+                match (left, right) {
+                    (ExprValue::Num(a), ExprValue::Num(b)) => left = ExprValue::Num(a - b),
+                    _ => return Err("subtract-non-numbers".to_string()),
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_mul(it: &mut ExprIter) -> Result<ExprValue, String> {
+    let mut left = parse_atom(it)?;
+    loop {
+        match it.peek() {
+            Some(ExprToken::Star) => {
+                it.next();
+                let right = parse_atom(it)?;
+                match (left, right) {
+                    (ExprValue::Num(a), ExprValue::Num(b)) => left = ExprValue::Num(a * b),
+                    _ => return Err("multiply-non-numbers".to_string()),
+                }
+            }
+            Some(ExprToken::Slash) => {
+                it.next();
+                let right = parse_atom(it)?;
+                match (left, right) {
+                    (ExprValue::Num(_), ExprValue::Num(b)) if b == 0.0 => {
+                        return Err("divide-by-zero".to_string());
+                    }
+                    (ExprValue::Num(a), ExprValue::Num(b)) => left = ExprValue::Num(a / b),
+                    _ => return Err("divide-non-numbers".to_string()),
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_atom(it: &mut ExprIter) -> Result<ExprValue, String> {
+    match it.next() {
+        Some(ExprToken::Num(n)) => Ok(ExprValue::Num(n)),
+        Some(ExprToken::Str(s)) => Ok(ExprValue::Str(s)),
+        Some(ExprToken::LParen) => {
+            let v = parse_expr(it)?;
+            match it.next() {
+                Some(ExprToken::RParen) => Ok(v),
+                _ => Err("missing-rparen".to_string()),
+            }
+        }
+        Some(ExprToken::Minus) => {
+            let v = parse_atom(it)?;
+            match v {
+                ExprValue::Num(n) => Ok(ExprValue::Num(-n)),
+                _ => Err("unary-minus-on-string".to_string()),
+            }
+        }
+        _ => Err("unexpected-token".to_string()),
+    }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    if path == "~" {
+        return home_dir();
+    }
+    PathBuf::from(path)
+}
+
+/// Substitute `{var}` placeholders in a string with values from a map.
+/// Unknown placeholders are left as-is so the user can see what's missing.
+/// Identifiers must match `[A-Za-z_][A-Za-z0-9_]*` — anything else (e.g. JSON
+/// `{ "key": ... }`) is left alone. Implemented as a single-pass scanner so
+/// we don't pull in a regex dependency.
+pub fn substitute_variables(template: &str, values: &HashMap<String, String>) -> String {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            // Look for matching identifier + closing '}'.
+            let start = i + 1;
+            let mut j = start;
+            // First char must be letter or underscore.
+            if j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'_') {
+                j += 1;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'}' {
+                    let name = &template[start..j];
+                    match values.get(name) {
+                        Some(v) => out.push_str(v),
+                        None => out.push_str(&template[i..=j]),
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        // Push one UTF-8 codepoint at a time so we don't slice mid-character.
+        let ch_end = next_char_boundary(template, i);
+        out.push_str(&template[i..ch_end]);
+        i = ch_end;
+    }
+    out
+}
+
+fn next_char_boundary(s: &str, mut i: usize) -> usize {
+    i += 1;
+    while !s.is_char_boundary(i) && i < s.len() {
+        i += 1;
+    }
+    i
+}
+
+// ── Agent Hooks (v1.4.0 F2) ──────────────────────────────────────────────
+//
+// Pre-call context hooks. Each hook fetches data (file / webhook / mcp / db /
+// computed) and the executor formats all results into a single <context>
+// block that gets prepended to the user prompt before dispatch.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHook {
+    pub id: String,
+    pub agent_id: String,
+    pub position: i32,
+    pub name: String,
+    pub kind: String,
+    /// JSON-encoded config:
+    ///   file     → { "path": "...", "maxBytes": 8192 }
+    ///   webhook  → { "url": "...", "headers": {...}, "maxBytes": 8192 }
+    ///   mcp-call → { "server": "...", "tool": "...", "args": {...} }
+    ///   db-query → { "connection": "...", "sql": "..." }
+    ///   computed → { "expr": "..." }
+    pub config_json: String,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub fn list_agent_hooks(
+    db: State<'_, DbState>,
+    agent_id: String,
+) -> Result<Vec<AgentHook>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at
+             FROM agent_hooks WHERE agent_id = ?1 ORDER BY position ASC, created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![agent_id], |row| {
+            Ok(AgentHook {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                position: row.get(2)?,
+                name: row.get(3)?,
+                kind: row.get(4)?,
+                config_json: row.get(5)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_agent_hook(
+    db: State<'_, DbState>,
+    id: Option<String>,
+    agent_id: String,
+    position: Option<i32>,
+    name: String,
+    kind: String,
+    config_json: String,
+    enabled: Option<bool>,
+) -> Result<AgentHook, String> {
+    let allowed = ["file", "webhook", "mcp-call", "db-query", "computed"];
+    if !allowed.contains(&kind.as_str()) {
+        return Err(format!("Unsupported hook kind: {}", kind));
+    }
+    if name.trim().is_empty() {
+        return Err("Hook name cannot be empty".into());
+    }
+    serde_json::from_str::<serde_json::Value>(&config_json)
+        .map_err(|e| format!("Invalid hook config JSON: {}", e))?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let final_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let final_pos = position.unwrap_or_else(|| {
+        // Append at end if no position given.
+        conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM agent_hooks WHERE agent_id = ?1",
+            params![agent_id],
+            |r| r.get::<_, i32>(0),
+        )
+        .unwrap_or(0)
+    });
+    let enabled_int: i32 = if enabled.unwrap_or(true) { 1 } else { 0 };
+
+    conn.execute(
+        "INSERT INTO agent_hooks (id, agent_id, position, name, kind, config_json, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+           position = excluded.position,
+           name = excluded.name,
+           kind = excluded.kind,
+           config_json = excluded.config_json,
+           enabled = excluded.enabled",
+        params![final_id, agent_id, final_pos, name, kind, config_json, enabled_int, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(AgentHook {
+        id: final_id,
+        agent_id,
+        position: final_pos,
+        name,
+        kind,
+        config_json,
+        enabled: enabled.unwrap_or(true),
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub fn delete_agent_hook(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM agent_hooks WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Run all enabled hooks for an agent and return a formatted `<context>`
+/// block. Failures don't break dispatch — they're surfaced as inline error
+/// notes inside the same block so the model sees what couldn't be fetched.
+async fn run_pre_call_hooks(
+    hooks: Vec<AgentHook>,
+) -> String {
+    if hooks.is_empty() {
+        return String::new();
+    }
+    let mut sections: Vec<String> = Vec::new();
+    for hook in hooks {
+        if !hook.enabled {
+            continue;
+        }
+        let result = execute_hook(&hook).await;
+        let section = match result {
+            Ok(content) => format!("<{name}>\n{body}\n</{name}>", name = hook.name, body = content),
+            Err(e) => format!(
+                "<{name} status=\"failed\">\n{body}\n</{name}>",
+                name = hook.name,
+                body = format!("Hook \"{}\" failed: {}", hook.name, e)
+            ),
+        };
+        sections.push(section);
+    }
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("<context>\n{}\n</context>\n\n", sections.join("\n\n"))
+    }
+}
+
+async fn execute_hook(hook: &AgentHook) -> Result<String, String> {
+    let cfg: serde_json::Value =
+        serde_json::from_str(&hook.config_json).map_err(|_| "bad-config".to_string())?;
+    match hook.kind.as_str() {
+        "file" => {
+            let path = cfg
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing-path".to_string())?;
+            let max_bytes = cfg
+                .get("maxBytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(8 * 1024) as usize;
+            let expanded = expand_tilde(path);
+            let contents = fs::read_to_string(&expanded).map_err(|e| e.to_string())?;
+            if contents.len() > max_bytes {
+                Ok(format!("{}…[truncated]", &contents[..max_bytes]))
+            } else {
+                Ok(contents)
+            }
+        }
+        "webhook" => {
+            let url = cfg
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing-url".to_string())?;
+            let max_bytes = cfg
+                .get("maxBytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(16 * 1024) as usize;
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut req = client.get(url);
+            if let Some(headers) = cfg.get("headers").and_then(|v| v.as_object()) {
+                for (k, v) in headers {
+                    if let Some(s) = v.as_str() {
+                        req = req.header(k, s);
+                    }
+                }
+            }
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            let body = resp.text().await.map_err(|e| e.to_string())?;
+            if body.len() > max_bytes {
+                Ok(format!("{}…[truncated]", &body[..max_bytes]))
+            } else {
+                Ok(body)
+            }
+        }
+        // Reuse the variable resolvers — same kinds, same configs.
+        "db-query" => resolve_db_query(&cfg),
+        "computed" => resolve_computed(&cfg, None),
+        "mcp-call" => Err("mcp-call-not-yet-implemented".to_string()),
+        other => Err(format!("unknown-kind-{}", other)),
+    }
+}
+
+/// Tauri command that wraps prompt_agent: resolves the agent's variables and
+/// substitutes them in the prompt before dispatching. Used by Quick Test and
+/// (future) cron jobs. Returns the runtime's response.
+#[tauri::command]
+pub async fn prompt_agent_with_context(
+    db: State<'_, DbState>,
+    agent_id: String,
+    runtime: String,
+    prompt: String,
+    config: Option<String>,
+    active_project_path: Option<String>,
+) -> Result<String, String> {
+    // Step 1: resolve variables + load hooks + read role-model preferences
+    // (single short-lived lock).
+    let (resolved, hooks, response_model, fallback_model) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let resolved = resolve_agent_variables(&conn, &agent_id, active_project_path.as_deref());
+        let hooks = load_agent_hooks(&conn, &agent_id);
+        let (rm, fb) = load_agent_response_model(&conn, &agent_id);
+        (resolved, hooks, rm, fb)
+    };
+
+    // Step 2: substitute into the prompt.
+    let rendered_prompt = substitute_variables(&prompt, &resolved);
+
+    // Step 3: run pre-call hooks → format as <context> block.
+    let context_block = run_pre_call_hooks(hooks).await;
+
+    // Step 4: prepend context block to the user prompt.
+    let final_prompt = if context_block.is_empty() {
+        rendered_prompt
+    } else {
+        format!("{}{}", context_block, rendered_prompt)
+    };
+
+    // Step 5 (F5): merge the agent's response model into the runtime config
+    // unless the caller already passed one. roleModels.response wins over
+    // agents.model — that's the whole point of per-task models.
+    let merged_config = merge_model_into_config(config, response_model, fallback_model);
+
+    prompt_agent(runtime, final_prompt, merged_config).await
+}
+
+// ── Conversation summarization (F3) ──────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessage {
+    /// "user" | "assistant" | "system" | "summary"
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryPolicyParsed {
+    #[serde(default = "default_summarize_after")]
+    summarize_after: usize,
+    #[serde(default = "default_keep_last_k")]
+    keep_last_k: usize,
+    #[serde(default)]
+    summarizer_model: String,
+}
+
+fn default_summarize_after() -> usize { 30 }
+fn default_keep_last_k() -> usize { 5 }
+
+impl Default for MemoryPolicyParsed {
+    fn default() -> Self {
+        Self {
+            summarize_after: default_summarize_after(),
+            keep_last_k: default_keep_last_k(),
+            summarizer_model: String::new(),
+        }
+    }
+}
+
+fn load_memory_policy(conn: &Connection, agent_id: &str) -> MemoryPolicyParsed {
+    let row: Option<Option<String>> = conn
+        .query_row(
+            "SELECT memory_policy_json FROM agents WHERE id = ?1",
+            params![agent_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok();
+    row.flatten()
+        .and_then(|s| serde_json::from_str::<MemoryPolicyParsed>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn load_agent_summarizer_model(conn: &Connection, agent_id: &str) -> Option<String> {
+    let rm_json: Option<Option<String>> = conn
+        .query_row(
+            "SELECT role_models_json FROM agents WHERE id = ?1",
+            params![agent_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok();
+    rm_json
+        .flatten()
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("summarizer").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+}
+
+/// Decide whether to summarize. Returns (older_to_summarize, recent_kept_verbatim).
+/// If we don't need to summarize, the first slice is empty.
+fn split_history_for_summarization(
+    history: &[AgentMessage],
+    policy: &MemoryPolicyParsed,
+) -> (Vec<AgentMessage>, Vec<AgentMessage>) {
+    if history.len() <= policy.summarize_after {
+        return (Vec::new(), history.to_vec());
+    }
+    let keep_k = policy.keep_last_k.min(history.len());
+    let split = history.len() - keep_k;
+    (history[..split].to_vec(), history[split..].to_vec())
+}
+
+fn build_summarizer_prompt(older: &[AgentMessage]) -> String {
+    let mut s = String::from(
+        "Summarize the following conversation between a user and an AI agent. \
+Keep concrete facts, decisions, names, identifiers, and any open questions. \
+Drop pleasantries. Output 5-10 bullet points, no preamble.\n\n",
+    );
+    for m in older {
+        s.push_str(&format!("[{}]: {}\n", m.role, m.content));
+    }
+    s.push_str("\nReturn the summary now.");
+    s
+}
+
+fn build_final_prompt(
+    summary: Option<&str>,
+    recent: &[AgentMessage],
+    new_user_prompt: &str,
+) -> String {
+    let mut out = String::new();
+    if let Some(s) = summary {
+        out.push_str("<conversation_summary>\n");
+        out.push_str(s.trim());
+        out.push_str("\n</conversation_summary>\n\n");
+    }
+    for m in recent {
+        out.push_str(&format!("[{}]: {}\n", m.role, m.content));
+    }
+    out.push_str(&format!("\n[user]: {}\n", new_user_prompt));
+    out
+}
+
+#[tauri::command]
+pub async fn prompt_agent_with_history(
+    db: State<'_, DbState>,
+    agent_id: String,
+    runtime: String,
+    history: Vec<AgentMessage>,
+    new_prompt: String,
+    config: Option<String>,
+    active_project_path: Option<String>,
+) -> Result<String, String> {
+    // Load all the dispatch-time inputs under one lock.
+    let (resolved, hooks, response_model, fallback_model, policy, summarizer_model) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let resolved = resolve_agent_variables(&conn, &agent_id, active_project_path.as_deref());
+        let hooks = load_agent_hooks(&conn, &agent_id);
+        let (rm, fb) = load_agent_response_model(&conn, &agent_id);
+        let policy = load_memory_policy(&conn, &agent_id);
+        let summ = load_agent_summarizer_model(&conn, &agent_id);
+        (resolved, hooks, rm, fb, policy, summ)
+    };
+
+    // Summarize if history exceeds the threshold.
+    let (older, recent) = split_history_for_summarization(&history, &policy);
+    let summary: Option<String> = if !older.is_empty() {
+        let summarizer_prompt = build_summarizer_prompt(&older);
+        // Pick summarizer model: explicit policy > role_models.summarizer >
+        // none (runtime default).
+        let chosen_summarizer = if !policy.summarizer_model.is_empty() {
+            Some(policy.summarizer_model.clone())
+        } else {
+            summarizer_model
+        };
+        let summ_cfg = chosen_summarizer.map(|m| {
+            serde_json::json!({ "model": m }).to_string()
+        });
+        match prompt_agent(runtime.clone(), summarizer_prompt, summ_cfg).await {
+            Ok(s) => Some(s),
+            // Summarization failure shouldn't block dispatch — fall back to
+            // dropping the older history entirely. The agent loses memory
+            // for this turn, which is the same as if we never summarized.
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Resolve variables in the user's new prompt.
+    let rendered_new = substitute_variables(&new_prompt, &resolved);
+
+    // Stitch everything together.
+    let stitched = build_final_prompt(summary.as_deref(), &recent, &rendered_new);
+
+    // Pre-call hooks.
+    let context_block = run_pre_call_hooks(hooks).await;
+    let final_prompt = if context_block.is_empty() {
+        stitched
+    } else {
+        format!("{}{}", context_block, stitched)
+    };
+
+    let merged_config = merge_model_into_config(config, response_model, fallback_model);
+    prompt_agent(runtime, final_prompt, merged_config).await
+}
+
+/// Returns (role_models.response, agents.model). Either may be None.
+fn load_agent_response_model(
+    conn: &Connection,
+    agent_id: &str,
+) -> (Option<String>, Option<String>) {
+    let row: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT role_models_json, model FROM agents WHERE id = ?1",
+            params![agent_id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .ok();
+    let (rm_json, agent_model) = row.unwrap_or((None, None));
+    let response = rm_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("response").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .filter(|s| !s.is_empty());
+    (response, agent_model.filter(|s| !s.is_empty()))
+}
+
+/// Merges a `model` override into the existing `config` JSON (or creates a
+/// new one). The caller's existing config wins — we only set model when the
+/// caller didn't.
+fn merge_model_into_config(
+    config: Option<String>,
+    response_model: Option<String>,
+    fallback_model: Option<String>,
+) -> Option<String> {
+    let chosen = response_model.or(fallback_model);
+    let chosen = match chosen {
+        Some(m) => m,
+        None => return config,
+    };
+
+    let mut obj: serde_json::Map<String, serde_json::Value> = config
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(c).ok())
+        .unwrap_or_default();
+
+    // Don't overwrite an explicit caller-supplied model.
+    let already_set = obj
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !already_set {
+        obj.insert("model".into(), serde_json::Value::String(chosen));
+    }
+
+    serde_json::to_string(&obj).ok()
+}
+
+fn load_agent_hooks(conn: &Connection, agent_id: &str) -> Vec<AgentHook> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at
+         FROM agent_hooks WHERE agent_id = ?1 ORDER BY position ASC, created_at ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map(params![agent_id], |row| {
+        Ok(AgentHook {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            position: row.get(2)?,
+            name: row.get(3)?,
+            kind: row.get(4)?,
+            config_json: row.get(5)?,
+            enabled: row.get::<_, i32>(6).unwrap_or(1) != 0,
+            created_at: row.get(7)?,
+        })
+    }) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    rows.flatten().collect()
+}
+
+#[cfg(test)]
+mod variable_tests {
+    use super::*;
+
+    #[test]
+    fn substitute_handles_known_and_unknown() {
+        let mut vals = HashMap::new();
+        vals.insert("name".to_string(), "Beatriz".to_string());
+        vals.insert("plan".to_string(), "Pro".to_string());
+        let out = substitute_variables(
+            "Hello {name}, your {plan} plan expires in {days} days.",
+            &vals,
+        );
+        assert_eq!(
+            out,
+            "Hello Beatriz, your Pro plan expires in {days} days."
+        );
+    }
+
+    #[test]
+    fn resolve_static_returns_configured_value() {
+        let v = resolve_one_variable("static", r#"{"value":"hi"}"#, None).unwrap();
+        assert_eq!(v, "hi");
+    }
+
+    #[test]
+    fn merge_model_uses_response_when_no_caller_model() {
+        let merged = merge_model_into_config(None, Some("sonnet".into()), Some("opus".into()));
+        let v: serde_json::Value = serde_json::from_str(&merged.unwrap()).unwrap();
+        assert_eq!(v.get("model").unwrap().as_str().unwrap(), "sonnet");
+    }
+
+    #[test]
+    fn merge_model_falls_back_to_agent_model() {
+        let merged = merge_model_into_config(None, None, Some("opus".into()));
+        let v: serde_json::Value = serde_json::from_str(&merged.unwrap()).unwrap();
+        assert_eq!(v.get("model").unwrap().as_str().unwrap(), "opus");
+    }
+
+    #[test]
+    fn merge_model_respects_caller_supplied_model() {
+        let caller = r#"{"model":"haiku","sshHost":"foo"}"#;
+        let merged = merge_model_into_config(Some(caller.into()), Some("sonnet".into()), Some("opus".into()));
+        let v: serde_json::Value = serde_json::from_str(&merged.unwrap()).unwrap();
+        assert_eq!(v.get("model").unwrap().as_str().unwrap(), "haiku");
+        assert_eq!(v.get("sshHost").unwrap().as_str().unwrap(), "foo");
+    }
+
+    #[test]
+    fn merge_model_returns_none_when_no_choice() {
+        assert!(merge_model_into_config(None, None, None).is_none());
+    }
+
+    fn msg(role: &str, content: &str) -> AgentMessage {
+        AgentMessage { role: role.into(), content: content.into() }
+    }
+
+    #[test]
+    fn split_returns_all_recent_below_threshold() {
+        let h = vec![msg("user", "hi"), msg("assistant", "hello")];
+        let policy = MemoryPolicyParsed { summarize_after: 30, keep_last_k: 5, summarizer_model: "".into() };
+        let (older, recent) = split_history_for_summarization(&h, &policy);
+        assert!(older.is_empty());
+        assert_eq!(recent.len(), 2);
+    }
+
+    #[test]
+    fn split_keeps_last_k_when_over_threshold() {
+        let mut h = Vec::new();
+        for i in 0..40 { h.push(msg("user", &format!("m{}", i))); }
+        let policy = MemoryPolicyParsed { summarize_after: 30, keep_last_k: 5, summarizer_model: "".into() };
+        let (older, recent) = split_history_for_summarization(&h, &policy);
+        assert_eq!(older.len(), 35);
+        assert_eq!(recent.len(), 5);
+        assert_eq!(recent[0].content, "m35");
+        assert_eq!(recent[4].content, "m39");
+    }
+
+    #[test]
+    fn build_final_prompt_wraps_summary_in_block() {
+        let recent = vec![msg("user", "ping")];
+        let out = build_final_prompt(Some("we discussed X"), &recent, "what's next?");
+        assert!(out.contains("<conversation_summary>"));
+        assert!(out.contains("we discussed X"));
+        assert!(out.contains("</conversation_summary>"));
+        assert!(out.contains("[user]: what's next?"));
+    }
+
+    #[test]
+    fn resolve_project_path_uses_active() {
+        let v = resolve_one_variable("project-path", "{}", Some("/work/repo")).unwrap();
+        assert_eq!(v, "/work/repo");
+    }
+
+    #[test]
+    fn resolve_env_missing_returns_error() {
+        let v = resolve_one_variable("env", r#"{"var":"DEFINITELY_NOT_SET_VAR"}"#, None);
+        assert!(v.is_err());
+    }
+
+    #[test]
+    fn mcp_call_remains_stubbed() {
+        let v = resolve_one_variable("mcp-call", "{}", None);
+        assert!(matches!(
+            v,
+            Err(ref s) if s == "mcp-call-not-yet-implemented"
+        ));
+    }
+
+    #[test]
+    fn db_query_rejects_writes() {
+        let cfg = r#"{"path":"/tmp/x.db","sql":"DELETE FROM users"}"#;
+        let v = resolve_one_variable("db-query", cfg, None);
+        assert!(matches!(v, Err(ref s) if s == "only-select-allowed"));
+    }
+
+    #[test]
+    fn computed_evaluates_arithmetic() {
+        let v = resolve_one_variable("computed", r#"{"expr":"2 + 3 * 4"}"#, None).unwrap();
+        assert_eq!(v, "14");
+    }
+
+    #[test]
+    fn computed_concatenates_strings() {
+        let v = resolve_one_variable(
+            "computed",
+            r#"{"expr":"\"hello \" + \"world\""}"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(v, "hello world");
+    }
+
+    #[test]
+    fn computed_uses_project_path() {
+        let v = resolve_one_variable(
+            "computed",
+            r#"{"expr":"project_path() + \"/CLAUDE.md\""}"#,
+            Some("/work/proj"),
+        )
+        .unwrap();
+        assert_eq!(v, "/work/proj/CLAUDE.md");
+    }
+
+    #[test]
+    fn computed_rejects_unknown_chars() {
+        let v = resolve_one_variable("computed", r#"{"expr":"foo()"}"#, None);
+        assert!(v.is_err());
+    }
+}
+
+// ── MCP Install (v1.3.0 T4 follow-up) ────────────────────────────────────
+//
+// Writes an MCP server entry into a runtime's config file.
+// Supported runtimes today:
+//   - claude  → ~/.claude/settings.json `mcpServers.<name>`
+//   - gemini  → ~/.gemini/settings.json `mcpServers.<name>`
+//   - codex   → ~/.codex/config.toml [mcp_servers.<name>]
+// Unsupported runtimes return a clear error so the UI can fall back to the
+// "copy snippet" flow.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInstallEntry {
+    pub name: String,
+    pub command: Option<String>,    // for stdio
+    pub args: Option<Vec<String>>,  // for stdio
+    pub env: Option<HashMap<String, String>>, // for stdio
+    pub url: Option<String>,        // for sse/http
+    pub transport: String,          // "stdio" | "sse" | "http"
+}
+
+fn mcp_settings_path(runtime: &str) -> Result<PathBuf, String> {
+    match runtime {
+        "claude" => Ok(claude_home().join("settings.json")),
+        "gemini" => Ok(gemini_home().join("settings.json")),
+        "codex" => {
+            let codex_home = PathBuf::from(
+                std::env::var("CODEX_HOME")
+                    .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()),
+            );
+            Ok(codex_home.join("config.toml"))
+        }
+        "openclaw" => {
+            let oc_home = PathBuf::from(
+                std::env::var("OPENCLAW_HOME")
+                    .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()),
+            );
+            Ok(oc_home.join("openclaw.json"))
+        }
+        "hermes" => Ok(home_dir().join(".hermes").join("config.yaml")),
+        other => Err(format!(
+            "Runtime '{}' does not support MCP install yet — copy the snippet manually.",
+            other
+        )),
+    }
+}
+
+fn build_mcp_json_value(entry: &McpInstallEntry) -> serde_json::Value {
+    if entry.transport == "stdio" {
+        let mut obj = serde_json::Map::new();
+        if let Some(cmd) = &entry.command {
+            obj.insert("command".into(), serde_json::Value::String(cmd.clone()));
+        }
+        if let Some(args) = &entry.args {
+            obj.insert(
+                "args".into(),
+                serde_json::Value::Array(
+                    args.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                ),
+            );
+        }
+        if let Some(env) = &entry.env {
+            let mut env_obj = serde_json::Map::new();
+            for (k, v) in env {
+                env_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            obj.insert("env".into(), serde_json::Value::Object(env_obj));
+        }
+        serde_json::Value::Object(obj)
+    } else {
+        let mut obj = serde_json::Map::new();
+        if let Some(url) = &entry.url {
+            obj.insert("url".into(), serde_json::Value::String(url.clone()));
+        }
+        serde_json::Value::Object(obj)
+    }
+}
+
+#[tauri::command]
+pub fn install_mcp_server(runtime: String, entry: McpInstallEntry) -> Result<String, String> {
+    if entry.name.trim().is_empty() {
+        return Err("MCP server name cannot be empty".to_string());
+    }
+
+    let path = mcp_settings_path(&runtime)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    }
+
+    if runtime == "hermes" {
+        // YAML path: load (or create), ensure mcp_servers map exists, insert.
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let mut doc: serde_yaml::Value = if existing.trim().is_empty() {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        } else {
+            serde_yaml::from_str(&existing)
+                .map_err(|e| format!("Invalid YAML in {:?}: {}", path, e))?
+        };
+
+        let map = doc
+            .as_mapping_mut()
+            .ok_or_else(|| format!("Config root in {:?} must be a mapping", path))?;
+        let key = serde_yaml::Value::String("mcp_servers".to_string());
+        let servers = map
+            .entry(key)
+            .or_insert(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        let servers_map = servers
+            .as_mapping_mut()
+            .ok_or("`mcp_servers` exists but isn't a mapping")?;
+
+        let mut server_map = serde_yaml::Mapping::new();
+        if entry.transport == "stdio" {
+            if let Some(cmd) = &entry.command {
+                server_map.insert(
+                    serde_yaml::Value::String("command".into()),
+                    serde_yaml::Value::String(cmd.clone()),
+                );
+            }
+            if let Some(args) = &entry.args {
+                server_map.insert(
+                    serde_yaml::Value::String("args".into()),
+                    serde_yaml::Value::Sequence(
+                        args.iter().map(|s| serde_yaml::Value::String(s.clone())).collect(),
+                    ),
+                );
+            }
+            if let Some(env) = &entry.env {
+                let mut env_map = serde_yaml::Mapping::new();
+                for (k, v) in env {
+                    env_map.insert(
+                        serde_yaml::Value::String(k.clone()),
+                        serde_yaml::Value::String(v.clone()),
+                    );
+                }
+                server_map.insert(
+                    serde_yaml::Value::String("env".into()),
+                    serde_yaml::Value::Mapping(env_map),
+                );
+            }
+        } else if let Some(url) = &entry.url {
+            server_map.insert(
+                serde_yaml::Value::String("url".into()),
+                serde_yaml::Value::String(url.clone()),
+            );
+        }
+
+        servers_map.insert(
+            serde_yaml::Value::String(entry.name.clone()),
+            serde_yaml::Value::Mapping(server_map),
+        );
+
+        let serialized = serde_yaml::to_string(&doc)
+            .map_err(|e| format!("Failed to serialize YAML: {}", e))?;
+        fs::write(&path, serialized).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+    } else if runtime == "codex" {
+        // TOML path: load (or create) the document, add an [mcp_servers.<name>] table.
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let mut doc: toml::Value = if existing.trim().is_empty() {
+            toml::Value::Table(toml::value::Table::new())
+        } else {
+            toml::from_str(&existing).map_err(|e| format!("Invalid TOML in {:?}: {}", path, e))?
+        };
+
+        let table = doc.as_table_mut().ok_or("Codex config root must be a table")?;
+        let servers = table
+            .entry("mcp_servers".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        let servers_table = servers
+            .as_table_mut()
+            .ok_or("`mcp_servers` already exists but is not a table")?;
+
+        let mut server_table = toml::value::Table::new();
+        if entry.transport == "stdio" {
+            if let Some(cmd) = &entry.command {
+                server_table.insert("command".into(), toml::Value::String(cmd.clone()));
+            }
+            if let Some(args) = &entry.args {
+                server_table.insert(
+                    "args".into(),
+                    toml::Value::Array(args.iter().map(|s| toml::Value::String(s.clone())).collect()),
+                );
+            }
+            if let Some(env) = &entry.env {
+                let mut env_table = toml::value::Table::new();
+                for (k, v) in env {
+                    env_table.insert(k.clone(), toml::Value::String(v.clone()));
+                }
+                server_table.insert("env".into(), toml::Value::Table(env_table));
+            }
+        } else if let Some(url) = &entry.url {
+            server_table.insert("url".into(), toml::Value::String(url.clone()));
+        }
+        servers_table.insert(entry.name.clone(), toml::Value::Table(server_table));
+
+        let serialized = toml::to_string_pretty(&doc)
+            .map_err(|e| format!("Failed to serialize TOML: {}", e))?;
+        fs::write(&path, serialized).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+    } else {
+        // JSON path: load (or create) the document, ensure mcpServers exists, add entry.
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let mut doc: serde_json::Value = if existing.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&existing).map_err(|e| format!("Invalid JSON in {:?}: {}", path, e))?
+        };
+
+        if !doc.is_object() {
+            return Err(format!("Config root in {:?} must be an object", path));
+        }
+        let obj = doc.as_object_mut().unwrap();
+        if !obj.contains_key("mcpServers") {
+            obj.insert("mcpServers".into(), serde_json::json!({}));
+        }
+        let servers = obj
+            .get_mut("mcpServers")
+            .and_then(|v| v.as_object_mut())
+            .ok_or("`mcpServers` already exists but is not an object")?;
+        servers.insert(entry.name.clone(), build_mcp_json_value(&entry));
+
+        let serialized = serde_json::to_string_pretty(&doc)
+            .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+        fs::write(&path, serialized).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+    }
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod mcp_install_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_runtime_errors() {
+        // Now we support claude / codex / gemini / openclaw / hermes.
+        assert!(mcp_settings_path("hermes").is_ok());
+        assert!(mcp_settings_path("openclaw").is_ok());
+        assert!(mcp_settings_path("nonsense-runtime").is_err());
+    }
+
+    #[test]
+    fn build_stdio_value_has_command_args() {
+        let entry = McpInstallEntry {
+            name: "fs".into(),
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()]),
+            env: None,
+            url: None,
+            transport: "stdio".into(),
+        };
+        let v = build_mcp_json_value(&entry);
+        assert_eq!(v["command"], "npx");
+        assert_eq!(v["args"][0], "-y");
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn slugify_basic() {
+        assert_eq!(slugify("PR Reviewer"), "pr-reviewer");
+        assert_eq!(slugify("My Agent!!"), "my-agent");
+        assert_eq!(slugify("  spaced   out  "), "spaced-out");
+        assert_eq!(slugify("---weird---"), "weird");
+    }
+
+    #[test]
+    fn claude_path_uses_md_file() {
+        let p = agent_file_path("claude", "pr-reviewer").unwrap();
+        let s = p.to_string_lossy();
+        assert!(s.ends_with(".claude/agents/pr-reviewer.md"));
+    }
+
+    #[test]
+    fn codex_path_uses_agents_md() {
+        let p = agent_file_path("codex", "doc-writer").unwrap();
+        let s = p.to_string_lossy();
+        assert!(s.ends_with(".codex/agents/doc-writer/AGENTS.md"));
+    }
+
+    #[test]
+    fn unsupported_runtime_errors() {
+        assert!(agent_file_path("nonsense", "x").is_err());
+    }
+
+    #[test]
+    fn render_claude_agent_includes_frontmatter() {
+        let a = Agent {
+            id: "test".into(),
+            slug: "pr-reviewer".into(),
+            display_name: "PR Reviewer".into(),
+            description: Some("Reviews PRs".into()),
+            runtime: "claude".into(),
+            model: Some("claude-sonnet-4-6".into()),
+            project_id: None,
+            system_prompt: Some("You review pull requests.".into()),
+            permissions: None,
+            skills: None,
+            mcps: None,
+            goal: None,
+            file_path: None,
+            created_at: "2026-04-30T00:00:00Z".into(),
+            last_used_at: None,
+            role_models: None,
+            memory_policy: None,
+        };
+        let out = render_claude_agent(&a);
+        assert!(out.contains("name: pr-reviewer"));
+        assert!(out.contains("description: Reviews PRs"));
+        assert!(out.contains("model: claude-sonnet-4-6"));
+        assert!(out.contains("# PR Reviewer"));
+        assert!(out.contains("You review pull requests."));
+    }
+}
+
+// ── Agent Groups (v1.4.0 F4) ─────────────────────────────────────────────
+//
+// Multi-agent groups. The article's headline pattern: instead of one agent
+// with 30 tools, you have a router that dispatches to N specialized children
+// with 5-8 tools each. ATO stores group metadata in SQLite (`agent_groups`
+// + `agent_group_members`) AND mirrors it to a portable file at
+// `~/.ato/groups/<slug>/group.json` so groups can be shared, version-
+// controlled, and discovered by the standalone MCP server.
+
+fn group_file_path(slug: &str) -> PathBuf {
+    home_dir().join(".ato").join("groups").join(slug).join("group.json")
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMemberInput {
+    /// Slug of an existing agent. We look up the id by slug at save time.
+    pub agent_slug: String,
+    pub role: String, // "router" | "child"
+    pub position: i32,
+}
+
+fn load_group_members(conn: &Connection, group_id: &str) -> Vec<AgentGroupMember> {
+    let mut stmt = match conn.prepare(
+        "SELECT m.agent_id, a.slug, a.display_name, m.role, m.position
+         FROM agent_group_members m
+         JOIN agents a ON a.id = m.agent_id
+         WHERE m.group_id = ?1
+         ORDER BY m.position ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map(params![group_id], |row| {
+        Ok(AgentGroupMember {
+            agent_id: row.get(0)?,
+            agent_slug: row.get(1)?,
+            agent_display_name: row.get(2)?,
+            role: row.get(3)?,
+            position: row.get(4)?,
+        })
+    }) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    rows.flatten().collect()
+}
+
+fn write_group_file(group: &AgentGroup) -> Result<String, String> {
+    let path = group_file_path(&group.slug);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create groups dir: {}", e))?;
+    }
+    let snapshot = serde_json::json!({
+        "slug": group.slug,
+        "displayName": group.display_name,
+        "description": group.description,
+        "runtime": group.runtime,
+        "routerConfig": group.router_config
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .unwrap_or_else(|| serde_json::json!({})),
+        "members": group.members.iter().map(|m| serde_json::json!({
+            "agent": m.agent_slug,
+            "role": m.role,
+            "position": m.position,
+        })).collect::<Vec<_>>(),
+    });
+    let serialized = serde_json::to_string_pretty(&snapshot)
+        .map_err(|e| format!("Failed to serialize group: {}", e))?;
+    fs::write(&path, serialized).map_err(|e| format!("Failed to write group file: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn create_agent_group(
+    db: State<'_, DbState>,
+    display_name: String,
+    runtime: String,
+    description: Option<String>,
+    router_config_json: Option<String>,
+    members: Vec<GroupMemberInput>,
+) -> Result<AgentGroup, String> {
+    if display_name.trim().is_empty() {
+        return Err("display_name cannot be empty".into());
+    }
+    let allowed_runtimes = ["claude", "codex", "gemini", "openclaw", "hermes"];
+    if !allowed_runtimes.contains(&runtime.as_str()) {
+        return Err(format!("Unsupported runtime: {}", runtime));
+    }
+    if let Some(ref cfg) = router_config_json {
+        serde_json::from_str::<serde_json::Value>(cfg)
+            .map_err(|e| format!("Invalid router_config JSON: {}", e))?;
+    }
+
+    let slug = slugify(&display_name);
+    if slug.is_empty() {
+        return Err("display_name must produce a non-empty slug".into());
+    }
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Resolve member slugs → agent IDs. Must all exist; runtime must match.
+    let mut resolved_members: Vec<AgentGroupMember> = Vec::new();
+    for m in &members {
+        let row = conn.query_row(
+            "SELECT id, slug, display_name, runtime FROM agents WHERE slug = ?1",
+            params![m.agent_slug],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        );
+        match row {
+            Ok((agent_id, slug_, display, agent_runtime)) => {
+                if agent_runtime != runtime {
+                    return Err(format!(
+                        "Member '{}' uses runtime '{}', but group runtime is '{}'",
+                        slug_, agent_runtime, runtime
+                    ));
+                }
+                resolved_members.push(AgentGroupMember {
+                    agent_id,
+                    agent_slug: slug_,
+                    agent_display_name: display,
+                    role: m.role.clone(),
+                    position: m.position,
+                });
+            }
+            Err(_) => return Err(format!("Agent with slug '{}' not found", m.agent_slug)),
+        }
+    }
+
+    // Insert group + members atomically.
+    let tx_result: Result<(), String> = (|| {
+        conn.execute(
+            "INSERT INTO agent_groups (id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)",
+            params![id, slug, display_name, description, runtime, router_config_json, now],
+        )
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE") {
+                format!("A group named \"{}\" already exists", slug)
+            } else {
+                msg
+            }
+        })?;
+
+        for m in &resolved_members {
+            conn.execute(
+                "INSERT INTO agent_group_members (group_id, agent_id, role, position)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, m.agent_id, m.role, m.position],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = tx_result {
+        // Best-effort rollback by deleting partial state.
+        let _ = conn.execute("DELETE FROM agent_groups WHERE id = ?1", params![id]);
+        return Err(e);
+    }
+
+    let mut group = AgentGroup {
+        id: id.clone(),
+        slug,
+        display_name,
+        description,
+        runtime,
+        router_config: router_config_json,
+        file_path: None,
+        created_at: now,
+        last_used_at: None,
+        members: resolved_members,
+    };
+
+    // Persist the file mirror; non-fatal on failure (agent still works in-DB).
+    match write_group_file(&group) {
+        Ok(path) => {
+            group.file_path = Some(path.clone());
+            let _ = conn.execute(
+                "UPDATE agent_groups SET file_path = ?1 WHERE id = ?2",
+                params![path, id],
+            );
+        }
+        Err(e) => eprintln!("write_group_file: {}", e),
+    }
+
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn list_agent_groups(
+    db: State<'_, DbState>,
+    runtime: Option<String>,
+) -> Result<Vec<AgentGroup>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let (sql, has_filter) = if runtime.is_some() {
+        (
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+             FROM agent_groups WHERE runtime = ?1
+             ORDER BY COALESCE(last_used_at, created_at) DESC".to_string(),
+            true,
+        )
+    } else {
+        (
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+             FROM agent_groups
+             ORDER BY COALESCE(last_used_at, created_at) DESC".to_string(),
+            false,
+        )
+    };
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let row_to_group = |row: &rusqlite::Row| -> rusqlite::Result<AgentGroup> {
+        Ok(AgentGroup {
+            id: row.get(0)?,
+            slug: row.get(1)?,
+            display_name: row.get(2)?,
+            description: row.get(3)?,
+            runtime: row.get(4)?,
+            router_config: row.get(5)?,
+            file_path: row.get(6)?,
+            created_at: row.get(7)?,
+            last_used_at: row.get(8)?,
+            members: Vec::new(), // filled in below
+        })
+    };
+    let mut groups: Vec<AgentGroup> = if has_filter {
+        let r = runtime.unwrap();
+        stmt.query_map(params![r], row_to_group)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    } else {
+        stmt.query_map([], row_to_group)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+
+    for g in &mut groups {
+        g.members = load_group_members(&conn, &g.id);
+    }
+    Ok(groups)
+}
+
+#[tauri::command]
+pub fn get_agent_group(db: State<'_, DbState>, slug: String) -> Result<AgentGroup, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut group = conn
+        .query_row(
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+             FROM agent_groups WHERE slug = ?1",
+            params![slug],
+            |row| {
+                Ok(AgentGroup {
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    display_name: row.get(2)?,
+                    description: row.get(3)?,
+                    runtime: row.get(4)?,
+                    router_config: row.get(5)?,
+                    file_path: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                    members: Vec::new(),
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    group.members = load_group_members(&conn, &group.id);
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn update_agent_group(
+    db: State<'_, DbState>,
+    id: String,
+    description: Option<String>,
+    router_config_json: Option<String>,
+    members: Option<Vec<GroupMemberInput>>,
+) -> Result<AgentGroup, String> {
+    if let Some(ref cfg) = router_config_json {
+        serde_json::from_str::<serde_json::Value>(cfg)
+            .map_err(|e| format!("Invalid router_config JSON: {}", e))?;
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    // Fetch the existing group to know runtime/slug for member resolution.
+    let (group_runtime, group_slug): (String, String) = conn.query_row(
+        "SELECT runtime, slug FROM agent_groups WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ).map_err(|e| e.to_string())?;
+
+    if let Some(desc) = &description {
+        conn.execute(
+            "UPDATE agent_groups SET description = ?1 WHERE id = ?2",
+            params![desc, id],
+        ).map_err(|e| e.to_string())?;
+    }
+    if let Some(cfg) = &router_config_json {
+        conn.execute(
+            "UPDATE agent_groups SET router_config = ?1 WHERE id = ?2",
+            params![cfg, id],
+        ).map_err(|e| e.to_string())?;
+    }
+    if let Some(new_members) = &members {
+        // Replace member list atomically.
+        conn.execute("DELETE FROM agent_group_members WHERE group_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        for m in new_members {
+            let agent_row = conn.query_row(
+                "SELECT id, runtime FROM agents WHERE slug = ?1",
+                params![m.agent_slug],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            );
+            match agent_row {
+                Ok((agent_id, agent_runtime)) => {
+                    if agent_runtime != group_runtime {
+                        return Err(format!(
+                            "Member '{}' uses runtime '{}', but group runtime is '{}'",
+                            m.agent_slug, agent_runtime, group_runtime
+                        ));
+                    }
+                    conn.execute(
+                        "INSERT INTO agent_group_members (group_id, agent_id, role, position)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![id, agent_id, m.role, m.position],
+                    ).map_err(|e| e.to_string())?;
+                }
+                Err(_) => return Err(format!("Agent with slug '{}' not found", m.agent_slug)),
+            }
+        }
+    }
+
+    drop(conn);
+    // Re-read the group + members through the public command so the file
+    // mirror always reflects the freshly-saved state.
+    let _ = group_slug; // borrowed only for clarity; not used further.
+    let group = get_agent_group(db, group_slug.clone())?;
+    let _ = write_group_file(&group);
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn delete_agent_group(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // Look up the slug so we can clean up the file mirror.
+    if let Ok(slug) = conn.query_row(
+        "SELECT slug FROM agent_groups WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, String>(0),
+    ) {
+        let path = group_file_path(&slug);
+        let _ = fs::remove_file(&path);
+        // Best-effort prune of the parent directory if empty.
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    conn.execute("DELETE FROM agent_groups WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Router execution (v1.4.0 F4 — dispatch_to_group) ─────────────────────
+
+/// Decide which child agent a prompt should route to. Two-stage:
+///   1. Apply rules (declarative, fast, cheap, predictable).
+///   2. If no rule matches AND llmFallback is enabled, ask the runtime's
+///      cheap classifier model to pick a child.
+/// Returns (chosen_child_slug, routing_reason).
+async fn route_prompt_to_child(
+    group: &AgentGroup,
+    prompt: &str,
+) -> Result<(String, String), String> {
+    let cfg: serde_json::Value = group
+        .router_config
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let children: Vec<&AgentGroupMember> = group
+        .members
+        .iter()
+        .filter(|m| m.role == "child")
+        .collect();
+    if children.is_empty() {
+        return Err("Group has no children to route to".into());
+    }
+
+    // Stage 1: rules.
+    if let Some(rules) = cfg.get("rules").and_then(|r| r.as_array()) {
+        let lower = prompt.to_lowercase();
+        for rule in rules {
+            let then_slug = rule.get("then").and_then(|v| v.as_str()).unwrap_or("");
+            let if_block = rule.get("if").cloned().unwrap_or_else(|| serde_json::json!({}));
+            // keyword match (any of the listed strings)
+            if let Some(keywords) = if_block.get("keyword").and_then(|v| v.as_array()) {
+                for kw in keywords {
+                    if let Some(s) = kw.as_str() {
+                        if !s.is_empty() && lower.contains(&s.to_lowercase()) {
+                            // Verify the child exists in this group.
+                            if children.iter().any(|c| c.agent_slug == then_slug) {
+                                return Ok((
+                                    then_slug.to_string(),
+                                    format!("rule: keyword '{}' matched", s),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // regex match
+            if let Some(pattern) = if_block.get("regex").and_then(|v| v.as_str()) {
+                // Tiny shim: use the same single-pass approach as substitute_variables
+                // to avoid a regex dep — only supports literal substring for now.
+                // (Wave 3.2 will add proper regex.)
+                if !pattern.is_empty() && prompt.contains(pattern) {
+                    if children.iter().any(|c| c.agent_slug == then_slug) {
+                        return Ok((
+                            then_slug.to_string(),
+                            format!("rule: pattern '{}' matched (literal)", pattern),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Stage 2: LLM fallback.
+    let llm_fb = cfg.get("llmFallback");
+    let llm_enabled = llm_fb
+        .and_then(|v| v.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if llm_enabled {
+        let descriptions: Vec<String> = children
+            .iter()
+            .map(|c| format!("- {}: {}", c.agent_slug, c.agent_display_name))
+            .collect();
+        let classifier_prompt = format!(
+            "You are a router. Pick the single agent slug that should handle the user's message.\n\
+             Available agents:\n{}\n\
+             User message: {}\n\
+             Reply with ONLY the slug — nothing else.",
+            descriptions.join("\n"),
+            prompt
+        );
+        // Reuse prompt_agent on the group's runtime.
+        match prompt_agent(group.runtime.clone(), classifier_prompt, None).await {
+            Ok(reply) => {
+                let pick = reply.trim().lines().next().unwrap_or("").trim().to_string();
+                if let Some(matched) =
+                    children.iter().find(|c| c.agent_slug == pick).map(|c| c.agent_slug.clone())
+                {
+                    return Ok((matched, "llm-fallback".to_string()));
+                }
+                // Classifier returned nothing useful; fall through to default.
+            }
+            Err(e) => {
+                eprintln!("router LLM fallback failed: {}", e);
+            }
+        }
+    }
+
+    // Default: first child.
+    let first = children[0].agent_slug.clone();
+    Ok((first, "default: first child".into()))
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupDispatchResult {
+    pub response: String,
+    pub routed_to: String,
+    pub routing_reason: String,
+}
+
+/// Tauri command: dispatch a prompt through a group's router.
+#[tauri::command]
+pub async fn dispatch_to_group(
+    db: State<'_, DbState>,
+    slug: String,
+    prompt: String,
+    config: Option<String>,
+    active_project_path: Option<String>,
+) -> Result<GroupDispatchResult, String> {
+    // Load the group once (under a short-lived lock).
+    let group = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut group = conn.query_row(
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+             FROM agent_groups WHERE slug = ?1",
+            params![slug],
+            |row| {
+                Ok(AgentGroup {
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    display_name: row.get(2)?,
+                    description: row.get(3)?,
+                    runtime: row.get(4)?,
+                    router_config: row.get(5)?,
+                    file_path: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                    members: Vec::new(),
+                })
+            },
+        ).map_err(|e| format!("Group '{}' not found: {}", slug, e))?;
+        group.members = load_group_members(&conn, &group.id);
+        group
+    };
+
+    // Pick a child via the router.
+    let (child_slug, reason) = route_prompt_to_child(&group, &prompt).await?;
+
+    // Find the child agent's id so we can use prompt_agent_with_context.
+    let child_agent_id = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id FROM agents WHERE slug = ?1",
+            params![child_slug],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| format!("Child agent '{}' not found: {}", child_slug, e))?
+    };
+
+    // Resolve variables + run hooks for the child + dispatch.
+    let response = prompt_agent_with_context(
+        db.clone(),
+        child_agent_id,
+        group.runtime.clone(),
+        prompt,
+        config,
+        active_project_path,
+    )
+    .await?;
+
+    // Bump last_used_at.
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "UPDATE agent_groups SET last_used_at = ?1 WHERE id = ?2",
+            params![now, group.id],
+        );
+    }
+
+    Ok(GroupDispatchResult {
+        response,
+        routed_to: child_slug,
+        routing_reason: reason,
+    })
+}
+
+// ── Agent Observability (v1.4.0 F6) ──────────────────────────────────────
+//
+// Reads `~/.ato/agent-logs.jsonl` — the unified trace log every dispatch path
+// (desktop Run button, Quick Test, MCP run_agent, group routing, cron jobs)
+// appends to. Surfaces metrics + per-trace details for the Insights panel.
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTraceLine {
+    pub ts: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub runtime: Option<String>,
+    pub slug: Option<String>,
+    pub file_path: Option<String>,
+    pub prompt_preview: Option<String>,
+    pub response_preview: Option<String>,
+    pub ok: Option<bool>,
+    pub error: Option<String>,
+    pub source: Option<String>,
+    /// Set when this dispatch was a group routed through its router (F4).
+    pub routed_to: Option<String>,
+    /// Future fields land here without breaking the type.
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTraceFilter {
+    pub agent_slug: Option<String>,
+    pub runtime: Option<String>,
+    /// "ok" | "error" | "all" (default all).
+    pub status: Option<String>,
+    /// ISO-8601; only return traces with `ts >= since`.
+    pub since: Option<String>,
+    /// Hard cap to avoid pulling huge files.
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMetrics {
+    pub total_runs: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub success_rate: f64,
+    pub p50_latency_ms: Option<i64>,
+    pub p95_latency_ms: Option<i64>,
+    pub avg_latency_ms: Option<i64>,
+    /// Per-agent breakdown so the dashboard can render a list. Sorted by
+    /// most-recent-first.
+    pub per_agent: Vec<PerAgentMetrics>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PerAgentMetrics {
+    pub slug: String,
+    pub runtime: Option<String>,
+    pub total_runs: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub success_rate: f64,
+    pub p50_latency_ms: Option<i64>,
+    pub p95_latency_ms: Option<i64>,
+    pub last_run_at: Option<String>,
+}
+
+fn load_agent_log_lines(filter: &AgentTraceFilter) -> Vec<AgentTraceLine> {
+    let path = home_dir().join(".ato").join("agent-logs.jsonl");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let content = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut all: Vec<AgentTraceLine> = content
+        .lines()
+        .rev() // newest first (file is append-only)
+        .filter_map(|line| serde_json::from_str::<AgentTraceLine>(line).ok())
+        .collect();
+
+    // Apply filters in-place.
+    if let Some(slug) = &filter.agent_slug {
+        all.retain(|t| t.slug.as_deref() == Some(slug));
+    }
+    if let Some(runtime) = &filter.runtime {
+        all.retain(|t| t.runtime.as_deref() == Some(runtime));
+    }
+    if let Some(status) = &filter.status {
+        match status.as_str() {
+            "ok" => all.retain(|t| t.ok == Some(true)),
+            "error" => all.retain(|t| t.ok == Some(false)),
+            _ => {} // "all" or unknown → keep
+        }
+    }
+    if let Some(since) = &filter.since {
+        all.retain(|t| t.ts.as_deref().map(|ts| ts >= since.as_str()).unwrap_or(false));
+    }
+    if let Some(limit) = filter.limit {
+        if all.len() > limit {
+            all.truncate(limit);
+        }
+    }
+    all
+}
+
+fn percentile(sorted: &[i64], pct: f64) -> Option<i64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * pct).round() as usize;
+    sorted.get(idx).copied()
+}
+
+#[tauri::command]
+pub fn read_agent_traces(filter: AgentTraceFilter) -> Result<Vec<AgentTraceLine>, String> {
+    Ok(load_agent_log_lines(&filter))
+}
+
+#[tauri::command]
+pub fn get_agent_metrics(filter: AgentTraceFilter) -> Result<AgentMetrics, String> {
+    // For aggregations we want every line that matches the runtime/status/
+    // since filters but ignoring `limit` so totals are accurate.
+    let aggregate_filter = AgentTraceFilter {
+        agent_slug: filter.agent_slug.clone(),
+        runtime: filter.runtime.clone(),
+        status: filter.status.clone(),
+        since: filter.since.clone(),
+        limit: None,
+    };
+    let lines = load_agent_log_lines(&aggregate_filter);
+
+    let total = lines.len();
+    let mut successful = 0usize;
+    let mut failed = 0usize;
+    let mut latencies: Vec<i64> = Vec::with_capacity(lines.len());
+
+    // Per-agent rollups
+    let mut per_agent_map: HashMap<String, PerAgentRollup> = HashMap::new();
+
+    for t in &lines {
+        match t.ok {
+            Some(true) => successful += 1,
+            Some(false) => failed += 1,
+            None => {}
+        }
+        if let Some(d) = t.duration_ms {
+            latencies.push(d);
+        }
+
+        if let Some(slug) = &t.slug {
+            let entry = per_agent_map
+                .entry(slug.clone())
+                .or_insert_with(|| PerAgentRollup {
+                    slug: slug.clone(),
+                    runtime: t.runtime.clone(),
+                    total: 0,
+                    successful: 0,
+                    failed: 0,
+                    latencies: Vec::new(),
+                    last_run: None,
+                });
+            entry.total += 1;
+            match t.ok {
+                Some(true) => entry.successful += 1,
+                Some(false) => entry.failed += 1,
+                None => {}
+            }
+            if let Some(d) = t.duration_ms {
+                entry.latencies.push(d);
+            }
+            if let Some(ts) = &t.ts {
+                entry.last_run = Some(match &entry.last_run {
+                    Some(prev) if prev > ts => prev.clone(),
+                    _ => ts.clone(),
+                });
+            }
+        }
+    }
+
+    latencies.sort_unstable();
+    let avg_latency_ms = if latencies.is_empty() {
+        None
+    } else {
+        Some(latencies.iter().sum::<i64>() / latencies.len() as i64)
+    };
+
+    let mut per_agent: Vec<PerAgentMetrics> = per_agent_map
+        .into_values()
+        .map(|mut r| {
+            r.latencies.sort_unstable();
+            PerAgentMetrics {
+                slug: r.slug,
+                runtime: r.runtime,
+                total_runs: r.total,
+                successful: r.successful,
+                failed: r.failed,
+                success_rate: if r.total == 0 { 0.0 } else { r.successful as f64 / r.total as f64 },
+                p50_latency_ms: percentile(&r.latencies, 0.5),
+                p95_latency_ms: percentile(&r.latencies, 0.95),
+                last_run_at: r.last_run,
+            }
+        })
+        .collect();
+    // Most-recent-first.
+    per_agent.sort_by(|a, b| b.last_run_at.cmp(&a.last_run_at));
+
+    Ok(AgentMetrics {
+        total_runs: total,
+        successful,
+        failed,
+        success_rate: if total == 0 { 0.0 } else { successful as f64 / total as f64 },
+        p50_latency_ms: percentile(&latencies, 0.5),
+        p95_latency_ms: percentile(&latencies, 0.95),
+        avg_latency_ms,
+        per_agent,
+    })
+}
+
+struct PerAgentRollup {
+    slug: String,
+    runtime: Option<String>,
+    total: usize,
+    successful: usize,
+    failed: usize,
+    latencies: Vec<i64>,
+    last_run: Option<String>,
+}
+
+// ── Evaluators (v1.4.0 F7 — heuristic only in this wave; LLM-as-judge in
+//    Wave 4.5) ────────────────────────────────────────────────────────────
+//
+// Evaluators answer "did this run succeed?" as code or as a small LLM call.
+// Stored in agent_evaluators (new table — added in init_database below
+// idempotently). Heuristic evaluators run locally; LLM-as-judge runs through
+// `prompt_agent` with a cheap model. Manual + scheduled batch only — never
+// live on every dispatch.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvaluator {
+    pub id: String,
+    pub agent_slug: String,
+    pub name: String,
+    pub kind: String, // 'contains' | 'not-contains' | 'length-range' | 'tool-called' | 'llm-judge'
+    pub config_json: String,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+fn ensure_evaluator_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_evaluators (
+            id          TEXT PRIMARY KEY,
+            agent_slug  TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_evaluators_slug ON agent_evaluators(agent_slug);",
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_agent_evaluators(
+    db: State<'_, DbState>,
+    agent_slug: String,
+) -> Result<Vec<AgentEvaluator>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    ensure_evaluator_table(&conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, agent_slug, name, kind, config_json, enabled, created_at
+             FROM agent_evaluators WHERE agent_slug = ?1 ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![agent_slug], |row| {
+            Ok(AgentEvaluator {
+                id: row.get(0)?,
+                agent_slug: row.get(1)?,
+                name: row.get(2)?,
+                kind: row.get(3)?,
+                config_json: row.get(4)?,
+                enabled: row.get::<_, i32>(5)? != 0,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_agent_evaluator(
+    db: State<'_, DbState>,
+    id: Option<String>,
+    agent_slug: String,
+    name: String,
+    kind: String,
+    config_json: String,
+    enabled: Option<bool>,
+) -> Result<AgentEvaluator, String> {
+    let allowed = ["contains", "not-contains", "length-range", "tool-called", "llm-judge"];
+    if !allowed.contains(&kind.as_str()) {
+        return Err(format!("Unsupported evaluator kind: {}", kind));
+    }
+    if name.trim().is_empty() {
+        return Err("Evaluator name cannot be empty".into());
+    }
+    serde_json::from_str::<serde_json::Value>(&config_json)
+        .map_err(|e| format!("Invalid evaluator config JSON: {}", e))?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    ensure_evaluator_table(&conn)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let final_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let enabled_int: i32 = if enabled.unwrap_or(true) { 1 } else { 0 };
+
+    conn.execute(
+        "INSERT INTO agent_evaluators (id, agent_slug, name, kind, config_json, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           kind = excluded.kind,
+           config_json = excluded.config_json,
+           enabled = excluded.enabled",
+        params![final_id, agent_slug, name, kind, config_json, enabled_int, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(AgentEvaluator {
+        id: final_id,
+        agent_slug,
+        name,
+        kind,
+        config_json,
+        enabled: enabled.unwrap_or(true),
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub fn delete_agent_evaluator(db: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    ensure_evaluator_table(&conn)?;
+    conn.execute("DELETE FROM agent_evaluators WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluationResult {
+    pub evaluator_id: String,
+    pub kind: String,
+    pub verdict: String, // "pass" | "fail" | "partial" | "unknown"
+    pub score: f64,      // 0.0 – 1.0
+    pub reason: String,
+}
+
+/// Run an evaluator against a single trace line. Heuristic kinds run locally
+/// in Rust; `llm-judge` is stubbed in this wave (returns an "unknown" verdict)
+/// because it'd ideally call a Pro cloud endpoint with budget controls.
+fn run_evaluator(eval: &AgentEvaluator, trace: &AgentTraceLine) -> EvaluationResult {
+    let cfg: serde_json::Value =
+        serde_json::from_str(&eval.config_json).unwrap_or_else(|_| serde_json::json!({}));
+    let response = trace.response_preview.clone().unwrap_or_default();
+
+    match eval.kind.as_str() {
+        "contains" => {
+            let needle = cfg.get("needle").and_then(|v| v.as_str()).unwrap_or("");
+            let case_sensitive = cfg
+                .get("caseSensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let hay = if case_sensitive {
+                response.clone()
+            } else {
+                response.to_lowercase()
+            };
+            let pin = if case_sensitive {
+                needle.to_string()
+            } else {
+                needle.to_lowercase()
+            };
+            let hit = !needle.is_empty() && hay.contains(&pin);
+            EvaluationResult {
+                evaluator_id: eval.id.clone(),
+                kind: eval.kind.clone(),
+                verdict: if hit { "pass".into() } else { "fail".into() },
+                score: if hit { 1.0 } else { 0.0 },
+                reason: if hit {
+                    format!("Response contains '{}'", needle)
+                } else {
+                    format!("Response missing '{}'", needle)
+                },
+            }
+        }
+        "not-contains" => {
+            let needle = cfg.get("needle").and_then(|v| v.as_str()).unwrap_or("");
+            let case_sensitive = cfg
+                .get("caseSensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let hay = if case_sensitive {
+                response.clone()
+            } else {
+                response.to_lowercase()
+            };
+            let pin = if case_sensitive {
+                needle.to_string()
+            } else {
+                needle.to_lowercase()
+            };
+            let hit = !needle.is_empty() && hay.contains(&pin);
+            EvaluationResult {
+                evaluator_id: eval.id.clone(),
+                kind: eval.kind.clone(),
+                verdict: if hit { "fail".into() } else { "pass".into() },
+                score: if hit { 0.0 } else { 1.0 },
+                reason: if hit {
+                    format!("Response contains forbidden '{}'", needle)
+                } else {
+                    format!("Response correctly omits '{}'", needle)
+                },
+            }
+        }
+        "length-range" => {
+            let min = cfg.get("min").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let max = cfg
+                .get("max")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(usize::MAX);
+            let len = response.chars().count();
+            let pass = len >= min && len <= max;
+            EvaluationResult {
+                evaluator_id: eval.id.clone(),
+                kind: eval.kind.clone(),
+                verdict: if pass { "pass".into() } else { "fail".into() },
+                score: if pass { 1.0 } else { 0.0 },
+                reason: format!("Response is {} chars (target {}–{})", len, min, max),
+            }
+        }
+        "tool-called" => {
+            let tool = cfg.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+            let lower = response.to_lowercase();
+            let hit = !tool.is_empty() && lower.contains(&tool.to_lowercase());
+            EvaluationResult {
+                evaluator_id: eval.id.clone(),
+                kind: eval.kind.clone(),
+                verdict: if hit { "pass".into() } else { "fail".into() },
+                score: if hit { 1.0 } else { 0.0 },
+                reason: if hit {
+                    format!("Response references tool '{}'", tool)
+                } else {
+                    format!("Response did not invoke tool '{}'", tool)
+                },
+            }
+        }
+        "llm-judge" => EvaluationResult {
+            evaluator_id: eval.id.clone(),
+            kind: eval.kind.clone(),
+            verdict: "unknown".into(),
+            score: 0.0,
+            reason: "LLM-as-judge runs server-side in Wave 4.5 (Pro tier).".into(),
+        },
+        other => EvaluationResult {
+            evaluator_id: eval.id.clone(),
+            kind: other.to_string(),
+            verdict: "unknown".into(),
+            score: 0.0,
+            reason: format!("Unknown evaluator kind: {}", other),
+        },
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluatedTrace {
+    pub trace: AgentTraceLine,
+    pub results: Vec<EvaluationResult>,
+}
+
+/// Run all enabled evaluators for an agent against the most-recent N traces
+/// for that agent. Used by the dashboard's "Evaluate last N runs" button.
+#[tauri::command]
+pub fn evaluate_recent_traces(
+    db: State<'_, DbState>,
+    agent_slug: String,
+    last_n: usize,
+) -> Result<Vec<EvaluatedTrace>, String> {
+    let evaluators: Vec<AgentEvaluator> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        ensure_evaluator_table(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, agent_slug, name, kind, config_json, enabled, created_at
+                 FROM agent_evaluators WHERE agent_slug = ?1 AND enabled = 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![agent_slug], |row| {
+                Ok(AgentEvaluator {
+                    id: row.get(0)?,
+                    agent_slug: row.get(1)?,
+                    name: row.get(2)?,
+                    kind: row.get(3)?,
+                    config_json: row.get(4)?,
+                    enabled: row.get::<_, i32>(5)? != 0,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+
+    let traces = load_agent_log_lines(&AgentTraceFilter {
+        agent_slug: Some(agent_slug),
+        runtime: None,
+        status: None,
+        since: None,
+        limit: Some(last_n),
+    });
+
+    let evaluated: Vec<EvaluatedTrace> = traces
+        .into_iter()
+        .map(|t| EvaluatedTrace {
+            results: evaluators.iter().map(|e| run_evaluator(e, &t)).collect(),
+            trace: t,
+        })
+        .collect();
+
+    Ok(evaluated)
+}
+
+// ── Streaming dispatch (v1.5.0) ─────────────────────────────────────────
+//
+// Mirrors prompt_agent / prompt_agent_with_history but streams stdout
+// through a Tauri Channel so the chat pane can render tokens as they
+// arrive. Each chunk is whatever bytes the CLI flushes; we don't try to
+// parse newlines or JSON — that's the runtime's contract.
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum StreamEvent {
+    Chunk { text: String },
+    Done { full: String },
+    Error { message: String },
+}
+
+/// Stream a single-shot dispatch. Caller must keep the channel alive until
+/// it observes a `done` or `error` event.
+#[tauri::command]
+pub async fn prompt_agent_stream(
+    runtime: String,
+    prompt: String,
+    config: Option<String>,
+    on_event: tauri::ipc::Channel<StreamEvent>,
+) -> Result<(), String> {
+    spawn_streaming_dispatch(&runtime, &prompt, config.as_deref(), on_event).await
+}
+
+/// Stream a multi-turn dispatch. Resolves variables / hooks / role models
+/// up-front (sync work), then streams the response.
+#[tauri::command]
+pub async fn prompt_agent_with_history_stream(
+    db: State<'_, DbState>,
+    agent_id: String,
+    runtime: String,
+    history: Vec<AgentMessage>,
+    new_prompt: String,
+    config: Option<String>,
+    active_project_path: Option<String>,
+    on_event: tauri::ipc::Channel<StreamEvent>,
+) -> Result<(), String> {
+    // Same prelude as prompt_agent_with_history — keep them in sync if you
+    // change one, change the other.
+    let (resolved, hooks, response_model, fallback_model, policy, summarizer_model) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let resolved = resolve_agent_variables(&conn, &agent_id, active_project_path.as_deref());
+        let hooks = load_agent_hooks(&conn, &agent_id);
+        let (rm, fb) = load_agent_response_model(&conn, &agent_id);
+        let policy = load_memory_policy(&conn, &agent_id);
+        let summ = load_agent_summarizer_model(&conn, &agent_id);
+        (resolved, hooks, rm, fb, policy, summ)
+    };
+
+    // Summarize older history (best-effort, non-streaming — summaries are
+    // small and we want them in one shot).
+    let (older, recent) = split_history_for_summarization(&history, &policy);
+    let summary: Option<String> = if !older.is_empty() {
+        let summarizer_prompt = build_summarizer_prompt(&older);
+        let chosen_summarizer = if !policy.summarizer_model.is_empty() {
+            Some(policy.summarizer_model.clone())
+        } else {
+            summarizer_model
+        };
+        let summ_cfg = chosen_summarizer.map(|m| serde_json::json!({ "model": m }).to_string());
+        prompt_agent(runtime.clone(), summarizer_prompt, summ_cfg).await.ok()
+    } else {
+        None
+    };
+
+    let rendered_new = substitute_variables(&new_prompt, &resolved);
+    let stitched = build_final_prompt(summary.as_deref(), &recent, &rendered_new);
+    let context_block = run_pre_call_hooks(hooks).await;
+    let final_prompt = if context_block.is_empty() {
+        stitched
+    } else {
+        format!("{}{}", context_block, stitched)
+    };
+    let merged_config = merge_model_into_config(config, response_model, fallback_model);
+
+    spawn_streaming_dispatch(&runtime, &final_prompt, merged_config.as_deref(), on_event).await
+}
+
+async fn spawn_streaming_dispatch(
+    runtime: &str,
+    prompt: &str,
+    config: Option<&str>,
+    on_event: tauri::ipc::Channel<StreamEvent>,
+) -> Result<(), String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command as TokioCommand;
+
+    let user_path = get_user_path();
+    let cfg_json: Option<serde_json::Value> = config.and_then(|c| serde_json::from_str(c).ok());
+    let model_override: Option<String> = cfg_json
+        .as_ref()
+        .and_then(|c| c.get("model"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut cmd = match runtime {
+        "claude" => {
+            let claude_path = which_claude().ok_or_else(|| "Claude Code CLI not found".to_string())?;
+            let mut c = TokioCommand::new(claude_path);
+            c.arg("--print").arg(prompt);
+            if let Some(m) = &model_override {
+                c.arg("--model").arg(m);
+            }
+            c
+        }
+        "codex" => {
+            let codex_path = which_cli("codex")
+                .ok_or_else(|| "Codex CLI not found. Install: npm install -g @openai/codex".to_string())?;
+            let mut c = TokioCommand::new(codex_path);
+            // Codex uses `exec` as the headless subcommand; the prompt is a
+            // positional argument. `--print` is invalid for codex.
+            c.arg("exec");
+            if let Some(m) = &model_override {
+                c.arg("--model").arg(m);
+            }
+            c.arg(prompt);
+            c
+        }
+        "openclaw" => {
+            let ssh_config: serde_json::Value = config
+                .and_then(|c| serde_json::from_str(c).ok())
+                .unwrap_or_default();
+            let host = ssh_config.get("sshHost").and_then(|v| v.as_str()).unwrap_or("localhost");
+            let port = ssh_config.get("sshPort").and_then(|v| v.as_u64()).unwrap_or(22);
+            let user = ssh_config.get("sshUser").and_then(|v| v.as_str()).unwrap_or("root");
+            let key_path = ssh_config.get("sshKeyPath").and_then(|v| v.as_str());
+
+            let mut c = TokioCommand::new("ssh");
+            if let Some(key) = key_path {
+                c.args(["-i", key]);
+            }
+            c.args([
+                "-p",
+                &port.to_string(),
+                &format!("{}@{}", user, host),
+                &format!("openclaw exec '{}'", prompt.replace('\'', "'\\''")),
+            ]);
+            c
+        }
+        "hermes" => {
+            let hermes_path = which_cli("hermes").ok_or_else(|| "Hermes CLI not found".to_string())?;
+            let mut c = TokioCommand::new(hermes_path);
+            c.arg("--execute").arg(prompt);
+            c
+        }
+        other => {
+            let _ = on_event.send(StreamEvent::Error {
+                message: format!("Unknown runtime: {}", other),
+            });
+            return Ok(());
+        }
+    };
+
+    cmd.env("PATH", &user_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = on_event.send(StreamEvent::Error {
+                message: format!("Failed to spawn {}: {}", runtime, e),
+            });
+            return Ok(());
+        }
+    };
+
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = on_event.send(StreamEvent::Error {
+                message: "stdout-pipe-missing".into(),
+            });
+            return Ok(());
+        }
+    };
+
+    // Read stdout in chunks, emitting each as a Chunk event. The buffer is
+    // small enough that the user sees tokens flowing within a few hundred
+    // ms, even if the runtime writes line-buffered.
+    let mut reader = stdout;
+    let mut buf = [0u8; 1024];
+    let mut full = String::new();
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                full.push_str(&chunk);
+                let _ = on_event.send(StreamEvent::Chunk { text: chunk });
+            }
+            Err(e) => {
+                let _ = on_event.send(StreamEvent::Error {
+                    message: format!("read-failed: {}", e),
+                });
+                let _ = child.kill().await;
+                return Ok(());
+            }
+        }
+    }
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = on_event.send(StreamEvent::Error {
+                message: format!("wait-failed: {}", e),
+            });
+            return Ok(());
+        }
+    };
+
+    if status.success() {
+        let _ = on_event.send(StreamEvent::Done { full });
+    } else {
+        // Drain stderr for the error message — best-effort.
+        let mut err_text = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut err_text).await;
+        }
+        let _ = on_event.send(StreamEvent::Error {
+            message: if err_text.is_empty() {
+                format!("{} exited with status {}", runtime, status)
+            } else {
+                err_text
+            },
+        });
+    }
+
+    Ok(())
+}
+
+// ── Configuration export / import (Polish-T4) ────────────────────────────
+//
+// JSON snapshots of the user's local config so they can move between
+// machines or roll back. We deliberately exclude the *contents* of secrets
+// and API keys — those live in the OS keychain or on disk in a way the user
+// already controls. The backup carries metadata only (preview, name, kind),
+// so importing on a new machine surfaces what's missing without leaking
+// values out of the keychain.
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigBackup {
+    pub version: u32,
+    pub exported_at: String,
+    pub agents: Vec<serde_json::Value>,
+    pub agent_variables: Vec<serde_json::Value>,
+    pub agent_hooks: Vec<serde_json::Value>,
+    pub agent_groups: Vec<serde_json::Value>,
+    pub agent_group_members: Vec<serde_json::Value>,
+    pub projects: Vec<serde_json::Value>,
+    pub env_vars: Vec<serde_json::Value>,
+    pub model_configs: Vec<serde_json::Value>,
+    pub secrets_meta: Vec<serde_json::Value>,
+    pub llm_api_keys_meta: Vec<serde_json::Value>,
+    pub settings: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub agents: usize,
+    pub agent_variables: usize,
+    pub agent_hooks: usize,
+    pub agent_groups: usize,
+    pub agent_group_members: usize,
+    pub projects: usize,
+    pub env_vars: usize,
+    pub model_configs: usize,
+    pub secrets_meta: usize,
+    pub llm_api_keys_meta: usize,
+    pub settings: usize,
+}
+
+fn dump_table(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    columns: &[&str],
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in columns.iter().enumerate() {
+                let val: rusqlite::types::Value = row.get(i)?;
+                obj.insert((*col).to_string(), match val {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(n) => serde_json::Value::from(n),
+                    rusqlite::types::Value::Real(f) => serde_json::Value::from(f),
+                    rusqlite::types::Value::Text(s) => serde_json::Value::from(s),
+                    rusqlite::types::Value::Blob(_) => serde_json::Value::Null,
+                });
+            }
+            Ok(serde_json::Value::Object(obj))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn export_configuration(db: State<'_, DbState>) -> Result<ConfigBackup, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    Ok(ConfigBackup {
+        version: 1,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        agents: dump_table(
+            &conn,
+            "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json FROM agents",
+            &["id","slug","displayName","description","runtime","model","projectId","systemPrompt","permissions","skills","mcps","goal","filePath","createdAt","lastUsedAt","roleModels","memoryPolicy"],
+        )?,
+        agent_variables: dump_table(
+            &conn,
+            "SELECT id, agent_id, name, kind, config_json, enabled, created_at, updated_at FROM agent_variables",
+            &["id","agentId","name","kind","config","enabled","createdAt","updatedAt"],
+        )?,
+        agent_hooks: dump_table(
+            &conn,
+            "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at FROM agent_hooks",
+            &["id","agentId","position","name","kind","config","enabled","createdAt"],
+        )?,
+        agent_groups: dump_table(
+            &conn,
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at FROM agent_groups",
+            &["id","slug","displayName","description","runtime","routerConfig","filePath","createdAt","lastUsedAt"],
+        )?,
+        agent_group_members: dump_table(
+            &conn,
+            "SELECT group_id, agent_id, role, position FROM agent_group_members",
+            &["groupId","agentId","role","position"],
+        )?,
+        projects: dump_table(
+            &conn,
+            "SELECT id, name, path, is_active, skill_count, last_accessed, created_at FROM projects",
+            &["id","name","path","isActive","skillCount","lastAccessed","createdAt"],
+        )?,
+        env_vars: dump_table(
+            &conn,
+            "SELECT id, project_id, runtime, key, value, created_at FROM env_vars",
+            &["id","projectId","runtime","key","value","createdAt"],
+        )?,
+        model_configs: dump_table(
+            &conn,
+            "SELECT id, runtime, project_id, model_id, max_tokens, temperature, created_at, updated_at FROM model_configs",
+            &["id","runtime","projectId","modelId","maxTokens","temperature","createdAt","updatedAt"],
+        )?,
+        // Secrets metadata only — never the encrypted blob.
+        secrets_meta: dump_table(
+            &conn,
+            "SELECT id, name, key_type, runtime, project_id, created_at, updated_at FROM secrets",
+            &["id","name","keyType","runtime","projectId","createdAt","updatedAt"],
+        )?,
+        // LLM API keys metadata only.
+        llm_api_keys_meta: dump_table(
+            &conn,
+            "SELECT id, provider, name, key_preview, project_id, runtime, is_active, last_used, usage_count, created_at, updated_at FROM llm_api_keys",
+            &["id","provider","name","keyPreview","projectId","runtime","isActive","lastUsed","usageCount","createdAt","updatedAt"],
+        )?,
+        settings: dump_table(
+            &conn,
+            "SELECT key, value FROM settings",
+            &["key","value"],
+        )?,
+    })
+}
+
+fn obj_str(v: &serde_json::Value, key: &str) -> Option<String> {
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+fn obj_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
+    v.get(key).and_then(|x| x.as_i64())
+}
+fn obj_f64(v: &serde_json::Value, key: &str) -> Option<f64> {
+    v.get(key).and_then(|x| x.as_f64())
+}
+
+#[tauri::command]
+pub fn import_configuration(
+    db: State<'_, DbState>,
+    backup_json: String,
+) -> Result<ImportSummary, String> {
+    let backup: ConfigBackup =
+        serde_json::from_str(&backup_json).map_err(|e| format!("invalid backup: {}", e))?;
+    if backup.version != 1 {
+        return Err(format!("unsupported backup version: {}", backup.version));
+    }
+
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let mut s = ImportSummary {
+        agents: 0,
+        agent_variables: 0,
+        agent_hooks: 0,
+        agent_groups: 0,
+        agent_group_members: 0,
+        projects: 0,
+        env_vars: 0,
+        model_configs: 0,
+        secrets_meta: 0,
+        llm_api_keys_meta: 0,
+        settings: 0,
+    };
+
+    for a in &backup.agents {
+        tx.execute(
+            "INSERT OR REPLACE INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                obj_str(a, "id"), obj_str(a, "slug"), obj_str(a, "displayName"), obj_str(a, "description"),
+                obj_str(a, "runtime"), obj_str(a, "model"), obj_str(a, "projectId"), obj_str(a, "systemPrompt"),
+                obj_str(a, "permissions"), obj_str(a, "skills"), obj_str(a, "mcps"), obj_str(a, "goal"),
+                obj_str(a, "filePath"), obj_str(a, "createdAt"), obj_str(a, "lastUsedAt"),
+                obj_str(a, "roleModels"), obj_str(a, "memoryPolicy"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.agents += 1;
+    }
+
+    for v in &backup.agent_variables {
+        tx.execute(
+            "INSERT OR REPLACE INTO agent_variables (id, agent_id, name, kind, config_json, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                obj_str(v, "id"), obj_str(v, "agentId"), obj_str(v, "name"), obj_str(v, "kind"),
+                obj_str(v, "config"), obj_i64(v, "enabled").unwrap_or(1),
+                obj_str(v, "createdAt"), obj_str(v, "updatedAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.agent_variables += 1;
+    }
+
+    for h in &backup.agent_hooks {
+        tx.execute(
+            "INSERT OR REPLACE INTO agent_hooks (id, agent_id, position, name, kind, config_json, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                obj_str(h, "id"), obj_str(h, "agentId"),
+                obj_i64(h, "position").unwrap_or(0),
+                obj_str(h, "name"), obj_str(h, "kind"),
+                obj_str(h, "config"), obj_i64(h, "enabled").unwrap_or(1),
+                obj_str(h, "createdAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.agent_hooks += 1;
+    }
+
+    for g in &backup.agent_groups {
+        tx.execute(
+            "INSERT OR REPLACE INTO agent_groups (id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                obj_str(g, "id"), obj_str(g, "slug"), obj_str(g, "displayName"), obj_str(g, "description"),
+                obj_str(g, "runtime"), obj_str(g, "routerConfig"), obj_str(g, "filePath"),
+                obj_str(g, "createdAt"), obj_str(g, "lastUsedAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.agent_groups += 1;
+    }
+
+    for m in &backup.agent_group_members {
+        tx.execute(
+            "INSERT OR REPLACE INTO agent_group_members (group_id, agent_id, role, position) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                obj_str(m, "groupId"), obj_str(m, "agentId"),
+                obj_str(m, "role"), obj_i64(m, "position").unwrap_or(0),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.agent_group_members += 1;
+    }
+
+    for p in &backup.projects {
+        tx.execute(
+            "INSERT OR REPLACE INTO projects (id, name, path, is_active, skill_count, last_accessed, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                obj_str(p, "id"), obj_str(p, "name"), obj_str(p, "path"),
+                obj_i64(p, "isActive").unwrap_or(0),
+                obj_i64(p, "skillCount").unwrap_or(0),
+                obj_str(p, "lastAccessed"), obj_str(p, "createdAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.projects += 1;
+    }
+
+    for e in &backup.env_vars {
+        tx.execute(
+            "INSERT OR REPLACE INTO env_vars (id, project_id, runtime, key, value, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                obj_str(e, "id"), obj_str(e, "projectId"), obj_str(e, "runtime"),
+                obj_str(e, "key"), obj_str(e, "value"), obj_str(e, "createdAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.env_vars += 1;
+    }
+
+    for m in &backup.model_configs {
+        tx.execute(
+            "INSERT OR REPLACE INTO model_configs (id, runtime, project_id, model_id, max_tokens, temperature, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                obj_str(m, "id"), obj_str(m, "runtime"), obj_str(m, "projectId"),
+                obj_str(m, "modelId"),
+                obj_i64(m, "maxTokens"),
+                obj_f64(m, "temperature"),
+                obj_str(m, "createdAt"), obj_str(m, "updatedAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.model_configs += 1;
+    }
+
+    // Secrets/keys: metadata only — re-create rows with empty encrypted_key.
+    // The user has to re-enter the values on the new machine. We surface
+    // this in ImportSummary so the UI can prompt them.
+    for k in &backup.secrets_meta {
+        tx.execute(
+            "INSERT OR IGNORE INTO secrets (id, name, key_type, runtime, project_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                obj_str(k, "id"), obj_str(k, "name"), obj_str(k, "keyType"),
+                obj_str(k, "runtime"), obj_str(k, "projectId"),
+                obj_str(k, "createdAt"), obj_str(k, "updatedAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.secrets_meta += 1;
+    }
+
+    for k in &backup.llm_api_keys_meta {
+        tx.execute(
+            "INSERT OR IGNORE INTO llm_api_keys (id, provider, name, key_preview, encrypted_key, project_id, runtime, is_active, last_used, usage_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                obj_str(k, "id"), obj_str(k, "provider"), obj_str(k, "name"),
+                obj_str(k, "keyPreview"), "",
+                obj_str(k, "projectId"), obj_str(k, "runtime"),
+                obj_i64(k, "isActive").unwrap_or(0),
+                obj_str(k, "lastUsed"),
+                obj_i64(k, "usageCount").unwrap_or(0),
+                obj_str(k, "createdAt"), obj_str(k, "updatedAt"),
+            ],
+        ).map_err(|e| e.to_string())?;
+        s.llm_api_keys_meta += 1;
+    }
+
+    for setting in &backup.settings {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![obj_str(setting, "key"), obj_str(setting, "value")],
+        ).map_err(|e| e.to_string())?;
+        s.settings += 1;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+
+    #[test]
+    fn percentile_handles_empty_and_single() {
+        assert_eq!(percentile(&[], 0.5), None);
+        assert_eq!(percentile(&[42], 0.5), Some(42));
+        assert_eq!(percentile(&[1, 2, 3, 4, 5], 0.5), Some(3));
+    }
+
+    fn make_eval(id: &str, kind: &str, cfg: &str) -> AgentEvaluator {
+        AgentEvaluator {
+            id: id.into(),
+            agent_slug: "test".into(),
+            name: "test-eval".into(),
+            kind: kind.into(),
+            config_json: cfg.into(),
+            enabled: true,
+            created_at: "2026-05-04T00:00:00Z".into(),
+        }
+    }
+
+    fn make_trace(response: &str) -> AgentTraceLine {
+        let mut t = AgentTraceLine::default();
+        t.response_preview = Some(response.into());
+        t
+    }
+
+    #[test]
+    fn contains_evaluator_passes_when_response_has_substring() {
+        let e = make_eval("e1", "contains", r#"{"needle":"success"}"#);
+        let t = make_trace("Operation completed with SUCCESS");
+        let r = run_evaluator(&e, &t);
+        assert_eq!(r.verdict, "pass");
+        assert_eq!(r.score, 1.0);
+    }
+
+    #[test]
+    fn not_contains_evaluator_fails_when_forbidden_substring_present() {
+        let e = make_eval("e1", "not-contains", r#"{"needle":"error"}"#);
+        let t = make_trace("Encountered an Error during dispatch");
+        let r = run_evaluator(&e, &t);
+        assert_eq!(r.verdict, "fail");
+    }
+
+    #[test]
+    fn length_range_evaluator_passes_when_within_bounds() {
+        let e = make_eval("e1", "length-range", r#"{"min":5,"max":50}"#);
+        let t = make_trace("hello world");
+        let r = run_evaluator(&e, &t);
+        assert_eq!(r.verdict, "pass");
+    }
+
+    #[test]
+    fn llm_judge_returns_unknown_for_now() {
+        let e = make_eval("e1", "llm-judge", r#"{"prompt":"is this good?"}"#);
+        let t = make_trace("anything");
+        let r = run_evaluator(&e, &t);
+        assert_eq!(r.verdict, "unknown");
+    }
+}

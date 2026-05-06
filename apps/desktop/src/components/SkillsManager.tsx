@@ -1,8 +1,8 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe, FolderKanban } from "lucide-react";
-import { getSkills, toggleSkill, type Skill } from "@/lib/api";
+import { Search, Plus, FolderOpen, File, ChevronDown, ArrowDown, AlertTriangle, ChevronRight, Store, Terminal, Cpu, Server, Globe, FolderKanban, CheckSquare, Square, Trash2, ToggleLeft, ToggleRight, X } from "lucide-react";
+import { getSkills, toggleSkill, deleteSkill, type Skill } from "@/lib/api";
 import { openclawListSkills, listProjects, type Project } from "@/lib/api";
 import { formatNumber, cn } from "@/lib/utils";
 import { analyzeSkillConflicts, type SkillConflict } from "@/lib/skill-similarity";
@@ -39,6 +39,9 @@ export default function SkillsManager() {
   const [search, setSearch] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  // v1.4.0 Polish-T6 — multi-select for bulk operations.
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(() => new Set());
+  const [bulkConfirmDelete, setBulkConfirmDelete] = useState(false);
   const queryClient = useQueryClient();
 
   const { data: localSkills = [], isLoading, error } = useQuery({
@@ -79,6 +82,52 @@ export default function SkillsManager() {
       toggleSkill(id, enabled),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["skills"] }),
   });
+
+  // Bulk ops (Polish-T6). Keep them sequential — the underlying toggle hits
+  // the filesystem watcher, parallelizing risks racing the cache.
+  const bulkToggle = useMutation({
+    mutationFn: async ({ ids, enabled }: { ids: string[]; enabled: boolean }) => {
+      for (const id of ids) {
+        try {
+          await toggleSkill(id, enabled);
+        } catch {
+          // Continue with the rest — one failure shouldn't block the batch.
+        }
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      setBulkSelected(new Set());
+    },
+  });
+
+  const bulkDelete = useMutation({
+    mutationFn: async (ids: string[]) => {
+      for (const id of ids) {
+        try {
+          await deleteSkill(id);
+        } catch {
+          // Best-effort; surface in the future via a toast.
+        }
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      setBulkSelected(new Set());
+      setBulkConfirmDelete(false);
+    },
+  });
+
+  const toggleBulkSelect = (id: string) => {
+    setBulkSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearBulk = () => setBulkSelected(new Set());
 
   const filtered = skills.filter((s) => {
     const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase());
@@ -256,6 +305,81 @@ export default function SkillsManager() {
               {t("skills.dragHint")}
             </p>
 
+            {/* Bulk action toolbar (Polish-T6) */}
+            {bulkSelected.size > 0 && (
+              <div className="sticky top-2 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-cs-accent/40 bg-cs-accent/10 px-3 py-2">
+                <CheckSquare size={14} className="text-cs-accent shrink-0" />
+                <span className="text-xs font-medium text-cs-text">
+                  {t("skills.bulk.selected", "{{count}} selected", { count: bulkSelected.size })}
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() =>
+                    bulkToggle.mutate({ ids: Array.from(bulkSelected), enabled: true })
+                  }
+                  disabled={bulkToggle.isPending}
+                  className="inline-flex items-center gap-1 rounded-md border border-cs-border bg-cs-bg-raised px-2.5 py-1 text-xs text-cs-text hover:border-cs-accent/40 disabled:opacity-50"
+                >
+                  <ToggleRight size={12} />
+                  {t("skills.bulk.enable", "Enable")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    bulkToggle.mutate({ ids: Array.from(bulkSelected), enabled: false })
+                  }
+                  disabled={bulkToggle.isPending}
+                  className="inline-flex items-center gap-1 rounded-md border border-cs-border bg-cs-bg-raised px-2.5 py-1 text-xs text-cs-text hover:border-cs-accent/40 disabled:opacity-50"
+                >
+                  <ToggleLeft size={12} />
+                  {t("skills.bulk.disable", "Disable")}
+                </button>
+                {bulkConfirmDelete ? (
+                  <>
+                    <span className="text-xs text-cs-text">
+                      {t("skills.bulk.confirmDelete", "Delete {{count}}?", {
+                        count: bulkSelected.size,
+                      })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => bulkDelete.mutate(Array.from(bulkSelected))}
+                      disabled={bulkDelete.isPending}
+                      className="inline-flex items-center gap-1 rounded-md bg-cs-danger px-2.5 py-1 text-xs font-medium text-white hover:bg-cs-danger/90 disabled:opacity-50"
+                    >
+                      <Trash2 size={12} />
+                      {t("skills.bulk.confirmDeleteYes", "Yes, delete")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBulkConfirmDelete(false)}
+                      className="rounded-md border border-cs-border px-2.5 py-1 text-xs text-cs-muted hover:text-cs-text"
+                    >
+                      {t("common.cancel", "Cancel")}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setBulkConfirmDelete(true)}
+                    className="inline-flex items-center gap-1 rounded-md border border-cs-danger/40 bg-cs-danger/10 px-2.5 py-1 text-xs text-cs-danger hover:bg-cs-danger/20"
+                  >
+                    <Trash2 size={12} />
+                    {t("skills.bulk.delete", "Delete")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearBulk}
+                  className="inline-flex items-center gap-1 rounded-md border border-cs-border px-2 py-1 text-xs text-cs-muted hover:text-cs-text"
+                  aria-label={t("skills.bulk.clear", "Clear selection")}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )}
+
             {/* Skill groups by scope */}
             {groupedSkills.map(({ scope, skills: scopeSkills }) => (
               <SkillGroup
@@ -266,6 +390,8 @@ export default function SkillsManager() {
                 selectedId={selectedSkillId}
                 onSelect={setSelectedSkillId}
                 onToggle={(id, enabled) => toggle.mutate({ id, enabled })}
+                bulkSelected={bulkSelected}
+                onBulkToggle={toggleBulkSelect}
               />
             ))}
 
@@ -348,6 +474,8 @@ function SkillGroup({
   selectedId,
   onSelect,
   onToggle,
+  bulkSelected,
+  onBulkToggle,
 }: {
   scope: string;
   title: string;
@@ -355,6 +483,8 @@ function SkillGroup({
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggle: (id: string, enabled: boolean) => void;
+  bulkSelected: Set<string>;
+  onBulkToggle: (id: string) => void;
 }) {
   const [orderedSkills, setOrderedSkills] = useState<Skill[] | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
@@ -437,6 +567,22 @@ function SkillGroup({
               )}
             >
               <div className="min-w-0 flex-1 flex items-start gap-2.5">
+                {/* Bulk-select checkbox (Polish-T6) */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBulkToggle(skill.id);
+                  }}
+                  className="shrink-0 mt-1 text-cs-muted hover:text-cs-accent transition-colors"
+                  aria-label={bulkSelected.has(skill.id) ? "Deselect" : "Select"}
+                >
+                  {bulkSelected.has(skill.id) ? (
+                    <CheckSquare size={14} className="text-cs-accent" />
+                  ) : (
+                    <Square size={14} />
+                  )}
+                </button>
                 {/* Drag handle + priority number */}
                 <div className="flex flex-col items-center gap-0.5 shrink-0 mt-0.5 cursor-grab active:cursor-grabbing">
                   <span className="text-[9px] font-mono text-cs-muted">{index + 1}</span>

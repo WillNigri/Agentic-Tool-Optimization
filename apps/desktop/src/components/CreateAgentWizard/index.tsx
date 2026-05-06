@@ -1,0 +1,156 @@
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Sparkles, FormInput, LayoutGrid, X } from "lucide-react";
+import GuidedPath from "./GuidedPath";
+import QuickPath from "./QuickPath";
+import TemplatesPath from "./TemplatesPath";
+import type { AgentTemplate } from "@/lib/agentTemplates";
+import type { QuickDraft } from "@/lib/agentDraft";
+
+// v1.3.0 — Create Agent wizard. T3 in docs/V1.3.0-IMPLEMENTATION.md.
+// v1.4.0 Polish-T1 — Adds a Templates path (5 starters). Picking a template
+// hands a pre-filled QuickDraft to QuickPath so the user edits a sensible
+// default instead of a blank form.
+
+export type WizardPath = "guided" | "quick" | "templates";
+
+interface CreateAgentWizardProps {
+  open: boolean;
+  initialPath?: WizardPath;
+  onClose: () => void;
+  onCreated?: (agentId: string) => void;
+}
+
+function templateToDraft(tpl: AgentTemplate): QuickDraft {
+  return {
+    name: tpl.displayName,
+    runtime: tpl.runtime,
+    model: tpl.model,
+    description: tpl.description,
+    systemPrompt: tpl.systemPrompt,
+    projectId: null,
+    skills: [],
+    // Pre-select recommended MCPs only if the user already has them configured;
+    // for this draft we just pre-fill the slugs and let QuickPath's MultiSelect
+    // intersect with what's actually installed.
+    mcps: tpl.recommendedMcps,
+  };
+}
+
+export default function CreateAgentWizard({
+  open,
+  initialPath = "guided",
+  onClose,
+  onCreated,
+}: CreateAgentWizardProps) {
+  const { t } = useTranslation();
+  const [path, setPath] = useState<WizardPath>(initialPath);
+  const [seedDraft, setSeedDraft] = useState<QuickDraft | null>(null);
+
+  if (!open) return null;
+
+  const handlePickTemplate = (tpl: AgentTemplate) => {
+    setSeedDraft(templateToDraft(tpl));
+    setPath("quick");
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl border border-cs-border bg-cs-card shadow-2xl">
+        {/* Header */}
+        <header className="flex items-center justify-between p-5 border-b border-cs-border">
+          <h2 className="text-lg font-semibold text-cs-text">
+            {t("createAgent.title", "Create Agent")}
+          </h2>
+          <button
+            type="button"
+            aria-label={t("common.close", "Close")}
+            onClick={onClose}
+            className="text-cs-muted hover:text-cs-text"
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        {/* Path toggle */}
+        <div className="px-5 pt-4 flex items-center gap-2">
+          <PathPill
+            active={path === "guided"}
+            onClick={() => {
+              setSeedDraft(null);
+              setPath("guided");
+            }}
+            icon={<Sparkles size={14} />}
+            label={t("createAgent.pathGuided", "Guided (chat)")}
+          />
+          <PathPill
+            active={path === "quick"}
+            onClick={() => {
+              setSeedDraft(null);
+              setPath("quick");
+            }}
+            icon={<FormInput size={14} />}
+            label={t("createAgent.pathQuick", "Quick (form)")}
+          />
+          <PathPill
+            active={path === "templates"}
+            onClick={() => {
+              setSeedDraft(null);
+              setPath("templates");
+            }}
+            icon={<LayoutGrid size={14} />}
+            label={t("createAgent.pathTemplates", "Templates")}
+          />
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-5">
+          {path === "guided" && <GuidedPath onCreated={onCreated} onCancel={onClose} />}
+          {path === "quick" && (
+            <QuickPath
+              key={seedDraft ? `seed-${seedDraft.name}` : "draft"}
+              onCreated={onCreated}
+              onCancel={onClose}
+              initialDraft={seedDraft ?? undefined}
+            />
+          )}
+          {path === "templates" && <TemplatesPath onPick={handlePickTemplate} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PathPill({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+        active
+          ? "bg-cs-accent text-cs-bg"
+          : "bg-cs-bg-raised text-cs-muted border border-cs-border hover:text-cs-text"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}

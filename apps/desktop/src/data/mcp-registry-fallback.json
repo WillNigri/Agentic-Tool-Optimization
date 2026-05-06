@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "fetchedAt": "2026-04-30",
+  "entries": [
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "description": "Read and write local files. Useful for agents that need to inspect or edit project files.",
+      "category": "files",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "$PROJECT_PATH"]
+      }
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "Create issues, comment on PRs, search code across your repositories.",
+      "category": "dev",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "" }
+      },
+      "authNote": "Requires GITHUB_PERSONAL_ACCESS_TOKEN with repo + issues scope."
+    },
+    {
+      "id": "postgres",
+      "name": "Postgres",
+      "description": "Run read-only SQL queries against a Postgres database (introspection, analytics).",
+      "category": "data",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-postgres", "$DATABASE_URL"]
+      },
+      "authNote": "Replace $DATABASE_URL with your connection string."
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "description": "Query and inspect a local SQLite database file.",
+      "category": "data",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-sqlite", "--db-path", "$DB_PATH"]
+      }
+    },
+    {
+      "id": "brave-search",
+      "name": "Brave Search",
+      "description": "Web search via Brave's API. Free tier: 2,000 queries/month.",
+      "category": "search",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "env": { "BRAVE_API_KEY": "" }
+      },
+      "authNote": "Requires BRAVE_API_KEY from api.search.brave.com."
+    },
+    {
+      "id": "fetch",
+      "name": "Fetch",
+      "description": "Fetch a URL and convert HTML to clean markdown for the agent to read.",
+      "category": "search",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"]
+      }
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "description": "Read channels and DMs, post messages, search history.",
+      "category": "communication",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/slack",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-slack"],
+        "env": { "SLACK_BOT_TOKEN": "", "SLACK_TEAM_ID": "" }
+      },
+      "authNote": "Requires Slack bot token (xoxb-…) and team ID."
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "description": "Read, search, send Gmail messages on your behalf.",
+      "category": "productivity",
+      "homepage": "https://github.com/modelcontextprotocol/servers",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-gmail"]
+      },
+      "authNote": "OAuth flow opens in browser on first run."
+    },
+    {
+      "id": "calendar",
+      "name": "Google Calendar",
+      "description": "List events, create calendar entries, find meeting slots.",
+      "category": "productivity",
+      "homepage": "https://github.com/modelcontextprotocol/servers",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-gcal"]
+      },
+      "authNote": "OAuth flow opens in browser on first run."
+    },
+    {
+      "id": "memory",
+      "name": "Memory",
+      "description": "Persistent key-value memory across agent sessions.",
+      "category": "dev",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"]
+      }
+    },
+    {
+      "id": "time",
+      "name": "Time",
+      "description": "Time / timezone helpers — current time, conversions, scheduling math.",
+      "category": "dev",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-time"]
+      }
+    }
+  ]
+}

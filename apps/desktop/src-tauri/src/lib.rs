@@ -2,6 +2,7 @@ mod openclaw_ws;
 mod log_watcher;
 mod health_poller;
 mod telemetry;
+pub mod pty;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use tauri::{State, Manager, Emitter};
 pub use log_watcher::LogWatcherState;
 pub use health_poller::HealthPollerState;
 pub use telemetry::TelemetryState;
+pub use pty::PtyState;
 use lettre::{
     Message, SmtpTransport, Transport,
     message::{header::ContentType, Mailbox},
@@ -148,6 +150,59 @@ pub struct Secret {
     pub created_at: String,
     pub updated_at: String,
     pub has_value: bool,       // Whether a value is stored in keychain
+}
+
+// v1.4.0 F4 — Multi-agent groups. A router agent + N specialized children.
+// The router decides which child handles each incoming prompt; specialization
+// keeps each child's tool set + prompt small + focused.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentGroup {
+    pub id: String,
+    pub slug: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub runtime: String,
+    /// JSON-encoded {rules: [...], llmFallback: {enabled, model}}.
+    pub router_config: Option<String>,
+    pub file_path: Option<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub members: Vec<AgentGroupMember>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentGroupMember {
+    pub agent_id: String,
+    pub agent_slug: String,
+    pub agent_display_name: String,
+    pub role: String, // 'router' | 'child'
+    pub position: i32,
+}
+
+// v1.3.0 — Agents (T3). Records produced by the Create Agent wizard.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Agent {
+    pub id: String,
+    pub slug: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub runtime: String,                  // claude | codex | gemini | openclaw | hermes
+    pub model: Option<String>,
+    pub project_id: Option<String>,
+    pub system_prompt: Option<String>,
+    pub permissions: Option<String>,      // JSON-encoded array of allowed tools
+    pub skills: Option<String>,           // JSON-encoded array of skill IDs
+    pub mcps: Option<String>,             // JSON-encoded array of MCP server names
+    pub goal: Option<String>,             // original "what do you want?" text
+    pub file_path: Option<String>,        // where the agent file landed on disk
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    // v1.4.0 additions (column added via ALTER TABLE in init_database).
+    pub role_models: Option<String>,      // JSON {router?, summarizer?, response?, evaluator?}
+    pub memory_policy: Option<String>,    // JSON {summarizeAfter, keepLastK, summarizerModel}
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -469,9 +524,133 @@ pub fn init_database(conn: &Connection) {
         );
         CREATE INDEX IF NOT EXISTS idx_llm_keys_provider ON llm_api_keys(provider);
         CREATE INDEX IF NOT EXISTS idx_llm_keys_project ON llm_api_keys(project_id);
+        CREATE TABLE IF NOT EXISTS agents (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL,
+            display_name  TEXT NOT NULL,
+            description   TEXT,
+            runtime       TEXT NOT NULL,
+            model         TEXT,
+            project_id    TEXT,
+            system_prompt TEXT,
+            permissions   TEXT,
+            skills        TEXT,
+            mcps          TEXT,
+            goal          TEXT,
+            file_path     TEXT,
+            created_at    TEXT NOT NULL,
+            last_used_at  TEXT,
+            UNIQUE (runtime, slug)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agents_runtime ON agents(runtime);
+        CREATE INDEX IF NOT EXISTS idx_agents_last_used ON agents(last_used_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
+        -- v1.4.0 — Production-Grade Agent Authoring (context engineering).
+        -- F1: Dynamic prompts with variables. Each row is one named variable
+        --     belonging to an agent, with a kind-specific resolver config.
+        CREATE TABLE IF NOT EXISTS agent_variables (
+            id          TEXT PRIMARY KEY,
+            agent_id    TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            kind        TEXT NOT NULL,            -- static | env | project-path | file | db-query | mcp-call | computed
+            config_json TEXT NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            UNIQUE (agent_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_vars_agent ON agent_variables(agent_id);
+        -- F2: Pre-call context hooks. Ordered list of resolvers that run
+        --     before each LLM turn and inject results into the user message.
+        CREATE TABLE IF NOT EXISTS agent_hooks (
+            id          TEXT PRIMARY KEY,
+            agent_id    TEXT NOT NULL,
+            position    INTEGER NOT NULL,
+            name        TEXT NOT NULL,
+            kind        TEXT NOT NULL,            -- mcp-call | file | db-query | webhook | computed
+            config_json TEXT NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_hooks_agent ON agent_hooks(agent_id, position);
+        -- F4: Multi-agent groups (router + children).
+        CREATE TABLE IF NOT EXISTS agent_groups (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            display_name  TEXT NOT NULL,
+            description   TEXT,
+            runtime       TEXT NOT NULL,
+            router_config TEXT,
+            file_path     TEXT,
+            created_at    TEXT NOT NULL,
+            last_used_at  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_groups_runtime ON agent_groups(runtime);
+        CREATE TABLE IF NOT EXISTS agent_group_members (
+            group_id    TEXT NOT NULL,
+            agent_id    TEXT NOT NULL,
+            role        TEXT NOT NULL,             -- 'router' | 'child'
+            position    INTEGER NOT NULL,
+            PRIMARY KEY (group_id, agent_id),
+            FOREIGN KEY (group_id) REFERENCES agent_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_group_members_agent ON agent_group_members(agent_id);
+        -- v1.4.0 Polish-T2 — Skill version history. We snapshot a SKILL.md's
+        -- contents on edit so the user can scroll back through prior versions
+        -- and restore one. Versions live in SQLite (not on disk) — they are
+        -- recovery state, not a vcs.
+        CREATE TABLE IF NOT EXISTS skill_versions (
+            id            TEXT PRIMARY KEY,
+            file_path     TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            content_hash  TEXT NOT NULL,
+            note          TEXT,
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_versions_path ON skill_versions(file_path, created_at DESC);
+        -- v1.5.0 — Persistent chat threads. Makes the bottom Chat pane a
+        -- destination instead of an ephemeral input. A thread isn't bound to
+        -- a runtime: each message records which runtime answered it, so the
+        -- same conversation can hop runtimes mid-flight. project_id is
+        -- optional — threads can be global.
+        CREATE TABLE IF NOT EXISTS chat_threads (
+            id              TEXT PRIMARY KEY,
+            title           TEXT NOT NULL,
+            project_id      TEXT,
+            agent_id        TEXT,                       -- last-used agent (sticky default)
+            created_at      TEXT NOT NULL,
+            last_message_at TEXT,
+            message_count   INTEGER NOT NULL DEFAULT 0,
+            archived        INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_threads_project
+            ON chat_threads(project_id, last_message_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chat_threads_recent
+            ON chat_threads(last_message_at DESC);
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id          TEXT PRIMARY KEY,
+            thread_id   TEXT NOT NULL,
+            role        TEXT NOT NULL,                  -- 'user' | 'assistant' | 'system' | 'attachment' | 'error'
+            content     TEXT NOT NULL,
+            runtime     TEXT,                           -- which runtime produced this turn (assistant only)
+            agent_slug  TEXT,                           -- which agent (if any) handled the dispatch
+            metadata    TEXT,                           -- JSON: file path for attachments, etc.
+            created_at  TEXT NOT NULL,
+            FOREIGN KEY (thread_id) REFERENCES chat_threads(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
+            ON chat_messages(thread_id, created_at ASC);
         ",
     )
     .expect("Failed to initialize database tables");
+
+    // F3 + F5 — additive columns on the existing `agents` table. Wrapped in
+    // separate calls so existing local.db files upgrade without complaint.
+    // SQLite returns "duplicate column" if the column already exists; ignore.
+    let _ = conn.execute("ALTER TABLE agents ADD COLUMN role_models_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE agents ADD COLUMN memory_policy_json TEXT", []);
 }
 
 
@@ -495,6 +674,7 @@ pub fn run() {
         .manage(LogWatcherState::new())
         .manage(HealthPollerState::new())
         .manage(TelemetryState::new())
+        .manage(PtyState::new())
         .setup(|app| {
             // Auto-start health poller on app launch
             let db_path_str = get_db_path().to_string_lossy().to_string();
@@ -527,6 +707,21 @@ pub fn run() {
             create_skill,
             update_skill,
             delete_skill,
+            list_skill_versions,
+            restore_skill_version,
+            delete_skill_version,
+            export_configuration,
+            import_configuration,
+            list_chat_threads,
+            create_chat_thread,
+            rename_chat_thread,
+            delete_chat_thread,
+            set_chat_thread_agent,
+            get_chat_messages,
+            append_chat_message,
+            delete_chat_message,
+            prompt_agent_stream,
+            prompt_agent_with_history_stream,
             prompt_claude,
             list_workflows,
             save_workflow,
@@ -672,6 +867,49 @@ pub fn run() {
             get_llm_api_key_value,
             rotate_llm_api_key,
             toggle_llm_api_key,
+            // v1.3.0: Agents (T3)
+            create_agent,
+            list_agents,
+            get_agent,
+            delete_agent,
+            touch_agent_last_used,
+            // v1.4.0 F1: Agent variables (dynamic prompt resolvers)
+            list_agent_variables,
+            save_agent_variable,
+            delete_agent_variable,
+            prompt_agent_with_context,
+            prompt_agent_with_history,
+            // v1.4.0 F2: Pre-call context hooks
+            list_agent_hooks,
+            save_agent_hook,
+            delete_agent_hook,
+            // v1.4.0 F3: Memory policy
+            update_agent_memory_policy,
+            // v1.4.0 F5: Per-task model selection
+            update_agent_role_models,
+            // v1.4.0 F4: Multi-agent groups (router + children)
+            create_agent_group,
+            list_agent_groups,
+            get_agent_group,
+            update_agent_group,
+            delete_agent_group,
+            dispatch_to_group,
+            // v1.4.0 F6: Observability (reads ~/.ato/agent-logs.jsonl)
+            read_agent_traces,
+            get_agent_metrics,
+            // v1.4.0 F7: Evaluators (heuristic local; LLM-as-judge stub)
+            list_agent_evaluators,
+            save_agent_evaluator,
+            delete_agent_evaluator,
+            evaluate_recent_traces,
+            // v1.3.0: Embedded terminal (T5)
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
+            pty::pty_list,
+            // v1.3.0: MCP install (T4 follow-up)
+            install_mcp_server,
             delete_llm_api_key,
             // v1.0.0: Real-time Agent Monitoring
             get_monitoring_snapshot,

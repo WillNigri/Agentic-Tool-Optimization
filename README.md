@@ -1,10 +1,20 @@
 # ATO — Agentic Tool Optimization
 
-The **multi-runtime control panel** for AI coding tools. One dashboard to manage **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, and **Ollama** — skills, configs, sandboxes, policies, API keys, costs, agent monitoring, and automation across all runtimes.
+**The GUI for daily agentic work.** Persistent multi-runtime conversations, production-grade agent authoring, and observability — across **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, and **Ollama**. Without editing JSON. Without leaving the app.
+
+Switch from Claude to Codex mid-conversation. Variables, hooks, and memory policies travel. Threads persist across restart. Markdown renders. Tokens stream.
+
+### Three audiences, one app
+
+- **First-time users** — chat-style guided wizard ("describe what you want") suggests runtime, model, skills, MCPs. Or pick a starter template. Working agent in under two minutes.
+- **Power users** — Quick form, command palette (⌘K), embedded `portable-pty` terminal, persistent threads, drag-drop file attachments, streaming responses with syntax-highlighted markdown.
+- **Teams** — cloud sync, shared agents, team-wide observability, SSO, audit retention via the optional Pro / Team tier.
+
+Bring your own auth: ATO rides your existing logged-in CLI subscriptions (Claude Code, Codex, Gemini CLI) the way VS Code rides your GitHub login — *or* you can use stored API keys. Your choice, per runtime.
 
 **[Website](https://agentictool.ai)** | **[Web Dashboard](https://app.agentictool.ai)** | **[SDK Docs](docs/SDK.md)** | **[npm](https://www.npmjs.com/package/@ato-sdk/js)**
 
-**MIT Licensed** | **Offline-first** | **macOS, Windows, Linux**
+**MIT Licensed** | **Local-first** | **macOS, Windows, Linux**
 
 ---
 
@@ -45,16 +55,9 @@ const msg = await client.messages.create({
 });
 ```
 
-Works with **Anthropic**, **OpenAI**, and **Claude Agent SDK**:
+Works with **Anthropic**, **OpenAI**, and **Claude Agent SDK**. Built-in pricing for **60+ models** across 7 providers. [Full SDK docs](docs/SDK.md).
 
-```typescript
-import { wrapOpenAI } from '@ato-sdk/js/openai';
-import { wrapAgent } from '@ato-sdk/js/agent';
-```
-
-Built-in pricing for **60+ models** across 7 providers. [Full SDK docs](docs/SDK.md).
-
-### MCP Server (16 tools)
+### MCP Server
 
 ```json
 {
@@ -67,96 +70,72 @@ Built-in pricing for **60+ models** across 7 providers. [Full SDK docs](docs/SDK
 }
 ```
 
----
-
-## What You Get
-
-### Projects Dashboard (NEW)
-Project-centric view: click a project and see **everything** — CLAUDE.md memory hierarchy (user → project → nested), skills, subagents, commands, hooks, permissions, MCP servers. Runtime switcher for multi-runtime projects. File watcher auto-refreshes when config files change on disk. Token breakdown chart shows estimated context usage. Empty sections collapse behind "+N more" with inline Create buttons to scaffold new configs.
-
-### Inline Config Editor
-CodeMirror 6 editor with syntax highlighting (JSON, Markdown, YAML, TOML), schema validation for `settings.json`, content-hash conflict detection, automatic timestamped backups (`~/.ato/backups/`), unified diff preview before save, and full audit logging. Two-step confirmation for global config changes.
-
-### OpenAI Agents SDK Support
-Sandbox configuration viewer + editor (network isolation, filesystem policy, timeout, port allowlist, snapshot toggle). Approval policies manager (per-tool rules with add/remove/edit). Writes back to `.codex/sandbox.json` and `.codex/policies.json`.
-
-### Gemini CLI / ADK Support
-Detects `.gemini/`, `GEMINI.md`, `root_agent.yaml`. Visual agent tree: parses `root_agent.yaml` into cards showing agent name, model, instruction, sub-agents, and tools. Inline editing for all config files.
-
-### Ollama Provider
-Auto-detects local Ollama server. Model picker showing all installed models with parameter size and quantization. Copy OpenAI-compatible endpoint (`localhost:11434/v1`) for use with any runtime. Environment config viewer (OLLAMA_HOST, GPU settings).
-
-### Backup + Restore
-Every file edit automatically creates a timestamped backup in `~/.ato/backups/` (auto-pruned after 30 days). Backup history panel per file with one-click restore. Restores go through the same safety pipeline (hash check, backup, audit).
-
-### Cost Dashboard
-Per-model, per-provider, per-day cost breakdowns. See burn rate, daily timeline, team-wide spend. Auto-calculated from SDK traces.
-
-### LLM API Key Management
-Store, rotate, and scope API keys for Anthropic, OpenAI, Google, Mistral, Groq, Cohere, Together, Fireworks. Encrypted locally, never sent to any server.
-
-### Agent Monitor
-Track active agent sessions, token consumption, error rates, and runtime health across all your AI coding tools. Basic stats free, real-time 3s auto-refresh in Pro.
-
-### Audit Log
-Complete trail of every action — skill changes, key rotations, config updates, file writes with diff stats. Filterable, activity feed on Projects dashboard.
-
-### Skills Manager + Marketplace
-Per-runtime tabs (Claude / Codex / OpenClaw / Hermes / Gemini). Browse marketplace, AI-powered skill creation, conflict detection, recursive directory scanning.
-
-### Automation Builder
-Visual workflow editor. Auto-detects flows from skill headers. Per-node runtime selection — mix Claude + Codex in one workflow.
-
-### Cron Monitor
-Google Calendar view with color-coded execution status. Click any day for output/error. Smart failure detection, manual trigger, auto-retry.
-
-### Context Visualizer
-Per-runtime context breakdown. Skills marked on-demand vs always-loaded. Color warnings at 75% and 90% usage.
-
-### Subagents Manager
-Create subagents with runtime selection. Runtime-specific config (SSH for OpenClaw, API keys for Codex). Assign skills, tools, model overrides.
+The MCP server exposes `run_agent` — any MCP-aware runtime can dispatch to any ATO-managed agent regardless of native runtime. Cross-runtime by protocol, not by hack.
 
 ---
 
-## Supported Runtimes
+## What's in the box
 
-| Runtime | Provider | Config Files | Skills Directory | Special Features |
-|---------|----------|-------------|------------------|-----------------|
-| **Claude Code** | Anthropic | `CLAUDE.md`, `.claude/settings.json`, `.mcp.json` | `~/.claude/skills/` | Memory hierarchy, hooks, permissions, MCP, subagents, commands |
-| **Codex / OpenAI Agents SDK** | OpenAI | `AGENTS.md`, `.codex/config.toml`, `codex.json` | `~/.codex/skills/` | Sandbox config, approval policies, visual TOML editor |
-| **Gemini CLI / ADK** | Google | `GEMINI.md`, `.gemini/settings.json`, `root_agent.yaml` | `.gemini/agents/` | Visual agent tree (sub-agents + tools from YAML) |
-| **OpenClaw** | OpenClaw | `SOUL.md`, `TOOLS.md`, `openclaw.json` | `~/.openclaw/skills/` | Parsed soul card + tools grid |
-| **Hermes** | NousResearch | `SOUL.md`, `config.yaml`, `memories/*.md` | `~/.hermes/skills/` | Full memory file scanning |
+### Daily workspace (v1.5)
 
-### Model Providers
+- **Persistent chat threads** — conversations survive app restart, scoped optionally to projects, listed in a dropdown with msg count + last activity.
+- **Multi-runtime mid-thread** — switch Claude → Codex → Gemini in the same conversation. The full thread history travels to whichever runtime answers next.
+- **Streaming responses** — tokens appear as they're generated, with a blinking caret. No more 20-second blocking waits.
+- **Syntax-highlighted markdown** — assistant replies render as proper markdown: headings, lists, GFM tables, fenced code blocks with copy buttons. Inline code in cyan.
+- **File attachments** — paperclip pick or drag-drop a text file (`.md`, `.json`, `.ts`, `.py`, etc.); contents join the conversation as context.
+- **Embedded shell** — real interactive PTY via `xterm.js` + `portable-pty`, scoped to active project, persists across navigation.
 
-| Provider | Integration | Features |
-|----------|------------|----------|
-| **Ollama** | Auto-detect `localhost:11434` | Model picker, GPU config, copy OpenAI-compatible endpoint |
+### Production-grade agent authoring (v1.4)
 
----
+Every principle from the [context engineering literature](https://nigri.substack.com/p/context-engineering-2026), as a first-class UI:
 
-## Open Source vs Pro
+- **Variables** — `{user_name}` style templates with resolvers: static, env var, project path, file (Free) + db-query, computed expressions, MCP call (Pro).
+- **Pre-call context hooks** — ordered list of resolvers that fire before each turn and inject results into the user message inside `<context>...</context>` tags.
+- **Conversation summarizers** — per-agent memory policy (`summarizeAfter`, `keepLastK`, custom summarizer model). Long sessions auto-compact.
+- **Multi-agent groups** — router + N children. Visual graph editor with router-in-the-middle, hover-to-inspect rules. Routing via keyword rules + LLM-classifier fallback.
+- **Per-task models** — distinct models for routing / summarizing / responding / evaluating. Cheap fast for routing, advanced for response.
+- **Observability** — per-agent metrics (run count, p50/p95 latency, success rate), trace explorer with full sequence (variables → hooks → router → response).
+- **Evaluators** — heuristic kinds (contains / not-contains / length-range / tool-called) run locally; LLM-as-judge runs Pro cloud-side. Manual + scheduled batch — never live on every dispatch.
+- **Tool description rewrite** — per-MCP-tool button that asks your runtime to rewrite the description for your specific use-case.
 
-| | Free (this repo) | Pro ([app.agentictool.ai](https://app.agentictool.ai)) |
-|---|---|---|
-| **Dashboard** | Desktop app | Desktop + Web dashboard |
-| **Skills** | Manager, marketplace, AI creation | + Cloud sync, team sharing |
-| **API Keys** | Local encrypted storage | + Team-wide key management |
-| **Monitoring** | Basic stats, manual refresh | Real-time (3s), smart alerts, charts |
-| **Cost Tracking** | Local via SDK | Cloud aggregation, per-team breakdown |
-| **Audit Log** | Local | Team-wide, cloud |
-| **Automation** | Builder, cron scheduling | + Push notifications (Slack/Discord/Email) |
-| **Auth** | GitHub OAuth | + SSO (Google, Okta, Microsoft Entra) |
-| **Teams** | — | Workspaces, roles, activity logs |
-| **SDK** | Full (MIT) | — |
-| **MCP Server** | 16 tools (MIT) | — |
+### Cross-runtime dispatch (agents-as-MCPs)
 
----
+The MCP server exposes `mcp__ato__run_agent("<slug>", "<prompt>")`. Any MCP-aware runtime can dispatch to any ATO-managed agent. Slug points at a single agent or a group — groups route through their router transparently. This is how cross-runtime works: not via a fragile shim, but as a standard MCP tool.
 
-## SDK
+### Create Agent (3 paths)
 
-Auto-capture LLM traces with zero code changes. Supports:
+- **Guided** — chat wizard: describe goal → ATO suggests runtime/model/skills/MCPs/permissions as confirmable cards.
+- **Quick** — one-page form, all fields visible, draft auto-saved.
+- **Templates** — 5 production-quality starters (PR Reviewer, Doc Writer, Codebase Explainer, Data Analyst, DevOps Helper). Pick → form pre-filled → customize → save.
+
+All paths write through the same safety pipeline (hash check, auto-backup, audit log) to the right place per runtime.
+
+### Skills, MCPs, projects
+
+- **Skills Manager** — per-runtime tabs, scope grouping (enterprise/personal/project/plugin), drag-to-prioritize, conflict detection (similar-description warnings), AI-powered creation.
+- **Skill version history** — every edit auto-snapshots; drawer shows prior versions; restore is itself reversible.
+- **Bulk skill ops** — multi-select toolbar: enable/disable/delete N at once.
+- **Marketplace** — browse curated + community skills.
+- **MCP install UI** — curated registry (filesystem, github, postgres, slack, brave-search, gmail, calendar, …) with one-click install.
+- **Projects dashboard** — click a project, see everything: memory hierarchy, skills, subagents, commands, hooks, permissions, MCPs. File watcher auto-refreshes.
+
+### Settings
+
+- **Runtimes** — Setup tab (CLI paths, SSH config, status checks) + **Compare tab** (per-runtime feature/config matrix).
+- **Models** — model config per runtime/project.
+- **API Keys / Secrets / Environment** — encrypted local storage, OS-keychain-backed where applicable.
+- **Cloud** — auth, teams, sync, notifications.
+- **Backup** — JSON export/import of all your config (agents, hooks, variables, groups, projects, env, model configs, secrets metadata).
+
+### Cross-cutting
+
+- **Command palette ⌘K** — global search across agents, skills, MCPs, projects, plus quick navigation.
+- **Tier gating** — Pro features are visible to Free users with a crown lock badge + upgrade tooltip. Discovery sells; hiding doesn't.
+- **i18n** — EN, PT, ES (react-i18next).
+
+### SDK
+
+Auto-capture LLM traces with zero code changes:
 
 | Provider | Wrapper | Import |
 |----------|---------|--------|
@@ -165,11 +144,48 @@ Auto-capture LLM traces with zero code changes. Supports:
 | Claude Agent SDK | `wrapAgent(agent)` | `@ato-sdk/js/agent` |
 | Any provider | `capture(trace)` | `@ato-sdk/js` |
 
-Each call automatically records: model, tokens (input/output/cached), cost (USD), duration, status, errors, metadata.
+Each call records: model, tokens (input/output/cached), cost (USD), duration, status, errors, metadata. Built-in pricing for 60+ models. [Full SDK documentation](docs/SDK.md).
 
-**60+ models priced**: Claude (Opus, Sonnet, Haiku), GPT-4o/4.1/o1/o3/o4-mini, Gemini, Mistral, Groq, Cohere.
+---
 
-[Full SDK documentation](docs/SDK.md)
+## Supported Runtimes
+
+| Runtime | Provider | Config Files | Skills Directory |
+|---------|----------|-------------|------------------|
+| **Claude Code** | Anthropic | `CLAUDE.md`, `.claude/settings.json`, `.mcp.json` | `~/.claude/skills/` |
+| **Codex / OpenAI Agents SDK** | OpenAI | `AGENTS.md`, `.codex/config.toml`, `codex.json` | `~/.codex/skills/` |
+| **Gemini CLI / ADK** | Google | `GEMINI.md`, `.gemini/settings.json`, `root_agent.yaml` | `.gemini/agents/` |
+| **OpenClaw** | OpenClaw | `SOUL.md`, `TOOLS.md`, `openclaw.json` | `~/.openclaw/skills/` |
+| **Hermes** | NousResearch | `SOUL.md`, `config.yaml`, `memories/*.md` | `~/.hermes/skills/` |
+| **Ollama** | local | auto-detect `localhost:11434` | n/a |
+
+---
+
+## Free vs Pro vs Team vs Enterprise
+
+| | Free (this repo) | Pro $29/seat/mo | Team $49/seat/mo | Enterprise $99+/seat/yr |
+|---|---|---|---|---|
+| Single-agent create / run / shell / Quick Test | ✅ | ✅ | ✅ | ✅ |
+| Cross-runtime MCP dispatch (`run_agent`) | ✅ | ✅ | ✅ | ✅ |
+| Persistent multi-runtime threads | ✅ | ✅ | ✅ | ✅ |
+| Streaming responses + markdown | ✅ | ✅ | ✅ | ✅ |
+| Variables — basic resolvers | ✅ | ✅ | ✅ | ✅ |
+| Variables — db-query / computed / MCP-call | – | ✅ | ✅ | ✅ |
+| Pre-call context hooks | – | ✅ | ✅ | ✅ |
+| Tunable summarizer policy | – | ✅ | ✅ | ✅ |
+| Multi-agent groups | up to 3 children | unlimited | unlimited + shared | unlimited |
+| Visual group graph editor | view-only | edit | edit + collab | edit + audit |
+| Per-task model selection | – | ✅ | ✅ | ✅ |
+| Local trace history | last 100 runs | unlimited | unlimited | unlimited |
+| Cloud trace retention | – | 30 days | 90 days | unlimited |
+| Observability dashboard | basic counts | full per-agent | + team aggregates | + SLA dashboards |
+| LLM-as-judge evaluators | – | ✅ | ✅ | ✅ |
+| Cron / Schedules | up to 3 jobs | unlimited | unlimited | unlimited + SLA |
+| Cloud sync of agents | – | ✅ | ✅ | ✅ |
+| Team workspaces / shared agents | – | – | ✅ | ✅ |
+| SSO / Audit retention | – | – | – | ✅ |
+
+The OSS desktop is fully functional standalone — Pro adds cloud-side capabilities (suggest fallback, hosted judge, trace retention, sync). Sign-in is optional.
 
 ---
 
@@ -178,27 +194,28 @@ Each call automatically records: model, tokens (input/output/cached), cost (USD)
 ```
 apps/
   desktop/                 # Tauri 2.x desktop app (Rust + React)
-  web/                     # Web dashboard (Vite + React, Vercel)
+  web/                     # Web dashboard (Vite + React)
 
 packages/
   sdk/                     # @ato-sdk/js — auto-trace LLM calls
   core/                    # Shared types, token utils
+  db/                      # Database adapters
 
 services/
-  mcp-server/              # Standalone MCP server (16 tools)
+  mcp-server/              # Standalone MCP server with `run_agent`
 ```
 
-### Cloud Backend (separate repo, Pro)
+### Cloud Backend (separate repo, Pro+)
 
 ```
-api.agentictool.ai         # 7 microservices on Railway
-├── API Gateway (3000)     # Routing, JWT auth, tiered rate limiting
-├── Auth (3001)            # Register, login, GitHub OAuth, SSO/OIDC
-├── Skills (3002)          # CRUD, filesystem sync
-├── Analytics (3003)       # Token tracking, cost aggregation, burn rate
-├── MCP Monitor (3004)     # MCP server health monitoring
-├── Teams (3005)           # Workspaces, roles, activity logs
-└── Notifications (3006)   # Email (SMTP), Slack, Discord, Telegram
+api.agentictool.ai
+├── API Gateway       # Routing, JWT auth, tiered rate limiting
+├── Auth              # Register, login, GitHub OAuth, SSO/OIDC, tier
+├── Skills            # CRUD, agent-suggest, agent-traces, agent-evaluators/judge
+├── Analytics         # Token tracking, cost aggregation, burn rate
+├── MCP Monitor       # MCP server health monitoring
+├── Teams             # Workspaces, roles, activity logs
+└── Notifications     # Email (SMTP), Slack, Discord, Telegram
 ```
 
 ### Data Storage (desktop — all local)
@@ -206,21 +223,10 @@ api.agentictool.ai         # 7 microservices on Railway
 | Data | Location |
 |------|----------|
 | Database | `~/.ato/local.db` (SQLite) |
-| Agent logs | `~/.ato/agent-logs.jsonl` |
+| Agent logs / traces | `~/.ato/agent-logs.jsonl` |
 | Workflows | `~/.ato/workflows/` |
 | Cron jobs | `~/.ato/cron-jobs.json` |
 | File backups | `~/.ato/backups/` (auto-pruned >30 days) |
-
----
-
-## Engineering Quality
-
-- **CI/CD**: GitHub Actions runs `cargo check` + `cargo test` + `vitest run` + `vite build` on every PR
-- **46 tests**: 35 Rust unit tests (SHA-256, diff, TOML parsing, sandbox config, permissions, hooks, MCP, backup, file resolution) + 11 frontend tests (SectionShell, ErrorBoundary) via Vitest
-- **Code splitting**: All 22 sidebar sections lazy-loaded via React.lazy — initial bundle 140KB gzipped
-- **Accessibility**: ARIA labels on navigation, section shells, dashboard tabs
-- **i18n**: Full EN/PT/ES translations via react-i18next
-- **Modular Rust**: lib.rs (979 lines) + commands.rs (8,745 lines) — types separate from commands
 
 ---
 
@@ -248,27 +254,35 @@ Requires [Rust](https://rustup.rs/) and [Tauri 2 prerequisites](https://v2.tauri
 
 | Version | Highlights |
 |---------|-----------|
-| **v1.1.0** | Projects dashboard, 6 runtimes (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor with conflict detection + inline lint, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES), 46 tests, CI/CD, code splitting (140KB initial), ARIA accessibility, lib.rs modular split |
-| **v1.0.0** | SDK (`@ato-sdk/js`), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, rate limiting, Homebrew tap |
-| v0.8.0 | Agent Configuration Manager, advanced automation |
-| v0.7.0 | Marketplace backend, dynamic workflows |
-| v0.6.0 | Deeper runtime integration (OpenClaw, Hermes) |
-| v0.5.5 | Notifications & integrations (Slack, Discord, Telegram, Email) |
-| v0.3.0 | Multi-LLM support, marketplace, cron, automation builder |
+| **v1.5.0** | **Daily workspace** — persistent threads (SQLite), streaming responses, syntax-highlighted markdown rendering, file attachments, multi-runtime mid-thread (history travels with or without an agent), per-thread sticky agent, project scoping, in-thread runtime swap |
+| **v1.4.0** | **Production-grade agent authoring** — Variables (F1), Context Hooks (F2), Summarizers (F3), Multi-agent Groups + Router + Graph Editor (F4), Per-task Models (F5), Observability + Trace Explorer (F6), Evaluators (F7), Tool Description Rewrite (F8); Pro tier gating; agent templates (5 starters); skill version history; bulk skill ops; runtime comparison tab; configuration export/import |
+| **v1.3.0** | **The GUI Pivot** — IA collapse (24 → 6 sections), Home page, Create Agent (Guided + Quick), MCP install UI, embedded terminal (xterm + portable-pty), command palette (⌘K), subscriptions-or-keys auth model |
+| **v1.2.0** | Visual workspace canvas, live execution visualization, skill palette, multi-select batch ops |
+| **v1.1.0** | Projects dashboard, 6 runtimes (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor with conflict detection + inline lint, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES) |
+| **v1.0.0** | SDK (`@ato-sdk/js`), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, Homebrew tap |
 
 ---
+
+## Engineering
+
+- **CI/CD**: GitHub Actions runs `cargo check` + `cargo test` + `vitest run` + `vite build` on every PR
+- **66+ Rust unit tests** + frontend Vitest tests
+- **Code splitting**: Sidebar sections lazy-loaded via `React.lazy`
+- **Accessibility**: ARIA labels on navigation, dialogs, dashboard tabs
+- **Modular Rust**: types separate from commands
 
 ## Security
 
 - **Local-first** — no network calls unless sync explicitly enabled
-- **Parameterized SQL** — all queries use parameterized statements
+- **Parameterized SQL** — all queries
 - **API keys** — encrypted locally, never sent externally
-- **SSH** — OpenClaw uses key-based auth (paths only, not key contents)
-- **Validation** — all inputs validated with Zod schemas; settings.json schema validation with inline lint
-- **Rate limiting** — tiered (global/auth/API/sensitive) on cloud endpoints
-- **Conflict detection** — SHA-256 content hashing prevents overwriting concurrent edits
+- **SSH** — OpenClaw uses key-based auth (paths only)
+- **Validation** — all inputs validated with Zod / serde
+- **Conflict detection** — content hashing prevents overwriting concurrent edits
 - **Auto-backup** — every file write creates a timestamped backup, restorable from the UI
 - **Audit trail** — every file write logged with diff stats and backup path
+- **db-query resolver** — opens SQLite read-only; rejects anything that isn't `SELECT/WITH`
+- **computed resolver** — constrained expression grammar, not arbitrary JS
 
 ## Contributing
 

@@ -21,7 +21,12 @@ export default function Register() {
 
     try {
       const result = await register({ name, email, password });
-      setAuth(result.user, result.accessToken, result.refreshToken);
+      setAuth(
+        result.user,
+        result.accessToken,
+        result.refreshToken,
+        result.user.subscription_tier ?? "pro",
+      );
       navigate("/");
     } catch (err: unknown) {
       const apiErr = err as { message?: string };

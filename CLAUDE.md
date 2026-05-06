@@ -1,6 +1,8 @@
 # ATO (Open Source)
 
-Multi-LLM control panel for AI coding tools. Supports Claude Code, Codex, OpenClaw, and Hermes. MIT licensed.
+The GUI for creating, managing, and observing AI agents — across Claude Code, Codex / OpenAI Agents SDK, Gemini CLI / ADK, OpenClaw, Hermes, and Ollama. MIT licensed. Local-first.
+
+Positioning as of v1.3.0 (The GUI Pivot): "the place where you create an agent, not just manage one." Three audiences served by one app: non-technical first-timers (guided chat wizard), power users (Quick form + ⌘K + terminal), teams (Pro/Team tier in `ato-cloud`). See `PRD.md` and `ROADMAP.md` for full positioning.
 
 ## Structure
 
@@ -62,11 +64,59 @@ Supported runtimes: Claude, Codex, OpenClaw (SSH), Hermes.
 - **Approval dialog**: When agent response contains SKILL.md content, shows approval UI
 - **Setup wizard**: First-launch onboarding, persisted to localStorage
 
+## Information Architecture (v1.3.0+)
+
+The desktop app sidebar has **6 top-level sections** (collapsed from 24 in v1.2.x). Every screen lives under one of these:
+
+1. **Home** — landing; Create Agent CTA, recent agents, recent runs, alerts.
+2. **Agents** — list, detail (Config / Skills / MCPs / Permissions), + New Agent wizard.
+3. **Skills & MCPs** — Skills tab, MCPs tab (with install registry), Marketplace tab.
+4. **Runs** — Live (active sessions) / History (logs) / Schedules (cron) / Automations (workflows) / Hooks.
+5. **Insights** — Health, Analytics, Context, Audit Log.
+6. **Settings** — Runtimes (merged), Models, API Keys, Secrets, Env, Cloud (auth+sync+teams+notifications), Projects.
+
+**Persistent surfaces**: Command palette (⌘K), Chat/Terminal pane (bottom, expandable), Project switcher (sidebar top).
+
+## Create Agent flow (v1.3.0+)
+
+Two paths share the same end-state. Guided (chat) is default for non-technical users; Quick (form) is default for power users.
+
+**File-writing contract per runtime** (all writes go through hash check + auto-backup + audit log):
+
+| Runtime | Path |
+|---|---|
+| Claude Code | `~/.claude/agents/<slug>.md` (global) or `<project>/.claude/agents/<slug>.md` (project) |
+| Codex / OpenAI Agents SDK | `~/.codex/agents/<slug>/` directory + `AGENTS.md` |
+| Gemini CLI / ADK | `<project>/.gemini/agents/<slug>.yaml` (root_agent.yaml entry) |
+| OpenClaw | `~/.openclaw/agents/<slug>/SOUL.md` + `TOOLS.md` |
+| Hermes | `~/.hermes/agents/<slug>/` |
+
+**Auth resolution order** for the wizard's "AI suggests a stack" step (subscriptions OR keys, both first-class):
+1. Active CLI subscription — shell out (`claude --print`, `codex --print`, `gemini -p`)
+2. Active API key in `LlmApiKeys` — direct provider SDK
+3. Local Ollama on `localhost:11434`
+4. Pro-tier `/agent-suggest` on `ato-cloud` (fallback)
+
+Drafts persisted to `~/.ato/agent-drafts/<id>.json` so users can leave and resume.
+
+## Embedded Terminal (v1.3.0+)
+
+Replaces chat-only PromptBar with an expandable bottom pane, two modes:
+
+- **Chat mode** — same as today's PromptBar (`promptAgent()`).
+- **Terminal mode** — full xterm shell scoped to active project CWD.
+
+**Stack**:
+- Frontend: `xterm.js` + `@xterm/addon-fit` + `@xterm/addon-web-links`
+- Backend: `portable-pty` Rust crate, spawned via Tauri command, default shell `$SHELL` (Unix) / `pwsh.exe` (Windows)
+- PATH from login-shell spawn (existing pattern).
+- Persistent across navigation; collapsible; resizable.
+
 ## Open Source vs Closed Source
 
-**Open source (this repo)**: Skills manager + marketplace, multi-agent runtime, subagents, automation builder, cron scheduling, context visualizer, hooks, MCP server (8 tools), config editor, setup wizard, prompt bar, i18n.
+**Open source (this repo)**: Skills manager + marketplace, multi-agent runtime, subagents, **Create Agent wizard (v1.3.0)**, **MCP install UI (v1.3.0)**, **embedded terminal (v1.3.0)**, automation builder, cron scheduling, context visualizer, hooks, ATO MCP server (8 tools), config editor, command palette, i18n.
 
-**Closed source (separate repo, paid)**: Real-time cron monitoring, silent failure detection, push notifications, usage analytics (cloud), cloud sync, team workspaces.
+**Closed source (`ato-cloud`, paid)**: Real-time cron monitoring, silent failure detection, push notifications, usage analytics (cloud), cloud sync, team workspaces, hosted `/agent-suggest` fallback, MCP registry mirror, hosted templates library, configuration backup vault, hosted terminal sessions (Team).
 
 ## Security
 

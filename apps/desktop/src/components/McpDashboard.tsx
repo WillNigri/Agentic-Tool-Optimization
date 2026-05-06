@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle, Loader2, CheckCircle2, XCircle, Code } from "lucide-react";
 import { getMcpServers, restartMcpServer, getMcpServersWithTools, discoverMcpServerTools, type McpServer, type McpServerDetails } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import ToolDescriptionRewrite from "@/components/ToolDescriptionRewrite";
 
 const STATUS_COLORS: Record<McpServer["status"], string> = {
   running: "bg-cs-success",
@@ -279,13 +280,21 @@ export default function McpDashboard() {
                                 <Code size={10} className="text-cs-muted shrink-0" />
                               )}
                             </div>
-                            {/* Expanded tool schema */}
-                            {expandedTools === tool.name && tool.inputSchema && (
-                              <div className="mt-2 pt-2 border-t border-cs-border">
-                                <p className="text-[10px] text-cs-muted uppercase mb-1">Input Schema</p>
-                                <pre className="text-[10px] font-mono text-cs-muted bg-cs-card rounded p-2 overflow-x-auto max-h-32">
-                                  {JSON.stringify(tool.inputSchema, null, 2)}
-                                </pre>
+                            {/* Expanded tool schema + rewrite suggester */}
+                            {expandedTools === tool.name && (
+                              <div className="mt-2 pt-2 border-t border-cs-border space-y-2">
+                                {tool.inputSchema && (
+                                  <div>
+                                    <p className="text-[10px] text-cs-muted uppercase mb-1">Input Schema</p>
+                                    <pre className="text-[10px] font-mono text-cs-muted bg-cs-card rounded p-2 overflow-x-auto max-h-32">
+                                      {JSON.stringify(tool.inputSchema, null, 2)}
+                                    </pre>
+                                  </div>
+                                )}
+                                <ToolDescriptionRewrite
+                                  toolName={tool.name}
+                                  currentDescription={tool.description || ""}
+                                />
                               </div>
                             )}
                           </div>

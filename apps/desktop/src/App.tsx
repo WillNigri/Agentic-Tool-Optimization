@@ -54,9 +54,14 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const refreshTier = useAuthStore((s) => s.refreshTier);
+
   useEffect(() => {
     checkForUpdates();
-  }, []);
+    // Pull the latest subscription_tier on mount. If the user upgraded on
+    // the web, the desktop tier badge updates without a re-login.
+    void refreshTier();
+  }, [refreshTier]);
 
   return (
     <Routes>

@@ -8,6 +8,7 @@ import { registerUsageTools } from "./tools/usage.js";
 import { registerMcpTools } from "./tools/mcp.js";
 import { registerRuntimeTools } from "./tools/runtimes.js";
 import { registerCacheTools } from "./tools/cache-management.js";
+import { registerAgentTools } from "./tools/agents.js";
 
 const server = new McpServer({
   name: "ato",
@@ -20,6 +21,7 @@ registerUsageTools(server);
 registerMcpTools(server);
 registerRuntimeTools(server);
 registerCacheTools(server);
+registerAgentTools(server); // v1.3.0+ — agents-as-MCPs (cross-runtime dispatch)
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

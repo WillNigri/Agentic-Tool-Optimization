@@ -1,13 +1,14 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { X, Pencil, Save, FolderOpen, File, Trash2, AlertTriangle, Info, Link2, ExternalLink, Eye, EyeOff, Bot, Zap, Share2, Upload, Sparkles } from "lucide-react";
+import { X, Pencil, Save, FolderOpen, File, Trash2, AlertTriangle, Info, Link2, ExternalLink, Eye, EyeOff, Bot, Zap, Share2, Upload, Sparkles, History } from "lucide-react";
 import { getSkillDetail, getSkills, updateSkill, deleteSkill, type SkillDetail } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ModelTag, StatusTag, TokenTag } from "./SkillMetaTags";
 import { analyzeSkillConflicts, getConflictsForSkill } from "@/lib/skill-similarity";
 import { shareSkill, promptAgent } from "@/lib/api";
 import PublishSkillModal from "./PublishSkillModal";
+import SkillVersionsDrawer from "./SkillVersionsDrawer";
 
 // Anthropic official guideline: keep SKILL.md under 500 lines
 const RECOMMENDED_MAX_LINES = 500;
@@ -66,6 +67,7 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [autoImproveRunning, setAutoImproveRunning] = useState(false);
   const [autoImproveDiff, setAutoImproveDiff] = useState<{ old: string; new: string } | null>(null);
+  const [showVersions, setShowVersions] = useState(false);
 
   const { data: skill, isLoading, error } = useQuery({
     queryKey: ["skill-detail", skillId],
@@ -184,6 +186,13 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
               <Pencil size={16} />
             </button>
           )}
+          <button
+            onClick={() => setShowVersions(true)}
+            className="p-1.5 rounded hover:bg-cs-border transition-colors text-cs-muted hover:text-cs-text"
+            title={t("skills.versions.openTitle", "Version history")}
+          >
+            <History size={16} />
+          </button>
           <button
             onClick={() => setConfirmDelete(true)}
             className="p-1.5 rounded hover:bg-red-500/10 transition-colors text-cs-muted hover:text-red-400"
@@ -600,6 +609,13 @@ export default function SkillDetailPanel({ skillId, onClose }: SkillDetailPanelP
           onClose={() => setShowPublish(false)}
         />
       )}
+
+      {/* Version history (Polish-T2) */}
+      <SkillVersionsDrawer
+        filePath={skill.filePath}
+        open={showVersions}
+        onClose={() => setShowVersions(false)}
+      />
     </Panel>
   );
 }

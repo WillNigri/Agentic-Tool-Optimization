@@ -30,7 +30,12 @@ export default function LoginModal({ onClose }: LoginModalProps) {
         if (!name.trim()) { setError("Name is required"); setLoading(false); return; }
         result = await register(email, password, name);
       }
-      setAuth(result.user, result.tokens.accessToken, result.tokens.refreshToken);
+      setAuth(
+        result.user,
+        result.tokens.accessToken,
+        result.tokens.refreshToken,
+        result.user.subscription_tier ?? "pro",
+      );
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");

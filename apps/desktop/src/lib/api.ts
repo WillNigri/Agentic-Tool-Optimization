@@ -72,7 +72,13 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 // ---- Auth (cloud only) ----
 
 export interface AuthResponse {
-  user: { id: string; email: string; name: string };
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    /** Optional — older backends may not include it; treat as 'free'. */
+    subscription_tier?: 'free' | 'pro' | 'team' | 'enterprise';
+  };
   accessToken: string;
   refreshToken: string;
 }

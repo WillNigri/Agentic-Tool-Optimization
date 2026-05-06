@@ -2,13 +2,41 @@
 
 ## Vision Statement
 
-ATO (Agentic Tool Optimization) is the **multi-LLM control panel** for AI coding tools. One desktop dashboard to manage **Claude Code**, **Codex**, **OpenClaw**, and **Hermes** — skills, subagents, automation workflows, cron scheduling, and context visualization across all runtimes with full two-way communication.
+ATO (Agentic Tool Optimization) is **the GUI for creating, managing, and observing AI agents** — across every runtime (Claude Code, Codex / OpenAI Agents SDK, Gemini CLI / ADK, OpenClaw, Hermes) and every model provider (Anthropic, OpenAI, Google, Ollama). One desktop app that takes a user from "I want an agent that does X" to a working, running agent in under two minutes.
 
-**Target Users**: Developers who use one or more AI coding agents and want a unified dashboard to manage skills, monitor context consumption, create automations, schedule agent tasks, and control everything from one place — instead of editing config files manually for each tool.
+**The "full GUI" promise**: anything you can do with an AI coding agent on the command line, you can do here — create it, configure it, run it, watch it work, debug it. Without leaving the app, and without editing JSON by hand.
 
-**Business Model**: Open-core. MIT-licensed desktop app + optional Pro subscription for real-time monitoring, cloud sync, and team features (closed source, separate repo).
+### Target Users
+
+ATO serves three audiences with one product, via two front-doors that share the same primitives:
+
+1. **Non-technical / first-agent users ("normies")** — Have heard of AI agents, may have installed Claude Code or ChatGPT desktop, want a real agent for a real job (review my PRs, summarize my emails, watch my server logs). Need a chat-style guided wizard, sane defaults, and zero JSON.
+2. **Power users / multi-agent developers** — Already running 2-5 agents across runtimes. Need fast switching, a real terminal, command palette, and bulk operations. Get the Quick (form) onboarding and ⌘K.
+3. **Teams / enterprise** — Multiple developers, shared skill libraries, audit trail, SSO, cross-runtime policies. Pro/Team tier features in `ato-cloud`.
+
+**Business Model**: Open-core. MIT-licensed desktop app + optional Pro subscription for real-time monitoring, cloud sync, hosted suggestions, and team features (closed source, separate repo `ato-cloud`).
 
 > Note: "ATO" is the short name; "Agentic Tool Optimization" is the full name.
+
+---
+
+## Information Architecture
+
+The desktop app is organized into **6 top-level sections** in the sidebar (collapsed from 24 in v1.2.x). Every screen lives under one of these.
+
+| # | Section | Purpose | Sub-tabs / panels |
+|---|---|---|---|
+| 1 | **Home** | Landing page; create new agents; see what's happening | Create Agent CTA, Recent Agents, Recent Runs, Alerts |
+| 2 | **Agents** | List, create, configure, and inspect agents | Agents list, Agent detail (Config, Skills, MCPs, Permissions), + New Agent |
+| 3 | **Skills & MCPs** | Manage capabilities — skills (SKILL.md) and MCP servers | Skills, MCPs, Marketplace |
+| 4 | **Runs** | Everything execution-related | Live (active sessions), History (logs), Schedules (cron), Automations (workflows), Hooks |
+| 5 | **Insights** | Health, costs, audit, context | Health, Analytics, Context, Audit Log |
+| 6 | **Settings** | Configuration | Runtimes, Models, API Keys, Secrets, Env, Cloud (auth/sync/teams/notifications), Projects |
+
+**Persistent surfaces** (not in the sidebar):
+- **Command palette (⌘K)** — search any action, page, agent, skill, project.
+- **Chat / Terminal pane** — bottom of the screen, expandable. Two modes: chat (send to runtime) or terminal (full xterm shell scoped to active project CWD).
+- **Project switcher** — sticky at the top of the sidebar.
 
 ---
 
@@ -95,15 +123,46 @@ Falls back to manual path input in Setup Wizard when auto-detect fails.
 
 ## Feature Specifications
 
-### F1: Setup Wizard (First Launch)
+### F1: Home + Create Agent (v1.3.0)
 
-4-step onboarding flow:
-1. **Welcome** — introduces ATO as multi-LLM control panel
-2. **Connect Runtimes** — toggle on/off each runtime, auto-detect CLIs, runtime-specific config (SSH for OpenClaw, API key for Codex, endpoint for Hermes), manual path fallback
-3. **Verify** — parallel health check all enabled runtimes (version, auth, connectivity)
-4. **Done** — summary + what's next
+**Home page** is the new landing destination after splash. Replaces the old SetupWizard as the front door. Contains:
 
-Persisted to `localStorage`. Runs only on first launch.
+- Single primary **"Create Agent"** CTA
+- **Recent Agents** carousel (most-recently-used)
+- **Recent Runs** strip (last 5 executions across all agents)
+- **Alerts** card (failed crons, runtime offline, token-budget hits)
+
+If no runtime is connected, Home prompts the user to connect one via the new Settings → Runtimes flow (which replaces the old SetupWizard's runtime-detection step).
+
+**Create Agent** is a full-page wizard with two tab-toggled paths:
+
+#### Path A — Guided (chat, default)
+Single-pane chat. Each turn either asks one question or offers a card to confirm. State persisted as a draft (`~/.ato/agent-drafts/<id>.json`).
+
+1. *"What do you want your agent to help with?"* (free text)
+2. AI proposes runtime + model + 0–3 skills + 0–3 MCPs as confirmable cards.
+3. *"Where will this agent live?"* (project picker)
+4. Confirm → ATO writes agent files to disk + creates SQLite record + opens `Agents → [new agent]` with "Open in Terminal" + "Run a test" buttons.
+
+The "AI proposes a stack" step uses the user's own runtime as the suggestion engine (resolution order):
+- Active CLI subscription (`claude --print`, `codex --print`, `gemini -p`) — VS-Code-style, zero key setup
+- Active API key (`LlmApiKeys`) — direct provider SDK
+- Local Ollama
+- Pro-tier hosted `/agent-suggest` (fallback)
+
+#### Path B — Quick (form, default for power users)
+One scrollable form: name, runtime, model, project, skills (multi-select), MCPs (multi-select), system prompt (CodeMirror), permissions. Single "Create" button. Both paths land at the same agent record.
+
+#### File-writing contract per runtime
+| Runtime | Agent files written |
+|---|---|
+| Claude Code | `~/.claude/agents/<slug>.md` (or `<project>/.claude/agents/<slug>.md` for project scope) |
+| Codex / OpenAI Agents SDK | `~/.codex/agents/<slug>/` directory + `AGENTS.md` |
+| Gemini CLI / ADK | `<project>/.gemini/agents/<slug>.yaml` (root_agent.yaml entry) |
+| OpenClaw | `~/.openclaw/agents/<slug>/SOUL.md` + `TOOLS.md` |
+| Hermes | `~/.hermes/agents/<slug>/` |
+
+All writes go through the existing safety pipeline (hash check, auto-backup, audit log).
 
 ### F2: Skills Manager
 
@@ -179,9 +238,9 @@ Shell commands on Claude Code events:
 - Configure: command, matcher (regex/exact), timeout, scope (global/project)
 - Starts clean (no mock data)
 
-### F9: MCP Server
+### F9a: ATO MCP Server (we expose ATO as an MCP)
 
-Standalone MCP server with 8 tools:
+Standalone MCP server with 8 tools — this is what we *publish* so other agents can read ATO state:
 - `get_context_usage` — Context window breakdown
 - `list_skills` / `toggle_skill` — Manage skills
 - `get_usage_stats` — Token/cost analytics from JSONL logs
@@ -189,6 +248,16 @@ Standalone MCP server with 8 tools:
 - `get_runtime_status` — Health check for any runtime
 - `get_all_runtime_statuses` — Health check all runtimes at once
 - `get_agent_logs` — Execution logs (filterable by runtime)
+
+### F9b: MCP Manager (we install MCPs into the user's agents) — v1.3.0
+
+The other half of MCP. `Skills & MCPs → MCPs` tab lets the user install and manage MCP servers that *their* agents will consume.
+
+- **Registry browser** — curated list (filesystem, github, postgres, slack, brave-search, gmail, calendar, etc.) sourced from `GET /mcp-registry` on `ato-cloud`. Search, category filter, install counts.
+- **One-click install** — writes the MCP entry into the active runtime's MCP config (`.mcp.json` for Claude, `codex.json` for Codex, etc.) AND runs the install command in the embedded terminal so the user can see what happened.
+- **Custom install** — manual form: name, command, args, env vars (stdio) or URL (SSE/HTTP).
+- **Per-agent enable/disable** — toggle which installed MCPs are exposed to which agent.
+- **Tool discovery** — for each running MCP, show available tools (existing `discoverMcpServerTools` in `McpDashboard`).
 
 ### F10: Prompt Bar
 
@@ -223,6 +292,20 @@ Full internationalization:
 - English (en), Portuguese (pt), Spanish (es)
 - All UI strings via react-i18next
 - Language switcher in sidebar
+
+### F14: Embedded Terminal (v1.3.0)
+
+Replaces today's chat-only `PromptBar` with an expandable bottom pane that has two modes (toggle in the header):
+
+- **Chat mode** — current behavior (send to runtime via `promptAgent()`, show approval dialog for SKILL.md content).
+- **Terminal mode** — full xterm.js shell, scoped to the active project's CWD, inheriting the user's PATH (Tauri login-shell PATH spawn). The chat agent can stream commands here when it wants to "show its work."
+
+**Stack**:
+- Frontend: `xterm.js` + `@xterm/addon-fit` + `@xterm/addon-web-links`
+- Backend: `portable-pty` Rust crate, spawned via Tauri command. Default shell: `$SHELL` on Unix, `pwsh.exe` on Windows.
+- Persistent across page navigation; collapsible; resizable.
+
+**Why it matters for positioning**: this is the single feature that lets us tell the same story to both audiences. Normies see "the agent did this thing in a terminal." Tech people see "an actual shell I can use."
 
 ---
 

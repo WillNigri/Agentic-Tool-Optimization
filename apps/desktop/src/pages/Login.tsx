@@ -20,7 +20,12 @@ export default function Login() {
 
     try {
       const result = await login({ email, password });
-      setAuth(result.user, result.accessToken, result.refreshToken);
+      setAuth(
+        result.user,
+        result.accessToken,
+        result.refreshToken,
+        result.user.subscription_tier ?? "pro",
+      );
       navigate("/");
     } catch (err: unknown) {
       const apiErr = err as { message?: string };

@@ -219,6 +219,28 @@ export async function deleteSkill(id: string): Promise<void> {
   return invoke('delete_skill', { id });
 }
 
+// ---- Skill version history (Polish-T2) ----
+export interface SkillVersion {
+  id: string;
+  filePath: string;
+  content: string;
+  contentHash: string;
+  note: string | null;
+  createdAt: string;
+}
+
+export async function listSkillVersions(filePath: string): Promise<SkillVersion[]> {
+  return invoke<SkillVersion[]>('list_skill_versions', { filePath });
+}
+
+export async function restoreSkillVersion(versionId: string): Promise<void> {
+  return invoke('restore_skill_version', { versionId });
+}
+
+export async function deleteSkillVersion(versionId: string): Promise<void> {
+  return invoke('delete_skill_version', { versionId });
+}
+
 // ---- Usage ----
 export interface UsageSummaryLocal {
   today: { inputTokens: number; outputTokens: number; costCents: number };

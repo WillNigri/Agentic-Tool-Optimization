@@ -1,35 +1,18 @@
 import { useState } from "react";
 import {
-  Layers,
+  Home as HomeIcon,
+  Bot,
   Sparkles,
+  Activity,
   BarChart3,
-  Server,
   Settings,
   LogOut,
-  Bot,
-  Webhook,
-  Workflow,
-  Clock,
   Crown,
   User,
-  Settings2,
-  FolderKanban,
-  KeyRound,
-  FileCode,
-  Cpu,
-  ScrollText,
-  Activity,
-  Cloud,
-  Users,
-  RefreshCw,
-  BellRing,
-  Shield,
-  Key,
-  MonitorDot,
   ChevronDown,
   ChevronRight,
   Loader2,
-  LayoutGrid,
+  FolderKanban,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -40,38 +23,23 @@ import { useProjectStore } from "@/stores/useProjectStore";
 import { listProjects } from "@/lib/api";
 import LoginModal from "./LoginModal";
 
-export type Section = "context" | "skills" | "projects" | "workspace" | "subagents" | "hooks" | "automation" | "cron" | "analytics" | "mcp" | "agents" | "config" | "secrets" | "env" | "models" | "logs" | "health" | "cloud" | "teams" | "sync" | "notifications" | "audit" | "llm-keys" | "agent-monitor";
+// v1.3.0 — IA collapse from 24 entries to 6 top-level sections (T1).
+// Sub-tabs are owned by each section component under pages/sections/*.
+
+export type Section = "home" | "agents" | "skills" | "runs" | "insights" | "settings";
 
 interface SidebarProps {
   active: Section;
   onNavigate: (section: Section) => void;
 }
 
-const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof Layers; group?: string }[] = [
-  { id: "context", labelKey: "nav.context", icon: Layers },
+const NAV_ITEMS: { id: Section; labelKey: string; icon: typeof HomeIcon }[] = [
+  { id: "home", labelKey: "nav.home", icon: HomeIcon },
+  { id: "agents", labelKey: "nav.agents", icon: Bot },
   { id: "skills", labelKey: "nav.skills", icon: Sparkles },
-  { id: "projects", labelKey: "nav.projects", icon: FolderKanban },
-  { id: "subagents", labelKey: "nav.subagents", icon: Bot },
-  { id: "hooks", labelKey: "nav.hooks", icon: Webhook },
-  { id: "automation", labelKey: "nav.automation", icon: Workflow },
-  { id: "workspace", labelKey: "nav.workspace", icon: LayoutGrid },
-  { id: "cron", labelKey: "nav.cron", icon: Clock },
-  { id: "analytics", labelKey: "nav.analytics", icon: BarChart3 },
-  { id: "logs", labelKey: "nav.logs", icon: ScrollText },
-  { id: "health", labelKey: "nav.health", icon: Activity },
-  { id: "mcp", labelKey: "nav.mcp", icon: Server },
-  { id: "agents", labelKey: "nav.agents", icon: Settings2 },
-  { id: "cloud", labelKey: "nav.cloud", icon: Cloud },
-  { id: "teams", labelKey: "nav.teams", icon: Users },
-  { id: "sync", labelKey: "nav.sync", icon: RefreshCw },
-  { id: "notifications", labelKey: "nav.notifications", icon: BellRing },
-  { id: "agent-monitor", labelKey: "nav.agentMonitor", icon: MonitorDot },
-  { id: "llm-keys", labelKey: "nav.llmKeys", icon: Key },
-  { id: "audit", labelKey: "nav.audit", icon: Shield },
-  { id: "secrets", labelKey: "nav.secrets", icon: KeyRound },
-  { id: "env", labelKey: "nav.env", icon: FileCode },
-  { id: "models", labelKey: "nav.models", icon: Cpu },
-  { id: "config", labelKey: "nav.config", icon: Settings },
+  { id: "runs", labelKey: "nav.runs", icon: Activity },
+  { id: "insights", labelKey: "nav.insights", icon: BarChart3 },
+  { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
 const LANGUAGES = [
@@ -93,11 +61,10 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
   const sidebarExpanded = useProjectStore((s) => s.sidebarExpanded);
   const toggleSidebarExpanded = useProjectStore((s) => s.toggleSidebarExpanded);
 
-  const projectsInSidebar = active === "projects" && sidebarExpanded;
   const { data: projects = [], isLoading: projectsLoading } = useQuery({
     queryKey: ["projects"],
     queryFn: listProjects,
-    enabled: projectsInSidebar,
+    enabled: sidebarExpanded,
     staleTime: 30_000,
   });
 
@@ -108,83 +75,82 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
 
   return (
     <aside className="w-56 h-screen bg-cs-card border-r border-cs-border flex flex-col shrink-0">
+      {/* Header */}
       <div className="px-4 py-5 border-b border-cs-border">
         <h1 className="text-lg font-bold tracking-tight">{t("app.name")}</h1>
-        <p className="text-xs text-cs-muted mt-0.5 truncate">
-          {user?.email}
-        </p>
+        <p className="text-xs text-cs-muted mt-0.5 truncate">{user?.email}</p>
       </div>
 
-      <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto" aria-label="Main navigation" role="navigation">
+      {/* Sticky project switcher */}
+      <div className="px-2 pt-2">
+        <div
+          className={cn(
+            "rounded-md text-sm transition-colors",
+            "text-cs-muted hover:text-cs-text"
+          )}
+        >
+          <button
+            onClick={() => toggleSidebarExpanded()}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-md hover:bg-cs-border/50 text-left"
+            title={t("sidebar.projectSwitcher", "Switch project")}
+          >
+            <FolderKanban size={16} />
+            <span className="flex-1 truncate text-xs uppercase tracking-wide">
+              {activeProject?.name ?? t("sidebar.noProject", "No project")}
+            </span>
+            {sidebarExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+
+          {sidebarExpanded && (
+            <div className="mt-1 ml-2 mb-2 border-l border-cs-border/60 pl-2 max-h-72 overflow-y-auto">
+              {projectsLoading ? (
+                <div className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-cs-muted">
+                  <Loader2 size={10} className="animate-spin" /> Loading…
+                </div>
+              ) : projects.length === 0 ? (
+                <button
+                  onClick={() => onNavigate("settings")}
+                  className="block w-full px-2 py-1.5 text-left text-[11px] text-cs-muted hover:text-cs-text"
+                >
+                  {t("sidebar.noProjectsYet", "No projects yet — open Settings")}
+                </button>
+              ) : (
+                projects.map((project) => {
+                  const selected = activeProject?.id === project.id;
+                  return (
+                    <button
+                      key={project.id}
+                      onClick={() => setActiveProjectStore(project)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] transition-colors",
+                        selected
+                          ? "bg-cs-accent/10 text-cs-accent"
+                          : "text-cs-muted hover:bg-cs-border/50 hover:text-cs-text"
+                      )}
+                      title={project.path}
+                    >
+                      <span className="truncate flex-1">{project.name}</span>
+                      <RuntimeDots project={project} />
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Main nav (6 sections) */}
+      <nav
+        className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto"
+        aria-label="Main navigation"
+        role="navigation"
+      >
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = active === item.id;
-
-          if (item.id === "projects") {
-            return (
-              <div key={item.id}>
-                <div
-                  className={cn(
-                    "flex items-center gap-1 rounded-md text-sm transition-colors",
-                    isActive
-                      ? "bg-[#00FFB2]/15 text-[#00FFB2]"
-                      : "text-cs-muted hover:text-cs-text hover:bg-cs-border/50"
-                  )}
-                >
-                  <button
-                    onClick={() => onNavigate(item.id)}
-                    className="flex flex-1 items-center gap-3 px-3 py-2 text-left"
-                  >
-                    <Icon size={18} />
-                    <span className="flex-1 text-left">{t(item.labelKey)}</span>
-                  </button>
-                  <button
-                    onClick={() => toggleSidebarExpanded()}
-                    title={sidebarExpanded ? "Collapse" : "Expand"}
-                    className="p-2 text-current opacity-70 hover:opacity-100"
-                  >
-                    {sidebarExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  </button>
-                </div>
-
-                {sidebarExpanded && (
-                  <div className="mt-1 ml-4 mb-1 border-l border-cs-border/60 pl-2 max-h-80 overflow-y-auto">
-                    {projectsLoading ? (
-                      <div className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-cs-muted">
-                        <Loader2 size={10} className="animate-spin" /> Loading…
-                      </div>
-                    ) : projects.length === 0 ? (
-                      <p className="px-2 py-1.5 text-[11px] text-cs-muted">No projects yet.</p>
-                    ) : (
-                      projects.map((project) => {
-                        const selected = activeProject?.id === project.id && active === "projects";
-                        return (
-                          <button
-                            key={project.id}
-                            onClick={() => {
-                              setActiveProjectStore(project);
-                              if (active !== "projects") onNavigate("projects");
-                            }}
-                            className={cn(
-                              "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] transition-colors",
-                              selected
-                                ? "bg-cs-accent/10 text-cs-accent"
-                                : "text-cs-muted hover:bg-cs-border/50 hover:text-cs-text"
-                            )}
-                            title={project.path}
-                          >
-                            <span className="truncate flex-1">{project.name}</span>
-                            <RuntimeDots project={project} />
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          }
-
+          // Cron alerts surface on the Runs entry now (cron lives under Runs → Schedules).
+          const showAlertDot = item.id === "runs" && cronAlertCount > 0;
           return (
             <button
               key={item.id}
@@ -198,7 +164,7 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
             >
               <Icon size={18} />
               <span className="flex-1 text-left">{t(item.labelKey)}</span>
-              {item.id === "cron" && cronAlertCount > 0 && (
+              {showAlertDot && (
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               )}
             </button>
@@ -206,6 +172,7 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
         })}
       </nav>
 
+      {/* Language switcher */}
       <div className="px-2 pb-1">
         <div className="flex items-center gap-1 px-3 py-2">
           {LANGUAGES.map((lang) => (
@@ -225,6 +192,7 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
         </div>
       </div>
 
+      {/* Footer: account / login */}
       <div className="p-2 border-t border-cs-border space-y-1">
         {isCloudUser ? (
           <>
@@ -253,7 +221,7 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
             className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm text-cs-accent hover:bg-cs-accent/10 transition-colors"
           >
             <Crown size={18} />
-            Sign in for Pro
+            {t("sidebar.signInForPro", "Sign in for Pro")}
           </button>
         )}
       </div>
@@ -263,7 +231,17 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
   );
 }
 
-function RuntimeDots({ project }: { project: { hasClaude: boolean; hasCodex: boolean; hasHermes: boolean; hasOpenclaw: boolean; hasGemini: boolean } }) {
+function RuntimeDots({
+  project,
+}: {
+  project: {
+    hasClaude: boolean;
+    hasCodex: boolean;
+    hasHermes: boolean;
+    hasOpenclaw: boolean;
+    hasGemini: boolean;
+  };
+}) {
   const runtimes = [
     { active: project.hasClaude, color: "bg-orange-400", title: "Claude" },
     { active: project.hasCodex, color: "bg-green-400", title: "Codex" },

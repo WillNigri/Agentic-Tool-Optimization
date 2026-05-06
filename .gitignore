@@ -11,3 +11,9 @@ coverage/
 # Tauri build artifacts
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+.vercel
+.env*.local
+
+# Nested separate repos (do not commit as part of OSS)
+/homebrew-ato/
+

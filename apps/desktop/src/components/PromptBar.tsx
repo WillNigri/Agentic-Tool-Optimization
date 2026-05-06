@@ -1,216 +1,589 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { Send, Bot, X, Loader2, ChevronUp, ChevronDown, Sparkles, Terminal, AlertCircle, Cpu, Server, Globe } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Send,
+  Bot,
+  X,
+  Loader2,
+  ChevronUp,
+  ChevronDown,
+  Sparkles,
+  Terminal,
+  AlertCircle,
+  Cpu,
+  Server,
+  Globe,
+  MessageSquarePlus,
+  History,
+  Paperclip,
+  Trash2,
+  FolderKanban,
+  Check,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
-import { promptAgent } from "@/lib/api";
+import { listAgents, parseMemoryPolicy, type Agent } from "@/lib/agents";
+import {
+  promptAgentWithHistoryStream,
+  promptAgentStream,
+  type AgentMessage,
+} from "@/lib/agentVariables";
+import {
+  appendChatMessage,
+  createChatThread,
+  defaultThreadTitle,
+  deleteChatThread,
+  getChatMessages,
+  listChatThreads,
+  renameChatThread,
+  setChatThreadAgent,
+  type ChatMessage,
+  type ChatThread,
+} from "@/lib/chatThreads";
+import { useProjectStore } from "@/stores/useProjectStore";
 import type { AgentRuntime } from "@/components/cron/types";
 import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
+import MarkdownContent from "./MarkdownContent";
 
-const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
+const isTauri =
+  typeof window !== "undefined" &&
+  ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
 
-interface Message {
-  id: string;
-  role: "user" | "assistant" | "error";
-  content: string;
-  timestamp: Date;
-  runtime?: AgentRuntime;
-  /** Extracted skill data for approval */
-  pendingSkill?: { content: string; name: string; path: string } | null;
-}
-
-const RUNTIME_OPTIONS: { id: AgentRuntime; label: string; icon: typeof Terminal; color: string }[] = [
+const RUNTIME_OPTIONS: {
+  id: AgentRuntime;
+  label: string;
+  icon: typeof Terminal;
+  color: string;
+}[] = [
   { id: "claude", label: "Claude", icon: Terminal, color: "#f97316" },
   { id: "codex", label: "Codex", icon: Cpu, color: "#22c55e" },
   { id: "openclaw", label: "OpenClaw", icon: Server, color: "#06b6d4" },
   { id: "hermes", label: "Hermes", icon: Globe, color: "#a855f7" },
 ];
 
+const MAX_ATTACHMENT_BYTES = 32 * 1024;
+
 function simulateMock(prompt: string): string {
   const lower = prompt.toLowerCase();
-  if (lower.includes("skill")) return "I can help you create a skill! Tell me what you want it to do.\n\n(Simulated — install the desktop app to connect to your agents.)";
-  if (lower.includes("context") || lower.includes("usage")) return "Context usage info would appear here from your real session.\n\n(Simulated — run in the desktop app to connect.)";
+  if (lower.includes("skill"))
+    return "I can help you create a skill! Tell me what you want it to do.\n\n(Simulated — install the desktop app to connect to your agents.)";
+  if (lower.includes("context") || lower.includes("usage"))
+    return "Context usage info would appear here from your real session.\n\n(Simulated — run in the desktop app to connect.)";
   return "Ask me anything — create skills, review code, manage configs.\n\n(Simulated — install the desktop app to use your agent subscriptions.)";
+}
+
+function isProbablyBinary(text: string): boolean {
+  // Cheap heuristic: look for NUL bytes in the first 4KB.
+  const chunk = text.slice(0, 4096);
+  return chunk.includes("\0");
 }
 
 export default function PromptBar() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const activeProject = useProjectStore((s) => s.activeProject);
+  const activeProjectId = activeProject?.id ?? null;
+
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  // Live streaming buffer — what the runtime has emitted so far for the
+  // in-flight dispatch. Cleared on done/error.
+  const [streamingText, setStreamingText] = useState("");
   const [runtime, setRuntime] = useState<AgentRuntime>("claude");
   const [showRuntimePicker, setShowRuntimePicker] = useState(false);
+  const [agentId, setAgentId] = useState<string | null>(null);
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [showThreadPicker, setShowThreadPicker] = useState(false);
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [renamingThread, setRenamingThread] = useState<{ id: string; title: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const currentRuntime = RUNTIME_OPTIONS.find((r) => r.id === runtime)!;
+  const RuntimeIcon = currentRuntime.icon;
+
+  // ── Threads ────────────────────────────────────────────────────────────
+
+  const threadsQuery = useQuery({
+    queryKey: ["chat-threads", activeProjectId],
+    queryFn: () => listChatThreads({ projectId: activeProjectId, limit: 50 }),
+    enabled: isTauri,
+    staleTime: 10_000,
+  });
+
+  // Pick the most-recent thread on first load. If none exist, currentThreadId
+  // stays null and we'll auto-create one on first send.
+  useEffect(() => {
+    if (!isTauri) return;
+    if (currentThreadId) return;
+    if (threadsQuery.isLoading) return;
+    const first = threadsQuery.data?.[0];
+    if (first) setCurrentThreadId(first.id);
+  }, [currentThreadId, threadsQuery.data, threadsQuery.isLoading]);
+
+  // Drop current thread if it's not in the active project's filtered list.
+  // (Switching projects shouldn't strand you on a foreign thread.)
+  useEffect(() => {
+    if (!currentThreadId || !threadsQuery.data) return;
+    if (!threadsQuery.data.some((t) => t.id === currentThreadId)) {
+      setCurrentThreadId(threadsQuery.data[0]?.id ?? null);
+    }
+  }, [currentThreadId, threadsQuery.data]);
+
+  const messagesQuery = useQuery({
+    queryKey: ["chat-messages", currentThreadId],
+    queryFn: () => (currentThreadId ? getChatMessages(currentThreadId) : Promise.resolve([])),
+    enabled: !!currentThreadId && isTauri,
+    staleTime: 5_000,
+  });
+  const messages = messagesQuery.data ?? [];
+
+  const currentThread = useMemo(
+    () => threadsQuery.data?.find((t) => t.id === currentThreadId) ?? null,
+    [threadsQuery.data, currentThreadId]
+  );
+
+  // When the thread carries a sticky agent_id, hydrate the picker on switch.
+  useEffect(() => {
+    if (!currentThread) return;
+    setAgentId(currentThread.agentId ?? null);
+  }, [currentThread]);
+
+  // ── Agents (filtered to runtime) ───────────────────────────────────────
+
+  const { data: runtimeAgents = [] } = useQuery({
+    queryKey: ["promptbar-agents", runtime],
+    queryFn: () => listAgents({ runtime: runtime as Agent["runtime"] }),
+    staleTime: 30_000,
+    enabled: isTauri,
+  });
+
+  const selectedAgent = useMemo(
+    () => runtimeAgents.find((a) => a.id === agentId) ?? null,
+    [runtimeAgents, agentId]
+  );
+
+  // Drop persisted agent if its runtime no longer matches.
+  useEffect(() => {
+    if (agentId && runtimeAgents.length > 0 && !selectedAgent) {
+      setAgentId(null);
+    }
+  }, [agentId, runtimeAgents, selectedAgent]);
+
+  // Persist agent selection as the thread's sticky default.
+  const stickAgentToThread = useCallback(
+    async (id: string | null) => {
+      if (!currentThreadId) return;
+      try {
+        await setChatThreadAgent(currentThreadId, id);
+      } catch {
+        // Sticky default is convenience — don't block the UI.
+      }
+      void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+    },
+    [currentThreadId, queryClient, activeProjectId]
+  );
+
+  // ── Auto-scroll ────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (expanded && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, expanded]);
+  }, [messages.length, expanded]);
 
-  const currentRuntime = RUNTIME_OPTIONS.find((r) => r.id === runtime)!;
-  const RuntimeIcon = currentRuntime.icon;
+  // ── Helpers ────────────────────────────────────────────────────────────
 
-  async function handleSubmit(e: React.FormEvent) {
+  /** Ensure a thread exists for the next send. Auto-titles from the first
+   *  user message; carries the active project + sticky agent. */
+  const ensureThread = useCallback(
+    async (firstUserContent: string): Promise<ChatThread | null> => {
+      if (currentThreadId) {
+        return threadsQuery.data?.find((t) => t.id === currentThreadId) ?? null;
+      }
+      const newThread = await createChatThread({
+        title: defaultThreadTitle(firstUserContent),
+        projectId: activeProjectId,
+        agentId,
+      });
+      setCurrentThreadId(newThread.id);
+      void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+      return newThread;
+    },
+    [currentThreadId, threadsQuery.data, activeProjectId, agentId, queryClient]
+  );
+
+  const refetchMessages = useCallback(
+    (threadId: string) => {
+      void queryClient.invalidateQueries({ queryKey: ["chat-messages", threadId] });
+    },
+    [queryClient]
+  );
+
+  // ── Submit ─────────────────────────────────────────────────────────────
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    const userMsg: Message = {
-      id: String(Date.now()),
-      role: "user",
-      content: input.trim(),
-      timestamp: new Date(),
-      runtime,
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
+    const userContent = input.trim();
     setInput("");
-    setIsLoading(true);
     setExpanded(true);
+    setIsLoading(true);
+
+    if (!isTauri) {
+      // Web mode: keep the simulated response, no persistence.
+      setIsLoading(false);
+      return;
+    }
 
     try {
-      let response: string;
-      if (isTauri) {
-        // Detect if user is asking to create/modify a skill or file
-        const lower = userMsg.content.toLowerCase();
-        const isSkillRequest = lower.includes("skill") || lower.includes("create") || lower.includes("write");
-        // If skill-related, prepend instruction to return content only (no file writes)
-        const prompt = isSkillRequest
-          ? `IMPORTANT: You are running in --print mode without file write permissions. Do NOT attempt to create files or ask for permissions. Instead, return the complete file content in a markdown code block so the user can review and save it through the app. If asked to create a skill, return the full SKILL.md content with YAML frontmatter (name, description, allowed-tools) in a \`\`\`markdown code block.\n\nUser request: ${userMsg.content}`
-          : userMsg.content;
-        response = await promptAgent(runtime, prompt);
-      } else {
-        response = simulateMock(userMsg.content);
-      }
-      // Check if response contains a skill file that needs approval
-      const pendingSkill = extractSkillFromResponse(response);
+      const thread = await ensureThread(userContent);
+      if (!thread) throw new Error("could-not-create-thread");
 
-      setMessages((prev) => [...prev, {
-        id: String(Date.now()),
+      // Persist the user message.
+      await appendChatMessage({
+        threadId: thread.id,
+        role: "user",
+        content: userContent,
+        runtime,
+        agentSlug: selectedAgent?.slug ?? null,
+      });
+      refetchMessages(thread.id);
+
+      // Build the prompt + dispatch.
+      const lower = userContent.toLowerCase();
+      const isSkillRequest =
+        lower.includes("skill") || lower.includes("create") || lower.includes("write");
+      const prompt = isSkillRequest
+        ? `IMPORTANT: You are running in --print mode without file write permissions. Do NOT attempt to create files or ask for permissions. Instead, return the complete file content in a markdown code block so the user can review and save it through the app. If asked to create a skill, return the full SKILL.md content with YAML frontmatter (name, description, allowed-tools) in a \`\`\`markdown code block.\n\nUser request: ${userContent}`
+        : userContent;
+
+      let response: string;
+      setStreamingText("");
+      try {
+        if (selectedAgent) {
+          // Agent-attributed multi-turn streaming dispatch — full thread
+          // history travels, plus the agent's variables / hooks / memory
+          // policy / role models all fire.
+          const history: AgentMessage[] = messagesToAgentHistory(messages);
+          response = await promptAgentWithHistoryStream({
+            agentId: selectedAgent.id,
+            agentSlug: selectedAgent.slug,
+            runtime,
+            history,
+            newPrompt: prompt,
+            source: "desktop:promptbar:stream",
+            onChunk: (text) => setStreamingText((prev) => prev + text),
+          });
+        } else {
+          // No agent selected — but the thread is still a conversation.
+          // Stitch the history into the prompt so cross-runtime swaps
+          // mid-thread keep their context. The runtime sees one big prompt
+          // with a framing instruction; this is the only honest way to do
+          // multi-turn when we don't manage the runtime's session.
+          const history: AgentMessage[] = messagesToAgentHistory(messages);
+          const stitched = stitchThreadIntoPrompt(history, prompt);
+          response = await promptAgentStream({
+            runtime,
+            prompt: stitched,
+            onChunk: (text) => setStreamingText((prev) => prev + text),
+          });
+        }
+      } finally {
+        // Clear regardless of success/error so the placeholder doesn't
+        // outlive the dispatch.
+        setStreamingText("");
+      }
+
+      await appendChatMessage({
+        threadId: thread.id,
         role: "assistant",
         content: response,
-        timestamp: new Date(),
         runtime,
-        pendingSkill,
-      }]);
+        agentSlug: selectedAgent?.slug ?? null,
+      });
+      refetchMessages(thread.id);
+      void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
     } catch (err) {
-      setMessages((prev) => [...prev, {
-        id: String(Date.now()),
-        role: "error",
-        content: String(err),
-        timestamp: new Date(),
-        runtime,
-      }]);
+      // Try to record the error in the thread, but don't loop if append fails.
+      if (currentThreadId) {
+        try {
+          await appendChatMessage({
+            threadId: currentThreadId,
+            role: "error",
+            content: err instanceof Error ? err.message : String(err),
+            runtime,
+          });
+          refetchMessages(currentThreadId);
+        } catch {
+          // ignore
+        }
+      }
     } finally {
       setIsLoading(false);
     }
-  }
+  };
 
-  function clearHistory() {
-    setMessages([]);
+  // ── File attachment ────────────────────────────────────────────────────
+
+  const handleFile = async (file: File) => {
+    if (!isTauri) return;
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      alert(
+        t(
+          "prompt.fileTooLarge",
+          "File is too large ({{size}} bytes). Max {{max}} bytes.",
+          { size: file.size, max: MAX_ATTACHMENT_BYTES }
+        )
+      );
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      alert(t("prompt.fileReadFailed", "Could not read file."));
+      return;
+    }
+    if (isProbablyBinary(text)) {
+      alert(t("prompt.fileBinaryRefused", "Binary files aren't supported as attachments."));
+      return;
+    }
+    const thread = await ensureThread(`📎 ${file.name}`);
+    if (!thread) return;
+    const wrapped = `<attachment name="${file.name}">\n${text}\n</attachment>`;
+    await appendChatMessage({
+      threadId: thread.id,
+      role: "attachment",
+      content: wrapped,
+      metadata: JSON.stringify({ filename: file.name, bytes: file.size }),
+    });
+    refetchMessages(thread.id);
+    setExpanded(true);
+  };
+
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) void handleFile(f);
+    e.target.value = "";
+  };
+
+  const onDropFile = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files?.[0];
+    if (f) await handleFile(f);
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+  };
+
+  // ── Thread actions ─────────────────────────────────────────────────────
+
+  const newThread = async () => {
+    const t = await createChatThread({
+      title: defaultThreadTitle(""),
+      projectId: activeProjectId,
+      agentId,
+    });
+    setCurrentThreadId(t.id);
+    void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+    setShowThreadPicker(false);
     setExpanded(false);
-  }
+  };
+
+  const removeThread = async (id: string) => {
+    await deleteChatThread(id);
+    if (currentThreadId === id) setCurrentThreadId(null);
+    void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+  };
+
+  const commitRename = async () => {
+    if (!renamingThread) return;
+    const trimmed = renamingThread.title.trim();
+    if (trimmed) {
+      await renameChatThread(renamingThread.id, trimmed);
+      void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+    }
+    setRenamingThread(null);
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────
 
   return (
-    <div className="border-t border-cs-border bg-cs-card">
+    <div
+      className="border-t border-cs-border bg-cs-card"
+      onDrop={onDropFile}
+      onDragOver={onDragOver}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={onPickFile}
+        accept="text/*,.md,.json,.yaml,.yml,.toml,.csv,.tsv,.ts,.tsx,.js,.jsx,.py,.rs,.go"
+      />
+
+      {/* Thread header — always visible so threads are discoverable */}
+      <header className="flex items-center gap-2 px-3 py-1.5 border-b border-cs-border/60 bg-cs-bg-raised/40">
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowThreadPicker((v) => !v)}
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-cs-text hover:bg-cs-border/40"
+          >
+            <History size={12} className="text-cs-muted" />
+            <span className="font-medium truncate max-w-[180px]">
+              {currentThread?.title ?? t("prompt.noThread", "(new conversation)")}
+            </span>
+            <ChevronDown size={10} className="text-cs-muted" />
+          </button>
+
+          {showThreadPicker && (
+            <>
+              <div className="fixed inset-0 z-30" onClick={() => setShowThreadPicker(false)} />
+              <div className="absolute top-full left-0 mt-1 w-80 max-h-80 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
+                <button
+                  type="button"
+                  onClick={newThread}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs border-b border-cs-border text-cs-accent hover:bg-cs-accent/5"
+                >
+                  <MessageSquarePlus size={12} />
+                  {t("prompt.newThread", "New conversation")}
+                </button>
+                {(threadsQuery.data ?? []).length === 0 ? (
+                  <p className="px-3 py-3 text-[11px] text-cs-muted">
+                    {t("prompt.noThreads", "No conversations yet.")}
+                  </p>
+                ) : (
+                  (threadsQuery.data ?? []).map((thr) => {
+                    const isCurrent = thr.id === currentThreadId;
+                    const isRenaming = renamingThread?.id === thr.id;
+                    return (
+                      <div
+                        key={thr.id}
+                        className={cn(
+                          "group flex items-center gap-1 px-3 py-1.5 transition-colors",
+                          isCurrent ? "bg-cs-accent/5" : "hover:bg-cs-bg"
+                        )}
+                      >
+                        {isRenaming ? (
+                          <input
+                            type="text"
+                            value={renamingThread.title}
+                            onChange={(e) =>
+                              setRenamingThread({ id: thr.id, title: e.target.value })
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void commitRename();
+                              if (e.key === "Escape") setRenamingThread(null);
+                            }}
+                            onBlur={() => void commitRename()}
+                            autoFocus
+                            className="flex-1 bg-cs-bg border border-cs-accent/40 rounded px-2 py-0.5 text-xs text-cs-text focus:outline-none"
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCurrentThreadId(thr.id);
+                              setShowThreadPicker(false);
+                              setExpanded(true);
+                            }}
+                            onDoubleClick={() =>
+                              setRenamingThread({ id: thr.id, title: thr.title })
+                            }
+                            className="flex-1 min-w-0 text-left text-xs"
+                          >
+                            <div className={cn(
+                              "truncate font-medium",
+                              isCurrent ? "text-cs-accent" : "text-cs-text"
+                            )}>
+                              {thr.title}
+                            </div>
+                            <div className="text-[10px] text-cs-muted truncate">
+                              {thr.messageCount} {t("prompt.msgs", "msgs")}
+                              {thr.lastMessageAt && ` · ${new Date(thr.lastMessageAt).toLocaleString()}`}
+                            </div>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void removeThread(thr.id);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 text-cs-muted hover:text-cs-danger shrink-0 p-1"
+                          aria-label={t("common.delete", "Delete")}
+                        >
+                          <Trash2 size={10} />
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="flex-1" />
+
+        {activeProject && (
+          <span className="inline-flex items-center gap-1 rounded-md bg-cs-bg px-2 py-0.5 text-[10px] text-cs-muted">
+            <FolderKanban size={10} />
+            {activeProject.name}
+          </span>
+        )}
+
+        <button
+          type="button"
+          onClick={newThread}
+          className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-cs-muted hover:text-cs-accent"
+          title={t("prompt.newThreadTitle", "New conversation")}
+        >
+          <MessageSquarePlus size={11} />
+        </button>
+      </header>
+
       {/* Chat history */}
       {expanded && messages.length > 0 && (
         <div className="max-h-80 overflow-y-auto border-b border-cs-border">
           <div className="p-3 space-y-3">
-            {messages.map((msg) => {
-              const msgRuntime = RUNTIME_OPTIONS.find((r) => r.id === msg.runtime) || currentRuntime;
-              const MsgIcon = msgRuntime.icon;
-              return (
-                <div
-                  key={msg.id}
-                  className={cn(
-                    "flex gap-2.5",
-                    msg.role === "user" ? "justify-end" : "justify-start"
-                  )}
-                >
-                  {msg.role !== "user" && (
-                    <div className={cn(
-                      "w-6 h-6 rounded-md border flex items-center justify-center shrink-0 mt-0.5",
-                      msg.role === "error"
-                        ? "bg-red-500/10 border-red-500/20"
-                        : "border-opacity-20"
-                    )}
-                    style={msg.role !== "error" ? {
-                      background: `${msgRuntime.color}15`,
-                      borderColor: `${msgRuntime.color}30`,
-                    } : undefined}
-                    >
-                      {msg.role === "error"
-                        ? <AlertCircle size={12} className="text-red-400" />
-                        : <MsgIcon size={12} style={{ color: msgRuntime.color }} />
-                      }
-                    </div>
-                  )}
-                  <div
-                    className={cn(
-                      "rounded-lg px-3 py-2 max-w-[85%]",
-                      msg.role === "user"
-                        ? "bg-cs-accent/10 border border-cs-accent/20"
-                        : msg.role === "error"
-                          ? "bg-red-500/5 border border-red-500/20"
-                          : "bg-cs-bg border border-cs-border"
-                    )}
-                  >
-                    {msg.role === "assistant" && isTauri && (
-                      <div className="flex items-center gap-1 mb-1">
-                        <MsgIcon size={10} style={{ color: msgRuntime.color }} />
-                        <span className="text-[9px] font-mono" style={{ color: msgRuntime.color }}>
-                          {msgRuntime.label}
-                        </span>
-                      </div>
-                    )}
-                    <pre className={cn(
-                      "text-xs whitespace-pre-wrap font-mono leading-relaxed",
-                      msg.role === "error" ? "text-red-400" : "text-cs-text"
-                    )}>
-                      {msg.content}
-                    </pre>
-                    <p className="text-[9px] text-cs-muted mt-1">
-                      {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </p>
-
-                    {/* Approval dialog for skill creation */}
-                    {msg.pendingSkill && (
-                      <ApprovalDialog
-                        content={msg.pendingSkill.content}
-                        filePath={msg.pendingSkill.path}
-                        skillName={msg.pendingSkill.name}
-                        runtime={msg.runtime || "claude"}
-                        onApprove={() => {
-                          setMessages((prev) =>
-                            prev.map((m) =>
-                              m.id === msg.id ? { ...m, pendingSkill: null } : m
-                            )
-                          );
-                        }}
-                        onDeny={() => {
-                          setMessages((prev) =>
-                            prev.map((m) =>
-                              m.id === msg.id ? { ...m, pendingSkill: null } : m
-                            )
-                          );
-                        }}
-                      />
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {messages.map((msg) => (
+              <ChatRow key={msg.id} msg={msg} />
+            ))}
             {isLoading && (
               <div className="flex gap-2.5">
-                <div className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
-                  style={{ background: `${currentRuntime.color}15`, border: `1px solid ${currentRuntime.color}30` }}
+                <div
+                  className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
+                  style={{
+                    background: `${currentRuntime.color}15`,
+                    border: `1px solid ${currentRuntime.color}30`,
+                  }}
                 >
-                  <Loader2 size={12} style={{ color: currentRuntime.color }} className="animate-spin" />
+                  {streamingText ? (
+                    <RuntimeIcon size={12} style={{ color: currentRuntime.color }} />
+                  ) : (
+                    <Loader2
+                      size={12}
+                      style={{ color: currentRuntime.color }}
+                      className="animate-spin"
+                    />
+                  )}
                 </div>
-                <div className="rounded-lg px-3 py-2 bg-cs-bg border border-cs-border">
-                  <span className="text-xs text-cs-muted">{t("prompt.thinking")}</span>
+                <div className="rounded-lg px-3 py-2 bg-cs-bg border border-cs-border max-w-[85%]">
+                  {streamingText ? (
+                    <div className="relative">
+                      <MarkdownContent content={streamingText} />
+                      <span className="inline-block w-1.5 h-3 bg-cs-accent ml-0.5 animate-pulse align-middle" />
+                    </div>
+                  ) : (
+                    <span className="text-xs text-cs-muted">{t("prompt.thinking")}</span>
+                  )}
                 </div>
               </div>
             )}
@@ -218,6 +591,37 @@ export default function PromptBar() {
           </div>
         </div>
       )}
+
+      {/* Multi-turn status banner */}
+      {selectedAgent && messages.length > 0 && (() => {
+        const policy = parseMemoryPolicy(selectedAgent);
+        const willSummarize = messages.length > policy.summarizeAfter;
+        const within = policy.summarizeAfter - messages.length;
+        if (!willSummarize && within > 5) return null;
+        return (
+          <div
+            className={cn(
+              "px-3 py-1 text-[10px] border-t",
+              willSummarize
+                ? "border-cs-accent/30 bg-cs-accent/5 text-cs-accent"
+                : "border-cs-border bg-cs-bg-raised text-cs-muted"
+            )}
+          >
+            {willSummarize
+              ? t(
+                  "prompt.willSummarize",
+                  "Next message: {{n}} prior turns will be summarized; last {{k}} kept verbatim.",
+                  {
+                    n: messages.length - policy.keepLastK,
+                    k: policy.keepLastK,
+                  }
+                )
+              : t("prompt.nearSummarize", "{{n}} more turns until summarization fires.", {
+                  n: within,
+                })}
+          </div>
+        );
+      })()}
 
       {/* Input bar */}
       <form onSubmit={handleSubmit} className="flex items-center gap-2 px-3 py-2.5">
@@ -243,14 +647,20 @@ export default function PromptBar() {
             style={{ borderColor: `${currentRuntime.color}40` }}
           >
             <RuntimeIcon size={12} style={{ color: currentRuntime.color }} />
-            <span className="text-[10px] font-medium" style={{ color: currentRuntime.color }}>
+            <span
+              className="text-[10px] font-medium"
+              style={{ color: currentRuntime.color }}
+            >
               {currentRuntime.label}
             </span>
           </button>
 
           {showRuntimePicker && (
             <>
-              <div className="fixed inset-0 z-30" onClick={() => setShowRuntimePicker(false)} />
+              <div
+                className="fixed inset-0 z-30"
+                onClick={() => setShowRuntimePicker(false)}
+              />
               <div className="absolute bottom-full left-0 mb-1 w-36 rounded-lg border border-cs-border bg-cs-card shadow-xl z-40 overflow-hidden">
                 {RUNTIME_OPTIONS.map((rt) => {
                   const Icon = rt.icon;
@@ -258,7 +668,10 @@ export default function PromptBar() {
                     <button
                       key={rt.id}
                       type="button"
-                      onClick={() => { setRuntime(rt.id); setShowRuntimePicker(false); }}
+                      onClick={() => {
+                        setRuntime(rt.id);
+                        setShowRuntimePicker(false);
+                      }}
                       className={cn(
                         "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors",
                         runtime === rt.id ? "bg-cs-accent/5" : "hover:bg-cs-bg"
@@ -276,8 +689,127 @@ export default function PromptBar() {
           )}
         </div>
 
+        {/* Agent selector */}
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowAgentPicker((v) => !v)}
+            className={cn(
+              "flex items-center gap-1 px-2 py-1.5 rounded-lg border transition-colors",
+              selectedAgent
+                ? "border-cs-accent/40 bg-cs-accent/5"
+                : "border-cs-border hover:border-cs-border/80"
+            )}
+            title={t("prompt.agentPickerTitle", "Pick an agent to enable multi-turn memory")}
+          >
+            <Bot size={12} className={selectedAgent ? "text-cs-accent" : "text-cs-muted"} />
+            <span
+              className={cn(
+                "text-[10px] font-medium font-mono",
+                selectedAgent ? "text-cs-accent" : "text-cs-muted"
+              )}
+            >
+              {selectedAgent ? `@${selectedAgent.slug}` : t("prompt.noAgent", "no agent")}
+            </span>
+          </button>
+
+          {showAgentPicker && (
+            <>
+              <div className="fixed inset-0 z-30" onClick={() => setShowAgentPicker(false)} />
+              <div className="absolute bottom-full left-0 mb-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAgentId(null);
+                    setShowAgentPicker(false);
+                    void stickAgentToThread(null);
+                  }}
+                  className={cn(
+                    "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors border-b border-cs-border",
+                    !agentId
+                      ? "bg-cs-accent/5 text-cs-accent"
+                      : "text-cs-muted hover:bg-cs-bg"
+                  )}
+                >
+                  {!agentId ? <Check size={11} /> : <X size={11} />}
+                  <span>{t("prompt.noAgent", "no agent")}</span>
+                  <span className="ml-auto text-[9px] text-cs-muted">single-shot</span>
+                </button>
+                {runtimeAgents.length === 0 ? (
+                  <p className="px-3 py-3 text-[11px] text-cs-muted">
+                    {t("prompt.noAgentsForRuntime", "No agents created for {{runtime}} yet.", {
+                      runtime,
+                    })}
+                  </p>
+                ) : (
+                  runtimeAgents.map((a) => {
+                    const policy = parseMemoryPolicy(a);
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        onClick={() => {
+                          setAgentId(a.id);
+                          setShowAgentPicker(false);
+                          void stickAgentToThread(a.id);
+                        }}
+                        className={cn(
+                          "w-full flex items-start gap-2 px-3 py-2 text-xs transition-colors text-left",
+                          agentId === a.id ? "bg-cs-accent/5" : "hover:bg-cs-bg"
+                        )}
+                      >
+                        <Bot
+                          size={11}
+                          className={cn(
+                            "shrink-0 mt-0.5",
+                            agentId === a.id ? "text-cs-accent" : "text-cs-muted"
+                          )}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <code
+                            className={cn(
+                              "font-mono truncate",
+                              agentId === a.id ? "text-cs-accent" : "text-cs-text"
+                            )}
+                          >
+                            @{a.slug}
+                          </code>
+                          <p className="text-[9px] text-cs-muted truncate">
+                            {t(
+                              "prompt.summarizesAfter",
+                              "summarizes after {{n}} msgs · keeps last {{k}}",
+                              {
+                                n: policy.summarizeAfter,
+                                k: policy.keepLastK,
+                              }
+                            )}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* File attachment */}
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="p-1.5 rounded text-cs-muted hover:text-cs-accent hover:bg-cs-border/40 shrink-0"
+          title={t("prompt.attachFile", "Attach a text file")}
+          disabled={!isTauri}
+        >
+          <Paperclip size={14} />
+        </button>
+
         <div className="flex-1 relative">
-          <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-cs-muted" />
+          <Sparkles
+            size={14}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-cs-muted"
+          />
           <input
             ref={inputRef}
             type="text"
@@ -297,18 +829,147 @@ export default function PromptBar() {
         >
           <Send size={14} />
         </button>
-
-        {messages.length > 0 && (
-          <button
-            type="button"
-            onClick={clearHistory}
-            className="p-1.5 rounded text-cs-muted hover:text-cs-text hover:bg-cs-border transition-colors shrink-0"
-            title={t("prompt.clear")}
-          >
-            <X size={14} />
-          </button>
-        )}
       </form>
+    </div>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Convert persisted ChatMessage[] into the role/content shape Rust expects.
+ *  Attachments become "system" messages so the summarizer/judge see them.
+ *  Errors are dropped. */
+function messagesToAgentHistory(messages: ChatMessage[]): AgentMessage[] {
+  return messages
+    .filter((m) => m.role !== "error")
+    .map((m) => ({
+      role:
+        m.role === "user"
+          ? "user"
+          : m.role === "assistant"
+          ? "assistant"
+          : "system",
+      content: m.content,
+    }));
+}
+
+/** Stitch a thread's prior history into a single prompt the runtime will
+ *  treat as one big request. Used for the no-agent path so cross-runtime
+ *  swaps mid-thread still carry context. The framing instruction is short
+ *  on purpose — telling the model "this is an ongoing conversation,
+ *  respond to the last message" is enough; it'll figure out the rest. */
+function stitchThreadIntoPrompt(history: AgentMessage[], newPrompt: string): string {
+  if (history.length === 0) return newPrompt;
+  let out =
+    "You are continuing an ongoing conversation. The previous turns are below; respond to the user's most recent message at the end.\n\n";
+  for (const m of history) {
+    out += `[${m.role}]: ${m.content}\n\n`;
+  }
+  out += `[user]: ${newPrompt}\n`;
+  return out;
+}
+
+function ChatRow({ msg }: { msg: ChatMessage }) {
+  const runtime = msg.runtime
+    ? RUNTIME_OPTIONS.find((r) => r.id === msg.runtime) ?? null
+    : null;
+  const Icon = runtime?.icon ?? Sparkles;
+  const color = runtime?.color ?? "#888";
+  const justifyEnd = msg.role === "user";
+
+  if (msg.role === "attachment") {
+    return (
+      <div className="flex items-start gap-2 rounded-lg border border-cs-border bg-cs-bg-raised/60 px-3 py-2 text-xs">
+        <Paperclip size={12} className="text-cs-accent shrink-0 mt-0.5" />
+        <pre className="text-[11px] text-cs-text font-mono whitespace-pre-wrap line-clamp-3 flex-1">
+          {msg.content}
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn("flex gap-2.5", justifyEnd ? "justify-end" : "justify-start")}>
+      {msg.role !== "user" && (
+        <div
+          className={cn(
+            "w-6 h-6 rounded-md border flex items-center justify-center shrink-0 mt-0.5",
+            msg.role === "error" ? "bg-red-500/10 border-red-500/20" : ""
+          )}
+          style={
+            msg.role !== "error"
+              ? { background: `${color}15`, borderColor: `${color}30` }
+              : undefined
+          }
+        >
+          {msg.role === "error" ? (
+            <AlertCircle size={12} className="text-red-400" />
+          ) : (
+            <Icon size={12} style={{ color }} />
+          )}
+        </div>
+      )}
+      <div
+        className={cn(
+          "rounded-lg px-3 py-2 max-w-[85%]",
+          msg.role === "user"
+            ? "bg-cs-accent/10 border border-cs-accent/20"
+            : msg.role === "error"
+            ? "bg-red-500/5 border border-red-500/20"
+            : "bg-cs-bg border border-cs-border"
+        )}
+      >
+        {msg.role === "assistant" && runtime && (
+          <div className="flex items-center gap-1 mb-1">
+            <Icon size={10} style={{ color }} />
+            <span className="text-[9px] font-mono" style={{ color }}>
+              {runtime.label}
+            </span>
+            {msg.agentSlug && (
+              <span className="text-[9px] font-mono text-cs-muted ml-1">
+                · @{msg.agentSlug}
+              </span>
+            )}
+          </div>
+        )}
+        {msg.role === "assistant" ? (
+          <MarkdownContent content={msg.content} />
+        ) : (
+          <pre
+            className={cn(
+              "text-xs whitespace-pre-wrap font-mono leading-relaxed",
+              msg.role === "error" ? "text-red-400" : "text-cs-text"
+            )}
+          >
+            {msg.content}
+          </pre>
+        )}
+        <p className="text-[9px] text-cs-muted mt-1">
+          {new Date(msg.createdAt).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </p>
+        {/* Approval dialog for skill creation in assistant responses */}
+        {msg.role === "assistant" && (() => {
+          const skill = extractSkillFromResponse(msg.content);
+          if (!skill) return null;
+          return (
+            <ApprovalDialog
+              content={skill.content}
+              filePath={skill.path}
+              skillName={skill.name}
+              runtime={(msg.runtime as AgentRuntime) ?? "claude"}
+              onApprove={() => {
+                /* approval is one-shot; no state to clear since we no longer
+                 * mutate the messages array — re-render will skip when the
+                 * file is written. */
+              }}
+              onDeny={() => {}}
+            />
+          );
+        })()}
+      </div>
     </div>
   );
 }

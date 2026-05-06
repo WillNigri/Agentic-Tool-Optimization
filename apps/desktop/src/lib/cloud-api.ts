@@ -9,6 +9,8 @@ const CLOUD_API_URL = import.meta.env.VITE_CLOUD_API_URL || 'https://api.ato.dev
 // Types
 // ============================================================
 
+export type CloudSubscriptionTier = 'free' | 'pro' | 'team' | 'enterprise';
+
 export interface CloudUser {
   id: string;
   email: string;
@@ -17,6 +19,9 @@ export interface CloudUser {
   auth_method: 'email' | 'oauth';
   github_id: string | null;
   github_username: string | null;
+  /** From users.subscription_tier — drives TierGate. May be missing on
+   *  older backends that haven't shipped the migration yet; treat as 'free'. */
+  subscription_tier?: CloudSubscriptionTier;
   created_at: string;
   updated_at: string;
 }
