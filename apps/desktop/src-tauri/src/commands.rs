@@ -2515,7 +2515,30 @@ pub struct DetectedRuntime {
 }
 
 /// Get the user's full shell PATH (Tauri apps launch with minimal env)
+use std::sync::OnceLock;
+
+/// Cached PATH resolution. Resolving the user's PATH spawns a shell on
+/// Unix and PowerShell on Windows — neither is cheap, and on Windows the
+/// PowerShell call pops a visible console window per invocation. v1.5.21
+/// shipped without this cache and called get_user_path() once per MCP
+/// discovery, which on Felipe's Windows install meant a stream of
+/// flashing PowerShell windows. Caching the value at first call (the
+/// shell's PATH doesn't change during app lifetime anyway) cuts both
+/// the cost and the visual noise.
+static USER_PATH_CACHE: OnceLock<String> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn no_window_flag() -> u32 {
+    // CREATE_NO_WINDOW — keeps the PowerShell child invisible to the user.
+    // Without this, every spawn pops a black PowerShell window briefly.
+    0x08000000
+}
+
 pub fn get_user_path() -> String {
+    USER_PATH_CACHE.get_or_init(resolve_user_path).clone()
+}
+
+fn resolve_user_path() -> String {
     // Windows takes a different code path: GUI-launched apps inherit the
     // PATH from when they were launched, which usually misses User-scope
     // PATH entries the user added later (npm-global, scoop shims, etc.).
@@ -2524,12 +2547,14 @@ pub fn get_user_path() -> String {
     // CLI was findable, even though `where claude` works in his terminal.
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         if let Ok(output) = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
                 "[Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')",
             ])
+            .creation_flags(no_window_flag())
             .output()
         {
             if output.status.success() {
@@ -2545,26 +2570,36 @@ pub fn get_user_path() -> String {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // Try to get PATH from user's shell
-        if let Ok(output) = std::process::Command::new("/bin/zsh")
-            .args(["-l", "-c", "echo $PATH"])
-            .output()
-        {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return path;
+        // Try to get PATH from user's shell. The shell flag set is critical
+        // for nvm-installed node: nvm.sh is sourced from ~/.bashrc and
+        // ~/.zshrc (interactive init), NOT from ~/.bash_profile / ~/.profile
+        // (login init). v1.5.21 only used `-l` (login) so Felipe's nvm node
+        // never made it onto PATH and `npx` stayed unfound. Using `-l -i`
+        // (login + interactive) sources both, which is what the user's
+        // terminal does on every fresh tab.
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            if let Ok(output) = std::process::Command::new(shell)
+                .args(["-l", "-i", "-c", "echo $PATH"])
+                .output()
+            {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return path;
+                    }
                 }
             }
-        }
-        if let Ok(output) = std::process::Command::new("/bin/bash")
-            .args(["-l", "-c", "echo $PATH"])
-            .output()
-        {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return path;
+            // Fallback to login-only in case `-i` triggered a prompt that
+            // blocked output (rare but possible with custom rc).
+            if let Ok(output) = std::process::Command::new(shell)
+                .args(["-l", "-c", "echo $PATH"])
+                .output()
+            {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return path;
+                    }
                 }
             }
         }
