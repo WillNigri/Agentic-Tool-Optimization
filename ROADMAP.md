@@ -170,12 +170,70 @@
 - Agent performance benchmarking across runtimes
 - **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine (MIT, on PyPI), surface harness-improvement reports as one-click inline diffs
 
-### v1.7.0+ — Future
+### v1.5.5 — Production-Ready Agents (Discoverability) (Planned)
+The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers, evaluators, per-task models) are powerful but **invisible to most users** — Felipe has been building agents for weeks and didn't realize they exist. v1.5.5 closes the gap between "we have it" and "users know we have it":
+- **Production agent template** — a 5th template (alongside the existing 4) wired up with example variables (file resolver pulling from a local `policies.md`, env-var resolver, computed JS expression), one pre-call context hook (file or db query), and a memory policy. New users see the production pattern on day one.
+- **Onboarding tour** — first-run highlight passes over the Variables / Context / Memory / Models tabs explaining what each does in 1 sentence + a "show me an example" link.
+- **Empty-state CTAs** on each tab pointing to the Production template.
+- **Settings → API Keys**: Grok already added in v1.5.4; the hint text in the Guided wizard now lists all 15 providers so users with API keys see we support them.
+
+### v1.6.0 — Intelligence Layer (Planned)
+- **Automations tab repurpose — group pipelines as flow nodes** ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
+  - Today the Runs → Automations tab visualizes skill-derived flow charts (parsed from `## Step N` / `## Phase N` headers in SKILL.md files). Useful but narrow — and v1.5 groups now own the word "automation."
+  - v1.6 turns it into the canonical visualization for **everything that runs without a human in the loop**: routed groups, sequential pipelines, scheduled cron jobs, hooks, and skill flows — all on the same canvas. Each node is a real agent / runtime / tool with live status (idle / running / errored).
+- Real-time collaborative workspace (WebSocket via ato-cloud)
+- Team cursors (Figma-style)
+- Cross-runtime policy enforcement templates
+- Hosted terminal sessions for Team tier (cloud)
+- Proactive suggestions ("Your project is missing X")
+- Cost optimization alerts from SDK traces
+- Agent performance benchmarking across runtimes
+- **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine
+
+### v2.0.0 — External Agents / Hosted Deployment (Planned)
+The strategic v2 release: ATO becomes the place where companies build customer-facing chatbots, deploy them to their own infrastructure (any LLM provider), and track their behavior — without us competing with hosting providers. ([detailed plan](docs/V2.0.0-EXTERNAL-AGENTS.md))
+
+- **"Internal vs External" toggle on agent create** — external agents get a Deploy tab + Knowledge tab, lock to read-only permissions by default.
+- **Knowledge ingestion** — drag-drop PDFs, MD files, URLs. RAG'd via context hooks. pgvector under the hood; users see a file list.
+- **External API + DB connections** — point-and-click integration with the customer's APIs / databases as scoped tools the agent can call.
+- **Deploy targets** — generate a deployable bundle for: Anthropic Claude API, OpenAI API, any of the 15 providers via the customer's own key. Templates for Cloudflare Worker / Vercel Edge Function / Docker / Railway / standalone Node.
+- **Embed widget** — `<script src="embed.agentictool.ai/v1.js" data-agent="...">`. Bubble chat for any website. Talks to whichever endpoint the customer deployed to.
+- **Multi-runtime support stays first-class** — the customer always picks which provider runs the dispatch. ATO never holds inference compute.
+- **Tracking dashboard** — opt-in trace stream from the deployed agent back to ato-cloud. Conversations/day, escalation triggers, cost-per-conversation, eval scores.
+- **Trace sink integrations** — one-click forward to Langfuse / Helicone / LangSmith / OpenTelemetry. We don't compete with request-level observability tools; we own agent-level + multi-runtime + embed-side analytics.
+
+### v2.1.0+ — Multi-Runtime Differentiated Observability (Planned)
+The unique-value layer on top of v2.0's deployment surface — what existing observability tools cannot do because they don't have our multi-runtime + agent-design context:
+- **Cross-runtime regression detection** — "Switching @reviewer from Sonnet 4.6 → 4.7 dropped evaluator score from 0.91 → 0.74 across 412 conversations. Here are the 14 newly-failing examples."
+- **Cost optimization recommendations** — shadow-evaluate alternative runtimes, surface "switching @triage from GPT-4 → Haiku saves $312/mo with no measurable quality drop."
+- **Pipeline trace visualizer** — sequential groups (Claude → Codex → Gemini) rendered as a single conversation flow with handoff inspection.
+- **Configuration impact ledger** — every variable / hook / system-prompt change versioned + correlated with quality scores.
+- **Eval workbench** — replay last week's failures against tweaked configs in batch; compare per runtime.
+- **Embed-side analytics** — page where the chat lives, time-to-first-message, drop-off rate per message turn, escalation keyword clusters.
+
+### v3.0.0+ — Multi-Tenant + Compliance (Planned, exploratory)
+- **Team workspaces** — shared agents, shared knowledge, shared trace history with per-member ACLs.
+- **PII / safety scanning** — auto-flag conversations with sensitive data; redact-on-export.
+- **Compliance bundles** — SOC2-ready audit log, retention controls, export-on-request, BYOK encryption.
+- **Marketplace for agent templates** — community-submitted agent recipes; revenue share if the OSS marketplace earns from sponsored placements.
+- **Agent versioning + rollback** — `git`-style history per agent, A/B routing, canary deploys.
+
+### v4.0.0+ — Federated Agent Network (Speculative)
+- **Agent-to-agent discovery protocol** — agents on different ATO installations can call each other via a registered handle (`acme/triage` → `acme/legal-review`). MCP-based, optional.
+- **Cross-tenant audit / abuse defense** — when external agents call each other, who pays / who's responsible / how is provenance preserved.
+- **Agent reputation system** — an agent's track record (success rate, eval scores, conversations served) becomes a portable signal across deployments.
+
+### v5.0.0+ — Open Standards / Spin-out Layer (Speculative)
+- **ATO becomes the reference implementation** for an open agent-deployment standard, similar to how `kubectl` is the reference for Kubernetes' API. Anyone can build a competing GUI / hosting provider that speaks the same agent spec.
+- **Plugin SDK** — third parties (Cursor, Windsurf, Aider, etc.) implement the protocol so the same agent runs unchanged across runtimes.
+
+### v1.7.0–1.8.0 — Polish (Planned, fits between v1.6 and v2.0)
 - Cron-driven evaluator scheduling
 - `mcp-call` variable / hook resolver (embedded MCP client)
-- Trace-retention enforcement on cloud (Pro=30d / Team=90d / Enterprise=∞)
+- Trace-retention enforcement on cloud
 - Search across persistent threads
 - Mobile companion (read-only)
+- Wizard runtime + agent runtime decoupling — pick MiniMax / Qwen / Grok / etc. as the *agent's* runtime while the wizard conversation stays on a CLI ([note in tier.ts policy](apps/desktop/src/lib/tier.ts))
 
 ---
 

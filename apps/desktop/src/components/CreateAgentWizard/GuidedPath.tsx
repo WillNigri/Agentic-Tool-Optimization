@@ -255,6 +255,31 @@ export default function GuidedPath({ onCreated, onCancel }: Props) {
                 "Both the wizard's questions and the agent itself will run on this runtime. You can change it later."
               )}
             </p>
+
+            {/* API-key providers — discovery hint. Full agent dispatch
+                via these providers is a v2.0 item; for now we surface
+                the menu so users with MiniMax/Qwen/Grok keys see the
+                product supports them and know where to configure. */}
+            <div className="mt-3 pt-3 border-t border-cs-border/50">
+              <div className="flex items-start gap-2">
+                <KeyRound size={11} className="text-cs-muted shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] uppercase tracking-wide text-cs-muted mb-1">
+                    {t("createAgent.guided.apiKeyProviders", "Or via API key")}
+                  </p>
+                  <p className="text-[10px] text-cs-muted leading-relaxed">
+                    {t(
+                      "createAgent.guided.apiKeyProvidersList",
+                      "Anthropic, OpenAI, Google, Mistral, Groq, xAI/Grok, Together, Fireworks, DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi — once an API key is configured, the agent dispatches against that provider. Full UI lands in v2.0."
+                    )}
+                  </p>
+                  <p className="mt-1 text-[10px]">
+                    <span className="text-cs-accent">Settings → API Keys</span>
+                    <span className="text-cs-muted"> to set them up.</span>
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <form onSubmit={start} className="flex gap-2">

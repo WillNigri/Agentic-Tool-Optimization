@@ -59,7 +59,12 @@ jobs:
         working-directory: apps/desktop
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        # Pinned to a recent version — @v0 floats to whatever's "latest"
+        # which has produced the "Signature not found for the updater
+        # JSON. Skipping upload..." regression on v1.5.0–1.5.4 even with
+        # a valid no-password signing key. v0.5.x has the bundle/.sig
+        # rename fix.
+        uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -78,7 +83,6 @@ jobs:
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
           includeUpdaterJson: true
-          updaterJsonKeepUniversal: true
 
   # The cask repo lives at WillNigri/homebrew-ato, so the default GITHUB_TOKEN
   # (scoped to this repo) can't push there. Set HOMEBREW_TAP_TOKEN to a PAT
