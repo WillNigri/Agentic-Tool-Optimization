@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { X, Search, Copy, Check, ExternalLink, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -219,6 +219,7 @@ function RegistryDetail({
   onBack: () => void;
 }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [copied, setCopied] = useState(false);
   const [installState, setInstallState] = useState<{
     runtime: InstallableRuntime | null;
@@ -241,6 +242,11 @@ function RegistryDetail({
     try {
       const path = await installMcpToRuntime(runtime, entry);
       setInstallState({ runtime, status: "ok", message: path });
+      // Refresh the MCP dashboard so the new server appears immediately
+      // — Felipe had to switch tabs to see installed servers because the
+      // local list was stale.
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers-with-tools"] });
     } catch (err) {
       setInstallState({
         runtime,
@@ -361,6 +367,7 @@ function RegistryDetail({
 
 function CustomTab() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [transport, setTransport] = useState<"stdio" | "http">("stdio");
   const [command, setCommand] = useState("");
@@ -400,6 +407,8 @@ function CustomTab() {
         url: transport !== "stdio" ? url : undefined,
       });
       setInstallState({ runtime, status: "ok", message: path });
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers-with-tools"] });
     } catch (err) {
       setInstallState({
         runtime,
