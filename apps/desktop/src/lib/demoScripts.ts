@@ -286,9 +286,12 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
       text: "Two group types: routed (router picks one) and automation (pipeline).",
       durationMs: 3000,
     },
-    // 1. Routed group — built BY HAND through the form so the recording
-    //    shows the same "watching it being built" UX as the agent quick
-    //    form. Open Groups sub-tab, click + New, animate fields, save.
+    // 1. Sequential automation pipeline — built BY HAND through the form.
+    //    Sequential makes a stronger visual story than routed because the
+    //    chat segment that follows fires BOTH children (writer → reviewer)
+    //    and the viewer has just watched the same group being assembled.
+    //    Routed groups are still supported, but the demo focuses on the
+    //    pattern that produces 2 answers from 1 prompt.
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "groups" },
     { kind: "wait", ms: 600 },
     { kind: "subtitle", text: "Click + New group.", durationMs: 1800 },
@@ -296,31 +299,25 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "wait", ms: 700 },
     {
       kind: "subtitle",
-      text: "Name → type → children → routing rule → save.",
-      durationMs: 2400,
+      text: "Name → type → children → save. Sequential pipeline runs each child in order.",
+      durationMs: 2800,
     },
     {
       kind: "autoFillGroupForm",
       spec: {
-        displayName: "code-review-team",
+        displayName: "write-and-review",
         runtime: "claude",
-        description: "Routed: router picks one specialist per prompt.",
-        dispatchKind: "routed",
-        childSlugs: ["perf-reviewer", "code-reviewer"],
-        routerRule: {
-          keywords: ["performance", "perf", "slow", "N+1", "latency", "hot path"],
-          thenSlug: "perf-reviewer",
-        },
+        description: "Automation: writer → security review, all from one prompt.",
+        dispatchKind: "sequential",
+        childSlugs: ["code-writer", "security-reviewer"],
       },
     },
-    // Dwell on the populated form so the viewer can read the children +
-    // routing rule that was just animated in. Without this beat the next
-    // step (scroll-to-save) snaps the page back to the top of the form
-    // and the populated content disappears off-screen too fast.
+    // Dwell on the populated form so the viewer can read the children
+    // before the next step (scroll-to-save) snaps the page to the header.
     {
       kind: "subtitle",
-      text: "Two children + one routing rule — exactly what we wanted.",
-      durationMs: 2400,
+      text: "Two children, in order: code-writer first, then security-reviewer. One prompt fires both.",
+      durationMs: 3000,
     },
     { kind: "wait", ms: 800 },
     { kind: "scrollIntoView", id: "group-save", block: "center" },
@@ -333,33 +330,6 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "highlight", id: "group-save", durationMs: 1500 },
     { kind: "clickByDemoId", id: "group-save" },
     { kind: "wait", ms: 1500 },
-    // The sequential automation needs to exist for the chat segment that
-    // follows (write-and-review fires the writer → reviewer pipeline).
-    // We create it via the backend rather than animating a second form —
-    // the viewer just watched one full form animation; doing it again
-    // would feel like the demo is repeating itself. The chat segment
-    // labels it clearly when it's used.
-    {
-      kind: "createGroup",
-      spec: {
-        displayName: "write-and-review",
-        runtime: "claude",
-        description: "Automation: writer → security review, all from one prompt.",
-        dispatchKind: "sequential",
-        childSlugs: ["code-writer", "security-reviewer"],
-      },
-    },
-    { kind: "wait", ms: 600 },
-
-    // Land on the Groups list so the viewer sees the saved code-review-team.
-    { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "groups" },
-    { kind: "wait", ms: 1200 },
-    {
-      kind: "subtitle",
-      text: "code-review-team is saved — routed group. Router picks one specialist per prompt.",
-      durationMs: 3200,
-    },
-    { kind: "wait", ms: 1000 },
     // Reset Agents sub-tab back to "mine" so the next phase shows the
     // populated agent list rather than the groups list.
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },

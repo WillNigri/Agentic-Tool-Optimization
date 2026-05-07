@@ -414,18 +414,25 @@ export const useDemoStore = create<DemoState>((set, get) => ({
           break;
         }
         case "selectAgent":
+          // DON'T reset to null after the flash — that used to be safe back
+          // when the consumer effect early-returned on falsy slugs, but
+          // PromptBar now treats null as "deselect" (so cross-runtime swaps
+          // can clear the agent). Resetting here would wipe the selection
+          // 550ms after we made it. The slug stays as the desired state
+          // until the next selectAgent step changes it.
           set({ pendingSelectAgentSlug: step.slug });
           await sleep(150);
           if (step.slug) flashHighlight(set, get, "agent-picker", 1100);
           await sleep(400);
-          set({ pendingSelectAgentSlug: null });
           break;
         case "selectChatGroup":
+          // Same reasoning as selectAgent above: leave the slug set so the
+          // consumer effect's "null = deselect" behavior doesn't fire 550ms
+          // after we explicitly selected a group.
           set({ pendingSelectGroupSlug: step.slug });
           await sleep(150);
           if (step.slug) flashHighlight(set, get, "agent-picker", 1100);
           await sleep(400);
-          set({ pendingSelectGroupSlug: null });
           break;
         case "setChatPaneOpen":
           set({ pendingChatPaneOpen: step.open });
