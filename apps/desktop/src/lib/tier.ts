@@ -70,9 +70,19 @@ export const FEATURE_MIN_TIER: Record<Feature, Tier> = {
   "enterprise.audit": "enterprise",
 };
 
-/** Hook: reads the current user's tier from the auth store. */
+/** Hook: reads the current user's effective tier.
+ *
+ *  v1.5.x early-access promo — anyone with a cloud account gets Pro for
+ *  free. Drives signups + dogfood while we collect feedback. Local-only
+ *  users (no account) stay on Free, which is the upgrade hook on the UI.
+ *  Team / Enterprise carriers keep their cached tier (no downgrade).
+ *
+ *  When we re-introduce paid Pro, remove the `if (isCloudUser …)` branch. */
 export function useTier(): Tier {
-  return useAuthStore((s) => s.tier);
+  const cachedTier = useAuthStore((s) => s.tier);
+  const isCloudUser = useAuthStore((s) => s.isCloudUser);
+  if (isCloudUser && cachedTier === "free") return "pro";
+  return cachedTier;
 }
 
 /** Hook: returns true when the current tier is high enough for `feature`. */
