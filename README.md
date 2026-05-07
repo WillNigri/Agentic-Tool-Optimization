@@ -1,13 +1,23 @@
 # ATO — Agentic Tool Optimization
 
-**AI agents that work together. Across every runtime.** Build automation pipelines where Claude writes, Codex reviews, and Gemini summarizes — all in one thread. Multi-runtime by protocol. Local-first. MIT.
+**Build agents that adapt, not repeat.** Static system prompts are the floor, not the ceiling. ATO makes it trivial to build agents whose prompts resolve from files, env vars, databases, or other LLMs at fire time. Multi-runtime by protocol. Local-first. MIT.
 
-Two group types make this real:
+```ts
+// Your system prompt:
+You are a context-aware assistant for {user_name} working on {project_name}.
+Today is {today}. The project root is {project_root}.
+// All four resolve at every turn — env var, computed JS, project path, current date.
+// Plus a pre-call hook injects the latest CHANGELOG.md into <context> on each call.
+```
+
+This is what production-grade agents look like — and ATO makes it a 5-minute setup, not weeks of plumbing. **Pick the [Production-grade Agent template](apps/desktop/src/lib/agentTemplates.ts) on first launch to see the dynamic pattern wired end-to-end.**
+
+Two group types make agents collaborate:
 
 - **Routed groups** — single prompt → router picks the right specialist child (keyword rules + LLM-classifier fallback).
-- **Sequential automations** *(new)* — single prompt → children run in order, each agent's output flows into the next as input. **Each child runs on its own runtime**, so you can chain Claude → Codex → Gemini in a single pipeline.
+- **Sequential automations** — single prompt → children run in order, each agent's output flows into the next as input. **Each child runs on its own runtime**, so you can chain Claude → Codex → Gemini in a single pipeline.
 
-Supported: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, **Ollama** — plus DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi as API providers.
+Supported: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, **Ollama** as native CLIs — plus 15+ API providers including Anthropic, OpenAI, Google AI, Mistral, Groq, **xAI/Grok**, Together, Fireworks, DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi.
 
 ### Three audiences, one app
 
@@ -81,14 +91,23 @@ The MCP server exposes `run_agent` — any MCP-aware runtime can dispatch to any
 
 ## What's in the box
 
-### Daily workspace (v1.5)
+### Production-Ready Agents (v1.5.5)
+
+- **Production-grade Agent template** — fifth starter ships pre-wired with 4 variables (env / computed / project-path / Date), a pre-call file hook, and a memory policy. Click it once → see the dynamic-prompt pattern end-to-end without manually configuring anything.
+- **Dynamic-prompt messaging** — the wizard now spells out that prompts adapt at fire time. Empty states on Variables / Context tabs teach the resolver kinds instead of just saying "no items yet."
+- **Cron jobs wake from sleep** on every desktop OS — launchd on macOS, systemd-user timers on Linux, Task Scheduler on Windows. Your scheduled agents fire even when ATO is closed.
+- **Demo Tab-to-pause** — viewing the in-app demo? Tab pauses, Tab resumes, Esc stops. Catch a long subtitle without restarting from scratch.
+
+### Daily workspace (v1.5.0–1.5.4)
 
 - **Persistent chat threads** — conversations survive app restart, scoped optionally to projects, listed in a dropdown with msg count + last activity.
 - **Multi-runtime mid-thread** — switch Claude → Codex → Gemini in the same conversation. The full thread history travels to whichever runtime answers next.
 - **Streaming responses** — tokens appear as they're generated, with a blinking caret. No more 20-second blocking waits.
+- **Sequential pipeline messages** — when a Claude → Codex pipeline returns, the messages stagger in with a "stage 1 / 2" badge so you can read each step as it arrives.
 - **Syntax-highlighted markdown** — assistant replies render as proper markdown: headings, lists, GFM tables, fenced code blocks with copy buttons. Inline code in cyan.
 - **File attachments** — paperclip pick or drag-drop a text file (`.md`, `.json`, `.ts`, `.py`, etc.); contents join the conversation as context.
 - **Embedded shell** — real interactive PTY via `xterm.js` + `portable-pty`, scoped to active project, persists across navigation.
+- **i18n** — English, Português, Español. Demo subtitles localized too.
 
 ### Production-grade agent authoring (v1.4)
 

@@ -3,7 +3,11 @@
  * Handles communication with the cloud backend for sync, teams, and auth
  */
 
-const CLOUD_API_URL = import.meta.env.VITE_CLOUD_API_URL || 'https://api.ato.dev';
+// Default points at the real cloud; override via VITE_CLOUD_API_URL for
+// local dev. The previous default was an unrouted `api.ato.dev` which
+// caused every signup to fail with "Load failed" before this file ever
+// hit the network.
+const CLOUD_API_URL = import.meta.env.VITE_CLOUD_API_URL || 'https://api.agentictool.ai';
 
 // ============================================================
 // Types
