@@ -1617,56 +1617,76 @@ pub fn delete_hook(hook_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_local_config() -> Result<Vec<LocalMcpServer>, String> {
-    let mut servers = Vec::new();
+    // Dedupe by `(runtime-family, server-name)`. Felipe's screenshot showed
+    // every Claude MCP listed twice — once for the global `~/.claude/settings.json`
+    // ("claude") and once for the per-project `.claude/settings.json`
+    // ("claude-project"). The same MCP shouldn't render as two cards just
+    // because it's referenced in both scopes.
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<(String, String), LocalMcpServer> = BTreeMap::new();
 
-    // Scan config files from ALL runtimes for MCP server definitions
     let codex_home = PathBuf::from(std::env::var("CODEX_HOME")
         .unwrap_or_else(|_| home_dir().join(".codex").to_string_lossy().to_string()));
     let oc_home = PathBuf::from(std::env::var("OPENCLAW_HOME")
         .unwrap_or_else(|_| home_dir().join(".openclaw").to_string_lossy().to_string()));
 
-    let config_paths: Vec<(PathBuf, &str)> = vec![
-        // Claude
-        (claude_home().join("settings.json"), "claude"),
-        (project_root().join(".claude").join("settings.json"), "claude-project"),
+    // (path, source-tag, runtime-family, scope-label).
+    // runtime-family is what we dedupe by; scope-label is what we show.
+    let config_paths: Vec<(PathBuf, &str, &str, &str)> = vec![
+        // Claude — dedupe global + project on the same name.
+        (claude_home().join("settings.json"), "claude", "claude", "global"),
+        (project_root().join(".claude").join("settings.json"), "claude-project", "claude", "project"),
         // Codex
-        (codex_home.join("config.toml"), "codex"),
-        (project_root().join(".codex").join("config.toml"), "codex-project"),
+        (codex_home.join("config.toml"), "codex", "codex", "global"),
+        (project_root().join(".codex").join("config.toml"), "codex-project", "codex", "project"),
         // OpenClaw
-        (oc_home.join("openclaw.json"), "openclaw"),
+        (oc_home.join("openclaw.json"), "openclaw", "openclaw", "global"),
         // Hermes
-        (home_dir().join(".hermes").join("config.yaml"), "hermes"),
+        (home_dir().join(".hermes").join("config.yaml"), "hermes", "hermes", "global"),
     ];
 
-    for (settings_path, source) in &config_paths {
-        if let Some(content) = read_file_lossy(settings_path) {
-            // Try JSON parsing (Claude, OpenClaw)
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-                // Check common MCP server config keys
-                for key in ["mcpServers", "mcp_servers"] {
-                    if let Some(mcp_servers) = parsed.get(key).and_then(|v| v.as_object()) {
-                        for (name, config) in mcp_servers {
-                            let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            let url_val = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            let transport = if url_val.is_some() { "http" } else { "stdio" };
+    for (settings_path, _source, runtime_family, scope_label) in &config_paths {
+        let Some(content) = read_file_lossy(settings_path) else { continue };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+        for key in ["mcpServers", "mcp_servers"] {
+            let Some(mcp_servers) = parsed.get(key).and_then(|v| v.as_object()) else { continue };
+            for (name, config) in mcp_servers {
+                let key_pair = (runtime_family.to_string(), name.clone());
+                let command = config.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let url_val = config.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let transport = if url_val.is_some() { "http" } else { "stdio" };
 
-                            servers.push(LocalMcpServer {
-                                id: content_hash(&format!("{}-{}", source, name)),
-                                name: format!("{} ({})", name, source),
-                                transport: transport.to_string(),
-                                status: "running".to_string(),
-                                tool_count: 0,
-                                command,
-                                url: url_val,
-                            });
-                        }
+                if let Some(existing) = seen.get_mut(&key_pair) {
+                    // Already listed in another scope — append to the
+                    // displayed name instead of creating a duplicate row.
+                    if !existing.name.contains(scope_label) {
+                        // Replace `(claude · global)` → `(claude · global, project)`.
+                        let new_name = if let Some(close) = existing.name.rfind(')') {
+                            format!("{}, {})", &existing.name[..close], scope_label)
+                        } else {
+                            format!("{} ({} · {})", existing.name, runtime_family, scope_label)
+                        };
+                        existing.name = new_name;
                     }
+                } else {
+                    seen.insert(
+                        key_pair,
+                        LocalMcpServer {
+                            id: content_hash(&format!("{}-{}", runtime_family, name)),
+                            name: format!("{} ({} · {})", name, runtime_family, scope_label),
+                            transport: transport.to_string(),
+                            status: "running".to_string(),
+                            tool_count: 0,
+                            command,
+                            url: url_val,
+                        },
+                    );
                 }
             }
         }
     }
 
-    Ok(servers)
+    Ok(seen.into_values().collect())
 }
 
 #[tauri::command]
