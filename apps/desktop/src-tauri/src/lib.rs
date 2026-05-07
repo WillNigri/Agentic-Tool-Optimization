@@ -212,6 +212,10 @@ pub struct Agent {
     // v1.4.0 additions (column added via ALTER TABLE in init_database).
     pub role_models: Option<String>,      // JSON {router?, summarizer?, response?, evaluator?}
     pub memory_policy: Option<String>,    // JSON {summarizeAfter, keepLastK, summarizerModel}
+    // v2.0.0 — "internal" runs on the developer's laptop via local CLI; "external"
+    // is designed for customer-facing deployment (embed widget, Cloudflare Worker,
+    // etc.) and locks the agent down to a read-only permission set.
+    pub kind: Option<String>,             // 'internal' | 'external' (default 'internal')
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -667,6 +671,11 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE agent_groups ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'routed'",
         [],
     );
+    // v2.0.0 — Internal vs External agent kind.
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN kind TEXT NOT NULL DEFAULT 'internal'",
+        [],
+    );
 }
 
 
@@ -920,6 +929,8 @@ pub fn run() {
             delete_agent_hook,
             // v1.4.0 F3: Memory policy
             update_agent_memory_policy,
+            // v2.0.0: Internal vs External agent kind
+            update_agent_kind,
             // v1.4.0 F5: Per-task model selection
             update_agent_role_models,
             // v1.5.0: Update MCPs attached to an agent (one-click browser tools etc.)

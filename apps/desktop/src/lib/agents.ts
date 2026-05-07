@@ -4,6 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type AgentRuntime = "claude" | "codex" | "gemini" | "openclaw" | "hermes";
 
+/**
+ * v2.0.0 — runs locally on the developer's laptop ("internal") or is designed
+ * for customer-facing deployment via embed widget / Cloudflare Worker / Docker
+ * etc. ("external"). External agents auto-lock to a read-only permission set
+ * and unlock the Deploy + Knowledge tabs.
+ */
+export type AgentKind = "internal" | "external";
+
 export interface Agent {
   id: string;
   slug: string;
@@ -23,6 +31,8 @@ export interface Agent {
   // v1.4.0 — JSON-encoded; parse with parseRoleModels / parseMemoryPolicy.
   roleModels?: string | null;
   memoryPolicy?: string | null;
+  // v2.0.0 — defaults to 'internal' for older rows.
+  kind?: AgentKind | null;
 }
 
 // v1.4.0 F5 — per-task model selection.
@@ -113,6 +123,8 @@ export interface CreateAgentInput {
   goal?: string;
   /** Default true — actually writes the agent file to disk in the runtime's directory. */
   writeFile?: boolean;
+  /** v2.0.0 — defaults to 'internal' if omitted. 'external' auto-locks permissions. */
+  kind?: AgentKind;
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<Agent> {
@@ -128,7 +140,12 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     mcps: input.mcps ?? null,
     goal: input.goal ?? null,
     writeFile: input.writeFile ?? true,
+    kind: input.kind ?? "internal",
   });
+}
+
+export async function updateAgentKind(id: string, kind: AgentKind): Promise<void> {
+  return invoke("update_agent_kind", { id, kind });
 }
 
 export async function listAgents(filter?: {

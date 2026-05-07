@@ -9470,6 +9470,7 @@ pub fn create_agent(
     mcps: Option<Vec<String>>,
     goal: Option<String>,
     write_file: Option<bool>,
+    kind: Option<String>,
 ) -> Result<Agent, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
@@ -9486,10 +9487,31 @@ pub fn create_agent(
         return Err("display_name must contain at least one alphanumeric character".to_string());
     }
 
+    // v2.0.0 — internal/external kind. External agents auto-lock to a read-only
+    // permission set (no shell, no fs writes) so customer-facing deployments
+    // can't accidentally execute arbitrary commands. The caller can still pass
+    // `permissions` to override after creation if they know what they're doing.
+    let kind_val = match kind.as_deref() {
+        Some("external") => "external",
+        Some("internal") | None => "internal",
+        Some(other) => return Err(format!("Unsupported agent kind: {}", other)),
+    }.to_string();
+
+    let effective_permissions = if kind_val == "external" && permissions.is_none() {
+        Some(vec![
+            "Read".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+            "WebFetch".to_string(),
+        ])
+    } else {
+        permissions
+    };
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let permissions_json = permissions.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    let permissions_json = effective_permissions.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
     let skills_json = skills.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
     let mcps_json = mcps.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
 
@@ -9511,10 +9533,13 @@ pub fn create_agent(
         last_used_at: None,
         role_models: None,
         memory_policy: None,
+        kind: Some(kind_val.clone()),
     };
 
-    // Optionally write the agent file to disk.
-    if write_file.unwrap_or(true) {
+    // Optionally write the agent file to disk. External agents skip this — they
+    // live in the cloud / customer infra after deploy, not on the dev's laptop.
+    let should_write_file = write_file.unwrap_or(true) && kind_val == "internal";
+    if should_write_file {
         let path = agent_file_path(&runtime, &slug)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -9528,12 +9553,12 @@ pub fn create_agent(
 
     // Insert into DB.
     conn.execute(
-        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             agent.id, agent.slug, agent.display_name, agent.description, agent.runtime, agent.model,
             agent.project_id, agent.system_prompt, agent.permissions, agent.skills, agent.mcps,
-            agent.goal, agent.file_path, agent.created_at, agent.last_used_at
+            agent.goal, agent.file_path, agent.created_at, agent.last_used_at, kind_val
         ],
     ).map_err(|e| {
         // SQLite UNIQUE violation → friendly message
@@ -9557,7 +9582,7 @@ pub fn list_agents(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
     let mut sql = String::from(
-        "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json FROM agents",
+        "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json, kind FROM agents",
     );
     let mut conditions: Vec<&str> = Vec::new();
     if runtime.is_some() {
@@ -9601,6 +9626,7 @@ pub fn list_agents(
                 last_used_at: row.get(14)?,
                 role_models: row.get(15).ok(),
                 memory_policy: row.get(16).ok(),
+                kind: row.get(17).ok(),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -9611,7 +9637,7 @@ pub fn list_agents(
 pub fn get_agent(db: State<'_, DbState>, id: String) -> Result<Agent, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     conn.query_row(
-        "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json FROM agents WHERE id = ?1",
+        "SELECT id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, role_models_json, memory_policy_json, kind FROM agents WHERE id = ?1",
         params![id],
         |row| {
             Ok(Agent {
@@ -9632,10 +9658,34 @@ pub fn get_agent(db: State<'_, DbState>, id: String) -> Result<Agent, String> {
                 last_used_at: row.get(14)?,
                 role_models: row.get(15).ok(),
                 memory_policy: row.get(16).ok(),
+                kind: row.get(17).ok(),
             })
         },
     )
     .map_err(|e| e.to_string())
+}
+
+/// v2.0.0 — flip an existing agent between internal and external. Switching to
+/// `external` does NOT auto-rewrite permissions on existing agents (caller is
+/// expected to review and adjust); the auto-lock behavior only fires at create
+/// time. This way users who deliberately broadened permissions don't lose them
+/// silently when they flip the toggle to share via embed.
+#[tauri::command]
+pub fn update_agent_kind(
+    db: State<'_, DbState>,
+    id: String,
+    kind: String,
+) -> Result<(), String> {
+    if kind != "internal" && kind != "external" {
+        return Err(format!("Unsupported agent kind: {}", kind));
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agents SET kind = ?1 WHERE id = ?2",
+        params![kind, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// v1.4.0 F3 — persist memory policy JSON for the agent.
@@ -11345,6 +11395,7 @@ mod agent_tests {
             last_used_at: None,
             role_models: None,
             memory_policy: None,
+            kind: Some("internal".into()),
         };
         let out = render_claude_agent(&a);
         assert!(out.contains("name: pr-reviewer"));

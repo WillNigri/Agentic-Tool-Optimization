@@ -1,4 +1,5 @@
 import type { AgentRuntime } from "@/lib/tauri-api";
+import type { AgentKind } from "@/lib/agents";
 
 // v1.3.0 T3.b — Agent wizard draft persistence (localStorage).
 // One draft per path (guided | quick). Saved on each change, cleared on
@@ -20,6 +21,10 @@ export interface QuickDraft {
    *  Hooks (kind: "file") on agent creation — content gets injected into a
    *  <context> block on every turn, NOT into the system prompt. */
   contextFiles: string[];
+  /** v2.0.0 — internal (laptop CLI dispatch) vs external (deployed for end
+   *  users via embed widget / Cloudflare Worker / etc.). External auto-locks
+   *  permissions to read-only on create. */
+  kind: AgentKind;
 }
 
 export interface GuidedDraft {

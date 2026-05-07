@@ -1,8 +1,10 @@
 import { useState, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
-import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
+import { updateAgentKind } from "@/lib/agents";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import BrowserToolsButton from "./BrowserToolsButton";
 
@@ -11,23 +13,36 @@ import BrowserToolsButton from "./BrowserToolsButton";
 // Opens when the user clicks "Configure" on an agent card. Hosts the v1.4
 // tabs (Variables / Context / Memory / Models / Evaluators) plus an Overview
 // that surfaces the agent's current config + file path.
+//
+// v2.0.0 — Deploy tab visible only when agent.kind === 'external'. Header gets
+// a kind badge + flip control.
 
 const VariablesTab = lazy(() => import("./VariablesTab"));
 const ContextTab = lazy(() => import("./ContextTab"));
 const MemoryTab = lazy(() => import("./MemoryTab"));
 const ModelsTab = lazy(() => import("./ModelsTab"));
 const EvaluatorsTab = lazy(() => import("./EvaluatorsTab"));
+const DeployTab = lazy(() => import("./DeployTab"));
 
 interface Props {
   agent: Agent;
   onClose: () => void;
 }
 
-type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators";
+type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators" | "deploy";
 
 export default function AgentDetail({ agent, onClose }: Props) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<TabId>("variables");
+  const isExternal = agent.kind === "external";
+
+  const flipKind = async () => {
+    const next = isExternal ? "internal" : "external";
+    await updateAgentKind(agent.id, next);
+    queryClient.invalidateQueries({ queryKey: ["agents"] });
+    queryClient.invalidateQueries({ queryKey: ["agent", agent.id] });
+  };
 
   return (
     <div
@@ -41,8 +56,27 @@ export default function AgentDetail({ agent, onClose }: Props) {
       <div className="w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl border border-cs-border bg-cs-card shadow-2xl">
         <header className="flex items-center justify-between p-5 border-b border-cs-border">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-cs-text truncate">
-              {agent.displayName}
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-cs-text truncate">
+              <span className="truncate">{agent.displayName}</span>
+              <button
+                type="button"
+                onClick={flipKind}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors",
+                  isExternal
+                    ? "border-cs-accent/40 bg-cs-accent/10 text-cs-accent hover:bg-cs-accent/20"
+                    : "border-cs-border bg-cs-bg text-cs-muted hover:text-cs-text",
+                )}
+                title={t(
+                  "agentDetail.kindFlipHint",
+                  "Toggle internal/external. External unlocks the Deploy tab.",
+                )}
+              >
+                {isExternal ? <Globe size={10} /> : <Lock size={10} />}
+                {isExternal
+                  ? t("agentDetail.kindExternal", "External")
+                  : t("agentDetail.kindInternal", "Internal")}
+              </button>
             </h2>
             <p className="text-[11px] text-cs-muted truncate">
               <code className="font-mono">@{agent.slug}</code>
@@ -83,6 +117,11 @@ export default function AgentDetail({ agent, onClose }: Props) {
           <TabPill active={tab === "evaluators"} onClick={() => setTab("evaluators")} icon={<Zap size={12} />}>
             {t("agentDetail.tabs.evaluators", "Evaluators")}
           </TabPill>
+          {isExternal && (
+            <TabPill active={tab === "deploy"} onClick={() => setTab("deploy")} icon={<Globe size={12} />}>
+              {t("agentDetail.tabs.deploy", "Deploy")}
+            </TabPill>
+          )}
         </nav>
 
         <div className="flex-1 overflow-y-auto p-5 min-h-0">
@@ -100,6 +139,7 @@ export default function AgentDetail({ agent, onClose }: Props) {
               {tab === "memory" && <MemoryTab agent={agent} />}
               {tab === "models" && <ModelsTab agent={agent} />}
               {tab === "evaluators" && <EvaluatorsTab agent={agent} />}
+              {tab === "deploy" && <DeployTab agent={agent} />}
             </Suspense>
           </ErrorBoundary>
         </div>

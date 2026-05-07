@@ -52,6 +52,7 @@ const DEFAULT_DRAFT: QuickDraft = {
   skills: [],
   mcps: [],
   contextFiles: [],
+  kind: "internal",
 };
 
 export default function QuickPath({ onCreated, onCancel, initialDraft, initialScaffold }: Props) {
@@ -141,6 +142,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
         projectId: draft.projectId ?? undefined,
         skills: draft.skills.length > 0 ? draft.skills : undefined,
         mcps: draft.mcps.length > 0 ? draft.mcps : undefined,
+        kind: draft.kind,
       });
       // F2 Context Hooks — turn the user's "context files" picks into real
       // file hooks on the new agent. Each one fires before every turn and
@@ -282,6 +284,51 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
+      {/* v2.0.0 — first decision: this agent for me, or for my customers? */}
+      <Field
+        label={t("createAgent.quick.kind", "Where does this agent run?")}
+        hint={t(
+          "createAgent.quick.kindHint",
+          "Internal runs on your laptop via your local CLI. External is designed for customer-facing deployment (embed widget, Cloudflare Worker, Docker) and auto-locks to read-only permissions.",
+        )}
+      >
+        <div className="grid grid-cols-2 gap-2">
+          {(["internal", "external"] as const).map((k) => {
+            const active = draft.kind === k;
+            return (
+              <button
+                key={k}
+                type="button"
+                onClick={() => update("kind", k)}
+                className={cn(
+                  "rounded-lg border px-3 py-3 text-left text-xs transition-colors",
+                  active
+                    ? "border-cs-accent bg-cs-accent/10 text-cs-text"
+                    : "border-cs-border bg-cs-bg text-cs-muted hover:border-cs-accent/40 hover:text-cs-text",
+                )}
+              >
+                <div className="text-sm font-medium text-cs-text">
+                  {k === "internal"
+                    ? t("createAgent.quick.kindInternal", "Internal")
+                    : t("createAgent.quick.kindExternal", "External")}
+                </div>
+                <div className="mt-1 text-[11px] leading-tight text-cs-muted">
+                  {k === "internal"
+                    ? t(
+                        "createAgent.quick.kindInternalHint",
+                        "Lives in your runtime's agent dir. Full local capabilities.",
+                      )
+                    : t(
+                        "createAgent.quick.kindExternalHint",
+                        "Deployable bundle. Read-only by default. Talks to your customers.",
+                      )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
       <Field label={t("createAgent.quick.name", "Name")} required>
         <input
           type="text"
