@@ -2501,16 +2501,63 @@ pub fn get_user_path() -> String {
     std::env::var("PATH").unwrap_or_default()
 }
 
+/// Build a `std::process::Command` from a CLI string that may be either
+/// a plain path or a wrapper invocation. This lets users on Windows run
+/// `wsl.exe -e /home/<user>/.local/bin/claude` as the override path —
+/// the WSL → Linux Claude case Felipe hit. Quoting is naive (whitespace
+/// split) but covers the common cases without pulling in a full shell
+/// parser.
+pub fn wrapper_command(spec: &str) -> std::process::Command {
+    let trimmed = spec.trim();
+    let mut parts = trimmed.split_whitespace();
+    let exe = parts.next().unwrap_or(trimmed);
+    let mut cmd = std::process::Command::new(exe);
+    for arg in parts {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
+/// Async tokio counterpart for streaming dispatch paths.
+pub fn wrapper_command_tokio(spec: &str) -> tokio::process::Command {
+    let trimmed = spec.trim();
+    let mut parts = trimmed.split_whitespace();
+    let exe = parts.next().unwrap_or(trimmed);
+    let mut cmd = tokio::process::Command::new(exe);
+    for arg in parts {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
 /// Search for a CLI binary by name, checking common install paths + user shell + npx cache.
 pub fn which_cli(name: &str) -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
 
-    // 1. Check user-configured override first (highest priority)
+    // 1. Check user-configured override first (highest priority).
+    //    The override may be a plain path OR a wrapper invocation
+    //    (e.g. `wsl.exe -e /home/user/.local/bin/claude`). When it has
+    //    a space, we only check the first token for existence — the
+    //    rest are arguments. The override is returned verbatim so
+    //    downstream callers can run it via `wrapper_command(...)`.
     let override_path = home_dir().join(".ato").join(format!("{}-path", name));
     if let Some(custom) = read_file_lossy(&override_path) {
         let trimmed = custom.trim().to_string();
-        if !trimmed.is_empty() && std::path::Path::new(&trimmed).exists() {
-            return Some(trimmed);
+        if !trimmed.is_empty() {
+            let first_token = trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or(&trimmed)
+                .to_string();
+            if std::path::Path::new(&first_token).exists() {
+                return Some(trimmed);
+            }
+            // Allow command names that resolve through PATH (e.g.
+            // `wsl.exe` on Windows is on PATH but not at a fixed
+            // location). Try `which`/`where` resolution.
+            if which_executable(&first_token).is_some() {
+                return Some(trimmed);
+            }
         }
     }
 
@@ -2543,21 +2590,31 @@ pub fn which_cli(name: &str) -> Option<String> {
         }
     }
 
-    // 4. Use `which` from the user's full shell PATH (not Tauri's minimal env)
+    // 4. Fall through to platform-specific `which`/`where` resolution.
+    which_executable(name)
+}
+
+/// Resolve a bare executable name through the user's shell PATH using
+/// the platform-native lookup tool. Returns the absolute path on
+/// success. Used both in `which_cli`'s fallback and to validate the
+/// first token of a wrapper override.
+fn which_executable(name: &str) -> Option<String> {
     let user_path = get_user_path();
-    if let Ok(output) = std::process::Command::new("which")
+    let lookup_cmd = if cfg!(target_os = "windows") { "where" } else { "which" };
+    if let Ok(output) = std::process::Command::new(lookup_cmd)
         .arg(name)
         .env("PATH", &user_path)
         .output()
     {
         if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // `where` on Windows can return multiple lines — take the first.
+            let path = stdout.lines().next().unwrap_or("").trim().to_string();
             if !path.is_empty() {
                 return Some(path);
             }
         }
     }
-
     None
 }
 
@@ -3012,13 +3069,13 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
 
             if let Some(ref cli) = path {
                 // Get version
-                if let Ok(output) = Command::new(cli).arg("--version").output() {
+                if let Ok(output) = wrapper_command(cli).arg("--version").output() {
                     if output.status.success() {
                         version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
                     }
                 }
                 // Auth check — run a minimal prompt
-                if let Ok(output) = Command::new(cli).args(["--print", "respond with OK"]).output() {
+                if let Ok(output) = wrapper_command(cli).args(["--print", "respond with OK"]).output() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     healthy = output.status.success() && !stderr.contains("not logged in");
                 }
@@ -3040,12 +3097,12 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
             let mut healthy = false;
 
             if let Some(ref cli) = path {
-                if let Ok(output) = Command::new(cli).arg("--version").output() {
+                if let Ok(output) = wrapper_command(cli).arg("--version").output() {
                     if output.status.success() {
                         version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
                     }
                 }
-                if let Ok(output) = Command::new(cli).arg("--help").output() {
+                if let Ok(output) = wrapper_command(cli).arg("--help").output() {
                     healthy = output.status.success();
                 }
             }
@@ -3126,12 +3183,12 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
             let mut healthy = false;
 
             if let Some(ref cli) = path {
-                if let Ok(output) = Command::new(cli).arg("--version").output() {
+                if let Ok(output) = wrapper_command(cli).arg("--version").output() {
                     if output.status.success() {
                         version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
                     }
                 }
-                if let Ok(output) = Command::new(cli).arg("--help").output() {
+                if let Ok(output) = wrapper_command(cli).arg("--help").output() {
                     healthy = output.status.success();
                 }
             }
@@ -11054,7 +11111,7 @@ pub fn install_mcp_server(runtime: String, entry: McpInstallEntry) -> Result<Str
 
         let serialized = serde_yaml::to_string(&doc)
             .map_err(|e| format!("Failed to serialize YAML: {}", e))?;
-        fs::write(&path, serialized).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+        write_with_perm_hint(&path, serialized.as_bytes())?;
     } else if runtime == "codex" {
         // TOML path: load (or create) the document, add an [mcp_servers.<name>] table.
         let existing = fs::read_to_string(&path).unwrap_or_default();
@@ -11097,7 +11154,7 @@ pub fn install_mcp_server(runtime: String, entry: McpInstallEntry) -> Result<Str
 
         let serialized = toml::to_string_pretty(&doc)
             .map_err(|e| format!("Failed to serialize TOML: {}", e))?;
-        fs::write(&path, serialized).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+        write_with_perm_hint(&path, serialized.as_bytes())?;
     } else {
         // JSON path: load (or create) the document, ensure mcpServers exists, add entry.
         let existing = fs::read_to_string(&path).unwrap_or_default();
@@ -11122,10 +11179,88 @@ pub fn install_mcp_server(runtime: String, entry: McpInstallEntry) -> Result<Str
 
         let serialized = serde_json::to_string_pretty(&doc)
             .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
-        fs::write(&path, serialized).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+        write_with_perm_hint(&path, serialized.as_bytes())?;
     }
 
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Counterpart to `install_mcp_server` — drops the named server from the
+/// runtime's config file. Felipe's feedback: "preciso de uma opcao de
+/// editar ou deletar os mcps". For edit we just delete + reinstall from
+/// the frontend; both flows go through here.
+#[tauri::command]
+pub fn uninstall_mcp_server(runtime: String, name: String) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("MCP server name cannot be empty".to_string());
+    }
+
+    let path = mcp_settings_path(&runtime)?;
+    if !path.exists() {
+        return Ok(path.to_string_lossy().to_string()); // nothing to remove
+    }
+
+    if runtime == "hermes" {
+        let existing = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read {:?}: {}", path, e))?;
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(&existing)
+            .map_err(|e| format!("Invalid YAML in {:?}: {}", path, e))?;
+        if let Some(map) = doc.as_mapping_mut() {
+            if let Some(serde_yaml::Value::Mapping(servers)) =
+                map.get_mut(serde_yaml::Value::String("mcp_servers".into()))
+            {
+                servers.remove(&serde_yaml::Value::String(name.clone()));
+            }
+        }
+        let serialized = serde_yaml::to_string(&doc)
+            .map_err(|e| format!("Failed to serialize YAML: {}", e))?;
+        write_with_perm_hint(&path, serialized.as_bytes())?;
+    } else if runtime == "codex" {
+        let existing = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read {:?}: {}", path, e))?;
+        let mut doc: toml::Value = toml::from_str(&existing)
+            .map_err(|e| format!("Invalid TOML in {:?}: {}", path, e))?;
+        if let Some(table) = doc.as_table_mut() {
+            if let Some(servers) = table.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) {
+                servers.remove(&name);
+            }
+        }
+        let serialized = toml::to_string_pretty(&doc)
+            .map_err(|e| format!("Failed to serialize TOML: {}", e))?;
+        write_with_perm_hint(&path, serialized.as_bytes())?;
+    } else {
+        // JSON path (claude, gemini, openclaw)
+        let existing = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read {:?}: {}", path, e))?;
+        let mut doc: serde_json::Value = serde_json::from_str(&existing)
+            .map_err(|e| format!("Invalid JSON in {:?}: {}", path, e))?;
+        if let Some(obj) = doc.as_object_mut() {
+            if let Some(servers) = obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+                servers.remove(&name);
+            }
+        }
+        let serialized = serde_json::to_string_pretty(&doc)
+            .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+        write_with_perm_hint(&path, serialized.as_bytes())?;
+    }
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Wrap fs::write so the error spells out the failing path AND, on
+/// permission denied, points users at the most likely cause (Felipe ran
+/// into this on WSL). This is what made his marketplace installs fail
+/// silently — the error was buried under "Failed to write" with no
+/// actionable guidance.
+fn write_with_perm_hint(path: &PathBuf, content: &[u8]) -> Result<(), String> {
+    match fs::write(path, content) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(format!(
+            "Permission denied writing {:?}. On WSL/Linux this usually means the file is owned by another user (e.g., root) — try `sudo chown $USER {:?}` or delete the file so ATO can recreate it.",
+            path, path
+        )),
+        Err(e) => Err(format!("Failed to write {:?}: {}", path, e)),
+    }
 }
 
 #[cfg(test)]

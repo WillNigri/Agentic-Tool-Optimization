@@ -947,6 +947,7 @@ pub fn run() {
             pty::pty_list,
             // v1.3.0: MCP install (T4 follow-up)
             install_mcp_server,
+            uninstall_mcp_server,
             delete_llm_api_key,
             // v1.0.0: Real-time Agent Monitoring
             get_monitoring_snapshot,

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle, Loader2, CheckCircle2, XCircle, Code, Copy, Check } from "lucide-react";
+import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle, Loader2, CheckCircle2, XCircle, Code, Copy, Check, Trash2 } from "lucide-react";
 import { getMcpServers, restartMcpServer, getMcpServersWithTools, discoverMcpServerTools, type McpServer, type McpServerDetails } from "@/lib/api";
+import { uninstallMcpFromRuntime, type InstallableRuntime } from "@/lib/mcpRegistry";
 import { cn } from "@/lib/utils";
 import ToolDescriptionRewrite from "@/components/ToolDescriptionRewrite";
 
@@ -38,6 +39,22 @@ export default function McpDashboard() {
 
   const restart = useMutation({
     mutationFn: restartMcpServer,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers-with-tools"] });
+    },
+  });
+
+  // Delete an MCP from the runtime's config. Server.name is shaped like
+  // "context7 (claude · global)" — split out the bare name for the
+  // backend, and infer runtime from the parenthetical scope label.
+  const uninstall = useMutation({
+    mutationFn: async (server: McpServer) => {
+      const bareName = server.name.split(" (")[0];
+      const scope = server.name.match(/\(([a-z]+)/)?.[1] ?? "claude";
+      const runtime = scope as InstallableRuntime;
+      return uninstallMcpFromRuntime(runtime, bareName);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
       queryClient.invalidateQueries({ queryKey: ["mcp-servers-with-tools"] });
@@ -188,6 +205,24 @@ export default function McpDashboard() {
                       className={cn(restart.isPending && "animate-spin")}
                     />
                     {t('mcp.restart')}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const bareName = server.name.split(" (")[0];
+                      if (confirm(t('mcp.confirmDelete', { defaultValue: `Remove ${bareName} from this runtime's MCP config?` }))) {
+                        uninstall.mutate(server);
+                      }
+                    }}
+                    disabled={uninstall.isPending}
+                    className="flex items-center justify-center w-8 h-8 rounded-md text-cs-muted hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                    title={t('mcp.delete', { defaultValue: 'Remove this MCP server' })}
+                  >
+                    {uninstall.isPending ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={14} />
+                    )}
                   </button>
                   <ChevronRight
                     size={16}

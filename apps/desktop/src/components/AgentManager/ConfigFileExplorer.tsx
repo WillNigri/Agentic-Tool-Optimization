@@ -15,6 +15,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useAgentConfigStore } from "@/stores/useAgentConfigStore";
 import type { AgentConfigFile } from "@/lib/api";
+import type { AgentConfigScope } from "@/lib/tauri-api";
 
 interface Props {
   isLoading: boolean;
@@ -72,10 +73,16 @@ export default function ConfigFileExplorer({ isLoading }: Props) {
     return grouped;
   };
 
-  const renderFileItem = (file: AgentConfigFile) => {
+  const renderFileItem = (file: AgentConfigFile, opts: { hideProjectPrefix?: boolean } = {}) => {
     const Icon = FILE_TYPE_ICONS[file.fileType] || FileText;
     const isSelected = selectedFilePath === file.path;
     const fileName = file.path.split("/").pop() || file.path;
+    // VS-Code-style label: when a project file is rendered outside a
+    // project sub-group, prefix with the project folder name so users
+    // with multiple projects can tell `aluminaria-sky/CLAUDE.md` apart
+    // from `cambã/CLAUDE.md` at a glance.
+    const showPrefix = !opts.hideProjectPrefix && file.scope === "project" && file.projectName;
+    const displayName = showPrefix ? `${file.projectName} / ${fileName}` : fileName;
 
     return (
       <button
@@ -88,9 +95,10 @@ export default function ConfigFileExplorer({ isLoading }: Props) {
             : "text-cs-muted hover:text-cs-text hover:bg-cs-border/50",
           !file.exists && "opacity-50"
         )}
+        title={file.path}
       >
         <Icon size={14} className={RUNTIME_COLORS[file.runtime]} />
-        <span className="flex-1 truncate">{fileName}</span>
+        <span className="flex-1 truncate">{displayName}</span>
         {file.tokenCount && (
           <span className="text-xs text-cs-muted">{formatTokens(file.tokenCount)}</span>
         )}
@@ -103,16 +111,28 @@ export default function ConfigFileExplorer({ isLoading }: Props) {
     );
   };
 
+  // Group project files by their projectName so VS-Code-style folders
+  // appear: each project gets a sub-header with its folder name and the
+  // files indented underneath. Avoids mixing files from different projects.
+  const groupFilesByProject = (files: AgentConfigFile[]) => {
+    const grouped: Record<string, AgentConfigFile[]> = {};
+    for (const file of files) {
+      const key = file.projectName ?? "(unknown project)";
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(file);
+    }
+    return grouped;
+  };
+
   const renderSection = (
     title: string,
     icon: typeof Globe,
     files: AgentConfigFile[],
-    sectionKey: string
+    sectionKey: string,
+    scope: AgentConfigScope = "global"
   ) => {
     const Icon = icon;
     const isExpanded = expandedSections[sectionKey];
-    const groupedFiles = groupFilesByRuntime(files);
-    const runtimes = Object.keys(groupedFiles).sort();
 
     return (
       <div className="mb-2">
@@ -130,16 +150,39 @@ export default function ConfigFileExplorer({ isLoading }: Props) {
 
         {isExpanded && (
           <div className="ml-2 mt-1 space-y-2">
-            {runtimes.map((runtime) => (
-              <div key={runtime}>
-                <div className="flex items-center gap-2 px-3 py-1 text-xs font-medium text-cs-muted uppercase tracking-wide">
-                  <span className={RUNTIME_COLORS[runtime]}>{runtime}</span>
-                </div>
-                <div className="space-y-0.5">
-                  {groupedFiles[runtime].map(renderFileItem)}
-                </div>
-              </div>
-            ))}
+            {scope === "project" ? (
+              // Project scope — group by project folder name first.
+              Object.entries(groupFilesByProject(files))
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([projectName, projectFiles]) => (
+                  <div key={projectName}>
+                    <div className="flex items-center gap-1 px-3 py-1 text-xs font-medium text-cs-text">
+                      <FolderOpen size={11} className="text-cs-muted" />
+                      <span className="truncate">{projectName}</span>
+                      <span className="text-cs-muted ml-auto">
+                        {projectFiles.filter((f) => f.exists).length}
+                      </span>
+                    </div>
+                    <div className="space-y-0.5 ml-2">
+                      {projectFiles.map((f) => renderFileItem(f, { hideProjectPrefix: true }))}
+                    </div>
+                  </div>
+                ))
+            ) : (
+              // Global scope — keep the runtime-grouped layout.
+              Object.entries(groupFilesByRuntime(files))
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([runtime, runtimeFiles]) => (
+                  <div key={runtime}>
+                    <div className="flex items-center gap-2 px-3 py-1 text-xs font-medium text-cs-muted uppercase tracking-wide">
+                      <span className={RUNTIME_COLORS[runtime]}>{runtime}</span>
+                    </div>
+                    <div className="space-y-0.5">
+                      {runtimeFiles.map((f) => renderFileItem(f))}
+                    </div>
+                  </div>
+                ))
+            )}
           </div>
         )}
       </div>
@@ -176,12 +219,14 @@ export default function ConfigFileExplorer({ isLoading }: Props) {
           t("agentManager.explorer.global", "Global (~/)"),
           Globe,
           globalFiles,
+          "global",
           "global"
         )}
         {renderSection(
           t("agentManager.explorer.project", "Project"),
           FolderOpen,
           projectFiles,
+          "project",
           "project"
         )}
 

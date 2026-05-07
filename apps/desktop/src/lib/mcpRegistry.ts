@@ -219,3 +219,14 @@ export async function installCustomMcp(
     },
   });
 }
+
+/** Counterpart to {@link installMcpToRuntime}: removes the named server
+ *  from the runtime's config file. Used by the delete button on each
+ *  MCP card. Returns the path that was written. */
+export async function uninstallMcpFromRuntime(
+  runtime: InstallableRuntime,
+  name: string
+): Promise<string> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string>("uninstall_mcp_server", { runtime, name });
+}
