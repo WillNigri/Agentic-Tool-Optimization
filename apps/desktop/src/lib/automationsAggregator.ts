@@ -338,6 +338,53 @@ export function hooksToWorkflow(
   };
 }
 
+/**
+ * Decorate every node in a list of workflows with a live status sourced
+ * from per-agent metrics (success rate + last run timestamp). Mutates
+ * the workflows in-place to keep the diff small — matches the existing
+ * `loadWorkflows` flow which expects whole workflow objects.
+ *
+ * Status mapping:
+ *   - never run yet → "idle"
+ *   - successRate < 0.3 with at least one run → "error"
+ *   - last run within 24h with successRate ≥ 0.7 → "active"
+ *   - otherwise → "idle"
+ */
+export function decorateWorkflowsWithStatus(
+  workflows: Workflow[],
+  perAgent: Array<{ slug: string; successRate: number; totalRuns: number; lastRunAt: string | null }>
+): Workflow[] {
+  if (perAgent.length === 0) return workflows;
+  const now = Date.now();
+  const dayAgo = now - 24 * 60 * 60 * 1000;
+  const bySlug = new Map(perAgent.map((m) => [m.slug, m]));
+
+  return workflows.map((wf) => ({
+    ...wf,
+    nodes: wf.nodes.map((node) => {
+      // Agent-attributed nodes carry agentName; otherwise the node has
+      // no live data we can pin status on.
+      const slug = node.agentName;
+      if (!slug) return node;
+      const m = bySlug.get(slug);
+      if (!m || m.totalRuns === 0) return node;
+      const lastTs = m.lastRunAt ? Date.parse(m.lastRunAt) : 0;
+      let status: FlowNode["status"] = "idle";
+      if (m.successRate < 0.3) status = "error";
+      else if (lastTs > dayAgo && m.successRate >= 0.7) status = "active";
+      return {
+        ...node,
+        status,
+        stats: {
+          executions: m.totalRuns,
+          errors: Math.round(m.totalRuns * (1 - m.successRate)),
+          avgTimeMs: node.stats.avgTimeMs,
+        },
+      };
+    }),
+  }));
+}
+
 function hookKindLabel(kind: AgentHook["kind"]): string {
   switch (kind) {
     case "file": return "Reads a file";

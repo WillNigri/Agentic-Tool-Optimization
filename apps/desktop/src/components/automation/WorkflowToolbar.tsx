@@ -212,7 +212,14 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
             {(() => {
               const sources = [...new Set(workflows.map((w) => w.source).filter(Boolean))];
               if (sources.length <= 1) return null;
-              const labels: Record<string, string> = { skill: "Skills", cron: "Cron Jobs", manual: "Manual" };
+              const labels: Record<string, string> = {
+                skill: "Skills",
+                cron: "Schedules",
+                manual: "Manual",
+                "group-routed": "Routed Groups",
+                "group-sequential": "Pipelines",
+                hook: "Hooks",
+              };
               return (
                 <div className="flex items-center gap-1 px-3 py-1.5 border-b border-[#2a2a3a] shrink-0">
                   <button

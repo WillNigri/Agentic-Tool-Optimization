@@ -14,11 +14,12 @@ import ExecutionOverlay from "./automation/ExecutionOverlay";
 import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
-import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows } from "@/lib/automationsAggregator";
+import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows, decorateWorkflowsWithStatus } from "@/lib/automationsAggregator";
 import { listAgentGroups } from "@/lib/agentGroups";
 import { listAgents } from "@/lib/agents";
 import { listAgentHooks } from "@/lib/agentHooks";
 import { listCronJobs } from "@/lib/tauri-api";
+import { getAgentMetrics } from "@/lib/agentObservability";
 import type { SkillDetail } from "@/lib/api";
 import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./automation/types";
 
@@ -92,11 +93,25 @@ export default function AutomationFlow() {
     staleTime: 30_000,
   });
 
+  // v1.6.0 wave 3 — pull per-agent metrics from agent-logs.jsonl so we
+  // can paint live status on each node (idle / active / error) instead
+  // of every node showing "idle" forever. Refetches every 30s.
+  const { data: agentMetrics } = useQuery({
+    queryKey: ["agent-metrics-for-automations"],
+    queryFn: () => getAgentMetrics({ limit: 500 }),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
+
   useEffect(() => {
     const groupWorkflows = groupsToWorkflows(agentGroups);
     const cronWorkflows = cronsToWorkflows(allCronJobs, allAgents, agentGroups);
     const hookWorkflows = hooksToWorkflows(allAgents, hooksByAgent);
-    const incoming = [...groupWorkflows, ...cronWorkflows, ...hookWorkflows];
+    let incoming = [...groupWorkflows, ...cronWorkflows, ...hookWorkflows];
+    // Decorate with live status when metrics are available.
+    if (agentMetrics?.perAgent && agentMetrics.perAgent.length > 0) {
+      incoming = decorateWorkflowsWithStatus(incoming, agentMetrics.perAgent);
+    }
     if (incoming.length === 0) return;
     const store = useAutomationStore.getState();
     const existingIds = new Set(store.workflows.map((w) => w.id));
@@ -104,7 +119,7 @@ export default function AutomationFlow() {
     if (newOnes.length > 0) {
       store.loadWorkflows([...store.workflows, ...newOnes]);
     }
-  }, [agentGroups, allCronJobs, allAgents, hooksByAgent]);
+  }, [agentGroups, allCronJobs, allAgents, hooksByAgent, agentMetrics]);
 
   useEffect(() => {
     if (skills.length > 0) {
