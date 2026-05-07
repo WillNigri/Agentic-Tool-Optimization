@@ -83,21 +83,24 @@ jobs:
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
           includeUpdaterJson: true
+          updaterJsonKeepUniversal: true
 
       # tauri-action's `includeUpdaterJson` upload logic has had a long-running
-      # regression on matrix builds (v1.5.0–1.5.5 all reproduced "Signature
+      # regression on matrix builds (v1.5.0–1.5.7 all reproduced "Signature
       # not found for the updater JSON. Skipping upload..."). The `.sig` files
       # ARE created by Tauri's bundler but never make it onto the release.
       # Workaround: explicitly upload every `.sig` and the `.nsis.zip` /
       # `.AppImage.tar.gz` updater bundles ourselves. The aggregator job
       # below then constructs `latest.json` from these.
-      - name: Upload updater artifacts (.sig + .nsis.zip + .AppImage.tar.gz)
-        if: success()
+      #
+      # PowerShell on Windows + bash on Unix — bash on Windows runners
+      # mangled the path globs in v1.5.6.
+      - name: Upload updater artifacts (Unix)
+        if: success() && matrix.platform != 'windows-latest'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-          LABEL: ${{ matrix.label }}
         run: |
           set -e
           BUNDLE_ROOT="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
@@ -105,14 +108,28 @@ jobs:
             echo "::warning::Bundle dir $BUNDLE_ROOT not found, skipping"
             exit 0
           fi
-          # Find every .sig + matching updater bundle. macOS produces
-          # `.app.tar.gz` + `.app.tar.gz.sig`; Linux produces
-          # `.AppImage.tar.gz` + `.sig`; Windows produces `.nsis.zip` +
-          # `.sig`. Each gets uploaded with `--clobber` to allow re-runs.
-          find "$BUNDLE_ROOT" \( -name "*.sig" -o -name "*.app.tar.gz" -o -name "*.AppImage.tar.gz" -o -name "*.nsis.zip" \) -type f | while read -r f; do
+          find "$BUNDLE_ROOT" \( -name "*.sig" -o -name "*.AppImage.tar.gz" \) -type f | while read -r f; do
             echo "Uploading $f"
-            gh release upload "$TAG" "$f" --clobber || echo "::warning::upload failed for $f"
+            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || echo "::warning::upload failed for $f"
           done
+
+      - name: Upload updater artifacts (Windows)
+        if: success() && matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $bundleRoot = "apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          if (-not (Test-Path $bundleRoot)) {
+            Write-Warning "Bundle dir $bundleRoot not found, skipping"
+            exit 0
+          }
+          Get-ChildItem -Path $bundleRoot -Recurse -Include *.sig, *.nsis.zip | ForEach-Object {
+            Write-Host "Uploading $($_.FullName)"
+            gh release upload $env:TAG $_.FullName --repo "${{ github.repository }}" --clobber
+            if ($LASTEXITCODE -ne 0) { Write-Warning "upload failed for $($_.FullName)" }
+          }
 
   # Aggregator job: pull all .sig files from the release after the matrix
   # finishes, construct latest.json, upload it. Replaces tauri-action's
@@ -130,9 +147,13 @@ jobs:
           set -e
           VERSION="${TAG#v}"
           mkdir -p sigs
-          gh release download "$TAG" -p "*.sig" -D sigs/ --clobber || true
+          # `gh release download/upload` requires a repo reference; without
+          # actions/checkout this job has no .git so we must pass --repo
+          # explicitly. Previous runs failed with "fatal: not a git
+          # repository".
+          gh release download "$TAG" --repo "${{ github.repository }}" -p "*.sig" -D sigs/ --clobber || true
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
 
           # Read signatures via Python so embedded special characters
           # don't break shell quoting. Missing platforms are silently
@@ -178,7 +199,7 @@ jobs:
           }, indent=2))
           PY
           cat latest.json
-          gh release upload "$TAG" latest.json --clobber
+          gh release upload "$TAG" latest.json --repo "${{ github.repository }}" --clobber
 
   # The cask repo lives at WillNigri/homebrew-ato, so the default GITHUB_TOKEN
   # (scoped to this repo) can't push there. Set HOMEBREW_TAP_TOKEN to a PAT

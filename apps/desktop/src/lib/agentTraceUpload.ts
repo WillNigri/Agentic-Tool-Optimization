@@ -29,7 +29,7 @@ export interface AgentTraceInput {
 }
 
 const CLOUD_API_URL =
-  (import.meta.env.VITE_CLOUD_API_URL as string | undefined) || "https://api.ato.dev";
+  (import.meta.env.VITE_CLOUD_API_URL as string | undefined) || "https://api.agentictool.ai";
 
 export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
   const { isCloudUser, accessToken, tier } = useAuthStore.getState();

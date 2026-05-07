@@ -25,10 +25,10 @@ export default function LoginModal({ onClose }: LoginModalProps) {
     try {
       let result;
       if (mode === "login") {
-        result = await login(email, password);
+        result = await login({ email, password });
       } else {
         if (!name.trim()) { setError("Name is required"); setLoading(false); return; }
-        result = await register(email, password, name);
+        result = await register({ email, password, name });
       }
       setAuth(
         result.user,

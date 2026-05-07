@@ -9,7 +9,7 @@ import { tierMeetsRequirement } from "@/lib/tier";
 // auth + tier check on the client and surfaces a typed result.
 
 const CLOUD_API_URL =
-  (import.meta.env.VITE_CLOUD_API_URL as string | undefined) || "https://api.ato.dev";
+  (import.meta.env.VITE_CLOUD_API_URL as string | undefined) || "https://api.agentictool.ai";
 
 export interface JudgeInput {
   judgePrompt: string;
