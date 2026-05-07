@@ -14,8 +14,11 @@ import ExecutionOverlay from "./automation/ExecutionOverlay";
 import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
-import { groupsToWorkflows } from "@/lib/automationsAggregator";
+import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows } from "@/lib/automationsAggregator";
 import { listAgentGroups } from "@/lib/agentGroups";
+import { listAgents } from "@/lib/agents";
+import { listAgentHooks } from "@/lib/agentHooks";
+import { listCronJobs } from "@/lib/tauri-api";
 import type { SkillDetail } from "@/lib/api";
 import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./automation/types";
 
@@ -52,17 +55,56 @@ export default function AutomationFlow() {
     staleTime: 30_000,
   });
 
+  // v1.6.0 wave 2 — agents + their hooks + cron jobs. Each becomes a
+  // Workflow on the canvas:
+  //   - cron jobs: clock-trigger node → dispatch target
+  //   - hooks: input nodes feeding into their parent agent
+  // The agent list also resolves the dispatch target on cron workflows.
+  const { data: allAgents = [] } = useQuery({
+    queryKey: ["agents-for-automations"],
+    queryFn: () => listAgents(),
+    staleTime: 30_000,
+  });
+  const { data: allCronJobs = [] } = useQuery({
+    queryKey: ["cron-jobs-for-automations"],
+    queryFn: () => listCronJobs(),
+    staleTime: 30_000,
+  });
+  const { data: hooksByAgent = new Map() } = useQuery<Map<string, import("@/lib/agentHooks").AgentHook[]>>({
+    queryKey: ["agent-hooks-for-automations", allAgents.map((a) => a.id).sort().join(",")],
+    queryFn: async () => {
+      const out = new Map<string, import("@/lib/agentHooks").AgentHook[]>();
+      // Fan out one query per agent. Each agent's hook count is small
+      // (typically 0-3), and listAgentHooks itself is one SQLite scan.
+      await Promise.all(
+        allAgents.map(async (a) => {
+          try {
+            const hooks = await listAgentHooks(a.id);
+            if (hooks.length > 0) out.set(a.id, hooks);
+          } catch {
+            // ignore — best-effort.
+          }
+        })
+      );
+      return out;
+    },
+    enabled: allAgents.length > 0,
+    staleTime: 30_000,
+  });
+
   useEffect(() => {
-    if (agentGroups.length === 0) return;
     const groupWorkflows = groupsToWorkflows(agentGroups);
-    if (groupWorkflows.length === 0) return;
+    const cronWorkflows = cronsToWorkflows(allCronJobs, allAgents, agentGroups);
+    const hookWorkflows = hooksToWorkflows(allAgents, hooksByAgent);
+    const incoming = [...groupWorkflows, ...cronWorkflows, ...hookWorkflows];
+    if (incoming.length === 0) return;
     const store = useAutomationStore.getState();
     const existingIds = new Set(store.workflows.map((w) => w.id));
-    const newOnes = groupWorkflows.filter((w) => !existingIds.has(w.id));
+    const newOnes = incoming.filter((w) => !existingIds.has(w.id));
     if (newOnes.length > 0) {
       store.loadWorkflows([...store.workflows, ...newOnes]);
     }
-  }, [agentGroups]);
+  }, [agentGroups, allCronJobs, allAgents, hooksByAgent]);
 
   useEffect(() => {
     if (skills.length > 0) {

@@ -16,6 +16,10 @@
 import type { Workflow, FlowNode, FlowEdge } from "@/components/automation/types";
 import type { AgentGroup, AgentGroupMember, RouterConfig } from "@/lib/agentGroups";
 import { parseRouterConfig } from "@/lib/agentGroups";
+import type { CronJob } from "@/components/cron/types";
+import type { AgentHook } from "@/lib/agentHooks";
+import type { Agent } from "@/lib/agents";
+import { cronToHuman } from "@/lib/cron-utils";
 
 // Layout constants — kept loose so node widths don't conflict with the
 // canvas's drag/zoom math. NODE_W matches the canvas's default node size.
@@ -178,4 +182,197 @@ function ruleKeywordsByTargetSlug(router: RouterConfig): Record<string, string[]
  */
 export function groupsToWorkflows(groups: AgentGroup[]): Workflow[] {
   return groups.map(groupToWorkflow);
+}
+
+// ── Wave 2: Cron jobs + hooks ────────────────────────────────────────────
+
+/**
+ * Convert a CronJob into a Workflow rooted at a clock-trigger node that
+ * fires on schedule and dispatches to its target (agent / group / raw
+ * runtime). The target shows up as the second node so the dispatch path
+ * is visible at a glance.
+ */
+export function cronToWorkflow(
+  cron: CronJob,
+  agents: Agent[] = [],
+  groups: AgentGroup[] = []
+): Workflow {
+  const triggerNode: FlowNode = {
+    id: `cron:${cron.id}:trigger`,
+    label: cronToHuman(cron.schedule),
+    description: cron.name,
+    type: "trigger",
+    width: NODE_W,
+    x: 80,
+    y: 120,
+    stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+    status: cron.enabled ? "idle" : "error",
+  };
+
+  // Resolve the dispatch target. Prefer agent/group references; fall
+  // back to a "runtime" placeholder when the cron uses raw runtime+prompt.
+  let targetNode: FlowNode | null = null;
+  if (cron.agentSlug) {
+    const agent = agents.find((a) => a.slug === cron.agentSlug);
+    targetNode = {
+      id: `cron:${cron.id}:agent`,
+      label: agent?.displayName ?? `@${cron.agentSlug}`,
+      description: agent ? `Agent on ${agent.runtime}` : "Referenced agent (not found locally)",
+      type: "action",
+      runtime: (agent?.runtime ?? cron.runtime) as FlowNode["runtime"],
+      agentId: agent?.id,
+      agentName: cron.agentSlug,
+      width: NODE_W,
+      x: 80 + NODE_GAP_X,
+      y: 120,
+      stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+      status: "idle",
+    };
+  } else if (cron.groupSlug) {
+    const group = groups.find((g) => g.slug === cron.groupSlug);
+    targetNode = {
+      id: `cron:${cron.id}:group`,
+      label: group?.displayName ?? cron.groupSlug,
+      description: group ? `${group.dispatchKind} group` : "Referenced group (not found locally)",
+      type: "process",
+      width: NODE_W,
+      x: 80 + NODE_GAP_X,
+      y: 120,
+      stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+      status: "idle",
+    };
+  } else {
+    // Raw runtime + prompt — show the runtime as the dispatch target.
+    targetNode = {
+      id: `cron:${cron.id}:runtime`,
+      label: `runtime: ${cron.runtime}`,
+      description: "Raw prompt dispatch",
+      type: "action",
+      runtime: cron.runtime as FlowNode["runtime"],
+      width: NODE_W,
+      x: 80 + NODE_GAP_X,
+      y: 120,
+      stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+      status: "idle",
+    };
+  }
+
+  const edges: FlowEdge[] = [
+    {
+      from: triggerNode.id,
+      to: targetNode.id,
+      animated: cron.enabled,
+      label: cron.wakeFromSleep ? "wakes from sleep" : undefined,
+    },
+  ];
+
+  return {
+    id: `cron:${cron.id}`,
+    name: `${cron.name} (cron)`,
+    description: cron.description || cronToHuman(cron.schedule),
+    enabled: cron.enabled,
+    runCount: 0,
+    errorCount: 0,
+    nodes: [triggerNode, targetNode],
+    edges,
+    source: "cron",
+  };
+}
+
+/**
+ * Convert an agent's pre-call hooks into a Workflow showing hook nodes
+ * feeding into the agent. Position hooks vertically on the input side
+ * so the "data flowing into the agent" mental model is obvious.
+ */
+export function hooksToWorkflow(
+  agent: Agent,
+  hooks: AgentHook[]
+): Workflow | null {
+  if (hooks.length === 0) return null;
+  const sorted = [...hooks].sort((a, b) => a.position - b.position);
+
+  const agentNode: FlowNode = {
+    id: `hooks:${agent.id}:agent`,
+    label: agent.displayName,
+    description: `Agent on ${agent.runtime}`,
+    type: "action",
+    runtime: agent.runtime as FlowNode["runtime"],
+    agentId: agent.id,
+    agentName: agent.slug,
+    width: NODE_W,
+    x: 80 + NODE_GAP_X,
+    y: 80 + Math.max(0, (sorted.length - 1) * NODE_GAP_Y) / 2,
+    stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+    status: "idle",
+  };
+
+  const hookNodes: FlowNode[] = sorted.map((hook, i) => ({
+    id: `hooks:${agent.id}:hook:${hook.id}`,
+    label: hook.name,
+    description: hookKindLabel(hook.kind),
+    type: "service",
+    width: NODE_W,
+    x: 80,
+    y: 80 + i * NODE_GAP_Y,
+    stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+    status: hook.enabled ? "idle" : "error",
+  }));
+
+  const edges: FlowEdge[] = hookNodes.map((node) => ({
+    from: node.id,
+    to: agentNode.id,
+    animated: false,
+    label: "<context>",
+  }));
+
+  return {
+    id: `hooks:${agent.id}`,
+    name: `${agent.slug} hooks`,
+    description: `${sorted.length} pre-call ${sorted.length === 1 ? "hook" : "hooks"} feed context into ${agent.slug} on every dispatch.`,
+    enabled: true,
+    runCount: 0,
+    errorCount: 0,
+    nodes: [...hookNodes, agentNode],
+    edges,
+    source: "hook",
+  };
+}
+
+function hookKindLabel(kind: AgentHook["kind"]): string {
+  switch (kind) {
+    case "file": return "Reads a file";
+    case "webhook": return "GET webhook";
+    case "mcp-call": return "Calls an MCP tool";
+    case "db-query": return "Runs a SQL query";
+    case "computed": return "Computed JS expression";
+  }
+}
+
+/**
+ * Convert all cron jobs to Workflows. Pass agents + groups so the
+ * dispatch target can resolve to the right node.
+ */
+export function cronsToWorkflows(
+  crons: CronJob[],
+  agents: Agent[] = [],
+  groups: AgentGroup[] = []
+): Workflow[] {
+  return crons.map((c) => cronToWorkflow(c, agents, groups));
+}
+
+/**
+ * Build hook-flow workflows for every agent that has at least one
+ * pre-call hook configured.
+ */
+export function hooksToWorkflows(
+  agents: Agent[],
+  hooksByAgentId: Map<string, AgentHook[]>
+): Workflow[] {
+  const out: Workflow[] = [];
+  for (const agent of agents) {
+    const hooks = hooksByAgentId.get(agent.id) ?? [];
+    const wf = hooksToWorkflow(agent, hooks);
+    if (wf) out.push(wf);
+  }
+  return out;
 }
