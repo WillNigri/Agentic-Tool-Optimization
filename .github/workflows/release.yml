@@ -111,20 +111,40 @@ jobs:
       # without tauri-action's release-upload pass these never get signed.
       # `tauri signer sign` is the same tool tauri-action uses internally —
       # it writes a minisign-compatible `.sig` file next to each input.
-      - name: Sign updater bundles (Unix)
+      # Package + sign updater bundles ourselves. Without `tagName` on
+      # tauri-action, its release-upload helpers don't run on Linux/Windows
+      # (verified in v1.5.17 logs: "No releaseId or tagName provided,
+      # skipping all uploads..." — and on Linux/Windows the .AppImage.tar.gz
+      # / .nsis.zip packaging lives inside that skipped block). On macOS the
+      # helper does still tar `.app/` → `.app.tar.gz` independently, so only
+      # signing is needed there.
+      - name: Package + sign updater bundles (Unix)
         if: success() && matrix.platform != 'windows-latest'
         shell: bash
         env:
-          # `tauri signer sign` auto-reads these env vars into --private-key
-          # and --password. Don't pass either flag explicitly or the CLI
-          # errors with "--private-key-path cannot be used with --private-key"
-          # (it considers env-derived values as already-set flags).
+          # `tauri signer sign` auto-reads these env vars; passing
+          # --private-key explicitly conflicts with the env-derived value.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         working-directory: apps/desktop
         run: |
           set -e
           BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          # On Linux, tar each .AppImage into .AppImage.tar.gz so the updater
+          # has a deterministic archive to sign. macOS already has .app.tar.gz
+          # from tauri-action's helper.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            while IFS= read -r app; do
+              [ -z "$app" ] && continue
+              dest="${app}.tar.gz"
+              if [ ! -f "$dest" ]; then
+                echo "Packaging $app -> $dest"
+                tar czf "$dest" -C "$(dirname "$app")" "$(basename "$app")"
+              fi
+            done < <(find "$BUNDLE_ROOT" -type f -name "*.AppImage" -not -name "*.tar.gz" 2>/dev/null)
+          fi
+
           SIGNED=0
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -135,10 +155,11 @@ jobs:
           echo "Signed $SIGNED bundles"
           if [ "$SIGNED" -eq 0 ]; then
             echo "::error::No updater bundles found to sign under $BUNDLE_ROOT"
+            find "$BUNDLE_ROOT" -type f | head -20
             exit 1
           fi
 
-      - name: Sign updater bundles (Windows)
+      - name: Package + sign updater bundles (Windows)
         if: success() && matrix.platform == 'windows-latest'
         shell: pwsh
         env:
@@ -147,6 +168,18 @@ jobs:
         working-directory: apps/desktop
         run: |
           $bundleRoot = "src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          # Zip each NSIS *-setup.exe into the matching *.nsis.zip the
+          # updater plugin expects. tauri-action's release path would
+          # normally do this, but it's gated behind tagName.
+          Get-ChildItem -Path $bundleRoot -Recurse -File -Filter *-setup.exe | ForEach-Object {
+            $dest = $_.FullName -replace '\.exe$', '.nsis.zip'
+            if (-not (Test-Path $dest)) {
+              Write-Host "Packaging $($_.FullName) -> $dest"
+              Compress-Archive -Path $_.FullName -DestinationPath $dest -Force
+            }
+          }
+
           $signed = 0
           Get-ChildItem -Path $bundleRoot -Recurse -File -Include *.nsis.zip | ForEach-Object {
             Write-Host "Signing $($_.FullName)"
@@ -156,6 +189,7 @@ jobs:
           }
           Write-Host "Signed $signed bundles"
           if ($signed -eq 0) {
+            Get-ChildItem -Path $bundleRoot -Recurse -File | ForEach-Object { Write-Host $_.FullName }
             Write-Error "No updater bundles found to sign under $bundleRoot"
             exit 1
           }
