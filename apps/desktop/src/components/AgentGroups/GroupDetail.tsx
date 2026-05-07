@@ -72,6 +72,12 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
   // Wave 3.2 — Graph view of router + children. Toggle between graph + form.
   const [view, setView] = useState<"form" | "graph">("form");
   const routerSectionRef = useRef<HTMLDivElement | null>(null);
+  // Demo-only refs — used by the autoFillGroupForm effect below to scroll
+  // each new section into view as the form animates. Without these the
+  // recording stays pinned at the top showing NAME / DESC / TYPE while the
+  // CHILDREN and ROUTER sections being populated are below the fold.
+  const childrenSectionRef = useRef<HTMLDivElement | null>(null);
+  const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   const [focusedChild, setFocusedChild] = useState<string | null>(null);
 
   // Reset member list when runtime changes (mismatched-runtime children would
@@ -106,6 +112,14 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
       setDispatchKind(spec.dispatchKind);
       await wait(380);
       if (cancelled) return;
+      // Scroll the Children section into view BEFORE we start adding
+      // children. The form is taller than the viewport once it's
+      // populated, and the recording was getting stuck at the top showing
+      // only NAME / DESCRIPTION / TYPE while children + router rules
+      // animated below the fold (Beatriz feedback, 2026-05-07).
+      childrenSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      await wait(450);
+      if (cancelled) return;
       // Children — append one at a time so the list grows visibly.
       for (const slug of spec.childSlugs) {
         if (cancelled) return;
@@ -117,14 +131,23 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
         await wait(380);
       }
       if (cancelled) return;
-      // Router rule — only meaningful for routed groups.
+      // Router rule — only meaningful for routed groups. Scroll the
+      // router section into view so the rule animation is visible.
       if (spec.dispatchKind === "routed" && spec.routerRule) {
+        routerSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        await wait(450);
+        if (cancelled) return;
         const rule: RouterRule = {
           if: { keyword: spec.routerRule.keywords },
           then: spec.routerRule.thenSlug,
         };
         setRouterConfig((rc) => ({ ...rc, rules: [...(rc.rules ?? []), rule] }));
+        await wait(800);
       }
+      if (cancelled) return;
+      // Final beat: scroll back up to the Save button so the next demo
+      // step (which clicks group-save) lands on a visible target.
+      saveButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     })();
     return () => {
       cancelled = true;
@@ -259,6 +282,7 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
           <button
             type="button"
             data-demo-id="group-save"
+            ref={saveButtonRef}
             disabled={!canSave}
             onClick={() => saveMutation.mutate()}
             className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover disabled:opacity-50"
@@ -412,7 +436,7 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
       </section>
 
       {/* Children */}
-      <section>
+      <section ref={childrenSectionRef}>
         <header className="flex items-center justify-between mb-2">
           <h4 className="text-xs font-medium text-cs-text uppercase tracking-wide">
             {t("agentGroups.children", "Children")}{" "}

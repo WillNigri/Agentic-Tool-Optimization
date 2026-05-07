@@ -794,7 +794,7 @@
       "bundleGroup": "Agrupalos. El router decide quien atiende cada prompt.",
       "twoGroupTypes": "Dos tipos de grupo: enrutado (el router elige uno) y automatizacion (pipeline).",
       "automationPipeline": "Ahora el pipeline de automatizacion — un prompt, el flujo completo se ejecuta.",
-      "swapMidThread": "Ahora cambia a Codex a mitad de hilo — el historial completo viaja contigo.",
+      "swapMidThread": "Ahora vuelve a Claude a mitad de hilo — el historial completo viaja contigo.",
       "scheduleUnattended": "Y puedes programarlo para que corra sin supervision.",
       "wakeFromSleep": "Despierta del sueno en macOS, Linux y Windows — los jobs se disparan aunque ATO este cerrado.",
       "closeBuildBundle": "Construye los agentes. Agrupalos en un flujo. Ejecuta a demanda o con un agendamiento.",

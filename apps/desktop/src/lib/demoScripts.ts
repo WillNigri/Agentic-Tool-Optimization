@@ -383,26 +383,29 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "wait", ms: 1200 },
 
     // ── Cross-runtime mid-thread ─────────────────────────────────────────
+    // Pipeline above ended on Codex (security-reviewer's runtime). Swap
+    // BACK to Claude here — Claude inherits the full history and can
+    // summarize what Codex just flagged. Beatriz feedback 2026-05-07.
     {
       kind: "subtitle",
       textKey: "demo.subtitles.swapMidThread",
-      text: "Now swap to Codex mid-thread — the full history travels.",
+      text: "Now swap back to Claude mid-thread — the full history travels.",
       durationMs: 2400,
     },
     { kind: "selectChatGroup", slug: null },
     { kind: "selectAgent", slug: null },
-    { kind: "setRuntime", runtime: "codex" },
+    { kind: "setRuntime", runtime: "claude" },
     { kind: "wait", ms: 500 },
     {
       kind: "type",
-      text: "Summarize what we just did, including the security issue Claude flagged.",
+      text: "Summarize what we just did, including the security issue Codex flagged.",
     },
     { kind: "wait", ms: 300 },
     { kind: "send" },
     { kind: "wait", ms: 800 },
     {
       kind: "subtitle",
-      text: "Codex remembers what Claude wrote, what the reviewer flagged. One thread.",
+      text: "Claude remembers what it wrote, what Codex flagged. One thread, two runtimes.",
       durationMs: 3500,
     },
     { kind: "wait", ms: 800 },

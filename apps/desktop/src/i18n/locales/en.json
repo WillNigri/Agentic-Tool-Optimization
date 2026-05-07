@@ -1010,7 +1010,7 @@
       "bundleGroup": "Bundle them into a group. Router decides who handles what.",
       "twoGroupTypes": "Two group types: routed (router picks one) and automation (pipeline).",
       "automationPipeline": "Now the automation pipeline — one prompt, the whole workflow runs.",
-      "swapMidThread": "Now swap to Codex mid-thread — the full history travels.",
+      "swapMidThread": "Now swap back to Claude mid-thread — the full history travels.",
       "scheduleUnattended": "And you can schedule it to run unattended.",
       "wakeFromSleep": "Wake-from-sleep on macOS, Linux, and Windows — jobs fire even when ATO is closed.",
       "closeBuildBundle": "Build the agents. Bundle them into a workflow. Run on demand or on a schedule.",

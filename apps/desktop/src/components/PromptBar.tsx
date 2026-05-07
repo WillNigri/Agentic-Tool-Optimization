@@ -482,7 +482,13 @@ export default function PromptBar() {
           );
           el?.scrollIntoView({ behavior: "smooth", block: "start" });
           if (!isLast) {
-            await new Promise((r) => setTimeout(r, 1500));
+            // Demo dwell — give the viewer time to actually READ stage N's
+            // output before stage N+1 lands. Previous 1500ms was too short:
+            // Beatriz reported that the chat looked like ONLY the final
+            // stage's LLM (Codex) had replied because Claude's bubble had
+            // already scrolled out of view by the time Codex appeared.
+            // 4000ms is enough for a glance at a 6–10 line code block.
+            await new Promise((r) => setTimeout(r, 4000));
           }
         }
       } else {
