@@ -139,6 +139,9 @@ export interface DemoScript {
 
 interface DemoState {
   isPlaying: boolean;
+  /** When true, the runner blocks before each step until pause is cleared.
+   *  Lets viewers stop on a long subtitle to read it without restarting. */
+  isPaused: boolean;
   scriptId: string | null;
   stepIndex: number;
   caption: string | null;
@@ -190,6 +193,8 @@ interface DemoState {
 
   play(script: DemoScript): Promise<void>;
   stop(): void;
+  /** Toggle pause/resume — bound to Tab in DemoOverlay. */
+  togglePause(): void;
   /** PromptBar calls this when the in-flight dispatch's stream completes. */
   notifyDispatchComplete(): void;
   /** QuickPath calls this when its createAgent mutation succeeds. */
@@ -198,10 +203,14 @@ interface DemoState {
 
 let dispatchResolvers: Array<() => void> = [];
 let agentCreatedResolvers: Array<() => void> = [];
+// Pending sleeps that are blocked because the demo is paused. togglePause
+// drains this list to resume; stop() drains it to abort.
+let pauseResolvers: Array<() => void> = [];
 let formPatchSeq = 0;
 
 export const useDemoStore = create<DemoState>((set, get) => ({
   isPlaying: false,
+  isPaused: false,
   scriptId: null,
   stepIndex: -1,
   caption: null,
@@ -570,8 +579,11 @@ export const useDemoStore = create<DemoState>((set, get) => ({
     dispatchResolvers = [];
     agentCreatedResolvers.forEach((r) => r());
     agentCreatedResolvers = [];
+    pauseResolvers.forEach((r) => r());
+    pauseResolvers = [];
     set({
       isPlaying: false,
+      isPaused: false,
       scriptId: null,
       stepIndex: -1,
       caption: null,
@@ -585,6 +597,16 @@ export const useDemoStore = create<DemoState>((set, get) => ({
     });
   },
 
+  togglePause: () => {
+    const willPause = !get().isPaused;
+    set({ isPaused: willPause });
+    if (!willPause) {
+      // Wake any sleeps blocked on the pause flag.
+      pauseResolvers.forEach((r) => r());
+      pauseResolvers = [];
+    }
+  },
+
   notifyDispatchComplete: () => {
     const next = dispatchResolvers.shift();
     next?.();
@@ -596,8 +618,16 @@ export const useDemoStore = create<DemoState>((set, get) => ({
   },
 }));
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function sleep(ms: number): Promise<void> {
+  // If paused, block until togglePause clears it. Then dwell for the
+  // requested duration so timing relative to the user's resume point is
+  // preserved.
+  if (useDemoStore.getState().isPaused) {
+    await new Promise<void>((resolve) => {
+      pauseResolvers.push(resolve);
+    });
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 /** Add an id to highlightIds, then remove it after `durationMs`. The

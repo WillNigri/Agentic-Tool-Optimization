@@ -19,11 +19,14 @@ import { DEMO_SCRIPTS, HERO_SCRIPT } from "@/lib/demoScripts";
 
 export default function DemoOverlay() {
   const isPlaying = useDemoStore((s) => s.isPlaying);
+  const isPaused = useDemoStore((s) => s.isPaused);
   const caption = useDemoStore((s) => s.caption);
   const play = useDemoStore((s) => s.play);
   const stop = useDemoStore((s) => s.stop);
+  const togglePause = useDemoStore((s) => s.togglePause);
 
-  // Cmd+Shift+D toggles the hero script. Esc stops a running demo.
+  // ⌘⇧D toggles the hero script. Esc stops. Tab pauses/resumes so
+  // viewers can stop on a long subtitle to read without restarting.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const playing = useDemoStore.getState().isPlaying;
@@ -36,11 +39,25 @@ export default function DemoOverlay() {
       if (e.key === "Escape" && playing) {
         e.preventDefault();
         stop();
+        return;
+      }
+      // Don't intercept Tab when the user's typing in a real input — only
+      // pause when Tab fires on a non-form element. This way the demo's
+      // own typing animations + any user-side interaction during a paused
+      // demo still work.
+      if (e.key === "Tab" && playing) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName ?? "";
+        const inField = tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable;
+        if (!inField) {
+          e.preventDefault();
+          togglePause();
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [play, stop]);
+  }, [play, stop, togglePause]);
 
   return (
     <>
@@ -52,6 +69,19 @@ export default function DemoOverlay() {
           <div className="rounded-lg border border-cs-accent/40 bg-cs-bg/95 backdrop-blur-md px-5 py-2.5 shadow-2xl max-w-2xl">
             <p className="text-sm font-medium text-cs-accent text-center leading-snug">
               {caption}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Paused indicator — small unobtrusive pill, only shown when the
+          viewer has hit Tab. Tells them the demo is held and how to
+          resume without leaking demo chrome into normal recordings. */}
+      {isPlaying && isPaused && (
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[81] pointer-events-none">
+          <div className="rounded-full border border-cs-accent/40 bg-cs-bg/95 backdrop-blur-md px-3 py-1 shadow-xl">
+            <p className="text-[11px] font-mono uppercase tracking-wider text-cs-accent">
+              ⏸ paused — Tab to resume
             </p>
           </div>
         </div>
