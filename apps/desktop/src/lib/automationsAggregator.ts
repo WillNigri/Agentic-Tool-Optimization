@@ -19,7 +19,7 @@ import { parseRouterConfig } from "@/lib/agentGroups";
 import type { CronJob } from "@/components/cron/types";
 import type { AgentHook } from "@/lib/agentHooks";
 import type { Agent } from "@/lib/agents";
-import { cronToHuman } from "@/lib/cron-utils";
+import { cronToHuman, getNextRun, formatRelativeTime } from "@/lib/cron-utils";
 
 // Layout constants — kept loose so node widths don't conflict with the
 // canvas's drag/zoom math. NODE_W matches the canvas's default node size.
@@ -197,10 +197,17 @@ export function cronToWorkflow(
   agents: Agent[] = [],
   groups: AgentGroup[] = []
 ): Workflow {
+  // Build a "schedule + next fire" description so the trigger node
+  // reads as operational state rather than a naked cron expression.
+  // Falls back to plain cronToHuman if next-run can't be computed.
+  const next = cron.enabled ? getNextRun(cron.schedule) : null;
+  const nextFiring = next ? `Next: ${formatRelativeTime(next)}` : null;
+  const triggerDescription = [cron.name, nextFiring].filter(Boolean).join(" · ");
+
   const triggerNode: FlowNode = {
     id: `cron:${cron.id}:trigger`,
     label: cronToHuman(cron.schedule),
-    description: cron.name,
+    description: triggerDescription,
     type: "trigger",
     width: NODE_W,
     x: 80,
