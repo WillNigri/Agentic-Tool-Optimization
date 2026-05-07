@@ -28,15 +28,77 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-const LLM_PROVIDERS = [
-  { id: "anthropic", name: "Anthropic", prefix: "sk-ant-", color: "#D4A574", docsUrl: "https://console.anthropic.com/settings/keys" },
-  { id: "openai", name: "OpenAI", prefix: "sk-", color: "#74AA9C", docsUrl: "https://platform.openai.com/api-keys" },
-  { id: "google", name: "Google AI", prefix: "AI", color: "#4285F4", docsUrl: "https://aistudio.google.com/apikey" },
-  { id: "mistral", name: "Mistral", prefix: "", color: "#FF7000", docsUrl: "https://console.mistral.ai/api-keys" },
-  { id: "cohere", name: "Cohere", prefix: "", color: "#39594D", docsUrl: "https://dashboard.cohere.com/api-keys" },
-  { id: "groq", name: "Groq", prefix: "gsk_", color: "#F55036", docsUrl: "https://console.groq.com/keys" },
-  { id: "together", name: "Together AI", prefix: "", color: "#0066FF", docsUrl: "https://api.together.xyz/settings/api-keys" },
-  { id: "fireworks", name: "Fireworks", prefix: "fw_", color: "#FF6B35", docsUrl: "https://fireworks.ai/account/api-keys" },
+interface LlmProviderDef {
+  id: string;
+  name: string;
+  prefix: string;
+  color: string;
+  docsUrl: string;
+  /** OpenAI-compatible base URL. Empty = native (Anthropic, Cohere, Google
+   *  use their own SDKs). When set, you can plug this provider into Codex /
+   *  Cursor / any OpenAI-compatible client by setting OPENAI_BASE_URL. */
+  baseUrl?: string;
+  /** Sample model id to show in the form, helps users get started. */
+  sampleModel?: string;
+}
+
+const LLM_PROVIDERS: LlmProviderDef[] = [
+  { id: "anthropic", name: "Anthropic", prefix: "sk-ant-", color: "#D4A574",
+    docsUrl: "https://console.anthropic.com/settings/keys",
+    sampleModel: "claude-sonnet-4-6" },
+  { id: "openai", name: "OpenAI", prefix: "sk-", color: "#74AA9C",
+    docsUrl: "https://platform.openai.com/api-keys",
+    baseUrl: "https://api.openai.com/v1",
+    sampleModel: "gpt-4.1" },
+  { id: "google", name: "Google AI", prefix: "AI", color: "#4285F4",
+    docsUrl: "https://aistudio.google.com/apikey",
+    sampleModel: "gemini-2.0-flash" },
+  { id: "mistral", name: "Mistral", prefix: "", color: "#FF7000",
+    docsUrl: "https://console.mistral.ai/api-keys",
+    baseUrl: "https://api.mistral.ai/v1",
+    sampleModel: "mistral-large-latest" },
+  { id: "cohere", name: "Cohere", prefix: "", color: "#39594D",
+    docsUrl: "https://dashboard.cohere.com/api-keys",
+    sampleModel: "command-r-plus" },
+  { id: "groq", name: "Groq", prefix: "gsk_", color: "#F55036",
+    docsUrl: "https://console.groq.com/keys",
+    baseUrl: "https://api.groq.com/openai/v1",
+    sampleModel: "llama-3.1-70b-versatile" },
+  { id: "together", name: "Together AI", prefix: "", color: "#0066FF",
+    docsUrl: "https://api.together.xyz/settings/api-keys",
+    baseUrl: "https://api.together.xyz/v1",
+    sampleModel: "meta-llama/Llama-3.1-70B-Instruct-Turbo" },
+  { id: "fireworks", name: "Fireworks", prefix: "fw_", color: "#FF6B35",
+    docsUrl: "https://fireworks.ai/account/api-keys",
+    baseUrl: "https://api.fireworks.ai/inference/v1",
+    sampleModel: "accounts/fireworks/models/llama-v3p1-70b-instruct" },
+  // Chinese providers — OpenAI-compatible APIs, usable via the SDK and via
+  // any runtime that accepts a custom base URL (Codex, OpenAI Agents SDK,
+  // local Ollama, etc.).
+  { id: "deepseek", name: "DeepSeek", prefix: "sk-", color: "#4D6BFE",
+    docsUrl: "https://platform.deepseek.com/api_keys",
+    baseUrl: "https://api.deepseek.com/v1",
+    sampleModel: "deepseek-chat" },
+  { id: "qwen", name: "Qwen (Alibaba)", prefix: "sk-", color: "#615CED",
+    docsUrl: "https://dashscope.console.aliyun.com/apiKey",
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    sampleModel: "qwen-max" },
+  { id: "minimax", name: "MiniMax", prefix: "", color: "#0EAFFF",
+    docsUrl: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+    baseUrl: "https://api.minimaxi.com/v1",
+    sampleModel: "MiniMax-Text-01" },
+  { id: "moonshot", name: "Moonshot (Kimi)", prefix: "sk-", color: "#16191E",
+    docsUrl: "https://platform.moonshot.cn/console/api-keys",
+    baseUrl: "https://api.moonshot.cn/v1",
+    sampleModel: "moonshot-v1-128k" },
+  { id: "zhipu", name: "Zhipu (GLM)", prefix: "", color: "#3859FF",
+    docsUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    sampleModel: "glm-4-plus" },
+  { id: "yi", name: "01.AI (Yi)", prefix: "", color: "#003DFF",
+    docsUrl: "https://platform.lingyiwanwu.com/apikeys",
+    baseUrl: "https://api.lingyiwanwu.com/v1",
+    sampleModel: "yi-large" },
   { id: "custom", name: "Custom Provider", prefix: "", color: "#888", docsUrl: "" },
 ];
 
@@ -240,6 +302,34 @@ export default function LlmApiKeys() {
               <ExternalLink className="w-3 h-3" />
               Get your {getProvider(formProvider).name} API key
             </a>
+          )}
+
+          {/* OpenAI-compatible providers — surface the base URL + sample model
+              so the user can plug them into Codex / Cursor / Ollama / SDK
+              without leaving this screen. */}
+          {getProvider(formProvider).baseUrl && (
+            <div className="rounded-md border border-cs-border bg-cs-bg/40 p-3 space-y-1.5">
+              <p className="text-[10px] uppercase tracking-wide text-cs-muted">
+                OpenAI-compatible — use it with Codex, Cursor, or the SDK
+              </p>
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="text-cs-muted shrink-0">Base URL:</span>
+                <code className="flex-1 truncate font-mono text-cs-accent select-all">
+                  {getProvider(formProvider).baseUrl}
+                </code>
+              </div>
+              {getProvider(formProvider).sampleModel && (
+                <div className="flex items-center gap-2 text-[11px]">
+                  <span className="text-cs-muted shrink-0">Sample model:</span>
+                  <code className="flex-1 truncate font-mono text-cs-text select-all">
+                    {getProvider(formProvider).sampleModel}
+                  </code>
+                </div>
+              )}
+              <p className="text-[10px] text-cs-muted leading-relaxed pt-0.5">
+                Example: <code className="font-mono text-cs-text">OPENAI_BASE_URL={getProvider(formProvider).baseUrl} OPENAI_API_KEY=&lt;your key&gt; codex exec "..."</code>
+              </p>
+            </div>
           )}
 
           <div className="flex items-center gap-2 pt-2">

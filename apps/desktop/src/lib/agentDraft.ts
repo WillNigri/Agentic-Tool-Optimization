@@ -16,6 +16,10 @@ export interface QuickDraft {
   projectId: string | null;
   skills: string[];
   mcps: string[];
+  /** Files the agent should always be able to read. Saved as F2 Context
+   *  Hooks (kind: "file") on agent creation — content gets injected into a
+   *  <context> block on every turn, NOT into the system prompt. */
+  contextFiles: string[];
 }
 
 export interface GuidedDraft {

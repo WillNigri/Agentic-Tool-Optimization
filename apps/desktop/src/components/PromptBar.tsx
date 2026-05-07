@@ -20,6 +20,8 @@ import {
   Trash2,
   FolderKanban,
   Check,
+  Network,
+  ArrowRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listAgents, parseMemoryPolicy, type Agent } from "@/lib/agents";
@@ -41,6 +43,8 @@ import {
   type ChatThread,
 } from "@/lib/chatThreads";
 import { useProjectStore } from "@/stores/useProjectStore";
+import { useDemoStore } from "@/stores/useDemoStore";
+import { listAgentGroups, dispatchToGroup, type AgentGroup } from "@/lib/agentGroups";
 import type { AgentRuntime } from "@/components/cron/types";
 import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
 import MarkdownContent from "./MarkdownContent";
@@ -94,6 +98,9 @@ export default function PromptBar() {
   const [showRuntimePicker, setShowRuntimePicker] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
+  // Group dispatch — when set, prompt routes through the group's router
+  // instead of going to a single agent. Mutually exclusive with agentId.
+  const [groupSlug, setGroupSlug] = useState<string | null>(null);
   const [showThreadPicker, setShowThreadPicker] = useState(false);
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [renamingThread, setRenamingThread] = useState<{ id: string; title: string } | null>(null);
@@ -160,9 +167,21 @@ export default function PromptBar() {
     enabled: isTauri,
   });
 
+  const { data: runtimeGroups = [] } = useQuery({
+    queryKey: ["promptbar-groups", runtime],
+    queryFn: () => listAgentGroups(runtime as AgentRuntime),
+    staleTime: 30_000,
+    enabled: isTauri,
+  });
+
   const selectedAgent = useMemo(
     () => runtimeAgents.find((a) => a.id === agentId) ?? null,
     [runtimeAgents, agentId]
+  );
+
+  const selectedGroup = useMemo<AgentGroup | null>(
+    () => runtimeGroups.find((g) => g.slug === groupSlug) ?? null,
+    [runtimeGroups, groupSlug]
   );
 
   // Drop persisted agent if its runtime no longer matches.
@@ -186,13 +205,107 @@ export default function PromptBar() {
     [currentThreadId, queryClient, activeProjectId]
   );
 
+  // ── Demo mode plumbing ─────────────────────────────────────────────────
+
+  const demoIsPlaying = useDemoStore((s) => s.isPlaying);
+  const demoPendingRuntime = useDemoStore((s) => s.pendingRuntime);
+  const demoPendingInputText = useDemoStore((s) => s.pendingInputText);
+  const demoPendingSubmit = useDemoStore((s) => s.pendingSubmit);
+  const demoPendingNewThread = useDemoStore((s) => s.pendingNewThread);
+  const demoPendingSelectAgentSlug = useDemoStore((s) => s.pendingSelectAgentSlug);
+  const demoPendingSelectGroupSlug = useDemoStore((s) => s.pendingSelectGroupSlug);
+  const demoNotifyDispatchComplete = useDemoStore((s) => s.notifyDispatchComplete);
+
+  // While the demo is playing, mirror its input text into the field.
+  useEffect(() => {
+    if (demoIsPlaying) {
+      setInput(demoPendingInputText);
+    }
+  }, [demoIsPlaying, demoPendingInputText]);
+
+  // Demo asked for a runtime swap → swap.
+  useEffect(() => {
+    if (demoPendingRuntime) {
+      setRuntime(demoPendingRuntime);
+    }
+  }, [demoPendingRuntime]);
+
+  // Demo asked us to pick an agent by slug → look it up in the runtime list
+  // and set the agent picker. We re-run when runtimeAgents changes too, in
+  // case the agent was just created (it'll show up after the next refresh).
+  useEffect(() => {
+    if (!demoPendingSelectAgentSlug) return;
+    const found = runtimeAgents.find((a) => a.slug === demoPendingSelectAgentSlug);
+    if (found) {
+      setAgentId(found.id);
+      setGroupSlug(null);
+    }
+  }, [demoPendingSelectAgentSlug, runtimeAgents]);
+
+  // Demo asked us to pick a group → set the group picker.
+  useEffect(() => {
+    if (!demoPendingSelectGroupSlug) return;
+    setGroupSlug(demoPendingSelectGroupSlug);
+    setAgentId(null);
+  }, [demoPendingSelectGroupSlug]);
+
+  // Demo asked for a new thread.
+  useEffect(() => {
+    if (demoPendingNewThread > 0 && isTauri) {
+      void (async () => {
+        const t = await createChatThread({
+          title: "Demo · " + new Date().toLocaleTimeString(),
+          projectId: activeProjectId,
+          agentId: null,
+        });
+        setCurrentThreadId(t.id);
+        setAgentId(null);
+        setExpanded(true);
+        void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+      })();
+    }
+    // We deliberately depend on the bumping counter, not deeper state.
+  }, [demoPendingNewThread]);
+
+  // Demo asked us to submit. The pendingSubmit counter only increments while
+  // the demo is playing, so observing the count change is the trigger.
+  const lastSeenSubmitRef = useRef(0);
+  useEffect(() => {
+    if (!demoIsPlaying) {
+      lastSeenSubmitRef.current = demoPendingSubmit;
+      return;
+    }
+    if (demoPendingSubmit > lastSeenSubmitRef.current) {
+      lastSeenSubmitRef.current = demoPendingSubmit;
+      // Fire handleSubmit on the next tick so the input state has settled.
+      requestAnimationFrame(() => {
+        const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+        void handleSubmit(fakeEvent);
+      });
+    }
+  }, [demoPendingSubmit, demoIsPlaying]);
+
+  // When isLoading transitions from true → false during demo, signal the
+  // runner that the dispatch is done so it can advance.
+  const prevLoadingRef = useRef(false);
+  useEffect(() => {
+    const prev = prevLoadingRef.current;
+    prevLoadingRef.current = isLoading;
+    if (demoIsPlaying && prev && !isLoading) {
+      demoNotifyDispatchComplete();
+    }
+  }, [isLoading, demoIsPlaying, demoNotifyDispatchComplete]);
+
   // ── Auto-scroll ────────────────────────────────────────────────────────
+  // Scrolls on new messages AND while streaming so the bottom of the chat
+  // follows the live-typing tokens. Also runs on isLoading flips so the
+  // "thinking" placeholder is visible the moment it appears.
 
   useEffect(() => {
     if (expanded && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  }, [messages.length, expanded]);
+  }, [messages.length, expanded, streamingText, isLoading]);
 
   // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -262,9 +375,36 @@ export default function PromptBar() {
         : userContent;
 
       let response: string;
+      let routedTo: string | null = null;
+      let routingReason: string | null = null;
+      // Sequential groups produce multiple messages — one per stage. We
+      // collect them here and persist each as its own assistant bubble so
+      // humans can follow the pipeline (and so each stage acts as a real
+      // turn in the thread, which is how LLM-to-LLM relay works best).
+      let pipelineStages: { agentSlug: string; runtime: string; response: string }[] = [];
       setStreamingText("");
       try {
-        if (selectedAgent) {
+        if (selectedGroup) {
+          // Group dispatch — router picks (routed) or pipeline runs all
+          // children (sequential). Single round-trip; we still stitch
+          // thread history so the dispatcher sees recent context.
+          const history: AgentMessage[] = messagesToAgentHistory(messages);
+          const stitched = stitchThreadIntoPrompt(history, prompt);
+          const result = await dispatchToGroup({
+            slug: selectedGroup.slug,
+            prompt: stitched,
+          });
+          response = result.response;
+          routedTo = result.routedTo;
+          routingReason = result.routingReason;
+          if (result.stages && result.stages.length > 1) {
+            pipelineStages = result.stages.map((s) => ({
+              agentSlug: s.agentSlug,
+              runtime: s.runtime,
+              response: s.response,
+            }));
+          }
+        } else if (selectedAgent) {
           // Agent-attributed multi-turn streaming dispatch — full thread
           // history travels, plus the agent's variables / hooks / memory
           // policy / role models all fire.
@@ -298,14 +438,73 @@ export default function PromptBar() {
         setStreamingText("");
       }
 
-      await appendChatMessage({
-        threadId: thread.id,
-        role: "assistant",
-        content: response,
-        runtime,
-        agentSlug: selectedAgent?.slug ?? null,
-      });
-      refetchMessages(thread.id);
+      if (pipelineStages.length > 0) {
+        // Sequential group: persist each stage as its own assistant bubble
+        // so the conversation reads as Claude → Codex → … each with their
+        // own runtime badge, a "via {group}" attribution, and a stage badge.
+        // We deliberately stagger appends so the viewer SEES two messages
+        // arrive — without the pause they blur together and auto-scroll
+        // jumps straight to the bottom of the second one.
+        for (let i = 0; i < pipelineStages.length; i++) {
+          const stage = pipelineStages[i];
+          const isLast = i === pipelineStages.length - 1;
+          const detectedTools = Array.from(
+            new Set(stage.response.match(/mcp__[a-z0-9_-]+__[a-z0-9_-]+/gi) ?? [])
+          );
+          const meta: Record<string, unknown> = {
+            viaGroup: selectedGroup!.slug,
+            routingReason,
+            stagedFrom: pipelineStages[0].agentSlug,
+            stageOf: pipelineStages.length,
+            stageIndex: i,
+          };
+          if (detectedTools.length > 0) meta.toolsUsed = detectedTools;
+          const appended = await appendChatMessage({
+            threadId: thread.id,
+            role: "assistant",
+            content: stage.response,
+            runtime: stage.runtime,
+            agentSlug: stage.agentSlug,
+            metadata: JSON.stringify(meta),
+          });
+          await refetchMessages(thread.id);
+
+          // For non-final stages, scroll to the TOP of the just-appended
+          // bubble (not the bottom) so the viewer sees a clear divider
+          // before the next message arrives. Then dwell so the eye lands.
+          // Anchor each stage's top to viewport top so the runtime badge +
+          // stage pill are visible — this is the sequential-pipeline money
+          // shot. Without this the auto-scroll-to-end hides the boundary
+          // between stage 1 and stage 2.
+          await new Promise((r) => setTimeout(r, 60)); // let DOM paint
+          const el = document.querySelector<HTMLElement>(
+            `[data-message-id="${appended.id}"]`
+          );
+          el?.scrollIntoView({ behavior: "smooth", block: "start" });
+          if (!isLast) {
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+        }
+      } else {
+        // Routed group OR single agent OR no agent: one message.
+        const detectedTools = Array.from(
+          new Set(response.match(/mcp__[a-z0-9_-]+__[a-z0-9_-]+/gi) ?? [])
+        );
+        const meta: Record<string, unknown> = {};
+        if (routedTo) meta.routedTo = routedTo;
+        if (routingReason) meta.routingReason = routingReason;
+        if (selectedGroup) meta.viaGroup = selectedGroup.slug;
+        if (detectedTools.length > 0) meta.toolsUsed = detectedTools;
+        await appendChatMessage({
+          threadId: thread.id,
+          role: "assistant",
+          content: response,
+          runtime,
+          agentSlug: routedTo ?? selectedAgent?.slug ?? null,
+          metadata: Object.keys(meta).length > 0 ? JSON.stringify(meta) : null,
+        });
+        refetchMessages(thread.id);
+      }
       void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
     } catch (err) {
       // Try to record the error in the thread, but don't loop if append fails.
@@ -582,7 +781,17 @@ export default function PromptBar() {
                       <span className="inline-block w-1.5 h-3 bg-cs-accent ml-0.5 animate-pulse align-middle" />
                     </div>
                   ) : (
-                    <span className="text-xs text-cs-muted">{t("prompt.thinking")}</span>
+                    <span className="text-xs text-cs-muted">
+                      {selectedGroup
+                        ? t("prompt.routingThroughGroup", "Routing through {{group}}…", {
+                            group: selectedGroup.slug,
+                          })
+                        : selectedAgent
+                        ? t("prompt.thinkingWithAgent", "Thinking — @{{agent}}…", {
+                            agent: selectedAgent.slug,
+                          })
+                        : t("prompt.thinkingPlain", "Thinking…")}
+                    </span>
                   )}
                 </div>
               </div>
@@ -643,6 +852,7 @@ export default function PromptBar() {
           <button
             type="button"
             onClick={() => setShowRuntimePicker(!showRuntimePicker)}
+            data-demo-id="runtime-picker"
             className="flex items-center gap-1 px-2 py-1.5 rounded-lg border border-cs-border hover:border-opacity-60 transition-colors"
             style={{ borderColor: `${currentRuntime.color}40` }}
           >
@@ -689,53 +899,125 @@ export default function PromptBar() {
           )}
         </div>
 
-        {/* Agent selector */}
+        {/* Agent / Group selector */}
         <div className="relative shrink-0">
           <button
             type="button"
             onClick={() => setShowAgentPicker((v) => !v)}
+            data-demo-id="agent-picker"
             className={cn(
               "flex items-center gap-1 px-2 py-1.5 rounded-lg border transition-colors",
-              selectedAgent
+              selectedAgent || selectedGroup
                 ? "border-cs-accent/40 bg-cs-accent/5"
                 : "border-cs-border hover:border-cs-border/80"
             )}
-            title={t("prompt.agentPickerTitle", "Pick an agent to enable multi-turn memory")}
+            title={t("prompt.agentPickerTitle", "Pick an agent or group")}
           >
-            <Bot size={12} className={selectedAgent ? "text-cs-accent" : "text-cs-muted"} />
+            {selectedGroup ? (
+              <Network size={12} className="text-cs-accent" />
+            ) : (
+              <Bot size={12} className={selectedAgent ? "text-cs-accent" : "text-cs-muted"} />
+            )}
             <span
               className={cn(
                 "text-[10px] font-medium font-mono",
-                selectedAgent ? "text-cs-accent" : "text-cs-muted"
+                selectedAgent || selectedGroup ? "text-cs-accent" : "text-cs-muted"
               )}
             >
-              {selectedAgent ? `@${selectedAgent.slug}` : t("prompt.noAgent", "no agent")}
+              {selectedGroup
+                ? `${selectedGroup.slug}/`
+                : selectedAgent
+                ? `@${selectedAgent.slug}`
+                : t("prompt.noAgent", "no agent")}
             </span>
           </button>
 
           {showAgentPicker && (
             <>
               <div className="fixed inset-0 z-30" onClick={() => setShowAgentPicker(false)} />
-              <div className="absolute bottom-full left-0 mb-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
+              <div className="absolute bottom-full left-0 mb-1 w-72 max-h-80 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
+                {/* No-agent / single-shot row */}
                 <button
                   type="button"
                   onClick={() => {
                     setAgentId(null);
+                    setGroupSlug(null);
                     setShowAgentPicker(false);
                     void stickAgentToThread(null);
                   }}
                   className={cn(
                     "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors border-b border-cs-border",
-                    !agentId
+                    !agentId && !groupSlug
                       ? "bg-cs-accent/5 text-cs-accent"
                       : "text-cs-muted hover:bg-cs-bg"
                   )}
                 >
-                  {!agentId ? <Check size={11} /> : <X size={11} />}
+                  {!agentId && !groupSlug ? <Check size={11} /> : <X size={11} />}
                   <span>{t("prompt.noAgent", "no agent")}</span>
                   <span className="ml-auto text-[9px] text-cs-muted">single-shot</span>
                 </button>
-                {runtimeAgents.length === 0 ? (
+
+                {/* Groups section — when selected, prompt routes through the
+                    group's router. Shown above individual agents because
+                    they're the more powerful primitive. */}
+                {runtimeGroups.length > 0 && (
+                  <>
+                    <div className="px-3 py-1.5 text-[9px] uppercase tracking-wider text-cs-muted bg-cs-bg-raised/40 border-b border-cs-border">
+                      {t("prompt.groupsHeader", "Groups · routed dispatch")}
+                    </div>
+                    {runtimeGroups.map((g) => {
+                      const isActive = groupSlug === g.slug;
+                      const childCount = g.members.filter((m) => m.role === "child").length;
+                      return (
+                        <button
+                          key={g.id}
+                          type="button"
+                          onClick={() => {
+                            setGroupSlug(g.slug);
+                            setAgentId(null);
+                            setShowAgentPicker(false);
+                            void stickAgentToThread(null);
+                          }}
+                          className={cn(
+                            "w-full flex items-start gap-2 px-3 py-2 text-xs transition-colors text-left border-b border-cs-border/40",
+                            isActive ? "bg-cs-accent/5" : "hover:bg-cs-bg"
+                          )}
+                        >
+                          <Network
+                            size={11}
+                            className={cn(
+                              "shrink-0 mt-0.5",
+                              isActive ? "text-cs-accent" : "text-cs-muted"
+                            )}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <code
+                              className={cn(
+                                "font-mono truncate",
+                                isActive ? "text-cs-accent" : "text-cs-text"
+                              )}
+                            >
+                              {g.slug}
+                            </code>
+                            <p className="text-[9px] text-cs-muted truncate">
+                              {t("prompt.groupChildren", "{{n}} children · router routes per prompt", {
+                                n: childCount,
+                              })}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </>
+                )}
+
+                {/* Individual agents */}
+                {runtimeAgents.length > 0 && (
+                  <div className="px-3 py-1.5 text-[9px] uppercase tracking-wider text-cs-muted bg-cs-bg-raised/40 border-b border-cs-border">
+                    {t("prompt.agentsHeader", "Agents")}
+                  </div>
+                )}
+                {runtimeAgents.length === 0 && runtimeGroups.length === 0 ? (
                   <p className="px-3 py-3 text-[11px] text-cs-muted">
                     {t("prompt.noAgentsForRuntime", "No agents created for {{runtime}} yet.", {
                       runtime,
@@ -750,6 +1032,7 @@ export default function PromptBar() {
                         type="button"
                         onClick={() => {
                           setAgentId(a.id);
+                          setGroupSlug(null);
                           setShowAgentPicker(false);
                           void stickAgentToThread(a.id);
                         }}
@@ -889,7 +1172,7 @@ function ChatRow({ msg }: { msg: ChatMessage }) {
   }
 
   return (
-    <div className={cn("flex gap-2.5", justifyEnd ? "justify-end" : "justify-start")}>
+    <div data-message-id={msg.id} className={cn("flex gap-2.5", justifyEnd ? "justify-end" : "justify-start")}>
       {msg.role !== "user" && (
         <div
           className={cn(
@@ -919,19 +1202,61 @@ function ChatRow({ msg }: { msg: ChatMessage }) {
             : "bg-cs-bg border border-cs-border"
         )}
       >
-        {msg.role === "assistant" && runtime && (
-          <div className="flex items-center gap-1 mb-1">
-            <Icon size={10} style={{ color }} />
-            <span className="text-[9px] font-mono" style={{ color }}>
-              {runtime.label}
-            </span>
-            {msg.agentSlug && (
-              <span className="text-[9px] font-mono text-cs-muted ml-1">
-                · @{msg.agentSlug}
+        {msg.role === "assistant" && runtime && (() => {
+          // Parse metadata once per render — small JSON, cheap.
+          let meta: { routedTo?: string; routingReason?: string; viaGroup?: string; toolsUsed?: string[]; stageOf?: number; stageIndex?: number; stagedFrom?: string } = {};
+          if (msg.metadata) {
+            try {
+              meta = JSON.parse(msg.metadata);
+            } catch {
+              // ignore
+            }
+          }
+          return (
+            <div className="flex flex-wrap items-center gap-x-1 gap-y-1 mb-1.5">
+              <span className="inline-flex items-center gap-1 text-[9px] font-mono" style={{ color }}>
+                <Icon size={10} />
+                {runtime.label}
               </span>
-            )}
-          </div>
-        )}
+              {msg.agentSlug && (
+                <span className="inline-flex items-center gap-1 text-[9px] font-mono text-cs-muted">
+                  <span>·</span>
+                  <Bot size={9} />
+                  @{msg.agentSlug}
+                </span>
+              )}
+              {meta.viaGroup && (
+                <span className="inline-flex items-center gap-1 text-[9px] font-mono text-cs-accent">
+                  <ArrowRight size={9} />
+                  via <Network size={9} /> {meta.viaGroup}
+                </span>
+              )}
+              {meta.stageOf && meta.stageOf > 1 && (
+                <span
+                  className="inline-flex items-center gap-1 text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded bg-cs-accent/15 text-cs-accent"
+                  title="One step in a sequential pipeline"
+                >
+                  stage {(meta.stageIndex ?? 0) + 1} / {meta.stageOf}
+                </span>
+              )}
+              {meta.routingReason && (
+                <span
+                  className="text-[9px] text-cs-muted italic truncate max-w-[180px]"
+                  title={meta.routingReason}
+                >
+                  {meta.routingReason}
+                </span>
+              )}
+              {meta.toolsUsed && meta.toolsUsed.length > 0 && (
+                <span className="inline-flex items-center gap-1 text-[9px] font-mono text-cs-muted">
+                  <span>·</span>
+                  tools: {meta.toolsUsed.slice(0, 3).map((t) => t.replace(/^mcp__/, "")).join(", ")}
+                  {meta.toolsUsed.length > 3 && ` +${meta.toolsUsed.length - 3}`}
+                </span>
+              )}
+            </div>
+          );
+        })()}
         {msg.role === "assistant" ? (
           <MarkdownContent content={msg.content} />
         ) : (

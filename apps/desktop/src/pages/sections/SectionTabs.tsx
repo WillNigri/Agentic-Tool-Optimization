@@ -2,6 +2,7 @@ import { useState, useEffect, Suspense, type ComponentType } from "react";
 import { Loader2, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import { useUiStore } from "@/stores/useUiStore";
 
 // Shared tab strip + panel host for top-level sections (T1 IA collapse).
 // Each tab's `Component` should be a React.lazy(...) wrapper defined at module scope
@@ -34,6 +35,15 @@ export default function SectionTabs({ storageKey, tabs, defaultTab }: SectionTab
 
   const [active, setActive] = useState<string>(initial);
 
+  // External override: if useUiStore.subTabs[storageKey] is set, honor it.
+  // The demo runner uses this to switch sub-tabs without racing localStorage.
+  const externalActive = useUiStore((s) => s.subTabs[storageKey] ?? null);
+  useEffect(() => {
+    if (externalActive && externalActive !== active && tabs.some((t) => t.id === externalActive)) {
+      setActive(externalActive);
+    }
+  }, [externalActive, active, tabs]);
+
   useEffect(() => {
     try {
       localStorage.setItem(storageKey, active);
@@ -60,7 +70,14 @@ export default function SectionTabs({ storageKey, tabs, defaultTab }: SectionTab
               key={t.id}
               role="tab"
               aria-selected={isActive}
-              onClick={() => setActive(t.id)}
+              onClick={() => {
+                setActive(t.id);
+                // Clear any external override (e.g. from a finished demo run)
+                // so the user's click is the source of truth — otherwise the
+                // controlling effect would race and revert.
+                useUiStore.getState().setSubTab(storageKey, null);
+              }}
+              data-demo-id={`subtab-${storageKey}-${t.id}`}
               className={cn(
                 "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap",
                 isActive

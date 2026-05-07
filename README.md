@@ -1,13 +1,18 @@
 # ATO — Agentic Tool Optimization
 
-**The GUI for daily agentic work.** Persistent multi-runtime conversations, production-grade agent authoring, and observability — across **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, and **Ollama**. Without editing JSON. Without leaving the app.
+**AI agents that work together. Across every runtime.** Build automation pipelines where Claude writes, Codex reviews, and Gemini summarizes — all in one thread. Multi-runtime by protocol. Local-first. MIT.
 
-Switch from Claude to Codex mid-conversation. Variables, hooks, and memory policies travel. Threads persist across restart. Markdown renders. Tokens stream.
+Two group types make this real:
+
+- **Routed groups** — single prompt → router picks the right specialist child (keyword rules + LLM-classifier fallback).
+- **Sequential automations** *(new)* — single prompt → children run in order, each agent's output flows into the next as input. **Each child runs on its own runtime**, so you can chain Claude → Codex → Gemini in a single pipeline.
+
+Supported: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, **Ollama** — plus DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi as API providers.
 
 ### Three audiences, one app
 
 - **First-time users** — chat-style guided wizard ("describe what you want") suggests runtime, model, skills, MCPs. Or pick a starter template. Working agent in under two minutes.
-- **Power users** — Quick form, command palette (⌘K), embedded `portable-pty` terminal, persistent threads, drag-drop file attachments, streaming responses with syntax-highlighted markdown.
+- **Power users** — Quick form, command palette (⌘K), embedded `portable-pty` terminal, persistent threads, drag-drop file attachments, streaming responses with syntax-highlighted markdown, sequential automation pipelines.
 - **Teams** — cloud sync, shared agents, team-wide observability, SSO, audit retention via the optional Pro / Team tier.
 
 Bring your own auth: ATO rides your existing logged-in CLI subscriptions (Claude Code, Codex, Gemini CLI) the way VS Code rides your GitHub login — *or* you can use stored API keys. Your choice, per runtime.
@@ -92,7 +97,7 @@ Every principle from the [context engineering literature](https://nigri.substack
 - **Variables** — `{user_name}` style templates with resolvers: static, env var, project path, file (Free) + db-query, computed expressions, MCP call (Pro).
 - **Pre-call context hooks** — ordered list of resolvers that fire before each turn and inject results into the user message inside `<context>...</context>` tags.
 - **Conversation summarizers** — per-agent memory policy (`summarizeAfter`, `keepLastK`, custom summarizer model). Long sessions auto-compact.
-- **Multi-agent groups** — router + N children. Visual graph editor with router-in-the-middle, hover-to-inspect rules. Routing via keyword rules + LLM-classifier fallback.
+- **Multi-agent groups** — two types: **Routed** (router picks one child per prompt — keyword rules + LLM-classifier fallback) and **Sequential automation pipeline** (children run in `position` order, each agent's output feeds the next as input; cross-runtime chains like Claude → Codex → Gemini work natively).
 - **Per-task models** — distinct models for routing / summarizing / responding / evaluating. Cheap fast for routing, advanced for response.
 - **Observability** — per-agent metrics (run count, p50/p95 latency, success rate), trace explorer with full sequence (variables → hooks → router → response).
 - **Evaluators** — heuristic kinds (contains / not-contains / length-range / tool-called) run locally; LLM-as-judge runs Pro cloud-side. Manual + scheduled batch — never live on every dispatch.
@@ -173,7 +178,9 @@ Each call records: model, tokens (input/output/cached), cost (USD), duration, st
 | Variables — db-query / computed / MCP-call | – | ✅ | ✅ | ✅ |
 | Pre-call context hooks | – | ✅ | ✅ | ✅ |
 | Tunable summarizer policy | – | ✅ | ✅ | ✅ |
-| Multi-agent groups | up to 3 children | unlimited | unlimited + shared | unlimited |
+| Routed groups (router picks one) | up to 3 children | unlimited | unlimited + shared | unlimited |
+| Sequential automation pipelines | up to 3 stages | unlimited | unlimited + shared | unlimited |
+| Cross-runtime children in pipelines | ✅ | ✅ | ✅ | ✅ |
 | Visual group graph editor | view-only | edit | edit + collab | edit + audit |
 | Per-task model selection | – | ✅ | ✅ | ✅ |
 | Local trace history | last 100 runs | unlimited | unlimited | unlimited |

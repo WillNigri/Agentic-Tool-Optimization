@@ -2687,6 +2687,27 @@ pub async fn prompt_agent(runtime: String, prompt: String, config: Option<String
                 Err(format!("Hermes error: {}", String::from_utf8_lossy(&output.stderr)))
             }
         }
+        "gemini" => {
+            let gemini_path = which_cli("gemini").ok_or_else(|| {
+                "Gemini CLI not found. Install: npm install -g @google/gemini-cli".to_string()
+            })?;
+            // gemini CLI: `gemini -p "<prompt>" [-m <model>]`
+            let mut args: Vec<String> = vec!["-p".into(), prompt.clone()];
+            if let Some(m) = &model_override {
+                args.push("-m".into());
+                args.push(m.clone());
+            }
+            let output = Command::new(&gemini_path)
+                .args(&args)
+                .env("PATH", &user_path)
+                .output()
+                .map_err(|e| format!("Failed to run gemini: {}", e))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                Err(format!("Gemini error: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
         _ => Err(format!("Unknown runtime: {}", runtime)),
     }
 }
@@ -2879,8 +2900,11 @@ pub fn get_cron_history(job_id: String) -> Result<Vec<serde_json::Value>, String
 }
 
 #[tauri::command]
-pub async fn trigger_cron_job(id: String) -> Result<String, String> {
-    // Read the job to get its prompt and runtime
+pub async fn trigger_cron_job(
+    db: State<'_, DbState>,
+    id: String,
+) -> Result<String, String> {
+    // Read the job from disk.
     let path = cron_jobs_path();
     if !path.exists() {
         return Err("No cron jobs configured".to_string());
@@ -2894,7 +2918,51 @@ pub async fn trigger_cron_job(id: String) -> Result<String, String> {
     let runtime = job.get("runtime").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
     let prompt = job.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let config = job.get("runtimeConfig").map(|v| v.to_string());
+    let agent_slug = job.get("agentSlug").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let group_slug = job.get("groupSlug").and_then(|v| v.as_str()).map(|s| s.to_string());
 
+    // Preferred dispatch order: group → agent → raw runtime+prompt.
+    if let Some(slug) = group_slug {
+        // Sequential pipelines & routed groups both go through dispatch_to_group;
+        // it returns a stitched transcript suitable as a single string result.
+        let result = dispatch_to_group(db, slug, prompt, config, None).await?;
+        return Ok(result.response);
+    }
+
+    if let Some(slug) = agent_slug {
+        // Look up the agent by slug → run via prompt_agent_with_context so
+        // variables / hooks / role-models / memory policy all fire.
+        let agent_id_runtime: Option<(String, String)> = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT id, runtime FROM agents WHERE slug = ?1",
+                rusqlite::params![slug],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok()
+        };
+        match agent_id_runtime {
+            Some((agent_id, agent_runtime)) => {
+                return prompt_agent_with_context(
+                    db,
+                    agent_id,
+                    agent_runtime,
+                    prompt,
+                    config,
+                    None,
+                )
+                .await;
+            }
+            None => {
+                return Err(format!(
+                    "Cron job references agent '{}' which doesn't exist anymore",
+                    slug
+                ));
+            }
+        }
+    }
+
+    // Fallback: raw dispatch (legacy / advanced).
     prompt_agent(runtime, prompt, config).await
 }
 
@@ -5140,6 +5208,7 @@ pub fn get_agent_context_preview(runtime: String) -> Result<ContextPreview, Stri
     let limit = match runtime.as_str() {
         "claude" => 200000u64,
         "codex" => 128000u64,
+        "gemini" => 1000000u64, // Gemini 1.5/2.x have 1M-token windows
         "hermes" => 128000u64,
         "openclaw" => 128000u64,
         _ => 100000u64,
@@ -7564,7 +7633,7 @@ pub fn add_execution_log(
 pub fn get_health_status(db: State<'_, DbState>) -> Result<Vec<RuntimeHealth>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    let runtimes = vec!["claude", "codex", "hermes", "openclaw"];
+    let runtimes = vec!["claude", "codex", "gemini", "hermes", "openclaw"];
     let mut health_list = Vec::new();
 
     for runtime in runtimes {
@@ -9534,6 +9603,25 @@ pub fn update_agent_role_models(
     Ok(())
 }
 
+/// Update the MCPs attached to an agent. Stored as a JSON-encoded string
+/// array in `agents.mcps`. Used by the one-click "Add browser tools" button
+/// and any future "attach MCP to agent" UX.
+#[tauri::command]
+pub fn update_agent_mcps(
+    db: State<'_, DbState>,
+    id: String,
+    mcps: Vec<String>,
+) -> Result<(), String> {
+    let json = serde_json::to_string(&mcps).map_err(|e| e.to_string())?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agents SET mcps = ?1 WHERE id = ?2",
+        params![json, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_agent(db: State<'_, DbState>, id: String, delete_file: Option<bool>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -11133,7 +11221,7 @@ pub struct GroupMemberInput {
 
 fn load_group_members(conn: &Connection, group_id: &str) -> Vec<AgentGroupMember> {
     let mut stmt = match conn.prepare(
-        "SELECT m.agent_id, a.slug, a.display_name, m.role, m.position
+        "SELECT m.agent_id, a.slug, a.display_name, m.role, m.position, a.runtime
          FROM agent_group_members m
          JOIN agents a ON a.id = m.agent_id
          WHERE m.group_id = ?1
@@ -11149,6 +11237,7 @@ fn load_group_members(conn: &Connection, group_id: &str) -> Vec<AgentGroupMember
             agent_display_name: row.get(2)?,
             role: row.get(3)?,
             position: row.get(4)?,
+            agent_runtime: row.get(5)?,
         })
     }) {
         Ok(r) => r,
@@ -11191,6 +11280,9 @@ pub fn create_agent_group(
     description: Option<String>,
     router_config_json: Option<String>,
     members: Vec<GroupMemberInput>,
+    // "routed" (default — router picks one child) or "sequential" (children
+    // run in order; previous output flows into next input).
+    dispatch_kind: Option<String>,
 ) -> Result<AgentGroup, String> {
     if display_name.trim().is_empty() {
         return Err("display_name cannot be empty".into());
@@ -11198,6 +11290,10 @@ pub fn create_agent_group(
     let allowed_runtimes = ["claude", "codex", "gemini", "openclaw", "hermes"];
     if !allowed_runtimes.contains(&runtime.as_str()) {
         return Err(format!("Unsupported runtime: {}", runtime));
+    }
+    let dispatch_kind = dispatch_kind.unwrap_or_else(|| "routed".to_string());
+    if dispatch_kind != "routed" && dispatch_kind != "sequential" {
+        return Err(format!("Unsupported dispatch_kind: {}", dispatch_kind));
     }
     if let Some(ref cfg) = router_config_json {
         serde_json::from_str::<serde_json::Value>(cfg)
@@ -11230,7 +11326,11 @@ pub fn create_agent_group(
         );
         match row {
             Ok((agent_id, slug_, display, agent_runtime)) => {
-                if agent_runtime != runtime {
+                // Routed groups: router runs once on group.runtime, so all
+                //   children MUST share that runtime.
+                // Sequential groups: each child runs on its OWN runtime in
+                //   turn, so cross-runtime pipelines (Claude → Codex) work.
+                if dispatch_kind != "sequential" && agent_runtime != runtime {
                     return Err(format!(
                         "Member '{}' uses runtime '{}', but group runtime is '{}'",
                         slug_, agent_runtime, runtime
@@ -11242,6 +11342,7 @@ pub fn create_agent_group(
                     agent_display_name: display,
                     role: m.role.clone(),
                     position: m.position,
+                    agent_runtime: agent_runtime.clone(),
                 });
             }
             Err(_) => return Err(format!("Agent with slug '{}' not found", m.agent_slug)),
@@ -11251,9 +11352,9 @@ pub fn create_agent_group(
     // Insert group + members atomically.
     let tx_result: Result<(), String> = (|| {
         conn.execute(
-            "INSERT INTO agent_groups (id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)",
-            params![id, slug, display_name, description, runtime, router_config_json, now],
+            "INSERT INTO agent_groups (id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, ?8)",
+            params![id, slug, display_name, description, runtime, router_config_json, now, dispatch_kind],
         )
         .map_err(|e| {
             let msg = e.to_string();
@@ -11292,6 +11393,7 @@ pub fn create_agent_group(
         created_at: now,
         last_used_at: None,
         members: resolved_members,
+        dispatch_kind,
     };
 
     // Persist the file mirror; non-fatal on failure (agent still works in-DB).
@@ -11317,14 +11419,14 @@ pub fn list_agent_groups(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let (sql, has_filter) = if runtime.is_some() {
         (
-            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind
              FROM agent_groups WHERE runtime = ?1
              ORDER BY COALESCE(last_used_at, created_at) DESC".to_string(),
             true,
         )
     } else {
         (
-            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind
              FROM agent_groups
              ORDER BY COALESCE(last_used_at, created_at) DESC".to_string(),
             false,
@@ -11342,6 +11444,7 @@ pub fn list_agent_groups(
             file_path: row.get(6)?,
             created_at: row.get(7)?,
             last_used_at: row.get(8)?,
+            dispatch_kind: row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "routed".to_string()),
             members: Vec::new(), // filled in below
         })
     };
@@ -11369,7 +11472,7 @@ pub fn get_agent_group(db: State<'_, DbState>, slug: String) -> Result<AgentGrou
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut group = conn
         .query_row(
-            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind
              FROM agent_groups WHERE slug = ?1",
             params![slug],
             |row| {
@@ -11383,6 +11486,7 @@ pub fn get_agent_group(db: State<'_, DbState>, slug: String) -> Result<AgentGrou
                     file_path: row.get(6)?,
                     created_at: row.get(7)?,
                     last_used_at: row.get(8)?,
+                    dispatch_kind: row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "routed".to_string()),
                     members: Vec::new(),
                 })
             },
@@ -11592,10 +11696,26 @@ async fn route_prompt_to_child(
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct GroupStageResult {
+    pub agent_slug: String,
+    pub runtime: String,
+    pub response: String,
+    pub ok: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupDispatchResult {
+    /// Stitched transcript of all stages (or single response for routed
+    /// groups). Frontend may render this OR walk `stages` to render each
+    /// stage as its own message.
     pub response: String,
     pub routed_to: String,
     pub routing_reason: String,
+    /// One entry per stage. Routed groups have exactly one; sequential
+    /// groups have one per child in pipeline order.
+    #[serde(default)]
+    pub stages: Vec<GroupStageResult>,
 }
 
 /// Tauri command: dispatch a prompt through a group's router.
@@ -11611,7 +11731,7 @@ pub async fn dispatch_to_group(
     let group = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let mut group = conn.query_row(
-            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind
              FROM agent_groups WHERE slug = ?1",
             params![slug],
             |row| {
@@ -11625,6 +11745,7 @@ pub async fn dispatch_to_group(
                     file_path: row.get(6)?,
                     created_at: row.get(7)?,
                     last_used_at: row.get(8)?,
+                    dispatch_kind: row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "routed".to_string()),
                     members: Vec::new(),
                 })
             },
@@ -11633,7 +11754,14 @@ pub async fn dispatch_to_group(
         group
     };
 
-    // Pick a child via the router.
+    // Branch on dispatch kind. Sequential walks every child in position
+    // order, feeding the previous output as input to the next; final
+    // response is a stitched transcript so the user sees each stage.
+    if group.dispatch_kind == "sequential" {
+        return run_sequential_dispatch(&group, &prompt, config.as_deref()).await;
+    }
+
+    // Routed (default): router picks a single child.
     let (child_slug, reason) = route_prompt_to_child(&group, &prompt).await?;
 
     // Find the child agent's id so we can use prompt_agent_with_context.
@@ -11669,9 +11797,98 @@ pub async fn dispatch_to_group(
     }
 
     Ok(GroupDispatchResult {
-        response,
-        routed_to: child_slug,
+        response: response.clone(),
+        routed_to: child_slug.clone(),
         routing_reason: reason,
+        stages: vec![GroupStageResult {
+            agent_slug: child_slug,
+            runtime: group.runtime.clone(),
+            response,
+            ok: true,
+        }],
+    })
+}
+
+/// Sequential / "automation" dispatch: walk children in `position` order,
+/// feed the prompt to the first child, then feed each output as input to
+/// the next. Returns a stitched transcript so the user sees what each stage
+/// produced.
+async fn run_sequential_dispatch(
+    group: &AgentGroup,
+    user_prompt: &str,
+    config: Option<&str>,
+) -> Result<GroupDispatchResult, String> {
+    let mut children: Vec<&AgentGroupMember> = group
+        .members
+        .iter()
+        .filter(|m| m.role == "child")
+        .collect();
+    children.sort_by_key(|m| m.position);
+
+    if children.is_empty() {
+        return Err("Sequential group has no children".into());
+    }
+
+    let mut transcript = String::new();
+    let mut stage_results: Vec<GroupStageResult> = Vec::new();
+    let mut last_output = user_prompt.to_string();
+
+    for (i, child) in children.iter().enumerate() {
+        let stage_prompt = if i == 0 {
+            user_prompt.to_string()
+        } else {
+            format!(
+                "Previous step produced this output:\n\n{}\n\n---\n\nOriginal task: {}\n\nYour task: act on the previous output per your instructions.",
+                last_output, user_prompt
+            )
+        };
+
+        // Each child runs on its OWN runtime. Sequential groups can chain
+        // Claude → Codex → Gemini etc. — that's the whole point.
+        let child_runtime = if child.agent_runtime.is_empty() {
+            group.runtime.clone()
+        } else {
+            child.agent_runtime.clone()
+        };
+        let (stage_response, ok) = match prompt_agent(
+            child_runtime.clone(),
+            stage_prompt,
+            config.map(|s| s.to_string()),
+        )
+        .await
+        {
+            Ok(r) => (r, true),
+            Err(e) => (format!("(stage '{}' on {} failed: {})", child.agent_slug, child_runtime, e), false),
+        };
+
+        if !transcript.is_empty() {
+            transcript.push_str("\n\n---\n\n");
+        }
+        transcript.push_str(&format!(
+            "**@{}** _({})_\n\n{}",
+            child.agent_slug, child_runtime, stage_response
+        ));
+        stage_results.push(GroupStageResult {
+            agent_slug: child.agent_slug.clone(),
+            runtime: child_runtime,
+            response: stage_response.clone(),
+            ok,
+        });
+        last_output = stage_response;
+    }
+
+    let stage_labels: Vec<String> = stage_results
+        .iter()
+        .map(|s| format!("{} ({})", s.agent_slug, s.runtime))
+        .collect();
+    let routed_to = children.last().map(|c| c.agent_slug.clone()).unwrap_or_default();
+    let routing_reason = format!("Sequential pipeline: {}", stage_labels.join(" → "));
+
+    Ok(GroupDispatchResult {
+        response: transcript,
+        routed_to,
+        routing_reason,
+        stages: stage_results,
     })
 }
 
@@ -12367,6 +12584,17 @@ async fn spawn_streaming_dispatch(
             c.arg("--execute").arg(prompt);
             c
         }
+        "gemini" => {
+            let gemini_path = which_cli("gemini")
+                .ok_or_else(|| "Gemini CLI not found. Install: npm install -g @google/gemini-cli".to_string())?;
+            let mut c = TokioCommand::new(gemini_path);
+            // Gemini CLI: `gemini -p "<prompt>" [-m <model>]`
+            c.arg("-p").arg(prompt);
+            if let Some(m) = &model_override {
+                c.arg("-m").arg(m);
+            }
+            c
+        }
         other => {
             let _ = on_event.send(StreamEvent::Error {
                 message: format!("Unknown runtime: {}", other),
@@ -12451,6 +12679,940 @@ async fn spawn_streaming_dispatch(
     }
 
     Ok(())
+}
+
+// ── Headless cron dispatch (v1.6 wake-from-sleep groundwork) ─────────────
+//
+// `ato-desktop --run-cron <id>` invokes this from outside the GUI. Used by
+// OS-level schedulers (launchd on macOS today; systemd / Task Scheduler
+// later) so jobs fire even when the app isn't open.
+//
+// Mirrors trigger_cron_job's logic but runs against a freshly-opened DB
+// connection, blocks on a tokio runtime, and exits with an integer status
+// code so launchd records success/failure.
+
+pub fn run_cron_headless(job_id: String) -> i32 {
+    let log_dir = home_dir().join(".ato").join("cron-logs");
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join(format!("{}.log", job_id));
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = fs::write(&log_path, format!("[error] tokio init: {}\n", e));
+            return 1;
+        }
+    };
+
+    let result = runtime.block_on(async { dispatch_cron_headless(&job_id).await });
+
+    let now = chrono::Utc::now().to_rfc3339();
+    match result {
+        Ok(response) => {
+            let entry = format!("[{}] [ok] job={}\n{}\n", now, job_id, response);
+            let _ = append_to_file(&log_path, &entry);
+            0
+        }
+        Err(e) => {
+            let entry = format!("[{}] [err] job={}: {}\n", now, job_id, e);
+            let _ = append_to_file(&log_path, &entry);
+            1
+        }
+    }
+}
+
+fn append_to_file(path: &PathBuf, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    f.write_all(content.as_bytes())?;
+    Ok(())
+}
+
+async fn dispatch_cron_headless(job_id: &str) -> Result<String, String> {
+    // Read the job from disk (same shape as trigger_cron_job).
+    let path = cron_jobs_path();
+    if !path.exists() {
+        return Err("No cron jobs configured".into());
+    }
+    let content = read_file_lossy(&path).unwrap_or_default();
+    let jobs: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+    let job = jobs
+        .iter()
+        .find(|j| j.get("id").and_then(|v| v.as_str()) == Some(job_id))
+        .ok_or_else(|| format!("Cron job not found: {}", job_id))?;
+
+    let runtime = job.get("runtime").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+    let prompt = job.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let config = job.get("runtimeConfig").map(|v| v.to_string());
+    let agent_slug = job.get("agentSlug").and_then(|v| v.as_str()).map(String::from);
+    let group_slug = job.get("groupSlug").and_then(|v| v.as_str()).map(String::from);
+
+    // Open the DB ourselves — we're outside the Tauri State context.
+    let db_path = crate::get_db_path();
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => return Err(format!("open db: {}", e)),
+    };
+
+    if let Some(slug) = group_slug {
+        // Replicate dispatch_to_group's logic without needing State<DbState>.
+        return headless_dispatch_group(&conn, &slug, &prompt, config.as_deref()).await;
+    }
+
+    if let Some(slug) = agent_slug {
+        let agent_lookup: Option<(String, String)> = conn
+            .query_row(
+                "SELECT id, runtime FROM agents WHERE slug = ?1",
+                params![slug],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok();
+        match agent_lookup {
+            Some((agent_id, agent_runtime)) => {
+                return headless_dispatch_agent(&conn, &agent_id, &agent_runtime, &prompt, config.as_deref()).await;
+            }
+            None => return Err(format!("Cron references missing agent slug '{}'", slug)),
+        }
+    }
+
+    prompt_agent(runtime, prompt, config).await
+}
+
+async fn headless_dispatch_agent(
+    conn: &Connection,
+    agent_id: &str,
+    runtime: &str,
+    prompt: &str,
+    config: Option<&str>,
+) -> Result<String, String> {
+    // Same shape as prompt_agent_with_context but doesn't need State<DbState>.
+    let resolved = resolve_agent_variables(conn, agent_id, None);
+    let hooks = load_agent_hooks(conn, agent_id);
+    let (response_model, fallback_model) = load_agent_response_model(conn, agent_id);
+
+    let rendered = substitute_variables(prompt, &resolved);
+    let context_block = run_pre_call_hooks(hooks).await;
+    let final_prompt = if context_block.is_empty() {
+        rendered
+    } else {
+        format!("{}{}", context_block, rendered)
+    };
+
+    let merged_config = merge_model_into_config(
+        config.map(|s| s.to_string()),
+        response_model,
+        fallback_model,
+    );
+    prompt_agent(runtime.to_string(), final_prompt, merged_config).await
+}
+
+async fn headless_dispatch_group(
+    conn: &Connection,
+    slug: &str,
+    prompt: &str,
+    config: Option<&str>,
+) -> Result<String, String> {
+    let mut group = conn
+        .query_row(
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind
+             FROM agent_groups WHERE slug = ?1",
+            params![slug],
+            |row| {
+                Ok(AgentGroup {
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    display_name: row.get(2)?,
+                    description: row.get(3)?,
+                    runtime: row.get(4)?,
+                    router_config: row.get(5)?,
+                    file_path: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                    dispatch_kind: row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "routed".to_string()),
+                    members: Vec::new(),
+                })
+            },
+        )
+        .map_err(|e| format!("Group '{}' not found: {}", slug, e))?;
+    group.members = load_group_members(conn, &group.id);
+
+    if group.dispatch_kind == "sequential" {
+        return run_sequential_dispatch(&group, prompt, config)
+            .await
+            .map(|r| r.response);
+    }
+
+    let (child_slug, _reason) = route_prompt_to_child(&group, prompt).await?;
+    let child_agent: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, runtime FROM agents WHERE slug = ?1",
+            params![child_slug],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok();
+    match child_agent {
+        Some((agent_id, agent_runtime)) => {
+            headless_dispatch_agent(conn, &agent_id, &agent_runtime, prompt, config).await
+        }
+        None => Err(format!("Routed child '{}' not found", child_slug)),
+    }
+}
+
+// ── Cron → launchd (macOS) ───────────────────────────────────────────────
+//
+// Translate the user's cron expression into one or more
+// StartCalendarInterval entries that launchd understands. launchd doesn't
+// support cron's full grammar (no ranges/steps/lists) — we expand to a
+// cross-product of concrete entries. Common cases (fixed time daily,
+// weekday-only, hourly, every-N-minutes) work; exotic expressions return
+// an error and the user gets the in-app scheduler instead.
+
+#[derive(Debug, Clone, Default)]
+struct CalInterval {
+    minute: Option<u32>,
+    hour: Option<u32>,
+    day: Option<u32>,
+    month: Option<u32>,
+    weekday: Option<u32>,
+}
+
+fn parse_cron_field(field: &str, min: u32, max_excl: u32) -> Result<Vec<Option<u32>>, String> {
+    if field == "*" {
+        return Ok(vec![None]);
+    }
+    let mut out: Vec<u32> = Vec::new();
+    for chunk in field.split(',') {
+        if let Some(stripped) = chunk.strip_prefix("*/") {
+            // Step: */N
+            let step: u32 = stripped.parse().map_err(|_| format!("bad step: {}", chunk))?;
+            if step == 0 {
+                return Err("step cannot be 0".into());
+            }
+            let mut v = min;
+            while v < max_excl {
+                out.push(v);
+                v += step;
+            }
+        } else if let Some((lo, hi)) = chunk.split_once('-') {
+            let lo: u32 = lo.parse().map_err(|_| format!("bad range start: {}", chunk))?;
+            let hi: u32 = hi.parse().map_err(|_| format!("bad range end: {}", chunk))?;
+            if lo > hi || hi >= max_excl || lo < min {
+                return Err(format!("range out of bounds: {}", chunk));
+            }
+            for v in lo..=hi {
+                out.push(v);
+            }
+        } else {
+            let v: u32 = chunk.parse().map_err(|_| format!("bad field: {}", chunk))?;
+            if v < min || v >= max_excl {
+                return Err(format!("value out of bounds: {}", chunk));
+            }
+            out.push(v);
+        }
+    }
+    Ok(out.into_iter().map(Some).collect())
+}
+
+fn cron_to_launchd_intervals(cron: &str) -> Result<Vec<CalInterval>, String> {
+    let parts: Vec<&str> = cron.split_whitespace().collect();
+    if parts.len() != 5 {
+        return Err("cron must have 5 fields (minute hour day month weekday)".into());
+    }
+    let minutes = parse_cron_field(parts[0], 0, 60)?;
+    let hours = parse_cron_field(parts[1], 0, 24)?;
+    let days = parse_cron_field(parts[2], 1, 32)?;
+    let months = parse_cron_field(parts[3], 1, 13)?;
+    // launchd weekday: 0 (Sunday) - 6 (Saturday). Cron same.
+    let weekdays = parse_cron_field(parts[4], 0, 7)?;
+
+    let mut out = Vec::new();
+    for &m in &minutes {
+        for &h in &hours {
+            for &d in &days {
+                for &mon in &months {
+                    for &w in &weekdays {
+                        out.push(CalInterval {
+                            minute: m,
+                            hour: h,
+                            day: d,
+                            month: mon,
+                            weekday: w,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if out.len() > 100 {
+        return Err(format!(
+            "cron expression expands to {} launchd entries (max 100)",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
+fn interval_to_plist_dict(iv: &CalInterval) -> String {
+    let mut out = String::from("    <dict>\n");
+    if let Some(v) = iv.minute  { out.push_str(&format!("      <key>Minute</key><integer>{}</integer>\n", v)); }
+    if let Some(v) = iv.hour    { out.push_str(&format!("      <key>Hour</key><integer>{}</integer>\n", v)); }
+    if let Some(v) = iv.day     { out.push_str(&format!("      <key>Day</key><integer>{}</integer>\n", v)); }
+    if let Some(v) = iv.month   { out.push_str(&format!("      <key>Month</key><integer>{}</integer>\n", v)); }
+    if let Some(v) = iv.weekday { out.push_str(&format!("      <key>Weekday</key><integer>{}</integer>\n", v)); }
+    out.push_str("    </dict>\n");
+    out
+}
+
+fn build_launchd_plist(job_id: &str, ato_binary: &str, cron: &str, log_dir: &str) -> Result<String, String> {
+    let intervals = cron_to_launchd_intervals(cron)?;
+    let label = format!("ai.agentictool.cron-{}", job_id);
+
+    let interval_xml = if intervals.len() == 1 {
+        interval_to_plist_dict(&intervals[0])
+    } else {
+        let mut s = String::from("    <array>\n");
+        for iv in &intervals {
+            // Indent one extra level inside the array.
+            for line in interval_to_plist_dict(iv).lines() {
+                s.push_str("    ");
+                s.push_str(line);
+                s.push('\n');
+            }
+        }
+        s.push_str("    </array>\n");
+        s
+    };
+
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{binary}</string>
+    <string>--run-cron</string>
+    <string>{job_id}</string>
+  </array>
+  <key>StartCalendarInterval</key>
+{intervals}  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>{log_dir}/{job_id}.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{log_dir}/{job_id}.err.log</string>
+</dict>
+</plist>
+"#,
+        label = label,
+        binary = ato_binary,
+        job_id = job_id,
+        intervals = interval_xml,
+        log_dir = log_dir,
+    ))
+}
+
+fn launchd_plist_path(job_id: &str) -> PathBuf {
+    home_dir()
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("ai.agentictool.cron-{}.plist", job_id))
+}
+
+fn current_ato_binary_path() -> Result<String, String> {
+    // The path of the running binary. When the OS scheduler later invokes
+    // the unit, it'll exec this same binary with --run-cron <id>.
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+    Ok(exe.to_string_lossy().to_string())
+}
+
+// ── Linux: systemd --user timers ─────────────────────────────────────────
+//
+// Each cron job becomes a (.service, .timer) pair under
+// `~/.config/systemd/user/`. The timer's OnCalendar field is derived from
+// the cron expression — systemd's calendar grammar is a superset of cron
+// (supports `*`, ranges with `..`, lists, and steps), so the mapping is
+// mostly direct. Wake-from-sleep (`WakeSystem=true`) requires polkit + a
+// configured RTC and isn't always honored — we set it as best-effort and
+// rely on systemd to fire on next-boot via `Persistent=true` for any
+// firings that were missed during sleep.
+
+fn cron_to_systemd_oncalendar(cron: &str) -> Result<String, String> {
+    let parts: Vec<&str> = cron.split_whitespace().collect();
+    if parts.len() != 5 {
+        return Err("cron must have 5 fields (minute hour day month weekday)".into());
+    }
+    // Validate each field by reusing the launchd parser — same grammar.
+    parse_cron_field(parts[0], 0, 60)?;
+    parse_cron_field(parts[1], 0, 24)?;
+    parse_cron_field(parts[2], 1, 32)?;
+    parse_cron_field(parts[3], 1, 13)?;
+    parse_cron_field(parts[4], 0, 7)?;
+
+    let translate_step = |field: &str| field.replace("*/", "*/");
+    let minute = translate_step(parts[0]);
+    let hour = translate_step(parts[1]);
+    let day = if parts[2] == "*" { "*".into() } else { parts[2].replace('-', "..") };
+    let month = if parts[3] == "*" { "*".into() } else { parts[3].replace('-', "..") };
+
+    // systemd weekdays are names: Mon..Fri, Sat,Sun. Translate the cron
+    // numeric weekday (0=Sun, 6=Sat) to systemd names.
+    let weekday_part = if parts[4] == "*" {
+        String::new()
+    } else {
+        let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        let translate_one = |s: &str| -> Result<String, String> {
+            let n: usize = s.parse().map_err(|_| format!("bad weekday: {}", s))?;
+            if n >= 7 {
+                return Err(format!("bad weekday: {}", s));
+            }
+            Ok(names[n].to_string())
+        };
+        let translated: Result<Vec<String>, String> = parts[4]
+            .split(',')
+            .map(|piece| {
+                if let Some((lo, hi)) = piece.split_once('-') {
+                    Ok(format!("{}..{}", translate_one(lo)?, translate_one(hi)?))
+                } else {
+                    translate_one(piece)
+                }
+            })
+            .collect();
+        let joined = translated?.join(",");
+        format!("{} ", joined)
+    };
+
+    // Format: [WEEKDAY ]*-MM-DD HH:MM:SS
+    Ok(format!(
+        "{wd}*-{mo}-{d} {h}:{m}:00",
+        wd = weekday_part,
+        mo = month,
+        d = day,
+        h = hour,
+        m = minute,
+    ))
+}
+
+fn build_systemd_service(job_id: &str, ato_binary: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=ATO scheduled agent dispatch — {job_id}
+
+[Service]
+Type=oneshot
+ExecStart={binary} --run-cron {job_id}
+"#,
+        job_id = job_id,
+        binary = ato_binary,
+    )
+}
+
+fn build_systemd_timer(job_id: &str, oncalendar: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=ATO scheduled agent timer — {job_id}
+
+[Timer]
+OnCalendar={oncalendar}
+Persistent=true
+WakeSystem=true
+
+[Install]
+WantedBy=timers.target
+"#,
+        job_id = job_id,
+        oncalendar = oncalendar,
+    )
+}
+
+#[allow(dead_code)] // only used on Linux; kept compiled elsewhere for parity.
+fn systemd_user_dir() -> PathBuf {
+    home_dir().join(".config").join("systemd").join("user")
+}
+
+#[allow(dead_code)]
+fn systemd_unit_paths(job_id: &str) -> (PathBuf, PathBuf) {
+    let dir = systemd_user_dir();
+    (
+        dir.join(format!("ato-cron-{}.service", job_id)),
+        dir.join(format!("ato-cron-{}.timer", job_id)),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn register_systemd(job_id: &str, cron: &str) -> Result<String, String> {
+    let binary = current_ato_binary_path()?;
+    let oncalendar = cron_to_systemd_oncalendar(cron)?;
+    let dir = systemd_user_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir systemd dir: {}", e))?;
+
+    let (service_path, timer_path) = systemd_unit_paths(job_id);
+    fs::write(&service_path, build_systemd_service(job_id, &binary))
+        .map_err(|e| format!("write service: {}", e))?;
+    fs::write(&timer_path, build_systemd_timer(job_id, &oncalendar))
+        .map_err(|e| format!("write timer: {}", e))?;
+
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+    let timer_unit = format!("ato-cron-{}.timer", job_id);
+    let enable = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", &timer_unit])
+        .output()
+        .map_err(|e| format!("systemctl enable: {}", e))?;
+    if !enable.status.success() {
+        return Err(format!(
+            "systemctl --user enable --now {} failed: {}",
+            timer_unit,
+            String::from_utf8_lossy(&enable.stderr)
+        ));
+    }
+    Ok(timer_path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn unregister_systemd(job_id: &str) {
+    let timer_unit = format!("ato-cron-{}.timer", job_id);
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", &timer_unit])
+        .output();
+    let (service_path, timer_path) = systemd_unit_paths(job_id);
+    let _ = fs::remove_file(&service_path);
+    let _ = fs::remove_file(&timer_path);
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+}
+
+// ── Windows: schtasks via Task Scheduler XML ─────────────────────────────
+//
+// We generate a Task Scheduler XML file that captures the cron schedule
+// (using calendar/time triggers) and `WakeToRun=true` so the laptop wakes
+// to fire the job. `schtasks /Create /XML <file> /TN <name> /F` registers
+// it; /Delete removes it.
+
+fn cron_to_schtasks_xml_trigger(cron: &str) -> Result<String, String> {
+    let parts: Vec<&str> = cron.split_whitespace().collect();
+    if parts.len() != 5 {
+        return Err("cron must have 5 fields (minute hour day month weekday)".into());
+    }
+    let minutes = parse_cron_field(parts[0], 0, 60)?;
+    let hours = parse_cron_field(parts[1], 0, 24)?;
+    let days = parse_cron_field(parts[2], 1, 32)?;
+    let months = parse_cron_field(parts[3], 1, 13)?;
+    let weekdays = parse_cron_field(parts[4], 0, 7)?;
+
+    // Pick a representative start time. Task Scheduler triggers have one
+    // start time + a repetition pattern, so for cron expressions like
+    // `*/15 * * * *` we use StartBoundary at midnight + Repetition every 15min.
+    let first_minute = minutes.first().and_then(|m| *m).unwrap_or(0);
+    let first_hour = hours.first().and_then(|h| *h).unwrap_or(0);
+    let start_boundary = format!("2024-01-01T{:02}:{:02}:00", first_hour, first_minute);
+
+    // Decide trigger type based on what's specified.
+    let weekday_specified = parts[4] != "*";
+    let day_specified = parts[2] != "*";
+    let monthly = day_specified && !weekday_specified;
+    let weekly = weekday_specified;
+    let multi_minute = minutes.len() > 1;
+    let multi_hour = hours.len() > 1;
+
+    if multi_minute || multi_hour {
+        // Use a Time trigger with a Repetition. Repetition interval: smallest
+        // step we can detect.
+        let interval = if multi_minute {
+            // assume even step
+            if minutes.len() >= 2 {
+                let m0 = minutes[0].unwrap_or(0);
+                let m1 = minutes[1].unwrap_or(0);
+                format!("PT{}M", m1.saturating_sub(m0).max(1))
+            } else {
+                "PT15M".to_string()
+            }
+        } else {
+            "PT1H".to_string()
+        };
+        return Ok(format!(
+            r#"    <TimeTrigger>
+      <Repetition>
+        <Interval>{interval}</Interval>
+        <Duration>P1D</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+"#,
+            interval = interval,
+            start = start_boundary,
+        ));
+    }
+
+    if weekly {
+        let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        let mut day_xml = String::new();
+        for w in weekdays.iter().filter_map(|w| *w) {
+            if let Some(name) = names.get(w as usize) {
+                day_xml.push_str(&format!("        <{0} />\n", name));
+            }
+        }
+        return Ok(format!(
+            r#"    <CalendarTrigger>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <DaysOfWeek>
+{days}        </DaysOfWeek>
+        <WeeksInterval>1</WeeksInterval>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+"#,
+            start = start_boundary,
+            days = day_xml,
+        ));
+    }
+
+    if monthly {
+        let mut day_xml = String::new();
+        for d in days.iter().filter_map(|d| *d) {
+            day_xml.push_str(&format!("        <Day>{}</Day>\n", d));
+        }
+        let mut month_xml = String::new();
+        let month_names = ["", "January", "February", "March", "April", "May", "June",
+                           "July", "August", "September", "October", "November", "December"];
+        for m in months.iter().filter_map(|m| *m) {
+            if let Some(name) = month_names.get(m as usize) {
+                month_xml.push_str(&format!("          <{0} />\n", name));
+            }
+        }
+        let months_block = if month_xml.is_empty() {
+            String::new()
+        } else {
+            format!("        <Months>\n{}        </Months>\n", month_xml)
+        };
+        return Ok(format!(
+            r#"    <CalendarTrigger>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByMonth>
+        <DaysOfMonth>
+{days}        </DaysOfMonth>
+{months_block}      </ScheduleByMonth>
+    </CalendarTrigger>
+"#,
+            start = start_boundary,
+            days = day_xml,
+            months_block = months_block,
+        ));
+    }
+
+    // Default: daily at the specified time.
+    Ok(format!(
+        r#"    <CalendarTrigger>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+"#,
+        start = start_boundary,
+    ))
+}
+
+fn build_schtasks_xml(job_id: &str, ato_binary: &str, cron: &str) -> Result<String, String> {
+    let trigger = cron_to_schtasks_xml_trigger(cron)?;
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>ATO scheduled agent dispatch — {job_id}</Description>
+  </RegistrationInfo>
+  <Triggers>
+{trigger}  </Triggers>
+  <Settings>
+    <WakeToRun>true</WakeToRun>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>{binary}</Command>
+      <Arguments>--run-cron {job_id}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        job_id = job_id,
+        binary = ato_binary,
+        trigger = trigger,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn register_schtasks(job_id: &str, cron: &str) -> Result<String, String> {
+    let binary = current_ato_binary_path()?;
+    let xml = build_schtasks_xml(job_id, &binary, cron)?;
+
+    // Write XML to a temp file. schtasks expects UTF-16 LE with BOM —
+    // construct it explicitly so the encoding declaration in the XML
+    // header isn't a lie.
+    let temp_dir = std::env::temp_dir();
+    let xml_path = temp_dir.join(format!("ato-cron-{}.xml", job_id));
+    let mut bytes = vec![0xFF, 0xFE]; // UTF-16 LE BOM
+    for u in xml.encode_utf16() {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    fs::write(&xml_path, &bytes).map_err(|e| format!("write xml: {}", e))?;
+
+    let task_name = format!("ATO\\Cron\\{}", job_id);
+    let create = std::process::Command::new("schtasks")
+        .args(["/Create", "/F", "/XML", &xml_path.to_string_lossy(), "/TN", &task_name])
+        .output()
+        .map_err(|e| format!("schtasks /Create: {}", e))?;
+    let _ = fs::remove_file(&xml_path);
+    if !create.status.success() {
+        return Err(format!(
+            "schtasks /Create failed: {}",
+            String::from_utf8_lossy(&create.stderr)
+        ));
+    }
+    Ok(task_name)
+}
+
+#[cfg(target_os = "windows")]
+fn unregister_schtasks(job_id: &str) {
+    let task_name = format!("ATO\\Cron\\{}", job_id);
+    let _ = std::process::Command::new("schtasks")
+        .args(["/Delete", "/F", "/TN", &task_name])
+        .output();
+}
+
+#[cfg(target_os = "windows")]
+fn is_schtasks_registered(job_id: &str) -> bool {
+    let task_name = format!("ATO\\Cron\\{}", job_id);
+    std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", &task_name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// ── Public Tauri commands — OS-agnostic façade ───────────────────────────
+//
+// Renamed from the original `*_cron_launchd` to be honest about what they
+// do across platforms. The old launchd-specific helpers are wrapped here.
+
+#[tauri::command]
+pub fn cron_os_scheduler_supported() -> bool {
+    cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+}
+
+#[tauri::command]
+pub fn cron_os_scheduler_kind() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "launchd"
+    } else if cfg!(target_os = "linux") {
+        "systemd-user"
+    } else if cfg!(target_os = "windows") {
+        "schtasks"
+    } else {
+        "unsupported"
+    }
+}
+
+#[tauri::command]
+pub fn register_cron_os_scheduler(job_id: String, cron: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let binary = current_ato_binary_path()?;
+        let log_dir = home_dir().join(".ato").join("cron-logs");
+        fs::create_dir_all(&log_dir).map_err(|e| format!("mkdir cron-logs: {}", e))?;
+        let plist = build_launchd_plist(&job_id, &binary, &cron, &log_dir.to_string_lossy())?;
+        let path = launchd_plist_path(&job_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir LaunchAgents: {}", e))?;
+        }
+        fs::write(&path, &plist).map_err(|e| format!("write plist: {}", e))?;
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &path.to_string_lossy()])
+            .output();
+        let load = std::process::Command::new("launchctl")
+            .args(["load", &path.to_string_lossy()])
+            .output()
+            .map_err(|e| format!("launchctl load: {}", e))?;
+        if !load.status.success() {
+            return Err(format!(
+                "launchctl load failed: {}",
+                String::from_utf8_lossy(&load.stderr)
+            ));
+        }
+        return Ok(path.to_string_lossy().to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return register_systemd(&job_id, &cron);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return register_schtasks(&job_id, &cron);
+    }
+    #[allow(unreachable_code)]
+    Err(format!("OS-level cron not implemented on this platform (job {})", job_id))
+}
+
+#[tauri::command]
+pub fn unregister_cron_os_scheduler(job_id: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = launchd_plist_path(&job_id);
+        if path.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &path.to_string_lossy()])
+                .output();
+            let _ = fs::remove_file(&path);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unregister_systemd(&job_id);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        unregister_schtasks(&job_id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_cron_os_scheduler_registered(job_id: String) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return launchd_plist_path(&job_id).exists();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (_, timer_path) = systemd_unit_paths(&job_id);
+        return timer_path.exists();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return is_schtasks_registered(&job_id);
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+#[cfg(test)]
+mod cron_launchd_tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_daily_schedule() {
+        let intervals = cron_to_launchd_intervals("0 7 * * *").unwrap();
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].minute, Some(0));
+        assert_eq!(intervals[0].hour, Some(7));
+        assert_eq!(intervals[0].day, None);
+        assert_eq!(intervals[0].weekday, None);
+    }
+
+    #[test]
+    fn expands_weekday_range() {
+        let intervals = cron_to_launchd_intervals("0 9 * * 1-5").unwrap();
+        assert_eq!(intervals.len(), 5);
+        assert!(intervals.iter().all(|i| i.minute == Some(0) && i.hour == Some(9)));
+        let weekdays: Vec<u32> = intervals.iter().filter_map(|i| i.weekday).collect();
+        assert_eq!(weekdays, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn expands_step_minutes() {
+        let intervals = cron_to_launchd_intervals("*/15 * * * *").unwrap();
+        assert_eq!(intervals.len(), 4);
+        let minutes: Vec<u32> = intervals.iter().filter_map(|i| i.minute).collect();
+        assert_eq!(minutes, vec![0, 15, 30, 45]);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(cron_to_launchd_intervals("not a cron").is_err());
+        assert!(cron_to_launchd_intervals("60 * * * *").is_err());
+    }
+
+    #[test]
+    fn plist_xml_contains_label_and_binary() {
+        let plist = build_launchd_plist("abc-123", "/Applications/ATO.app/Contents/MacOS/ato-desktop", "0 7 * * *", "/tmp").unwrap();
+        assert!(plist.contains("ai.agentictool.cron-abc-123"));
+        assert!(plist.contains("/Applications/ATO.app/Contents/MacOS/ato-desktop"));
+        assert!(plist.contains("--run-cron"));
+        assert!(plist.contains("<integer>7</integer>"));
+    }
+
+    #[test]
+    fn systemd_oncalendar_daily() {
+        let cal = cron_to_systemd_oncalendar("0 7 * * *").unwrap();
+        assert_eq!(cal, "*-*-* 7:0:00");
+    }
+
+    #[test]
+    fn systemd_oncalendar_weekday_range() {
+        let cal = cron_to_systemd_oncalendar("0 9 * * 1-5").unwrap();
+        assert_eq!(cal, "Mon..Fri *-*-* 9:0:00");
+    }
+
+    #[test]
+    fn systemd_oncalendar_step_minute() {
+        // systemd OnCalendar accepts */15 syntax verbatim — we just pass it through.
+        let cal = cron_to_systemd_oncalendar("*/15 * * * *").unwrap();
+        assert!(cal.starts_with("*-*-* *:*/15:00"));
+    }
+
+    #[test]
+    fn systemd_unit_files_have_required_sections() {
+        let svc = build_systemd_service("abc-123", "/usr/local/bin/ato-desktop");
+        assert!(svc.contains("[Unit]"));
+        assert!(svc.contains("[Service]"));
+        assert!(svc.contains("--run-cron abc-123"));
+
+        let timer = build_systemd_timer("abc-123", "*-*-* 09:00:00");
+        assert!(timer.contains("[Timer]"));
+        assert!(timer.contains("OnCalendar=*-*-* 09:00:00"));
+        assert!(timer.contains("Persistent=true"));
+        assert!(timer.contains("WakeSystem=true"));
+    }
+
+    #[test]
+    fn schtasks_xml_weekly_includes_days() {
+        let xml = build_schtasks_xml("abc-123", "C:\\ato\\ato-desktop.exe", "0 9 * * 1-5").unwrap();
+        assert!(xml.contains("WakeToRun>true"));
+        assert!(xml.contains("--run-cron abc-123"));
+        assert!(xml.contains("<Monday />"));
+        assert!(xml.contains("<Friday />"));
+        assert!(xml.contains("CalendarTrigger"));
+    }
+
+    #[test]
+    fn schtasks_xml_daily() {
+        let xml = build_schtasks_xml("xyz", "C:\\ato\\ato-desktop.exe", "0 7 * * *").unwrap();
+        assert!(xml.contains("ScheduleByDay"));
+        assert!(xml.contains("StartBoundary>2024-01-01T07:00:00"));
+    }
+
+    #[test]
+    fn schtasks_xml_step_uses_repetition() {
+        let xml = build_schtasks_xml("xyz", "C:\\ato\\ato-desktop.exe", "*/15 * * * *").unwrap();
+        assert!(xml.contains("<Repetition>"));
+        assert!(xml.contains("<Interval>PT15M</Interval>"));
+    }
 }
 
 // ── Configuration export / import (Polish-T4) ────────────────────────────
@@ -12548,8 +13710,8 @@ pub fn export_configuration(db: State<'_, DbState>) -> Result<ConfigBackup, Stri
         )?,
         agent_groups: dump_table(
             &conn,
-            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at FROM agent_groups",
-            &["id","slug","displayName","description","runtime","routerConfig","filePath","createdAt","lastUsedAt"],
+            "SELECT id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind FROM agent_groups",
+            &["id","slug","displayName","description","runtime","routerConfig","filePath","createdAt","lastUsedAt","dispatchKind"],
         )?,
         agent_group_members: dump_table(
             &conn,
@@ -12674,12 +13836,13 @@ pub fn import_configuration(
 
     for g in &backup.agent_groups {
         tx.execute(
-            "INSERT OR REPLACE INTO agent_groups (id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO agent_groups (id, slug, display_name, description, runtime, router_config, file_path, created_at, last_used_at, dispatch_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, 'routed'))",
             params![
                 obj_str(g, "id"), obj_str(g, "slug"), obj_str(g, "displayName"), obj_str(g, "description"),
                 obj_str(g, "runtime"), obj_str(g, "routerConfig"), obj_str(g, "filePath"),
                 obj_str(g, "createdAt"), obj_str(g, "lastUsedAt"),
+                obj_str(g, "dispatchKind"),
             ],
         ).map_err(|e| e.to_string())?;
         s.agent_groups += 1;

@@ -1,9 +1,13 @@
-import { useState, lazy, Suspense } from "react";
+import { lazy, Suspense } from "react";
 import { Loader2 } from "lucide-react";
-import Sidebar, { type Section } from "@/components/Sidebar";
+import Sidebar from "@/components/Sidebar";
 import TerminalPane from "@/components/Terminal/TerminalPane";
 import CommandPalette from "@/components/CommandPalette";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import DemoOverlay from "@/components/DemoOverlay";
+import { useUiStore } from "@/stores/useUiStore";
+
+const CreateAgentWizard = lazy(() => import("@/components/CreateAgentWizard"));
 
 // v1.3.0 — IA collapse: 6 top-level sections (T1).
 // Each section owns its sub-tabs in pages/sections/*.
@@ -17,7 +21,11 @@ const InsightsSection = lazy(() => import("@/pages/sections/InsightsSection"));
 const SettingsSection = lazy(() => import("@/pages/sections/SettingsSection"));
 
 export default function Dashboard() {
-  const [section, setSection] = useState<Section>("home");
+  const section = useUiStore((s) => s.section);
+  const setSection = useUiStore((s) => s.setSection);
+  const createAgentOpen = useUiStore((s) => s.createAgentOpen);
+  const createAgentPath = useUiStore((s) => s.createAgentPath);
+  const closeCreateAgent = useUiStore((s) => s.closeCreateAgent);
 
   const renderSection = () => {
     switch (section) {
@@ -56,6 +64,16 @@ export default function Dashboard() {
         <TerminalPane />
       </div>
       <CommandPalette onNavigate={setSection} />
+      <DemoOverlay />
+      {/* Globally-mounted Create Agent wizard so the demo runner (and any
+          coordinator) can open it from any section. */}
+      <Suspense fallback={null}>
+        <CreateAgentWizard
+          open={createAgentOpen}
+          initialPath={createAgentPath}
+          onClose={closeCreateAgent}
+        />
+      </Suspense>
     </div>
   );
 }

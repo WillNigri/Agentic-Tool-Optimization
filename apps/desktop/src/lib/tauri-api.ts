@@ -639,6 +639,18 @@ export async function saveCronJob(job: CronJob): Promise<void> {
     else all.push(job);
     localStorage.setItem('ato-cron-jobs', JSON.stringify(all));
   }
+  // Sync OS-level scheduling (launchd / systemd-user / Task Scheduler).
+  // Best-effort: failures never block the save — the in-app scheduler is
+  // still authoritative.
+  try {
+    if (job.wakeFromSleep && job.enabled) {
+      await invoke('register_cron_os_scheduler', { jobId: job.id, cron: job.schedule });
+    } else {
+      await invoke('unregister_cron_os_scheduler', { jobId: job.id });
+    }
+  } catch (err) {
+    console.warn('OS scheduler sync failed', err);
+  }
 }
 
 export async function deleteCronJob(id: string): Promise<void> {
@@ -648,7 +660,40 @@ export async function deleteCronJob(id: string): Promise<void> {
     const all = await listCronJobs();
     localStorage.setItem('ato-cron-jobs', JSON.stringify(all.filter((j) => j.id !== id)));
   }
+  try {
+    await invoke('unregister_cron_os_scheduler', { jobId: id });
+  } catch {
+    // Nothing registered — fine.
+  }
 }
+
+export async function cronOsSchedulerSupported(): Promise<boolean> {
+  try {
+    return await invoke<boolean>('cron_os_scheduler_supported');
+  } catch {
+    return false;
+  }
+}
+
+export async function cronOsSchedulerKind(): Promise<string> {
+  try {
+    return await invoke<string>('cron_os_scheduler_kind');
+  } catch {
+    return 'unsupported';
+  }
+}
+
+export async function isCronOsSchedulerRegistered(jobId: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>('is_cron_os_scheduler_registered', { jobId });
+  } catch {
+    return false;
+  }
+}
+
+// Back-compat aliases — older code paths may still reference these.
+export const cronLaunchdSupported = cronOsSchedulerSupported;
+export const isCronLaunchdRegistered = isCronOsSchedulerRegistered;
 
 export async function getCronHistory(jobId: string): Promise<CronExecution[]> {
   try {

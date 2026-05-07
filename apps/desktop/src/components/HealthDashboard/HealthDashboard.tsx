@@ -49,6 +49,13 @@ const RUNTIME_CONFIG = {
     borderColor: "border-green-500/30",
     textColor: "text-green-400",
   },
+  gemini: {
+    name: "Gemini",
+    color: "#3b82f6",
+    bgColor: "bg-blue-500/10",
+    borderColor: "border-blue-500/30",
+    textColor: "text-blue-400",
+  },
   hermes: {
     name: "Hermes",
     color: "#a855f7",
@@ -64,6 +71,29 @@ const RUNTIME_CONFIG = {
     textColor: "text-cyan-400",
   },
 };
+
+/** "down" with an error message that suggests the CLI was never installed
+ *  (or SSH was never set up) shouldn't read as "Down" — that's alarming and
+ *  technically wrong. We translate to "not_configured" so it lives in its
+ *  own neutral pill and stays out of the Degraded/Down counts. */
+function effectiveStatus(health: { status: string; errorMessage?: string }): string {
+  if (health.status === "down" || health.status === "unknown") {
+    const msg = (health.errorMessage ?? "").toLowerCase();
+    if (
+      msg.includes("not found") ||
+      msg.includes("not installed") ||
+      msg.includes("missing") ||
+      msg.includes("ssh config") ||
+      msg.includes("not configured") ||
+      // No error message + status came back unknown → never been checked,
+      // most likely because the CLI doesn't exist locally.
+      (health.status === "unknown" && !msg)
+    ) {
+      return "not_configured";
+    }
+  }
+  return health.status;
+}
 
 const STATUS_CONFIG = {
   healthy: {
@@ -89,6 +119,12 @@ const STATUS_CONFIG = {
     color: "text-cs-muted",
     bg: "bg-cs-border",
     label: "Unknown",
+  },
+  not_configured: {
+    icon: Clock,
+    color: "text-cs-muted",
+    bg: "bg-cs-border",
+    label: "Not configured",
   },
 };
 
@@ -135,12 +171,18 @@ export default function HealthDashboard() {
   }, [queryClient]);
 
   const getOverallStatus = () => {
-    if (healthStatuses.length === 0) return "unknown";
-    const healthyCount = healthStatuses.filter((h) => h.status === "healthy").length;
-    const downCount = healthStatuses.filter((h) => h.status === "down").length;
+    // Only configured runtimes contribute to overall status. A user who
+    // never set up Hermes shouldn't see the system as "Degraded" because
+    // of it.
+    const configured = healthStatuses.filter(
+      (h) => effectiveStatus(h) !== "not_configured"
+    );
+    if (configured.length === 0) return "unknown";
+    const healthyCount = configured.filter((h) => h.status === "healthy").length;
+    const downCount = configured.filter((h) => h.status === "down").length;
 
-    if (downCount === healthStatuses.length) return "down";
-    if (healthyCount === healthStatuses.length) return "healthy";
+    if (downCount === configured.length) return "down";
+    if (healthyCount === configured.length) return "healthy";
     return "degraded";
   };
 
@@ -265,7 +307,7 @@ export default function HealthDashboard() {
           <div className="text-right text-sm text-cs-muted">
             <div className="flex items-center gap-2 justify-end">
               <Server size={14} />
-              {healthStatuses.length} runtimes monitored
+              {healthStatuses.filter((h) => effectiveStatus(h) !== "not_configured").length} runtimes monitored
             </div>
             <div className="flex items-center gap-2 justify-end mt-1">
               <Zap size={14} />
@@ -274,31 +316,38 @@ export default function HealthDashboard() {
           </div>
         </div>
 
-        {/* Quick stats */}
-        <div className="grid grid-cols-4 gap-4 mt-6">
+        {/* Quick stats — counts ignore not_configured runtimes so they don't
+            inflate the Down or Degraded numbers. */}
+        <div className="grid grid-cols-5 gap-4 mt-6">
           <div className="text-center">
             <p className="text-2xl font-bold text-green-400">
-              {healthStatuses.filter((h) => h.status === "healthy").length}
+              {healthStatuses.filter((h) => effectiveStatus(h) === "healthy").length}
             </p>
             <p className="text-xs text-cs-muted">Healthy</p>
           </div>
           <div className="text-center">
             <p className="text-2xl font-bold text-yellow-400">
-              {healthStatuses.filter((h) => h.status === "degraded").length}
+              {healthStatuses.filter((h) => effectiveStatus(h) === "degraded").length}
             </p>
             <p className="text-xs text-cs-muted">Degraded</p>
           </div>
           <div className="text-center">
             <p className="text-2xl font-bold text-red-400">
-              {healthStatuses.filter((h) => h.status === "down").length}
+              {healthStatuses.filter((h) => effectiveStatus(h) === "down").length}
             </p>
             <p className="text-xs text-cs-muted">Down</p>
           </div>
           <div className="text-center">
             <p className="text-2xl font-bold text-cs-muted">
-              {healthStatuses.filter((h) => h.status === "unknown").length}
+              {healthStatuses.filter((h) => effectiveStatus(h) === "unknown").length}
             </p>
             <p className="text-xs text-cs-muted">Unknown</p>
+          </div>
+          <div className="text-center">
+            <p className="text-2xl font-bold text-cs-muted">
+              {healthStatuses.filter((h) => effectiveStatus(h) === "not_configured").length}
+            </p>
+            <p className="text-xs text-cs-muted">Not configured</p>
           </div>
         </div>
       </div>
@@ -409,7 +458,8 @@ export default function HealthDashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {healthStatuses.map((health) => {
           const runtime = RUNTIME_CONFIG[health.runtime as keyof typeof RUNTIME_CONFIG];
-          const status = STATUS_CONFIG[health.status as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.unknown;
+          const eff = effectiveStatus(health);
+          const status = STATUS_CONFIG[eff as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.unknown;
           const StatusIcon = status.icon;
           const historyData = healthHistory.find((h) => h.runtime === health.runtime);
 

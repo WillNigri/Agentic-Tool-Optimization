@@ -87,6 +87,12 @@ export async function updateAgentMemoryPolicy(id: string, policy: MemoryPolicy |
   });
 }
 
+/** Replace the MCPs attached to an agent. Used by the one-click "Add
+ *  browser tools" flow and any future MCP-attach UX. */
+export async function updateAgentMcps(id: string, mcps: string[]): Promise<void> {
+  return invoke("update_agent_mcps", { id, mcps });
+}
+
 export async function updateAgentRoleModels(id: string, models: RoleModels | null): Promise<void> {
   return invoke("update_agent_role_models", {
     id,

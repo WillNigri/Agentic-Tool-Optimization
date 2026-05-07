@@ -6,6 +6,9 @@ import type { AgentRuntime } from "@/lib/agents";
 // "Free tier capped at 3 children" which the UI enforces (see lib/tier.ts).
 
 export interface AgentGroupMember {
+  /** Optional — older serialized state may lack it. New rows include the
+   *  child's runtime so cross-runtime sequential pipelines render correctly. */
+  agentRuntime?: string;
   agentId: string;
   agentSlug: string;
   agentDisplayName: string;
@@ -25,6 +28,9 @@ export interface AgentGroup {
   createdAt: string;
   lastUsedAt: string | null;
   members: AgentGroupMember[];
+  /** "routed" (router picks one child) or "sequential" (children run in
+   *  order, output of N is input to N+1). Older rows default to "routed". */
+  dispatchKind: "routed" | "sequential";
 }
 
 export interface RouterRule {
@@ -79,12 +85,17 @@ export async function getAgentGroup(slug: string): Promise<AgentGroup> {
   return invoke<AgentGroup>("get_agent_group", { slug });
 }
 
+export type DispatchKind = "routed" | "sequential";
+
 export async function createAgentGroup(input: {
   displayName: string;
   runtime: AgentRuntime;
   description?: string;
   routerConfig?: RouterConfig;
   members: GroupMemberInput[];
+  /** "routed" (router picks one child) | "sequential" (children run in
+   *  order, output of N is input to N+1). Defaults to "routed". */
+  dispatchKind?: DispatchKind;
 }): Promise<AgentGroup> {
   return invoke<AgentGroup>("create_agent_group", {
     displayName: input.displayName,
@@ -94,6 +105,7 @@ export async function createAgentGroup(input: {
       ? JSON.stringify(input.routerConfig)
       : JSON.stringify(DEFAULT_ROUTER_CONFIG),
     members: input.members,
+    dispatchKind: input.dispatchKind ?? null,
   });
 }
 
@@ -115,10 +127,22 @@ export async function deleteAgentGroup(id: string): Promise<void> {
   return invoke("delete_agent_group", { id });
 }
 
+export interface GroupStageResult {
+  agentSlug: string;
+  runtime: string;
+  response: string;
+  ok: boolean;
+}
+
 export interface GroupDispatchResult {
+  /** Stitched transcript (or single response for routed groups). */
   response: string;
   routedTo: string;
   routingReason: string;
+  /** One per stage. Routed groups have one entry; sequential groups have
+   *  one per child in pipeline order. Frontend can render each stage as
+   *  its own chat message (preferred for sequential groups). */
+  stages?: GroupStageResult[];
 }
 
 export async function dispatchToGroup(input: {

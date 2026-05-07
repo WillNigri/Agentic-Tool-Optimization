@@ -6,6 +6,7 @@ import {
   Binary,
   Terminal,
   Headphones,
+  Globe,
   Search,
 } from "lucide-react";
 import { AGENT_TEMPLATES, type AgentTemplate } from "@/lib/agentTemplates";
@@ -26,6 +27,7 @@ const ICONS: Record<AgentTemplate["icon"], React.ComponentType<{ size?: number; 
   binary: Binary,
   terminal: Terminal,
   headphones: Headphones,
+  globe: Globe,
 };
 
 const CATEGORY_LABELS: Record<AgentTemplate["category"], string> = {
@@ -34,6 +36,7 @@ const CATEGORY_LABELS: Record<AgentTemplate["category"], string> = {
   data: "Data",
   ops: "Ops",
   support: "Support",
+  automation: "Automation",
 };
 
 export default function TemplatesPath({ onPick }: Props) {

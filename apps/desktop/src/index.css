@@ -78,3 +78,21 @@
     @apply text-xl font-mono font-bold tracking-tight;
   }
 }
+
+/* v1.5.0 — Demo highlight pulse. Applied to elements with data-demo-id
+   while the demo runner is "clicking" them. Bright cyan ring that fades
+   so the recording shows where the action is happening. */
+@keyframes demo-pulse-ring {
+  0%   { box-shadow: 0 0 0 0 rgba(0, 255, 178, 0.65), 0 0 0 0 rgba(0, 255, 178, 0.45); }
+  60%  { box-shadow: 0 0 0 6px rgba(0, 255, 178, 0.0),  0 0 0 12px rgba(0, 255, 178, 0.0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 255, 178, 0.0),   0 0 0 0 rgba(0, 255, 178, 0.0); }
+}
+
+.demo-highlight {
+  position: relative;
+  outline: 2px solid rgba(0, 255, 178, 0.85);
+  outline-offset: 2px;
+  border-radius: 8px;
+  animation: demo-pulse-ring 1s ease-out infinite;
+  z-index: 50;
+}

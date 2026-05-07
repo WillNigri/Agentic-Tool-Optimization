@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Sparkles, FormInput, LayoutGrid, X } from "lucide-react";
 import GuidedPath from "./GuidedPath";
 import QuickPath from "./QuickPath";
 import TemplatesPath from "./TemplatesPath";
-import type { AgentTemplate } from "@/lib/agentTemplates";
+import { AGENT_TEMPLATES, type AgentTemplate } from "@/lib/agentTemplates";
 import type { QuickDraft } from "@/lib/agentDraft";
+import { useUiStore } from "@/stores/useUiStore";
 
 // v1.3.0 — Create Agent wizard. T3 in docs/V1.3.0-IMPLEMENTATION.md.
 // v1.4.0 Polish-T1 — Adds a Templates path (5 starters). Picking a template
@@ -34,6 +35,7 @@ function templateToDraft(tpl: AgentTemplate): QuickDraft {
     // for this draft we just pre-fill the slugs and let QuickPath's MultiSelect
     // intersect with what's actually installed.
     mcps: tpl.recommendedMcps,
+    contextFiles: [],
   };
 }
 
@@ -46,6 +48,26 @@ export default function CreateAgentWizard({
   const { t } = useTranslation();
   const [path, setPath] = useState<WizardPath>(initialPath);
   const [seedDraft, setSeedDraft] = useState<QuickDraft | null>(null);
+  const pendingTemplateId = useUiStore((s) => s.createAgentTemplateId);
+  const consumeTemplateId = useUiStore((s) => s.consumeTemplateId);
+
+  // Re-sync the path when the store reopens us with a different one.
+  useEffect(() => {
+    if (open) setPath(initialPath);
+  }, [open, initialPath]);
+
+  // If a coordinator (e.g. the demo runner) pre-picked a template, auto-pick
+  // it after the wizard sees the id. Watching the id directly means a
+  // late-arriving id (after open) still triggers. Consumes after applying.
+  useEffect(() => {
+    if (!open || !pendingTemplateId) return;
+    const tpl = AGENT_TEMPLATES.find((tt) => tt.id === pendingTemplateId);
+    if (tpl) {
+      setSeedDraft(templateToDraft(tpl));
+      setPath("quick");
+    }
+    consumeTemplateId();
+  }, [open, pendingTemplateId, consumeTemplateId]);
 
   if (!open) return null;
 
@@ -82,6 +104,7 @@ export default function CreateAgentWizard({
         {/* Path toggle */}
         <div className="px-5 pt-4 flex items-center gap-2">
           <PathPill
+            demoId="wizard-path-guided"
             active={path === "guided"}
             onClick={() => {
               setSeedDraft(null);
@@ -91,6 +114,7 @@ export default function CreateAgentWizard({
             label={t("createAgent.pathGuided", "Guided (chat)")}
           />
           <PathPill
+            demoId="wizard-path-quick"
             active={path === "quick"}
             onClick={() => {
               setSeedDraft(null);
@@ -100,6 +124,7 @@ export default function CreateAgentWizard({
             label={t("createAgent.pathQuick", "Quick (form)")}
           />
           <PathPill
+            demoId="wizard-path-templates"
             active={path === "templates"}
             onClick={() => {
               setSeedDraft(null);
@@ -133,16 +158,19 @@ function PathPill({
   onClick,
   icon,
   label,
+  demoId,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
+  demoId?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      data-demo-id={demoId}
       className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
         active
           ? "bg-cs-accent text-cs-bg"

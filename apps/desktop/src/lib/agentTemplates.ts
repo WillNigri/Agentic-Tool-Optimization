@@ -31,9 +31,9 @@ export interface AgentTemplate {
   /** Default goal text — also seeds the agent's `goal` field for traceability. */
   goal: string;
   /** UI grouping. */
-  category: "engineering" | "writing" | "data" | "ops" | "support";
+  category: "engineering" | "writing" | "data" | "ops" | "support" | "automation";
   /** Used in the card icon — values match Lucide icon names available globally. */
-  icon: "git-pull-request" | "feather" | "binary" | "terminal" | "headphones";
+  icon: "git-pull-request" | "feather" | "binary" | "terminal" | "headphones" | "globe";
 }
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
@@ -170,6 +170,42 @@ Style: precise, brief, action-oriented. SRE register, not customer-support regis
     recommendedMcps: ["filesystem", "fetch"],
     defaultPermissions: ["allow:read_logs", "allow:read_metrics", "approve:restart_service", "approve:rollback", "deny:delete_resources"],
   },
+  {
+    id: "browser-agent",
+    displayName: "Browser Agent",
+    description: "Drives a real browser to research, fill forms, scrape pages, and complete web tasks. Pre-wired with Playwright.",
+    runtime: "claude",
+    model: "claude-sonnet-4-6",
+    category: "automation",
+    icon: "globe",
+    goal: "Complete web tasks by driving a real browser — research, form fill, multi-step navigation",
+    systemPrompt: `You are a browser-driving agent. You have access to Playwright MCP tools (browser_navigate, browser_click, browser_type, browser_screenshot, browser_snapshot, browser_close). Use them to complete the user's web task.
+
+Process every browser task this way:
+1. Open the URL with browser_navigate.
+2. Take a browser_snapshot or browser_screenshot to ground yourself in the current page state.
+3. Decide on the next single action — click, type, scroll, or read.
+4. Take it.
+5. Snapshot again to verify the result.
+6. Repeat until the task is done.
+
+Rules:
+- One action per step. Don't queue clicks blind.
+- After every navigation or click, ALWAYS take a snapshot before deciding the next action.
+- If you can't find an element, snapshot the page and re-read what's actually there. Don't guess selectors.
+- Stop and ask if you hit auth, CAPTCHA, payment forms, or anything that looks risky.
+- For long pages, scroll incrementally and snapshot. Don't try to read entire SPAs in one shot.
+- Quote the exact text or URL you're working with — selectors lie, page content doesn't.
+
+Output style:
+- Tell the user what you did, in plain language. "Opened example.com → clicked 'Sign in' → typed username → page now shows 2FA prompt."
+- When you complete the task, summarize what was achieved and surface any data the user asked for.
+- When you can't proceed, say exactly why and what input you need.
+
+Never invent page contents. If you didn't snapshot, you don't know.`,
+    recommendedMcps: ["playwright", "fetch"],
+    defaultPermissions: ["allow:browser_navigate", "allow:browser_click", "allow:browser_type", "allow:browser_screenshot", "approve:browser_close", "deny:browser_run_js"],
+  },
 ];
 
 export function getTemplate(id: string): AgentTemplate | undefined {
@@ -183,6 +219,7 @@ export function templatesByCategory(): Record<AgentTemplate["category"], AgentTe
     data: [],
     ops: [],
     support: [],
+    automation: [],
   };
   for (const tpl of AGENT_TEMPLATES) {
     out[tpl.category].push(tpl);

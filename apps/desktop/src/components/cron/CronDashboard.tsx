@@ -80,6 +80,7 @@ function CronDashboardInner() {
             {/* View toggle */}
             <div className="flex items-center rounded-lg border border-cs-border overflow-hidden">
               <button
+                data-demo-id="cron-view-list"
                 onClick={() => setView("list")}
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-1.5 text-xs transition-colors",
@@ -92,6 +93,7 @@ function CronDashboardInner() {
                 {t("cron.views.list")}
               </button>
               <button
+                data-demo-id="cron-view-calendar"
                 onClick={() => setView("calendar")}
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-1.5 text-xs transition-colors border-l border-cs-border",

@@ -7,6 +7,7 @@ import type {
 } from "@/components/cron/types";
 import { getActiveAlerts } from "@/lib/cron-health";
 import { getNextRun } from "@/lib/cron-utils";
+import { saveCronJob, deleteCronJob as deleteCronJobOnDisk } from "@/lib/tauri-api";
 
 // ---------------------------------------------------------------------------
 // Store
@@ -74,24 +75,30 @@ export const useCronStore = create<CronStore>((set, get) => {
         nextRunAt,
       };
       set((s) => ({ jobs: [...s.jobs, job] }));
+      void saveCronJob(job).catch((err) => console.warn("saveCronJob failed", err));
     },
 
-    updateJob: (id, updates) =>
+    updateJob: (id, updates) => {
       set((s) => ({
         jobs: s.jobs.map((j) =>
           j.id === id ? { ...j, ...updates, updatedAt: new Date().toISOString() } : j
         ),
-      })),
+      }));
+      const updated = get().jobs.find((j) => j.id === id);
+      if (updated) void saveCronJob(updated).catch((err) => console.warn("saveCronJob failed", err));
+    },
 
-    deleteJob: (id) =>
+    deleteJob: (id) => {
       set((s) => ({
         jobs: s.jobs.filter((j) => j.id !== id),
         executions: s.executions.filter((e) => e.jobId !== id),
         alerts: s.alerts.filter((a) => a.jobId !== id),
         selectedJobId: s.selectedJobId === id ? null : s.selectedJobId,
-      })),
+      }));
+      void deleteCronJobOnDisk(id).catch((err) => console.warn("deleteCronJob failed", err));
+    },
 
-    toggleJob: (id) =>
+    toggleJob: (id) => {
       set((s) => ({
         jobs: s.jobs.map((j) =>
           j.id === id
@@ -103,7 +110,10 @@ export const useCronStore = create<CronStore>((set, get) => {
               }
             : j
         ),
-      })),
+      }));
+      const toggled = get().jobs.find((j) => j.id === id);
+      if (toggled) void saveCronJob(toggled).catch((err) => console.warn("saveCronJob failed", err));
+    },
 
     triggerJob: (id) => {
       const job = get().jobs.find((j) => j.id === id);
@@ -203,10 +213,13 @@ export const useCronStore = create<CronStore>((set, get) => {
 
     loadJobs: (jobs) => {
       set((s) => {
-        // Merge: keep ATO-local jobs, replace external ones
-        const localJobs = s.jobs.filter((j) => !j.source || j.source === "ato");
-        const externalJobs = jobs.filter((j) => j.source && j.source !== "ato");
-        return { jobs: [...localJobs, ...externalJobs] };
+        // Merge by id: incoming wins (disk + external runtimes are the
+        // source of truth). Anything currently in zustand that doesn't
+        // appear in the incoming set is preserved (covers in-flight
+        // creates that haven't round-tripped yet).
+        const incomingIds = new Set(jobs.map((j) => j.id));
+        const preserved = s.jobs.filter((j) => !incomingIds.has(j.id));
+        return { jobs: [...preserved, ...jobs] };
       });
     },
 

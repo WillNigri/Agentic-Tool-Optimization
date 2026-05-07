@@ -4,6 +4,7 @@ import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2 } from "lucide-
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import BrowserToolsButton from "./BrowserToolsButton";
 
 // v1.4.0 — AgentDetail page (full-screen overlay).
 //
@@ -157,6 +158,10 @@ function OverviewTab({ agent }: { agent: Agent }) {
         <pre className="rounded-md bg-cs-bg p-3 text-xs text-cs-text font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">
           {agent.systemPrompt ?? "(none)"}
         </pre>
+      </Detail>
+
+      <Detail label={t("agentDetail.overview.quickTools", "Quick tools")}>
+        <BrowserToolsButton agent={agent} />
       </Detail>
     </div>
   );

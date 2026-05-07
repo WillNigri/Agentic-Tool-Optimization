@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronUp, MessageSquare, Terminal as TerminalIcon, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTerminalStore } from "@/stores/useTerminalStore";
+import { useDemoStore } from "@/stores/useDemoStore";
 
 // v1.3.0 — Embedded terminal pane (T5).
 // Two modes (toggled in the header):
@@ -47,6 +48,28 @@ export default function TerminalPane() {
       setOpen(true);
     }
   }, [pendingRequest]);
+
+  // Demo mode forces the Chat tab open by default so the recording
+  // captures it. An explicit `pendingChatPaneOpen` flag overrides — the
+  // demo runner uses this to collapse the pane during the section tour
+  // (so navigation has full vertical space) and reopen it for the chat.
+  const demoIsPlaying = useDemoStore((s) => s.isPlaying);
+  const demoChatPaneOpen = useDemoStore((s) => s.pendingChatPaneOpen);
+  useEffect(() => {
+    if (!demoIsPlaying) return;
+    if (demoChatPaneOpen === false) {
+      setOpen(false);
+      return;
+    }
+    if (demoChatPaneOpen === true) {
+      setTab("chat");
+      setOpen(true);
+      return;
+    }
+    // Default while demo is playing: ensure chat tab open at start.
+    setTab("chat");
+    setOpen(true);
+  }, [demoIsPlaying, demoChatPaneOpen]);
 
   useEffect(() => {
     try {

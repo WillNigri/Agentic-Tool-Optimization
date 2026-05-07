@@ -7,6 +7,7 @@ import { queryAllAgentStatuses } from "@/lib/api";
 import { listAgents, type Agent } from "@/lib/agents";
 import RunAgentDialog from "@/components/MyAgentsList/RunAgentDialog";
 import { useTerminalStore } from "@/stores/useTerminalStore";
+import { useUiStore } from "@/stores/useUiStore";
 import { shellRequestForAgent, getRuntimeCapability } from "@/lib/runtimeCapabilities";
 
 // v1.3.0 — The GUI Pivot landing page (T1+T2+T9).
@@ -75,6 +76,12 @@ export default function Home({
   const [hoveringQuick, setHoveringQuick] = useState(false);
   const [wizard, setWizard] = useState<WizardPath | null>(null);
   const [runningAgent, setRunningAgent] = useState<Agent | null>(null);
+
+  // Cross-cutting wizard state — lets the demo runner / command palette /
+  // anywhere else trigger the wizard with a chosen path.
+  const uiCreateAgentOpen = useUiStore((s) => s.createAgentOpen);
+  const uiCreateAgentPath = useUiStore((s) => s.createAgentPath);
+  const closeUiCreateAgent = useUiStore((s) => s.closeCreateAgent);
   const requestShell = useTerminalStore((s) => s.requestShell);
 
   const runInShell = async (agent: Agent) => {
@@ -326,9 +333,12 @@ export default function Home({
       </section>
 
       <CreateAgentWizard
-        open={wizard !== null}
-        initialPath={wizard ?? "guided"}
-        onClose={() => setWizard(null)}
+        open={wizard !== null || uiCreateAgentOpen}
+        initialPath={wizard ?? uiCreateAgentPath}
+        onClose={() => {
+          setWizard(null);
+          closeUiCreateAgent();
+        }}
       />
 
       {runningAgent && (

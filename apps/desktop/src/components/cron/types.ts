@@ -30,6 +30,14 @@ export interface CronJob {
   nextRunAt?: string;
   source?: CronJobSource;
   readOnly?: boolean; // true for jobs from external runtimes
+  /** Preferred dispatch target — use one of these when set, fall back to
+   *  raw `runtime` + `prompt` when both are null. */
+  agentSlug?: string;
+  groupSlug?: string;
+  /** v1.5.0 — when true and the OS supports it (macOS today), the job is
+   *  registered with the OS scheduler so it fires even when ATO is closed
+   *  or the laptop just woke from sleep. */
+  wakeFromSleep?: boolean;
 }
 
 export interface CronExecution {

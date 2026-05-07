@@ -214,16 +214,18 @@ function LoginPage({ onLogin, onRegister, onGithub }: {
     <div className="min-h-screen bg-[#0a0a0f] text-white">
       {/* Marketing hero — shown to anyone hitting the page unauthenticated */}
       <section className="max-w-5xl mx-auto px-6 pt-16 pb-10 text-center">
-        <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">
-          The GUI for daily <span className="text-[#00FFB2]">agentic work</span>.
+        <h1 className="text-4xl sm:text-5xl font-bold tracking-tight leading-tight">
+          AI agents that <span className="text-[#00FFB2]">work together</span>.
+          <br />
+          Across every runtime.
         </h1>
-        <p className="mt-4 text-base sm:text-lg text-[#aaaab8] max-w-2xl mx-auto">
-          Persistent multi-runtime conversations, production-grade agent authoring, and
-          observability — across Claude Code, Codex, Gemini, OpenClaw, Hermes, and Ollama.
+        <p className="mt-5 text-base sm:text-lg text-[#aaaab8] max-w-2xl mx-auto">
+          Build automation pipelines where Claude writes, Codex reviews, and Gemini summarizes —
+          all in one thread. Multi-runtime. Local-first. Open source.
         </p>
         <p className="mt-2 text-sm text-[#8888a0] max-w-2xl mx-auto">
-          Switch from Claude to Codex mid-conversation. Threads persist. Tokens stream.
-          Markdown renders. Local-first. MIT licensed.
+          Single prompt → routed dispatch or full sequential pipeline. Each agent runs on its own
+          runtime, output flows to the next, every step traced.
         </p>
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
@@ -241,29 +243,47 @@ function LoginPage({ onLogin, onRegister, onGithub }: {
           </a>
         </div>
 
+        {/* Supported-runtimes strip — drives the multi-runtime story home. */}
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-[11px] uppercase tracking-wider text-[#8888a0]">
+          <span>Claude Code</span>
+          <span className="text-[#2a2a3a]">·</span>
+          <span>Codex</span>
+          <span className="text-[#2a2a3a]">·</span>
+          <span>Gemini CLI</span>
+          <span className="text-[#2a2a3a]">·</span>
+          <span>OpenClaw</span>
+          <span className="text-[#2a2a3a]">·</span>
+          <span>Hermes</span>
+          <span className="text-[#2a2a3a]">·</span>
+          <span>Ollama</span>
+          <span className="text-[#2a2a3a]">·</span>
+          <span>+ DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi via API</span>
+        </div>
+
         <ul className="mt-10 grid grid-cols-1 sm:grid-cols-3 gap-3 text-left text-sm">
           <li className="rounded-lg border border-[#2a2a3a] bg-[#16161e] p-4">
-            <div className="text-[#00FFB2] font-semibold">Daily workspace</div>
+            <div className="text-[#00FFB2] font-semibold">Pipelines, not just chat</div>
             <p className="mt-1 text-[#aaaab8] text-xs leading-relaxed">
-              Persistent threads survive restart. Switch runtimes mid-conversation; the
-              full history travels. Streaming responses with markdown + syntax highlighting.
-              Drag-drop file attachments.
+              Bundle agents into <span className="text-white">routed groups</span> (router picks
+              one) or <span className="text-white">sequential automations</span> (writer → reviewer
+              → summarizer). One prompt fires the whole pipeline. Each agent's output flows into the
+              next as input.
+            </p>
+          </li>
+          <li className="rounded-lg border border-[#2a2a3a] bg-[#16161e] p-4">
+            <div className="text-[#00FFB2] font-semibold">Multi-runtime, by protocol</div>
+            <p className="mt-1 text-[#aaaab8] text-xs leading-relaxed">
+              Each child in a sequential pipeline runs on its own runtime — Claude writes, Codex
+              reviews, Gemini summarizes. Cross-runtime dispatch via MCP means any runtime can call
+              any agent. Bring your own CLI subscriptions or stored API keys.
             </p>
           </li>
           <li className="rounded-lg border border-[#2a2a3a] bg-[#16161e] p-4">
             <div className="text-[#00FFB2] font-semibold">Production-grade authoring</div>
             <p className="mt-1 text-[#aaaab8] text-xs leading-relaxed">
-              Variables, pre-call hooks, summarizers, multi-agent groups with router,
-              per-task models, evaluators, observability — every context-engineering
-              primitive as a first-class UI.
-            </p>
-          </li>
-          <li className="rounded-lg border border-[#2a2a3a] bg-[#16161e] p-4">
-            <div className="text-[#00FFB2] font-semibold">Multi-runtime by protocol</div>
-            <p className="mt-1 text-[#aaaab8] text-xs leading-relaxed">
-              Cross-runtime dispatch via MCP — any runtime can call any agent. Bring
-              your own auth: ride your CLI subscriptions, or use stored API keys. Your
-              choice, per runtime.
+              Dynamic prompt variables, pre-call context hooks, conversation summarizers, per-task
+              model selection, evaluators, observability — every context-engineering primitive as a
+              UI. Persistent threads survive restart. Streaming responses, markdown, code blocks.
             </p>
           </li>
         </ul>

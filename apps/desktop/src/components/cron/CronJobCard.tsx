@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Play, Loader2, Terminal, Cpu, Server, Globe, Link2, Pencil } from "lucide-react";
+import { Play, Loader2, Terminal, Cpu, Server, Globe, Link2, Pencil, Moon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CronJob, CronExecution, AgentRuntime } from "./types";
 import ExecutionTimeline from "./ExecutionTimeline";
@@ -114,8 +114,17 @@ export default function CronJobCard({
           </div>
 
           {/* Schedule */}
-          <p className="text-xs text-cs-muted mb-1.5">
-            {cronToHuman(job.schedule)}
+          <p className="text-xs text-cs-muted mb-1.5 flex items-center gap-1.5">
+            <span>{cronToHuman(job.schedule)}</span>
+            {job.wakeFromSleep && (
+              <span
+                className="inline-flex items-center gap-0.5 text-[9px] font-medium px-1 py-0.5 rounded bg-cs-accent/10 text-cs-accent"
+                title="Registered with launchd — wakes the machine to fire"
+              >
+                <Moon size={9} />
+                wake
+              </span>
+            )}
           </p>
 
           {/* Last/Next run */}

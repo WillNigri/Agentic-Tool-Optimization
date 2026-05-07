@@ -36,6 +36,7 @@ import {
 import McpInstallOptions, { type OptionValues } from "./McpInstallOptions";
 import { promptAgent } from "@/lib/tauri-api";
 import { useTerminalStore } from "@/stores/useTerminalStore";
+import { useDemoStore } from "@/stores/useDemoStore";
 
 // v1.3.0 T3.c — Multi-turn conversational wizard.
 // The LLM asks clarifying questions until it has enough info, then emits a
@@ -67,9 +68,10 @@ export default function GuidedPath({ onCreated, onCancel }: Props) {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Available runtimes for the user to pick from before starting the chat.
-  // We only ask if more than one is healthy; otherwise we silently use the only
-  // available option (or fall through to the no_runtime branch).
+  // All native runtimes — shown in the picker so the user always sees the
+  // full menu. Unavailable ones render disabled with a "connect first" hint
+  // (better discovery than hiding them entirely).
+  const ALL_RUNTIMES: AgentRuntime[] = ["claude", "codex", "gemini", "openclaw", "hermes"];
   const [readyRuntimes, setReadyRuntimes] = useState<AgentRuntime[]>([]);
   const [selectedRuntime, setSelectedRuntime] = useState<AgentRuntime | null>(null);
 
@@ -101,6 +103,25 @@ export default function GuidedPath({ onCreated, onCancel }: Props) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [history, pending, phase]);
+
+  // Demo runner integration — animate typing the goal + submit.
+  const demoIsPlaying = useDemoStore((s) => s.isPlaying);
+  const demoGoal = useDemoStore((s) => s.pendingGuidedGoal);
+  const demoSubmitGoal = useDemoStore((s) => s.pendingGuidedSubmit);
+  useEffect(() => {
+    if (demoIsPlaying) setGoal(demoGoal);
+  }, [demoIsPlaying, demoGoal]);
+  const lastSeenGoalSubmitRef = useRef(0);
+  useEffect(() => {
+    if (demoSubmitGoal > lastSeenGoalSubmitRef.current) {
+      lastSeenGoalSubmitRef.current = demoSubmitGoal;
+      requestAnimationFrame(() => {
+        const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+        void start(fakeEvent);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoSubmitGoal]);
 
   const start = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -191,40 +212,50 @@ export default function GuidedPath({ onCreated, onCancel }: Props) {
             )}
           </Bubble>
 
-          {/* Runtime picker — shown when multiple CLIs are ready. The choice
-              decides which AI conducts the wizard AND is what the agent runs
-              against (recorded in the agent record). Single-runtime systems
-              skip this. */}
-          {readyRuntimes.length > 1 && (
-            <div className="rounded-lg border border-cs-border bg-cs-bg-raised p-3">
-              <div className="text-[11px] uppercase tracking-wide text-cs-muted mb-2">
-                {t("createAgent.guided.pickRuntime", "Run this agent on")}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {readyRuntimes.map((rt) => (
+          {/* Runtime picker — always shows all six native runtimes so users
+              see the full menu. Unavailable ones render disabled with a
+              "Connect in Settings" tooltip — discovery beats hiding. */}
+          <div className="rounded-lg border border-cs-border bg-cs-bg-raised p-3">
+            <div className="text-[11px] uppercase tracking-wide text-cs-muted mb-2">
+              {t("createAgent.guided.pickRuntime", "Run this agent on")}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {ALL_RUNTIMES.map((rt) => {
+                const ready = readyRuntimes.includes(rt);
+                const active = selectedRuntime === rt;
+                return (
                   <button
                     key={rt}
                     type="button"
-                    onClick={() => setSelectedRuntime(rt)}
+                    onClick={() => ready && setSelectedRuntime(rt)}
+                    disabled={!ready}
+                    title={
+                      ready
+                        ? `Run the wizard + agent on ${runtimeLabel(rt)}`
+                        : `${runtimeLabel(rt)} isn't connected. Open Settings → Runtimes to connect it.`
+                    }
                     className={
-                      selectedRuntime === rt
+                      !ready
+                        ? "inline-flex items-center gap-1.5 rounded-full border border-cs-border/60 bg-cs-bg/40 px-3 py-1 text-xs font-medium text-cs-muted/60 opacity-60 cursor-not-allowed"
+                        : active
                         ? "inline-flex items-center gap-1.5 rounded-full border border-cs-accent bg-cs-accent/10 px-3 py-1 text-xs font-medium text-cs-accent"
                         : "inline-flex items-center gap-1.5 rounded-full border border-cs-border bg-cs-bg px-3 py-1 text-xs font-medium text-cs-muted hover:border-cs-hover hover:text-cs-text"
                     }
                   >
-                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${runtimeDot(rt)}`} />
+                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${ready ? runtimeDot(rt) : "bg-cs-muted/40"}`} />
                     {runtimeLabel(rt)}
+                    {!ready && <span className="text-[9px] uppercase tracking-wider">· connect</span>}
                   </button>
-                ))}
-              </div>
-              <p className="mt-2 text-[10px] text-cs-muted">
-                {t(
-                  "createAgent.guided.pickRuntimeHint",
-                  "Both the wizard's questions and the agent itself will run on this runtime. You can change it later."
-                )}
-              </p>
+                );
+              })}
             </div>
-          )}
+            <p className="mt-2 text-[10px] text-cs-muted">
+              {t(
+                "createAgent.guided.pickRuntimeHint",
+                "Both the wizard's questions and the agent itself will run on this runtime. You can change it later."
+              )}
+            </p>
+          </div>
 
           <form onSubmit={start} className="flex gap-2">
             <input

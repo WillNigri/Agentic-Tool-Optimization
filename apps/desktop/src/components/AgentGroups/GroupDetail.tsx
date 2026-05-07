@@ -30,6 +30,7 @@ import { listAgents, type Agent, type AgentRuntime } from "@/lib/agents";
 import { useFeatureFlag } from "@/lib/tier";
 import UpgradePrompt from "@/components/Tier/UpgradePrompt";
 import GroupGraphEditor from "./GroupGraphEditor";
+import { useDemoStore } from "@/stores/useDemoStore";
 import { cn } from "@/lib/utils";
 
 // v1.4.0 F4 — Group create/edit form. Wave 3.2 will add the visual graph
@@ -63,6 +64,9 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
   const [routerConfig, setRouterConfig] = useState<RouterConfig>(
     existing ? parseRouterConfig(existing.routerConfig) : DEFAULT_ROUTER_CONFIG
   );
+  const [dispatchKind, setDispatchKind] = useState<"routed" | "sequential">(
+    existing?.dispatchKind ?? "routed"
+  );
   const [error, setError] = useState<string | null>(null);
   const [proPrompt, setProPrompt] = useState(false);
   // Wave 3.2 — Graph view of router + children. Toggle between graph + form.
@@ -76,6 +80,58 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
     if (existing) return;
     setMembers([]);
   }, [runtime, existing]);
+
+  // Demo bridge — when the demo runner pushes a `pendingGroupAutoFill`,
+  // animate the form so the recording shows the same "watching it being
+  // built" UX as the agent quick form. New groups only.
+  const demoAutoFill = useDemoStore((s) => s.pendingGroupAutoFill);
+  const lastAutoFillSeqRef = useRef(0);
+  useEffect(() => {
+    if (existing) return;
+    if (!demoAutoFill || demoAutoFill.seq === lastAutoFillSeqRef.current) return;
+    lastAutoFillSeqRef.current = demoAutoFill.seq;
+    let cancelled = false;
+    const { spec } = demoAutoFill;
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    (async () => {
+      if (spec.runtime) setRuntime(spec.runtime);
+      await wait(180);
+      if (cancelled) return;
+      setDisplayName(spec.displayName);
+      await wait(420);
+      if (cancelled) return;
+      if (spec.description) setDescription(spec.description);
+      await wait(420);
+      if (cancelled) return;
+      setDispatchKind(spec.dispatchKind);
+      await wait(380);
+      if (cancelled) return;
+      // Children — append one at a time so the list grows visibly.
+      for (const slug of spec.childSlugs) {
+        if (cancelled) return;
+        setMembers((prev) =>
+          prev.some((m) => m.agentSlug === slug)
+            ? prev
+            : [...prev, { agentSlug: slug, role: "child", position: prev.length }]
+        );
+        await wait(380);
+      }
+      if (cancelled) return;
+      // Router rule — only meaningful for routed groups.
+      if (spec.dispatchKind === "routed" && spec.routerRule) {
+        const rule: RouterRule = {
+          if: { keyword: spec.routerRule.keywords },
+          then: spec.routerRule.thenSlug,
+        };
+        setRouterConfig((rc) => ({ ...rc, rules: [...(rc.rules ?? []), rule] }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // intentional: react only to seq bumps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoAutoFill?.seq]);
 
   const { data: allAgents = [] } = useQuery({
     queryKey: ["agents-for-group", runtime],
@@ -102,6 +158,7 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
         description: description || undefined,
         routerConfig,
         members,
+        dispatchKind,
       });
     },
     onSuccess: () => {
@@ -201,6 +258,7 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
           </div>
           <button
             type="button"
+            data-demo-id="group-save"
             disabled={!canSave}
             onClick={() => saveMutation.mutate()}
             className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover disabled:opacity-50"
@@ -283,6 +341,74 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
             </p>
           </Field>
         )}
+
+        {/* Dispatch kind — Routed (current) vs Sequential ("automation"
+            pipeline). Hidden for existing groups since changing it on the
+            fly would invalidate the router rules; keep it create-only. */}
+        {!existing && (
+          <Field label={t("agentGroups.fields.dispatchKind", "Type")} required>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDispatchKind("routed")}
+                className={cn(
+                  "rounded-md border px-3 py-2 text-left transition",
+                  dispatchKind === "routed"
+                    ? "border-cs-accent/60 bg-cs-accent/10"
+                    : "border-cs-border bg-cs-bg-raised hover:border-cs-border/80"
+                )}
+              >
+                <div className={cn(
+                  "text-xs font-medium",
+                  dispatchKind === "routed" ? "text-cs-accent" : "text-cs-text"
+                )}>
+                  {t("agentGroups.dispatchKind.routed", "Routed")}
+                </div>
+                <p className="mt-0.5 text-[10px] text-cs-muted leading-snug">
+                  {t(
+                    "agentGroups.dispatchKind.routedHint",
+                    "Router picks one child per prompt. Keyword rules + LLM fallback."
+                  )}
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDispatchKind("sequential")}
+                className={cn(
+                  "rounded-md border px-3 py-2 text-left transition",
+                  dispatchKind === "sequential"
+                    ? "border-cs-accent/60 bg-cs-accent/10"
+                    : "border-cs-border bg-cs-bg-raised hover:border-cs-border/80"
+                )}
+              >
+                <div className={cn(
+                  "text-xs font-medium",
+                  dispatchKind === "sequential" ? "text-cs-accent" : "text-cs-text"
+                )}>
+                  {t("agentGroups.dispatchKind.sequential", "Automation pipeline")}
+                </div>
+                <p className="mt-0.5 text-[10px] text-cs-muted leading-snug">
+                  {t(
+                    "agentGroups.dispatchKind.sequentialHint",
+                    "Children run in order. Each agent's output feeds the next. One prompt → full pipeline."
+                  )}
+                </p>
+              </button>
+            </div>
+          </Field>
+        )}
+        {existing && (
+          <Field label={t("agentGroups.fields.dispatchKind", "Type")}>
+            <div className="rounded-md border border-cs-border bg-cs-bg-raised px-3 py-2 text-xs text-cs-muted">
+              {existing.dispatchKind === "sequential"
+                ? t("agentGroups.dispatchKind.sequential", "Automation pipeline")
+                : t("agentGroups.dispatchKind.routed", "Routed")}
+              <span className="ml-2 text-[10px]">
+                {t("agentGroups.dispatchKind.locked", "(locked after create)")}
+              </span>
+            </div>
+          </Field>
+        )}
       </section>
 
       {/* Children */}
@@ -333,14 +459,54 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
         )}
       </section>
 
-      {/* Router config */}
+      {/* Router config — only relevant for "routed" groups. Sequential
+          groups don't have a router; they run children in position order. */}
       <div ref={routerSectionRef}>
-        <RouterEditor
-          config={routerConfig}
-          onChange={setRouterConfig}
-          children={childMembers.map((m) => m.agentSlug)}
-          focusedChild={focusedChild}
-        />
+        {dispatchKind === "routed" ? (
+          <RouterEditor
+            config={routerConfig}
+            onChange={setRouterConfig}
+            children={childMembers.map((m) => m.agentSlug)}
+            focusedChild={focusedChild}
+          />
+        ) : (
+          <section>
+            <header className="mb-2">
+              <h4 className="text-xs font-medium text-cs-text uppercase tracking-wide">
+                {t("agentGroups.pipeline", "Pipeline order")}
+              </h4>
+              <p className="text-[11px] text-cs-muted mt-0.5">
+                {t(
+                  "agentGroups.pipelineHint",
+                  "Children run top-to-bottom. The first agent receives the user's prompt; every later agent receives the previous agent's output."
+                )}
+              </p>
+            </header>
+            {childMembers.length === 0 ? (
+              <p className="text-[11px] text-cs-muted italic">
+                {t("agentGroups.pipelineEmpty", "Add children above to define the pipeline.")}
+              </p>
+            ) : (
+              <ol className="space-y-1.5">
+                {childMembers.map((m, i) => (
+                  <li
+                    key={m.agentSlug}
+                    className="flex items-center gap-2 rounded-md border border-cs-border bg-cs-bg-raised px-3 py-2"
+                  >
+                    <span className="text-[10px] font-mono text-cs-muted w-5 shrink-0">
+                      {i + 1}.
+                    </span>
+                    <Sparkles size={11} className="text-cs-accent shrink-0" />
+                    <code className="text-xs font-mono text-cs-text flex-1">{m.agentSlug}</code>
+                    {i < childMembers.length - 1 && (
+                      <span className="text-[10px] text-cs-muted">→</span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
       </div>
 
       <UpgradePrompt

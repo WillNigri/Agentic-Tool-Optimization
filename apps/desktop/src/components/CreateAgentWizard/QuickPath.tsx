@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Search } from "lucide-react";
@@ -10,7 +10,10 @@ import {
   clearQuickDraft,
   type QuickDraft,
 } from "@/lib/agentDraft";
+import { saveAgentHook, hookConfigToJson } from "@/lib/agentHooks";
+import { useDemoStore } from "@/stores/useDemoStore";
 import { cn } from "@/lib/utils";
+import { FileText, Plus, Trash2 } from "lucide-react";
 
 // Quick (form) path — wired to Rust create_agent. T3.b adds:
 //   - Draft persistence via localStorage (auto-save on change, cleared on success)
@@ -42,6 +45,7 @@ const DEFAULT_DRAFT: QuickDraft = {
   projectId: null,
   skills: [],
   mcps: [],
+  contextFiles: [],
 };
 
 export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) {
@@ -52,10 +56,12 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
   const [createdAgentName, setCreatedAgentName] = useState<string | null>(null);
 
   // Draft (auto-saved). initialDraft (from a template pick) wins over the
-  // persisted draft so the user lands on the pre-filled form.
-  const [draft, setDraft] = useState<QuickDraft>(
-    () => initialDraft ?? loadQuickDraft() ?? DEFAULT_DRAFT
-  );
+  // persisted draft so the user lands on the pre-filled form. Merge with
+  // DEFAULT_DRAFT so old persisted drafts get any new fields filled in.
+  const [draft, setDraft] = useState<QuickDraft>(() => {
+    const seed = initialDraft ?? loadQuickDraft() ?? DEFAULT_DRAFT;
+    return { ...DEFAULT_DRAFT, ...seed };
+  });
 
   useEffect(() => {
     saveQuickDraft(draft);
@@ -86,6 +92,34 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
 
   const runtimeSkills = allSkills.filter((s) => s.runtime === draft.runtime || draft.runtime === "openclaw");
 
+  // ── Demo mode plumbing ────────────────────────────────────────────────
+  // When the demo runner emits typeAgentField / setAgentField steps, it
+  // writes a patch with a monotonic seq number. We merge each new patch
+  // exactly once into local draft state. This makes form creation look
+  // like a human typing while keeping the runner deterministic.
+  const demoPatch = useDemoStore((s) => s.pendingAgentFormPatch);
+  const demoSubmit = useDemoStore((s) => s.pendingAgentFormSubmit);
+  const demoNotifyAgentCreated = useDemoStore((s) => s.notifyAgentCreated);
+  const lastSeenPatchSeqRef = useRef(0);
+  const lastSeenSubmitRef = useRef(0);
+  const systemPromptRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!demoPatch) return;
+    if (demoPatch.seq <= lastSeenPatchSeqRef.current) return;
+    lastSeenPatchSeqRef.current = demoPatch.seq;
+    setDraft((d) => ({ ...d, ...demoPatch.patch }));
+    // While the demo is typing into a long field (system prompt), scroll
+    // the field into view so the recording follows what's being written.
+    if (demoPatch.patch.systemPrompt !== undefined && systemPromptRef.current) {
+      systemPromptRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      // Also keep the textarea's own viewport pinned to the bottom so the
+      // most recently typed line is always visible.
+      const ta = systemPromptRef.current;
+      ta.scrollTop = ta.scrollHeight;
+    }
+  }, [demoPatch]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!draft.name.trim() || submitting) return;
@@ -102,10 +136,35 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
         skills: draft.skills.length > 0 ? draft.skills : undefined,
         mcps: draft.mcps.length > 0 ? draft.mcps : undefined,
       });
+      // F2 Context Hooks — turn the user's "context files" picks into real
+      // file hooks on the new agent. Each one fires before every turn and
+      // injects the file's contents into a <context> block. Best-effort:
+      // an individual hook failure doesn't block the create.
+      const cleanedFiles = draft.contextFiles
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0);
+      for (let i = 0; i < cleanedFiles.length; i++) {
+        const path = cleanedFiles[i];
+        const fallbackName = path.split("/").filter(Boolean).pop() || `file-${i + 1}`;
+        try {
+          await saveAgentHook({
+            agentId: agent.id,
+            position: i,
+            name: fallbackName,
+            kind: "file",
+            configJson: hookConfigToJson({ kind: "file", path, maxBytes: 16 * 1024 }),
+            enabled: true,
+          });
+        } catch {
+          // ignore — user can re-add manually under Context tab
+        }
+      }
       setCreatedAgentName(agent.displayName);
       clearQuickDraft();
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
       void queryClient.invalidateQueries({ queryKey: ["recent-agents"] });
+      // Tell the demo runner the create completed — it can advance now.
+      demoNotifyAgentCreated();
       onCreated?.(agent.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -118,6 +177,18 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
     setDraft(DEFAULT_DRAFT);
     clearQuickDraft();
   };
+
+  // Demo runner asked us to submit the form.
+  useEffect(() => {
+    if (demoSubmit > lastSeenSubmitRef.current) {
+      lastSeenSubmitRef.current = demoSubmit;
+      requestAnimationFrame(() => {
+        const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+        void handleSubmit(fakeEvent);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoSubmit]);
 
   if (createdAgentName) {
     return (
@@ -226,6 +297,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
         hint={t("createAgent.quick.systemPromptHint", "Optional. The agent's instructions.")}
       >
         <textarea
+          ref={systemPromptRef}
           value={draft.systemPrompt}
           onChange={(e) => update("systemPrompt", e.target.value)}
           rows={5}
@@ -265,6 +337,11 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
         emptyHint={t("createAgent.quick.noMcpsAvailable", "No MCP servers configured.")}
       />
 
+      <ContextFilesField
+        files={draft.contextFiles}
+        onChange={(files) => update("contextFiles", files)}
+      />
+
       {error && (
         <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3">
           <AlertCircle size={14} className="text-cs-danger shrink-0 mt-0.5" />
@@ -290,6 +367,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
           </button>
           <button
             type="submit"
+            data-demo-id="quick-form-save"
             disabled={!draft.name.trim() || submitting}
             className="inline-flex items-center gap-2 rounded-lg bg-cs-accent px-4 py-2 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover disabled:opacity-50"
           >
@@ -299,6 +377,78 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
         </div>
       </div>
     </form>
+  );
+}
+
+/** Context Files — wired on agent create as F2 file Hooks. We give the user
+ *  text inputs (paths support `~/...` expansion server-side). They can add
+ *  any number; each one ends up as a Hook row that fires on every dispatch. */
+function ContextFilesField({
+  files,
+  onChange,
+}: {
+  files: string[];
+  onChange: (files: string[]) => void;
+}) {
+  const { t } = useTranslation();
+  const update = (i: number, value: string) =>
+    onChange(files.map((f, idx) => (idx === i ? value : f)));
+  const remove = (i: number) => onChange(files.filter((_, idx) => idx !== i));
+  const add = () => onChange([...files, ""]);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-medium text-cs-muted uppercase tracking-wide flex items-center gap-1.5">
+          <FileText size={11} />
+          {t("createAgent.quick.contextFiles", "Context files")}
+        </span>
+        <span className="text-[10px] text-cs-muted">
+          {t(
+            "createAgent.quick.contextFilesHint",
+            "Loaded on every turn into <context>, not into the system prompt"
+          )}
+        </span>
+      </div>
+      <div className="space-y-1.5">
+        {files.map((path, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={path}
+              onChange={(e) => update(i, e.target.value)}
+              placeholder="~/notes/style-guide.md"
+              className="flex-1 rounded-lg border border-cs-border bg-cs-bg px-3 py-1.5 text-xs text-cs-text font-mono focus:border-cs-accent focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => remove(i)}
+              className="text-cs-muted hover:text-cs-danger p-1.5 shrink-0"
+              aria-label={t("common.remove", "Remove")}
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={add}
+          className="inline-flex items-center gap-1 text-xs text-cs-accent hover:underline"
+        >
+          <Plus size={11} />
+          {files.length === 0
+            ? t("createAgent.quick.addContextFile", "Add a context file")
+            : t("createAgent.quick.addAnotherContextFile", "Add another file")}
+        </button>
+      </div>
+      {files.length > 0 && (
+        <p className="mt-1.5 text-[10px] text-cs-muted leading-snug">
+          {t(
+            "createAgent.quick.contextFilesNote",
+            "Each file becomes a Context Hook on the agent. You can edit, reorder, or remove them later from the agent's Context tab."
+          )}
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -169,6 +169,10 @@ pub struct AgentGroup {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub members: Vec<AgentGroupMember>,
+    /// "routed" (router picks one) | "sequential" (children run in order,
+    /// each receiving the previous output as input). Defaults to "routed"
+    /// for backwards compatibility with existing groups.
+    pub dispatch_kind: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -177,6 +181,11 @@ pub struct AgentGroupMember {
     pub agent_id: String,
     pub agent_slug: String,
     pub agent_display_name: String,
+    /// The child agent's runtime — useful for sequential dispatch where
+    /// each child can run on its own runtime (Claude → Codex pipelines).
+    /// Optional for backwards compat with serialized state that lacked it.
+    #[serde(default)]
+    pub agent_runtime: String,
     pub role: String, // 'router' | 'child'
     pub position: i32,
 }
@@ -651,6 +660,13 @@ pub fn init_database(conn: &Connection) {
     // SQLite returns "duplicate column" if the column already exists; ignore.
     let _ = conn.execute("ALTER TABLE agents ADD COLUMN role_models_json TEXT", []);
     let _ = conn.execute("ALTER TABLE agents ADD COLUMN memory_policy_json TEXT", []);
+    // v1.5.0 — dispatch kind on agent groups: "routed" (router picks one
+    // child) vs "sequential" (children run in order, output of N is input
+    // to N+1). Default keeps existing groups behaving as before.
+    let _ = conn.execute(
+        "ALTER TABLE agent_groups ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'routed'",
+        [],
+    );
 }
 
 
@@ -660,6 +676,20 @@ pub use commands::*;
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
+    // Headless cron entry — when launchd / cron / Task Scheduler invokes
+    // `ato-desktop --run-cron <id>`, we dispatch the job and exit without
+    // opening any window. Detected before tauri::Builder runs so the GUI
+    // never tries to spin up.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(idx) = args.iter().position(|a| a == "--run-cron") {
+        if let Some(id) = args.get(idx + 1).cloned() {
+            let exit_code = commands::run_cron_headless(id);
+            std::process::exit(exit_code);
+        }
+        eprintln!("--run-cron requires a job id");
+        std::process::exit(2);
+    }
+
     let db_path = get_db_path();
     let conn = Connection::open(&db_path).expect("Failed to open SQLite database");
     init_database(&conn);
@@ -740,6 +770,11 @@ pub fn run() {
             delete_cron_job,
             get_cron_history,
             trigger_cron_job,
+            cron_os_scheduler_supported,
+            cron_os_scheduler_kind,
+            register_cron_os_scheduler,
+            unregister_cron_os_scheduler,
+            is_cron_os_scheduler_registered,
             openclaw_gateway_status,
             openclaw_list_cron_jobs,
             openclaw_cron_status,
@@ -887,6 +922,8 @@ pub fn run() {
             update_agent_memory_policy,
             // v1.4.0 F5: Per-task model selection
             update_agent_role_models,
+            // v1.5.0: Update MCPs attached to an agent (one-click browser tools etc.)
+            update_agent_mcps,
             // v1.4.0 F4: Multi-agent groups (router + children)
             create_agent_group,
             list_agent_groups,

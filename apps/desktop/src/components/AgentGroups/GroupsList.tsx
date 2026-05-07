@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useUiStore } from "@/stores/useUiStore";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -46,6 +47,18 @@ export default function GroupsList() {
     queryFn: () => listAgentGroups(),
     staleTime: 5_000,
   });
+
+  // External demo coordinator can request opening a specific group's detail.
+  const externalSelectedSlug = useUiStore((s) => s.selectedGroupSlug);
+  const clearExternalSelectedSlug = useUiStore((s) => s.selectGroupSlug);
+  useEffect(() => {
+    if (!externalSelectedSlug) return;
+    const found = groups.find((g) => g.slug === externalSelectedSlug);
+    if (found) {
+      setEditing(found);
+      clearExternalSelectedSlug(null);
+    }
+  }, [externalSelectedSlug, groups, clearExternalSelectedSlug]);
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteAgentGroup(id),
@@ -109,6 +122,7 @@ export default function GroupsList() {
         </div>
         <button
           type="button"
+          data-demo-id="group-new"
           onClick={() => setEditing("new")}
           className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover shrink-0"
         >
