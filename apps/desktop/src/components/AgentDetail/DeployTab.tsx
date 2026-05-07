@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Copy, Check, ExternalLink, Cloud, Server, Box, Layers } from "lucide-react";
+import { Copy, Check, ExternalLink, Cloud, Server, Box, Layers, FolderDown, Loader2 } from "lucide-react";
 import type { Agent } from "@/lib/agents";
 import { generateCloudflareWorker } from "@/lib/deployBundleGenerators/cloudflare";
 import { generateVercelEdge } from "@/lib/deployBundleGenerators/vercel";
@@ -205,7 +205,7 @@ export default function DeployTab({ agent }: Props) {
       {/* File preview */}
       {bundle && (
         <section className="rounded-lg border border-cs-border bg-cs-bg/40 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-cs-border bg-cs-bg/60 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 border-b border-cs-border bg-cs-bg/60 px-3 py-2">
             <div className="flex flex-wrap gap-1">
               {fileNames.map((name) => (
                 <button
@@ -223,7 +223,10 @@ export default function DeployTab({ agent }: Props) {
                 </button>
               ))}
             </div>
-            {currentFile && <CopyButton value={bundle.files[currentFile]} />}
+            <div className="flex items-center gap-2">
+              <SaveBundleButton bundle={bundle} agentSlug={agent.slug} />
+              {currentFile && <CopyButton value={bundle.files[currentFile]} />}
+            </div>
           </div>
           <pre className="max-h-[420px] overflow-auto p-3 text-[11px] text-cs-text font-mono whitespace-pre">
             {currentFile ? bundle.files[currentFile] : ""}
@@ -288,6 +291,73 @@ function SectionHeader({ title, hint }: { title: string; hint?: string }) {
       <div className="text-[11px] font-semibold uppercase tracking-wide text-cs-muted">{title}</div>
       {hint && <p className="mt-1 text-[11px] text-cs-muted">{hint}</p>}
     </div>
+  );
+}
+
+function SaveBundleButton({ bundle, agentSlug }: { bundle: GeneratedBundle; agentSlug: string }) {
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Save the entire bundle into a folder the user picks. Tauri only — falls
+  // back gracefully when the dialog plugin import fails (e.g., browser dev
+  // mode), and surfaces the error inline rather than blowing up the tab.
+  const onSave = async () => {
+    setState("saving");
+    setErrorMsg(null);
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile, mkdir } = await import("@tauri-apps/plugin-fs");
+      const dir = await open({
+        directory: true,
+        multiple: false,
+        title: "Pick a folder for the deploy bundle",
+      });
+      if (!dir || typeof dir !== "string") {
+        setState("idle");
+        return;
+      }
+      const root = `${dir}/${agentSlug}`;
+      // Best-effort recursive mkdir so nested paths like
+      // app/api/agent/route.ts (Vercel target) work.
+      await mkdir(root, { recursive: true }).catch(() => undefined);
+      for (const [relPath, contents] of Object.entries(bundle.files)) {
+        const full = `${root}/${relPath}`;
+        const parent = full.substring(0, full.lastIndexOf("/"));
+        if (parent && parent !== root) {
+          await mkdir(parent, { recursive: true }).catch(() => undefined);
+        }
+        await writeTextFile(full, contents);
+      }
+      setState("saved");
+      setTimeout(() => setState("idle"), 1500);
+    } catch (err) {
+      setState("error");
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setTimeout(() => setState("idle"), 3000);
+    }
+  };
+
+  const label =
+    state === "saving" ? "Saving…" :
+    state === "saved"  ? "Saved" :
+    state === "error"  ? errorMsg ?? "Error" :
+    "Save bundle…";
+
+  return (
+    <button
+      type="button"
+      onClick={onSave}
+      disabled={state === "saving"}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors",
+        state === "saved" ? "border-cs-accent/40 text-cs-accent" : "border-cs-border bg-cs-bg text-cs-muted hover:text-cs-text",
+        state === "error" && "border-red-500/40 text-red-400",
+      )}
+      title={errorMsg ?? undefined}
+    >
+      {state === "saving" ? <Loader2 size={11} className="animate-spin" /> : state === "saved" ? <Check size={11} /> : <FolderDown size={11} />}
+      {label}
+    </button>
   );
 }
 
