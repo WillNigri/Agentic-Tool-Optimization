@@ -1130,25 +1130,51 @@ pub fn discover_mcp_tools_stdio(command: &str, args: &[&str], env: &std::collect
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
-    // Build the command
+    // Build the command. CRITICAL: inject the user's full shell PATH so the
+    // spawned MCP server (and any tools it calls — `npx`, `node`, `python`)
+    // can be found. Without this, GUI-launched Tauri's narrow PATH means
+    // `npx @modelcontextprotocol/server-*` can't even find npx, and we
+    // misreport "0 tools" for every MCP. Felipe + Beatriz hit this on
+    // v1.5.20 — every MCP showed Error / 0 tools after the inheritance gap
+    // surfaced.
+    let user_path = get_user_path();
     let mut cmd = Command::new(command);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Capture stderr so we can surface real spawn errors instead of a
+        // silent "Failed to read response" — previously we ate everything
+        // the server logged on its way to crashing.
+        .stderr(Stdio::piped())
+        .env("PATH", &user_path)
         .envs(env);
 
     // Spawn the process
     let mut child = cmd.spawn()
-        .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
+        .map_err(|e| format!("Failed to spawn MCP server '{}': {}", command, e))?;
 
     let stdin = child.stdin.as_mut()
         .ok_or("Failed to open stdin")?;
     let stdout = child.stdout.take()
         .ok_or("Failed to open stdout")?;
+    let stderr_pipe = child.stderr.take();
 
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
+
+    // Drain stderr on demand — used when the server exits before we get a
+    // valid response. Without this we'd report a generic "Failed to parse
+    // response" with no clue that the actual problem was e.g. `npx: command
+    // not found` or a missing API key.
+    let drain_stderr = |stderr_pipe: Option<std::process::ChildStderr>| -> String {
+        if let Some(mut s) = stderr_pipe {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = s.read_to_string(&mut buf);
+            return buf.trim().to_string();
+        }
+        String::new()
+    };
 
     // Send initialize request
     let init_request = json!({
@@ -1169,16 +1195,31 @@ pub fn discover_mcp_tools_stdio(command: &str, args: &[&str], env: &std::collect
         .map_err(|e| format!("Failed to write initialize request: {}", e))?;
     stdin.flush().map_err(|e| format!("Failed to flush stdin: {}", e))?;
 
-    // Read initialize response with timeout
+    // Read initialize response.
     let mut read_response = || -> Result<serde_json::Value, String> {
         line.clear();
-        reader.read_line(&mut line)
+        let n = reader.read_line(&mut line)
             .map_err(|e| format!("Failed to read response: {}", e))?;
+        if n == 0 {
+            // Server closed stdout before sending anything — usually means
+            // it crashed during init. The real diagnostic is in stderr.
+            return Err("server exited before sending a response".to_string());
+        }
         serde_json::from_str(&line)
-            .map_err(|e| format!("Failed to parse response: {}", e))
+            .map_err(|e| format!("Failed to parse response (got: {:?}): {}", line.trim(), e))
     };
 
-    let init_response = read_response()?;
+    let init_response = match read_response() {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = child.kill();
+            let stderr_msg = drain_stderr(stderr_pipe);
+            if stderr_msg.is_empty() {
+                return Err(e);
+            }
+            return Err(format!("{}\nstderr: {}", e, stderr_msg));
+        }
+    };
 
     // Extract server info
     let server_info = init_response.get("result")
@@ -2475,30 +2516,60 @@ pub struct DetectedRuntime {
 
 /// Get the user's full shell PATH (Tauri apps launch with minimal env)
 pub fn get_user_path() -> String {
-    // Try to get PATH from user's shell
-    if let Ok(output) = std::process::Command::new("/bin/zsh")
-        .args(["-l", "-c", "echo $PATH"])
-        .output()
+    // Windows takes a different code path: GUI-launched apps inherit the
+    // PATH from when they were launched, which usually misses User-scope
+    // PATH entries the user added later (npm-global, scoop shims, etc.).
+    // Resolve via PowerShell which reads both Machine + User env at runtime.
+    // Felipe hit this on v1.5.20: nothing connects on Windows because no
+    // CLI was findable, even though `where claude` works in his terminal.
+    #[cfg(target_os = "windows")]
     {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return path;
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "[Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return path;
+                }
             }
         }
+        // Fall through to the inherited PATH. Better than nothing.
+        return std::env::var("PATH").unwrap_or_default();
     }
-    if let Ok(output) = std::process::Command::new("/bin/bash")
-        .args(["-l", "-c", "echo $PATH"])
-        .output()
+
+    #[cfg(not(target_os = "windows"))]
     {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return path;
+        // Try to get PATH from user's shell
+        if let Ok(output) = std::process::Command::new("/bin/zsh")
+            .args(["-l", "-c", "echo $PATH"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return path;
+                }
             }
         }
+        if let Ok(output) = std::process::Command::new("/bin/bash")
+            .args(["-l", "-c", "echo $PATH"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return path;
+                }
+            }
+        }
+        std::env::var("PATH").unwrap_or_default()
     }
-    std::env::var("PATH").unwrap_or_default()
 }
 
 /// Build a `std::process::Command` from a CLI string that may be either
@@ -2532,7 +2603,12 @@ pub fn wrapper_command_tokio(spec: &str) -> tokio::process::Command {
 
 /// Search for a CLI binary by name, checking common install paths + user shell + npx cache.
 pub fn which_cli(name: &str) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
+    // HOME isn't set on Windows by default — USERPROFILE is. Falling back
+    // to USERPROFILE keeps the candidate-path expansion working
+    // cross-platform without forcing every caller to set HOME first.
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
 
     // 1. Check user-configured override first (highest priority).
     //    The override may be a plain path OR a wrapper invocation
@@ -2561,8 +2637,8 @@ pub fn which_cli(name: &str) -> Option<String> {
         }
     }
 
-    // 2. Check common install locations
-    let candidates: Vec<String> = vec![
+    // 2. Check common install locations.
+    let mut candidates: Vec<String> = vec![
         format!("/usr/local/bin/{}", name),
         format!("/opt/homebrew/bin/{}", name),
         format!("{}/.npm-global/bin/{}", home, name),
@@ -2570,6 +2646,31 @@ pub fn which_cli(name: &str) -> Option<String> {
         format!("{}/.local/bin/{}", home, name),
         format!("{}/.cargo/bin/{}", home, name),
     ];
+    // Windows-specific candidates. npm shims land in %APPDATA%\npm\<name>.cmd
+    // — `where` doesn't always pick these up if Tauri's GUI-launched PATH
+    // misses %APPDATA%. Volta, scoop, and Cargo for Windows go elsewhere
+    // again. Felipe's "nothing connects on Windows" was this set never
+    // being checked.
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let local_appdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        // Each candidate gets tried both as `<name>.cmd` and `<name>.exe`
+        // — npm publishes .cmd shims, native installers ship .exe.
+        for ext in ["cmd", "exe"] {
+            if !appdata.is_empty() {
+                candidates.push(format!(r"{}\npm\{}.{}", appdata, name, ext));
+            }
+            if !local_appdata.is_empty() {
+                candidates.push(format!(r"{}\Programs\{}\{}.{}", local_appdata, name, name, ext));
+                candidates.push(format!(r"{}\Volta\bin\{}.{}", local_appdata, name, ext));
+            }
+            if !home.is_empty() {
+                candidates.push(format!(r"{}\.cargo\bin\{}.{}", home, name, ext));
+                candidates.push(format!(r"{}\scoop\shims\{}.{}", home, name, ext));
+            }
+        }
+    }
 
     for path in &candidates {
         if std::path::Path::new(path).exists() {
