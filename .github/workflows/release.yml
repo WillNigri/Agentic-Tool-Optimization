@@ -108,10 +108,26 @@ jobs:
             echo "::warning::Bundle dir $BUNDLE_ROOT not found, skipping"
             exit 0
           fi
-          find "$BUNDLE_ROOT" \( -name "*.sig" -o -name "*.AppImage.tar.gz" \) -type f | while read -r f; do
+          echo "Bundle dir contents:"
+          find "$BUNDLE_ROOT" -maxdepth 4 -type f \( -name "*.sig" -o -name "*.tar.gz" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) 2>&1 | head -30
+          echo "---"
+          # Two separate finds so the OR logic doesn't depend on parenthesis
+          # escaping inside YAML→bash. v1.5.5–v1.5.8 used `\( -name X -o -name Y \)`
+          # which silently produced zero results in some shell environments.
+          UPLOADED=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
             echo "Uploading $f"
-            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || echo "::warning::upload failed for $f"
-          done
+            if gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber; then
+              UPLOADED=$((UPLOADED+1))
+            else
+              echo "::warning::upload failed for $f"
+            fi
+          done < <(find "$BUNDLE_ROOT" -type f -name "*.sig"; find "$BUNDLE_ROOT" -type f -name "*.AppImage.tar.gz")
+          echo "Uploaded $UPLOADED updater artifacts"
+          if [ "$UPLOADED" -eq 0 ]; then
+            echo "::warning::No updater artifacts found under $BUNDLE_ROOT — auto-update will be broken for this platform."
+          fi
 
       - name: Upload updater artifacts (Windows)
         if: success() && matrix.platform == 'windows-latest'
@@ -125,10 +141,18 @@ jobs:
             Write-Warning "Bundle dir $bundleRoot not found, skipping"
             exit 0
           }
-          Get-ChildItem -Path $bundleRoot -Recurse -Include *.sig, *.nsis.zip | ForEach-Object {
+          Write-Host "Bundle dir contents:"
+          Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Name -match '\.(sig|tar\.gz|nsis\.zip|exe|msi)$' } | ForEach-Object { Write-Host $_.FullName }
+          Write-Host "---"
+          $uploaded = 0
+          Get-ChildItem -Path $bundleRoot -Recurse -File -Include *.sig, *.nsis.zip | ForEach-Object {
             Write-Host "Uploading $($_.FullName)"
             gh release upload $env:TAG $_.FullName --repo "${{ github.repository }}" --clobber
-            if ($LASTEXITCODE -ne 0) { Write-Warning "upload failed for $($_.FullName)" }
+            if ($LASTEXITCODE -eq 0) { $uploaded++ } else { Write-Warning "upload failed for $($_.FullName)" }
+          }
+          Write-Host "Uploaded $uploaded updater artifacts"
+          if ($uploaded -eq 0) {
+            Write-Warning "No updater artifacts found under $bundleRoot — auto-update will be broken for this platform."
           }
 
   # Aggregator job: pull all .sig files from the release after the matrix
