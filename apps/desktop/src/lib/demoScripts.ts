@@ -66,7 +66,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     {
       kind: "cleanup",
       runtime: "claude",
-      agentSlugs: ["code-reviewer", "code-writer", "security-reviewer", "perf-reviewer"],
+      agentSlugs: ["code-reviewer", "code-writer", "security-reviewer", "perf-reviewer", "acme-support"],
       groupSlugs: ["code-review-team", "write-and-review"],
     },
     // ── Open: Home ───────────────────────────────────────────────────────
@@ -250,6 +250,27 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
       },
     },
     { kind: "wait", ms: 600 },
+    // v2.0 seed — an external agent to walk through the v2 segment at the
+    // end of the demo. Created silently (no form animation) — the v2
+    // segment opens it, clicks the Knowledge + Deploy tabs, and narrates
+    // what each does. The systemPrompt mentions a {company_name} variable
+    // so the Variables tab demonstrates a live template.
+    {
+      kind: "createAgent",
+      spec: {
+        displayName: "acme-support",
+        runtime: "claude",
+        model: "claude-sonnet-4-6",
+        description: "Customer support chatbot for {company_name}. RAG-backed. Deploys to Cloudflare Worker.",
+        systemPrompt:
+          "You are the customer support agent for {company_name}. " +
+          "Answer using the policies provided in the <context> block when available. " +
+          "If you don't know, say so and offer to escalate.",
+        goal: "Customer-facing support chatbot",
+        kind: "external",
+      },
+    },
+    { kind: "wait", ms: 400 },
 
     // ── Build the group ──────────────────────────────────────────────────
     {
@@ -312,10 +333,12 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "highlight", id: "group-save", durationMs: 1500 },
     { kind: "clickByDemoId", id: "group-save" },
     { kind: "wait", ms: 1500 },
-    // 2. Sequential automation: one prompt fires the whole pipeline.
-    //    Writer creates code → security reviewer reviews it → done.
-    //    Created via the backend (no second form animation) — viewer
-    //    just saw the form pattern; doing it again would feel duplicated.
+    // The sequential automation needs to exist for the chat segment that
+    // follows (write-and-review fires the writer → reviewer pipeline).
+    // We create it via the backend rather than animating a second form —
+    // the viewer just watched one full form animation; doing it again
+    // would feel like the demo is repeating itself. The chat segment
+    // labels it clearly when it's used.
     {
       kind: "createGroup",
       spec: {
@@ -328,15 +351,13 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     },
     { kind: "wait", ms: 600 },
 
-    // Two groups now exist. Show the LIST view (not the detail) so the
-    // viewer sees both side-by-side instead of re-opening the routed one
-    // they just watched being filled.
+    // Land on the Groups list so the viewer sees the saved code-review-team.
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "groups" },
     { kind: "wait", ms: 1200 },
     {
       kind: "subtitle",
-      text: "Two groups created — code-review-team (routed) and write-and-review (sequential).",
-      durationMs: 3000,
+      text: "code-review-team is saved — routed group. Router picks one specialist per prompt.",
+      durationMs: 3200,
     },
     { kind: "wait", ms: 1000 },
     // Reset Agents sub-tab back to "mine" so the next phase shows the
@@ -472,37 +493,67 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     // The cross-runtime + scheduling story above is the developer-facing
     // surface. v2.0 turns ATO into the place where you build agents for
     // OTHER PEOPLE — customer chatbots that deploy to your customers' own
-    // infrastructure. Narration-only segment; the deeper auto-fill
-    // walkthrough comes once the v2 alpha lands and we have a seeded
-    // external agent to demo against.
+    // infrastructure. Walks through the seeded `acme-support` external
+    // agent so the viewer SEES the new tabs (Knowledge + Deploy), not
+    // just hears about them.
+    { kind: "setChatPaneOpen", open: false },
     { kind: "navigate", section: "agents" },
+    { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },
     { kind: "wait", ms: 800 },
     {
       kind: "subtitle",
-      text: "v2.0 — agents you build for your customers, not just yourself.",
+      text: "v2.0 — agents you build for your CUSTOMERS, not just yourself.",
       durationMs: 3000,
     },
     {
       kind: "subtitle",
-      text: "Pick External when you create an agent — permissions auto-lock to read-only.",
-      durationMs: 3200,
+      text: "Pick External when creating an agent — permissions auto-lock to read-only, no shell, no fs writes.",
+      durationMs: 3500,
+    },
+    // Open the seeded external agent's detail view.
+    { kind: "highlight", id: "agent-configure-acme-support", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-configure-acme-support" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "External agents get two new tabs — Knowledge and Deploy.",
+      durationMs: 3000,
+    },
+    // Click into Knowledge tab.
+    { kind: "highlight", id: "agent-tab-knowledge", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-knowledge" },
+    { kind: "wait", ms: 800 },
+    {
+      kind: "subtitle",
+      text: "Knowledge: drop a .md or .txt — ATO chunks + embeds via OpenAI text-embedding-3-small. Local SQLite.",
+      durationMs: 4200,
     },
     {
       kind: "subtitle",
-      text: "Knowledge tab: drop a .md or .txt — chunks + embeds locally via OpenAI.",
-      durationMs: 3400,
+      text: "Test retrieval right here — see the top-K chunks the deployed agent will inject as <context>.",
+      durationMs: 3800,
     },
+    // Click into Deploy tab.
+    { kind: "highlight", id: "agent-tab-deploy", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-deploy" },
+    { kind: "wait", ms: 1000 },
     {
       kind: "subtitle",
-      text: "Deploy tab: pick Cloudflare Worker, Vercel Edge, Docker, or Node — get a self-contained bundle.",
+      text: "Deploy: Cloudflare Worker / Vercel Edge / Docker / Node. Pick one — get a self-contained bundle.",
       durationMs: 4000,
     },
     {
       kind: "subtitle",
-      text: "Knowledge baked in. Customer's API key. Their infra. Your IDE.",
-      durationMs: 3600,
+      text: "Knowledge inlined into the bundle. Customer's API key. Customer's infra. Your IDE.",
+      durationMs: 4000,
     },
     { kind: "wait", ms: 800 },
+    // Close the AgentDetail overlay so the closing subtitles render on
+    // top of the regular dashboard, not over the detail modal.
+    { kind: "clickByDemoId", id: "agent-detail-close" },
+    { kind: "wait", ms: 500 },
+    { kind: "navigate", section: "home" },
+    { kind: "wait", ms: 600 },
 
     // ── Close ────────────────────────────────────────────────────────────
     {

@@ -231,23 +231,39 @@ export default function PromptBar() {
   }, [demoPendingRuntime]);
 
   // Demo asked us to pick an agent by slug → look it up in the runtime list
-  // and set the agent picker. We re-run when runtimeAgents changes too, in
-  // case the agent was just created (it'll show up after the next refresh).
+  // and set the agent picker. When the demo passes `null` (and is currently
+  // playing) we DESELECT — that's how cross-runtime swaps work (the chat
+  // panel goes from "agent X" → "no agent" so the runtime picker takes over).
+  // The `demoIsPlaying` gate keeps the mount-time `null` from clearing a
+  // user's manual selection.
   useEffect(() => {
-    if (!demoPendingSelectAgentSlug) return;
+    if (!demoIsPlaying) return;
+    if (demoPendingSelectAgentSlug === null) {
+      setAgentId(null);
+      return;
+    }
     const found = runtimeAgents.find((a) => a.slug === demoPendingSelectAgentSlug);
     if (found) {
       setAgentId(found.id);
       setGroupSlug(null);
     }
-  }, [demoPendingSelectAgentSlug, runtimeAgents]);
+  }, [demoPendingSelectAgentSlug, runtimeAgents, demoIsPlaying]);
 
-  // Demo asked us to pick a group → set the group picker.
+  // Demo asked us to pick a group → set the group picker. Same null-means-
+  // deselect rule as the agent effect above; without this the chat panel
+  // stayed routed through the previously-selected group even after the
+  // demo issued `selectChatGroup: { slug: null }` (Beatriz feedback
+  // 2026-05-07: summarize step kept dispatching through write-and-review
+  // instead of going to a single Claude).
   useEffect(() => {
-    if (!demoPendingSelectGroupSlug) return;
+    if (!demoIsPlaying) return;
+    if (demoPendingSelectGroupSlug === null) {
+      setGroupSlug(null);
+      return;
+    }
     setGroupSlug(demoPendingSelectGroupSlug);
     setAgentId(null);
-  }, [demoPendingSelectGroupSlug]);
+  }, [demoPendingSelectGroupSlug, demoIsPlaying]);
 
   // Demo asked for a new thread.
   useEffect(() => {

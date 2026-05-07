@@ -88,6 +88,7 @@ export default function AgentDetail({ agent, onClose }: Props) {
           </div>
           <button
             type="button"
+            data-demo-id="agent-detail-close"
             aria-label={t("common.close", "Close")}
             onClick={onClose}
             className="text-cs-muted hover:text-cs-text"
@@ -119,12 +120,12 @@ export default function AgentDetail({ agent, onClose }: Props) {
             {t("agentDetail.tabs.evaluators", "Evaluators")}
           </TabPill>
           {isExternal && (
-            <TabPill active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={12} />}>
+            <TabPill active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={12} />} demoId="agent-tab-knowledge">
               {t("agentDetail.tabs.knowledge", "Knowledge")}
             </TabPill>
           )}
           {isExternal && (
-            <TabPill active={tab === "deploy"} onClick={() => setTab("deploy")} icon={<Globe size={12} />}>
+            <TabPill active={tab === "deploy"} onClick={() => setTab("deploy")} icon={<Globe size={12} />} demoId="agent-tab-deploy">
               {t("agentDetail.tabs.deploy", "Deploy")}
             </TabPill>
           )}
@@ -160,16 +161,19 @@ function TabPill({
   onClick,
   icon,
   children,
+  demoId,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   children: React.ReactNode;
+  demoId?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      data-demo-id={demoId}
       role="tab"
       aria-selected={active}
       className={cn(

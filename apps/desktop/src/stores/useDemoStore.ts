@@ -16,6 +16,9 @@ interface CreateAgentSpec {
   permissions?: string[];
   skills?: string[];
   mcps?: string[];
+  /** v2.0.0 — defaults to 'internal'; pass 'external' to seed an
+   *  external/customer-facing agent for the v2 demo segment. */
+  kind?: "internal" | "external";
 }
 
 interface CreateGroupSpec {
@@ -373,7 +376,8 @@ export const useDemoStore = create<DemoState>((set, get) => ({
               skills: step.spec.skills ?? null,
               mcps: step.spec.mcps ?? null,
               goal: step.spec.goal ?? null,
-              writeFile: true,
+              writeFile: step.spec.kind !== "external", // external skips the on-disk file
+              kind: step.spec.kind ?? "internal",
             });
           } catch {
             // Agent may already exist from a prior demo run — that's fine.

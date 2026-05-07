@@ -340,6 +340,7 @@ function AgentRow({
                   e.stopPropagation();
                   onConfigure();
                 }}
+                data-demo-id={`agent-configure-${agent.slug}`}
                 className="inline-flex items-center gap-1 text-[11px] text-cs-muted hover:text-cs-accent"
                 title="Open the full agent detail editor"
               >
