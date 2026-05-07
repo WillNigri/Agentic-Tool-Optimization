@@ -89,14 +89,14 @@ jobs:
         working-directory: apps/desktop
 
       - name: Build Tauri app
-        # IMPORTANT: no `tagName` / `releaseName` / `releaseBody` —
-        # without these, tauri-action runs `tauri build` only and
-        # SKIPS its release-upload phase entirely. That's what we
-        # want, because tauri-action's upload phase silently deletes
-        # `.sig` files (verified across v1.5.6–v1.5.13: Tauri's
-        # bundler emits .sig at T+0, tauri-action deletes it by T+6).
-        # The next step uploads everything ourselves to the release
-        # shell created by the `prepare-release` job.
+        # IMPORTANT: no `tagName` / `releaseName` / `releaseBody` — without
+        # these, tauri-action runs `tauri build` only and skips its
+        # release-upload phase entirely (which is what we want, because
+        # that phase has the broken `.sig` cleanup we hit on v1.5.6–v1.5.13).
+        #
+        # The catch: tauri-action's release-upload phase is ALSO where it
+        # signs the updater bundles. Without it, no .sig files are ever
+        # produced. We do the signing ourselves in the next step.
         uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -106,16 +106,68 @@ jobs:
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
 
-      # We upload EVERYTHING ourselves — installers AND updater artifacts —
-      # because tauri-action's release-upload phase silently deletes `.sig`
-      # files (the updater signatures) before our explicit upload step runs.
-      # Verified across v1.5.6–v1.5.13: Tauri's bundler creates the .sig at
-      # T+0, tauri-action wipes them at T+6, our step at T+10 finds nothing.
-      #
-      # Now that we removed `tagName` from tauri-action's `with:` block,
-      # tauri-action skips its release-upload phase entirely, leaving the
-      # bundle dir intact. We upload to the release shell pre-created by
-      # the `prepare-release` job.
+      # Sign updater bundles ourselves using `tauri signer sign`. The bundler
+      # produces the .app.tar.gz / .AppImage.tar.gz / .nsis.zip files, but
+      # without tauri-action's release-upload pass these never get signed.
+      # `tauri signer sign` is the same tool tauri-action uses internally —
+      # it writes a minisign-compatible `.sig` file next to each input.
+      - name: Sign updater bundles (Unix)
+        if: success() && matrix.platform != 'windows-latest'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: apps/desktop
+        run: |
+          set -e
+          BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
+          SIGNED=0
+          # `tauri signer sign` reads the key from --private-key (file path
+          # OR raw key string). The secret is the raw key string; pipe it
+          # through a temp file because the CLI rejects multiline args.
+          KEY_FILE="$(mktemp)"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_FILE"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "Signing $f"
+            npx tauri signer sign --private-key-path "$KEY_FILE" "$f"
+            SIGNED=$((SIGNED+1))
+          done < <(find "$BUNDLE_ROOT" -type f \( -name "*.app.tar.gz" -o -name "*.AppImage.tar.gz" \) 2>/dev/null)
+          rm -f "$KEY_FILE"
+          echo "Signed $SIGNED bundles"
+          if [ "$SIGNED" -eq 0 ]; then
+            echo "::error::No updater bundles found to sign under $BUNDLE_ROOT"
+            exit 1
+          fi
+
+      - name: Sign updater bundles (Windows)
+        if: success() && matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: apps/desktop
+        run: |
+          $bundleRoot = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          $keyFile = New-TemporaryFile
+          $env:TAURI_SIGNING_PRIVATE_KEY | Out-File -FilePath $keyFile -NoNewline -Encoding ASCII
+          $signed = 0
+          Get-ChildItem -Path $bundleRoot -Recurse -File -Include *.nsis.zip | ForEach-Object {
+            Write-Host "Signing $($_.FullName)"
+            npx tauri signer sign --private-key-path $keyFile $_.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Error "signing failed for $($_.FullName)"; exit 1 }
+            $signed++
+          }
+          Remove-Item $keyFile -Force
+          Write-Host "Signed $signed bundles"
+          if ($signed -eq 0) {
+            Write-Error "No updater bundles found to sign under $bundleRoot"
+            exit 1
+          }
+
+      # Now upload everything: installers AND the freshly-signed updater
+      # bundles + their .sig files. tauri-action didn't touch the release
+      # (no tagName), so we own the upload entirely.
       - name: Upload all bundle artifacts (Unix)
         if: success() && matrix.platform != 'windows-latest'
         shell: bash
