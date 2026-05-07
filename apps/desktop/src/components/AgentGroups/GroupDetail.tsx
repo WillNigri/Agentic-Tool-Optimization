@@ -77,7 +77,6 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
   // recording stays pinned at the top showing NAME / DESC / TYPE while the
   // CHILDREN and ROUTER sections being populated are below the fold.
   const childrenSectionRef = useRef<HTMLDivElement | null>(null);
-  const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   const [focusedChild, setFocusedChild] = useState<string | null>(null);
 
   // Reset member list when runtime changes (mismatched-runtime children would
@@ -144,10 +143,11 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
         setRouterConfig((rc) => ({ ...rc, rules: [...(rc.rules ?? []), rule] }));
         await wait(800);
       }
-      if (cancelled) return;
-      // Final beat: scroll back up to the Save button so the next demo
-      // step (which clicks group-save) lands on a visible target.
-      saveButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Don't auto-scroll to save here — the save button lives in the
+      // header (top of the form), so jumping back to it would hide the
+      // just-populated children + router that the viewer is supposed to
+      // see. The demo script handles the scroll-to-save right before
+      // clicking, with its own subtitle dwell. Beatriz feedback 2026-05-07.
     })();
     return () => {
       cancelled = true;
@@ -282,7 +282,6 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
           <button
             type="button"
             data-demo-id="group-save"
-            ref={saveButtonRef}
             disabled={!canSave}
             onClick={() => saveMutation.mutate()}
             className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover disabled:opacity-50"

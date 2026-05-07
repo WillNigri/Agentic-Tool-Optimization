@@ -292,6 +292,16 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
         },
       },
     },
+    // Dwell on the populated form so the viewer can read the children +
+    // routing rule that was just animated in. Without this beat the next
+    // step (scroll-to-save) snaps the page back to the top of the form
+    // and the populated content disappears off-screen too fast.
+    {
+      kind: "subtitle",
+      text: "Two children + one routing rule — exactly what we wanted.",
+      durationMs: 2400,
+    },
+    { kind: "wait", ms: 800 },
     { kind: "scrollIntoView", id: "group-save", block: "center" },
     { kind: "wait", ms: 400 },
     {
@@ -304,6 +314,8 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "wait", ms: 1500 },
     // 2. Sequential automation: one prompt fires the whole pipeline.
     //    Writer creates code → security reviewer reviews it → done.
+    //    Created via the backend (no second form animation) — viewer
+    //    just saw the form pattern; doing it again would feel duplicated.
     {
       kind: "createGroup",
       spec: {
@@ -316,25 +328,19 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     },
     { kind: "wait", ms: 600 },
 
-    // ── Show the group: Agents → Groups → open code-review-team in Graph
+    // Two groups now exist. Show the LIST view (not the detail) so the
+    // viewer sees both side-by-side instead of re-opening the routed one
+    // they just watched being filled.
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "groups" },
+    { kind: "wait", ms: 1200 },
+    {
+      kind: "subtitle",
+      text: "Two groups created — code-review-team (routed) and write-and-review (sequential).",
+      durationMs: 3000,
+    },
     { kind: "wait", ms: 1000 },
-    {
-      kind: "subtitle",
-      text: "Three specialists. One router. Visible in the Groups tab.",
-      durationMs: 2400,
-    },
-    { kind: "wait", ms: 800 },
-    { kind: "selectGroup", slug: "code-review-team" },
-    { kind: "wait", ms: 1500 },
-    {
-      kind: "subtitle",
-      text: "Form view shows the rules. Switch to Graph to see the routing.",
-      durationMs: 2800,
-    },
-    { kind: "wait", ms: 1500 },
     // Reset Agents sub-tab back to "mine" so the next phase shows the
-    // populated agent list rather than the group editor.
+    // populated agent list rather than the groups list.
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },
     { kind: "wait", ms: 600 },
 
@@ -461,6 +467,42 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
       durationMs: 3600,
     },
     { kind: "wait", ms: 1200 },
+
+    // ── v2.0 — External agents + Knowledge + Deploy ─────────────────────
+    // The cross-runtime + scheduling story above is the developer-facing
+    // surface. v2.0 turns ATO into the place where you build agents for
+    // OTHER PEOPLE — customer chatbots that deploy to your customers' own
+    // infrastructure. Narration-only segment; the deeper auto-fill
+    // walkthrough comes once the v2 alpha lands and we have a seeded
+    // external agent to demo against.
+    { kind: "navigate", section: "agents" },
+    { kind: "wait", ms: 800 },
+    {
+      kind: "subtitle",
+      text: "v2.0 — agents you build for your customers, not just yourself.",
+      durationMs: 3000,
+    },
+    {
+      kind: "subtitle",
+      text: "Pick External when you create an agent — permissions auto-lock to read-only.",
+      durationMs: 3200,
+    },
+    {
+      kind: "subtitle",
+      text: "Knowledge tab: drop a .md or .txt — chunks + embeds locally via OpenAI.",
+      durationMs: 3400,
+    },
+    {
+      kind: "subtitle",
+      text: "Deploy tab: pick Cloudflare Worker, Vercel Edge, Docker, or Node — get a self-contained bundle.",
+      durationMs: 4000,
+    },
+    {
+      kind: "subtitle",
+      text: "Knowledge baked in. Customer's API key. Their infra. Your IDE.",
+      durationMs: 3600,
+    },
+    { kind: "wait", ms: 800 },
 
     // ── Close ────────────────────────────────────────────────────────────
     {
