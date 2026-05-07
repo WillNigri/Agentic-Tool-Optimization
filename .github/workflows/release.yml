@@ -115,6 +115,10 @@ jobs:
         if: success() && matrix.platform != 'windows-latest'
         shell: bash
         env:
+          # `tauri signer sign` auto-reads these env vars into --private-key
+          # and --password. Don't pass either flag explicitly or the CLI
+          # errors with "--private-key-path cannot be used with --private-key"
+          # (it considers env-derived values as already-set flags).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         working-directory: apps/desktop
@@ -122,18 +126,12 @@ jobs:
           set -e
           BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
           SIGNED=0
-          # `tauri signer sign` reads the key from --private-key (file path
-          # OR raw key string). The secret is the raw key string; pipe it
-          # through a temp file because the CLI rejects multiline args.
-          KEY_FILE="$(mktemp)"
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_FILE"
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             echo "Signing $f"
-            npx tauri signer sign --private-key-path "$KEY_FILE" "$f"
+            npx tauri signer sign "$f"
             SIGNED=$((SIGNED+1))
           done < <(find "$BUNDLE_ROOT" -type f \( -name "*.app.tar.gz" -o -name "*.AppImage.tar.gz" \) 2>/dev/null)
-          rm -f "$KEY_FILE"
           echo "Signed $SIGNED bundles"
           if [ "$SIGNED" -eq 0 ]; then
             echo "::error::No updater bundles found to sign under $BUNDLE_ROOT"
@@ -149,16 +147,13 @@ jobs:
         working-directory: apps/desktop
         run: |
           $bundleRoot = "src-tauri/target/${{ matrix.target }}/release/bundle"
-          $keyFile = New-TemporaryFile
-          $env:TAURI_SIGNING_PRIVATE_KEY | Out-File -FilePath $keyFile -NoNewline -Encoding ASCII
           $signed = 0
           Get-ChildItem -Path $bundleRoot -Recurse -File -Include *.nsis.zip | ForEach-Object {
             Write-Host "Signing $($_.FullName)"
-            npx tauri signer sign --private-key-path $keyFile $_.FullName
+            npx tauri signer sign $_.FullName
             if ($LASTEXITCODE -ne 0) { Write-Error "signing failed for $($_.FullName)"; exit 1 }
             $signed++
           }
-          Remove-Item $keyFile -Force
           Write-Host "Signed $signed bundles"
           if ($signed -eq 0) {
             Write-Error "No updater bundles found to sign under $bundleRoot"
