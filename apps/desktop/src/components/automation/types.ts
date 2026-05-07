@@ -54,7 +54,10 @@ export interface FlowNode {
   templateId?: string;
 }
 
-export type WorkflowSource = "skill" | "cron" | "manual";
+// v1.6.0 — extended to include agent groups (routed + sequential) so the
+// Automations canvas becomes the canonical visualization for everything
+// that runs without a human in the loop, not just skill-derived flows.
+export type WorkflowSource = "skill" | "cron" | "manual" | "group-routed" | "group-sequential" | "hook";
 
 export interface NodeConfig {
   params: Record<string, string>;

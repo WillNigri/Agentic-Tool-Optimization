@@ -5,6 +5,7 @@ import TerminalPane from "@/components/Terminal/TerminalPane";
 import CommandPalette from "@/components/CommandPalette";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import DemoOverlay from "@/components/DemoOverlay";
+import WelcomeTour from "@/components/WelcomeTour";
 import { useUiStore } from "@/stores/useUiStore";
 
 const CreateAgentWizard = lazy(() => import("@/components/CreateAgentWizard"));
@@ -65,6 +66,7 @@ export default function Dashboard() {
       </div>
       <CommandPalette onNavigate={setSection} />
       <DemoOverlay />
+      <WelcomeTour />
       {/* Globally-mounted Create Agent wizard so the demo runner (and any
           coordinator) can open it from any section. */}
       <Suspense fallback={null}>

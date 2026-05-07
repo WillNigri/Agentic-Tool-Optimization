@@ -14,6 +14,8 @@ import ExecutionOverlay from "./automation/ExecutionOverlay";
 import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
+import { groupsToWorkflows } from "@/lib/automationsAggregator";
+import { listAgentGroups } from "@/lib/agentGroups";
 import type { SkillDetail } from "@/lib/api";
 import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./automation/types";
 
@@ -40,6 +42,27 @@ export default function AutomationFlow() {
     queryKey: ["skills"],
     queryFn: getSkills,
   });
+
+  // v1.6.0 wave 1 — also load agent groups so the canvas shows them
+  // alongside skill flows. Sequential groups render as left-to-right
+  // pipelines; routed groups render as router-fanout to children.
+  const { data: agentGroups = [] } = useQuery({
+    queryKey: ["agent-groups-for-automations"],
+    queryFn: () => listAgentGroups(),
+    staleTime: 30_000,
+  });
+
+  useEffect(() => {
+    if (agentGroups.length === 0) return;
+    const groupWorkflows = groupsToWorkflows(agentGroups);
+    if (groupWorkflows.length === 0) return;
+    const store = useAutomationStore.getState();
+    const existingIds = new Set(store.workflows.map((w) => w.id));
+    const newOnes = groupWorkflows.filter((w) => !existingIds.has(w.id));
+    if (newOnes.length > 0) {
+      store.loadWorkflows([...store.workflows, ...newOnes]);
+    }
+  }, [agentGroups]);
 
   useEffect(() => {
     if (skills.length > 0) {
