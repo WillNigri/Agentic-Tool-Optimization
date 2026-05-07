@@ -9,6 +9,7 @@ import {
   Cloud as CloudIcon,
   FolderKanban,
   Archive,
+  Info,
   Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -29,6 +30,7 @@ const ProjectManager = lazy(() =>
   import("@/components/AgentManager").then((m) => ({ default: m.ProjectManager }))
 );
 const ConfigBackup = lazy(() => import("@/components/ConfigBackup"));
+const AboutPanel = lazy(() => import("@/components/AboutPanel"));
 
 // Cloud is a meta-tab that nests auth + teams + sync + notifications.
 const CloudAuth = lazy(() => import("@/components/CloudAuth"));
@@ -162,6 +164,12 @@ export default function SettingsSection() {
       label: t("subnav.settingsBackup", "Backup"),
       icon: Archive,
       Component: ConfigBackup,
+    },
+    {
+      id: "about",
+      label: t("subnav.settingsAbout", "About"),
+      icon: Info,
+      Component: AboutPanel,
     },
   ];
   return <SectionTabs storageKey="ato.subtab.settings" tabs={tabs} />;

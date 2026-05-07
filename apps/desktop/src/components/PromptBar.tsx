@@ -636,7 +636,14 @@ export default function PromptBar() {
 
   return (
     <div
-      className="border-t border-cs-border bg-cs-card"
+      // PromptBar's parent (TerminalPane) constrains height to 320px. Without
+      // `h-full flex flex-col` here, PromptBar's children (header + chat
+      // history + form) grew naturally and the form got pushed below the
+      // 320px ceiling — invisible to the user. Felipe + Beatriz both hit this
+      // on Linux + macOS in v1.5.20: chat worked for the first message
+      // (history was empty so the form was still in view) then "the input
+      // area disappeared" once the chat history took its max-h-80.
+      className="h-full flex flex-col border-t border-cs-border bg-cs-card"
       onDrop={onDropFile}
       onDragOver={onDragOver}
     >
@@ -649,7 +656,7 @@ export default function PromptBar() {
       />
 
       {/* Thread header — always visible so threads are discoverable */}
-      <header className="flex items-center gap-2 px-3 py-1.5 border-b border-cs-border/60 bg-cs-bg-raised/40">
+      <header className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-cs-border/60 bg-cs-bg-raised/40">
         <div className="relative shrink-0">
           <button
             type="button"
@@ -770,9 +777,12 @@ export default function PromptBar() {
         </button>
       </header>
 
-      {/* Chat history */}
+      {/* Chat history — flex-1 with min-h-0 so it shares the parent's
+          height with header + form instead of overflowing them. The
+          previous `max-h-80` capped at 320px which equaled the entire
+          parent height, pushing the form offscreen. */}
       {expanded && messages.length > 0 && (
-        <div className="max-h-80 overflow-y-auto border-b border-cs-border">
+        <div className="flex-1 min-h-0 overflow-y-auto border-b border-cs-border">
           <div className="p-3 space-y-3">
             {messages.map((msg) => (
               <ChatRow key={msg.id} msg={msg} />
@@ -855,7 +865,7 @@ export default function PromptBar() {
       })()}
 
       {/* Input bar */}
-      <form onSubmit={handleSubmit} className="flex items-center gap-2 px-3 py-2.5">
+      <form onSubmit={handleSubmit} className="shrink-0 flex items-center gap-2 px-3 py-2.5">
         <button
           type="button"
           onClick={() => messages.length > 0 && setExpanded(!expanded)}

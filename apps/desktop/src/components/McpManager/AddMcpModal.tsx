@@ -156,10 +156,16 @@ function RegistryTab() {
             className="w-full rounded-lg border border-cs-border bg-cs-bg pl-9 pr-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none"
           />
         </div>
+        {/* Linux WebKitGTK + dark themes can render <select> options with the
+            system's default text color, ignoring our `text-cs-text` on the
+            outer element. Felipe reported the dropdown appearing blank on
+            Linux v1.5.20. Setting `[&>option]:bg-cs-bg-raised` +
+            `[&>option]:text-cs-text` forces the option list to inherit our
+            colors, so the text stays legible cross-platform. */}
         <select
           value={category}
           onChange={(e) => setCategory(e.target.value as McpCategory | "all")}
-          className="rounded-lg border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none"
+          className="rounded-lg border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none [&>option]:bg-cs-bg-raised [&>option]:text-cs-text"
         >
           <option value="all">{t("mcpManager.allCategories", "All categories")}</option>
           {categories.map((c) => (

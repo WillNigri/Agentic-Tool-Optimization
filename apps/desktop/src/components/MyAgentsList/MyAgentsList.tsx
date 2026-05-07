@@ -219,6 +219,7 @@ function AgentRow({
         <button
           type="button"
           onClick={onToggle}
+          data-demo-id={`agent-row-${agent.slug}`}
           className="flex-1 flex items-center gap-3 px-4 py-3 text-left hover:bg-cs-bg-raised transition min-w-0"
         >
           <span className={cn("inline-block w-2 h-2 rounded-full shrink-0", RUNTIME_DOT[agent.runtime])} />
