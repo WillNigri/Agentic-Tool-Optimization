@@ -84,6 +84,102 @@ jobs:
           args: --target ${{ matrix.target }}
           includeUpdaterJson: true
 
+      # tauri-action's `includeUpdaterJson` upload logic has had a long-running
+      # regression on matrix builds (v1.5.0–1.5.5 all reproduced "Signature
+      # not found for the updater JSON. Skipping upload..."). The `.sig` files
+      # ARE created by Tauri's bundler but never make it onto the release.
+      # Workaround: explicitly upload every `.sig` and the `.nsis.zip` /
+      # `.AppImage.tar.gz` updater bundles ourselves. The aggregator job
+      # below then constructs `latest.json` from these.
+      - name: Upload updater artifacts (.sig + .nsis.zip + .AppImage.tar.gz)
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -e
+          BUNDLE_ROOT="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          if [ ! -d "$BUNDLE_ROOT" ]; then
+            echo "::warning::Bundle dir $BUNDLE_ROOT not found, skipping"
+            exit 0
+          fi
+          # Find every .sig + matching updater bundle. macOS produces
+          # `.app.tar.gz` + `.app.tar.gz.sig`; Linux produces
+          # `.AppImage.tar.gz` + `.sig`; Windows produces `.nsis.zip` +
+          # `.sig`. Each gets uploaded with `--clobber` to allow re-runs.
+          find "$BUNDLE_ROOT" \( -name "*.sig" -o -name "*.app.tar.gz" -o -name "*.AppImage.tar.gz" -o -name "*.nsis.zip" \) -type f | while read -r f; do
+            echo "Uploading $f"
+            gh release upload "$TAG" "$f" --clobber || echo "::warning::upload failed for $f"
+          done
+
+  # Aggregator job: pull all .sig files from the release after the matrix
+  # finishes, construct latest.json, upload it. Replaces tauri-action's
+  # broken updater-json generation step.
+  generate-updater-manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build + upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -e
+          VERSION="${TAG#v}"
+          mkdir -p sigs
+          gh release download "$TAG" -p "*.sig" -D sigs/ --clobber || true
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          # Read signatures via Python so embedded special characters
+          # don't break shell quoting. Missing platforms are silently
+          # omitted from the manifest rather than crashing the JSON.
+          export VERSION TAG PUB_DATE BASE_URL
+          python3 - <<'PY' > latest.json
+          import glob, json, os
+          version = os.environ["VERSION"]
+          base = os.environ["BASE_URL"]
+          pub_date = os.environ["PUB_DATE"]
+
+          def read_first(*patterns):
+              for pat in patterns:
+                  matches = glob.glob(f"sigs/{pat}")
+                  if matches:
+                      with open(matches[0]) as f:
+                          return f.read().strip()
+              return None
+
+          # macOS Apple Silicon
+          aarch64_sig = read_first("*aarch64*.app.tar.gz.sig", "ATO.app.tar.gz.sig")
+          # macOS Intel (x86_64). Tauri may emit the same generic name
+          # on both runners — fall back if no arch-tagged file.
+          x64_sig = read_first("*x64*.app.tar.gz.sig", "*x86_64*.app.tar.gz.sig", "ATO.app.tar.gz.sig")
+          linux_sig = read_first("*AppImage.tar.gz.sig", "*.AppImage.sig")
+          win_sig = read_first("*nsis.zip.sig", "*msi.zip.sig")
+
+          platforms = {}
+          def add(key, sig, url):
+              if sig:
+                  platforms[key] = {"signature": sig, "url": url}
+
+          add("darwin-aarch64", aarch64_sig, f"{base}/ATO_aarch64.app.tar.gz")
+          add("darwin-x86_64",  x64_sig,     f"{base}/ATO_x64.app.tar.gz")
+          add("linux-x86_64",   linux_sig,   f"{base}/ATO_{version}_amd64.AppImage.tar.gz")
+          add("windows-x86_64", win_sig,     f"{base}/ATO_{version}_x64-setup.nsis.zip")
+
+          print(json.dumps({
+              "version": version,
+              "notes": f"ATO {version}",
+              "pub_date": pub_date,
+              "platforms": platforms,
+          }, indent=2))
+          PY
+          cat latest.json
+          gh release upload "$TAG" latest.json --clobber
+
   # The cask repo lives at WillNigri/homebrew-ato, so the default GITHUB_TOKEN
   # (scoped to this repo) can't push there. Set HOMEBREW_TAP_TOKEN to a PAT
   # with `repo` scope on the tap repo to enable this step. Without that
