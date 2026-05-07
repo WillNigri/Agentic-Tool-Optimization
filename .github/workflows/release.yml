@@ -131,6 +131,29 @@ jobs:
           set -e
           BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
 
+          # On macOS, tauri-action tars `.app/` into `ATO.app.tar.gz` with no
+          # architecture suffix. Both Apple Silicon and Intel jobs produce
+          # the same filename, so the second one to upload silently
+          # overwrites the first's binary AND its signature (--clobber).
+          # latest.json's per-arch URLs (ATO_aarch64.app.tar.gz /
+          # ATO_x64.app.tar.gz) then point at non-existent files.
+          # Rename per-arch before signing so each arch ends up with its own
+          # unique filename in the release.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            case "${{ matrix.target }}" in
+              aarch64-apple-darwin) ARCH=aarch64 ;;
+              x86_64-apple-darwin)  ARCH=x64 ;;
+              *) echo "::error::unknown macOS target ${{ matrix.target }}"; exit 1 ;;
+            esac
+            for f in "$BUNDLE_ROOT/macos/ATO.app.tar.gz" "$BUNDLE_ROOT/macos/ATO.app.tar.gz.sig"; do
+              if [ -f "$f" ]; then
+                newname="$(dirname "$f")/ATO_${ARCH}.app.tar.gz$(echo "$f" | grep -oE '\.sig$' || true)"
+                echo "Renaming $f -> $newname"
+                mv "$f" "$newname"
+              fi
+            done
+          fi
+
           # On Linux, tar each .AppImage into .AppImage.tar.gz so the updater
           # has a deterministic archive to sign. macOS already has .app.tar.gz
           # from tauri-action's helper.
