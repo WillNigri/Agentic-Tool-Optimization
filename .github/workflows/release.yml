@@ -80,9 +80,16 @@ jobs:
           includeUpdaterJson: true
           updaterJsonKeepUniversal: true
 
+  # The cask repo lives at WillNigri/homebrew-ato, so the default GITHUB_TOKEN
+  # (scoped to this repo) can't push there. Set HOMEBREW_TAP_TOKEN to a PAT
+  # with `repo` scope on the tap repo to enable this step. Without that
+  # secret the step is allowed to fail without breaking the release —
+  # binaries + latest.json upload still succeed.
   update-homebrew:
     needs: build
     runs-on: macos-latest
+    continue-on-error: true
+    if: ${{ vars.PUBLISH_HOMEBREW != 'false' }}
     steps:
       - name: Wait for release assets
         run: sleep 30
@@ -100,13 +107,18 @@ jobs:
 
       - name: Update Homebrew cask
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the tap PAT when present; fall back to the in-repo token (which
+          # will fail with 403 against the tap, but that's caught below).
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
           TAG: ${{ github.ref_name }}
           ARM_SHA: ${{ steps.sha.outputs.arm_sha }}
           X64_SHA: ${{ steps.sha.outputs.x64_sha }}
         run: |
-          git clone https://x-access-token:${GH_TOKEN}@github.com/WillNigri/homebrew-ato.git /tmp/homebrew-ato
+          if ! git clone https://x-access-token:${GH_TOKEN}@github.com/WillNigri/homebrew-ato.git /tmp/homebrew-ato 2>/dev/null; then
+            echo "::warning::Cannot push to homebrew-ato. Set HOMEBREW_TAP_TOKEN secret (PAT with repo scope) to enable cask updates."
+            exit 0
+          fi
           cat > /tmp/homebrew-ato/Casks/ato.rb << 'CASK'
           cask "ato" do
             version "VERSION_PLACEHOLDER"

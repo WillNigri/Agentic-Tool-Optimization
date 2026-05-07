@@ -156,6 +156,11 @@
 - **Runtime mid-thread for no-agent path** — frontend stitches thread history into a single framed prompt so cross-runtime swaps without an agent still carry context
 
 ### v1.6.0 — Intelligence Layer (Planned)
+- **Automations tab repurpose — group pipelines as flow nodes** ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
+  - Today the Runs → Automations tab visualizes skill-derived flow charts (parsed from `## Step N` / `## Phase N` headers in SKILL.md files). Useful but narrow — and v1.5 groups now own the word "automation."
+  - v1.6 turns it into the canonical visualization for **everything that runs without a human in the loop**: routed groups, sequential pipelines, scheduled cron jobs, hooks, and skill flows — all on the same canvas. Each node is a real agent / runtime / tool with live status (idle / running / errored).
+  - Sequential group "Claude → Codex" becomes a left-to-right flow with arrows showing data flow; routed group becomes a fan-out from the router node; cron jobs anchor at the left edge with a clock icon.
+  - Click a node → Insights opens that agent's trace explorer for the last N runs.
 - Real-time collaborative workspace (WebSocket via ato-cloud)
 - Team cursors (Figma-style)
 - Cross-runtime policy enforcement templates

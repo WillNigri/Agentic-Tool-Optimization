@@ -36,10 +36,13 @@ This creates:
 Go to your GitHub repository → Settings → Secrets and Variables → Actions
 
 Add these secrets:
-| Secret Name | Value |
-|-------------|-------|
-| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `~/.tauri/ato.key` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password you used during generation |
+| Secret Name | Value | Required for |
+|-------------|-------|--------------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `~/.tauri/ato.key` | Auto-updater (`latest.json`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password you used during generation. **If the key was generated without a password, leave this secret empty AND `TAURI_SIGNING_PRIVATE_KEY` must contain a key with no encryption header.** | Auto-updater (`latest.json`) |
+| `HOMEBREW_TAP_TOKEN` | PAT with `repo` scope on `WillNigri/homebrew-ato` (or your fork) | Optional — Homebrew cask auto-update step. Step skips cleanly if absent. |
+
+> **Why the password matters.** When the password secret is empty *but the private key was generated with a password*, the Tauri action fails to decrypt the key, logs `Signature not found for the updater JSON. Skipping upload...`, and **silently omits `latest.json`** from the release. The build still succeeds — but existing users will never see "Update available." If you've cut a release and there's no `latest.json` in the assets, this is almost certainly why.
 
 ### 1.3 Update Public Key
 
