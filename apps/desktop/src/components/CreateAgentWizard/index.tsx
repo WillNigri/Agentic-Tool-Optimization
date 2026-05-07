@@ -48,6 +48,7 @@ export default function CreateAgentWizard({
   const { t } = useTranslation();
   const [path, setPath] = useState<WizardPath>(initialPath);
   const [seedDraft, setSeedDraft] = useState<QuickDraft | null>(null);
+  const [seedScaffold, setSeedScaffold] = useState<AgentTemplate["dynamicScaffold"] | undefined>(undefined);
   const pendingTemplateId = useUiStore((s) => s.createAgentTemplateId);
   const consumeTemplateId = useUiStore((s) => s.consumeTemplateId);
 
@@ -64,6 +65,7 @@ export default function CreateAgentWizard({
     const tpl = AGENT_TEMPLATES.find((tt) => tt.id === pendingTemplateId);
     if (tpl) {
       setSeedDraft(templateToDraft(tpl));
+      setSeedScaffold(tpl.dynamicScaffold);
       setPath("quick");
     }
     consumeTemplateId();
@@ -73,6 +75,7 @@ export default function CreateAgentWizard({
 
   const handlePickTemplate = (tpl: AgentTemplate) => {
     setSeedDraft(templateToDraft(tpl));
+    setSeedScaffold(tpl.dynamicScaffold);
     setPath("quick");
   };
 
@@ -87,15 +90,23 @@ export default function CreateAgentWizard({
     >
       <div className="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl border border-cs-border bg-cs-card shadow-2xl">
         {/* Header */}
-        <header className="flex items-center justify-between p-5 border-b border-cs-border">
-          <h2 className="text-lg font-semibold text-cs-text">
-            {t("createAgent.title", "Create Agent")}
-          </h2>
+        <header className="flex items-start justify-between gap-4 p-5 border-b border-cs-border">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg font-semibold text-cs-text">
+              {t("createAgent.title", "Create Agent")}
+            </h2>
+            <p className="mt-0.5 text-[11px] text-cs-muted leading-relaxed">
+              {t(
+                "createAgent.dynamicHint",
+                "Build agents whose prompts adapt — variables resolve from files, env vars, databases, or other LLMs at fire time. Static system prompts are the floor, not the ceiling."
+              )}
+            </p>
+          </div>
           <button
             type="button"
             aria-label={t("common.close", "Close")}
             onClick={onClose}
-            className="text-cs-muted hover:text-cs-text"
+            className="text-cs-muted hover:text-cs-text shrink-0"
           >
             <X size={18} />
           </button>
@@ -144,6 +155,7 @@ export default function CreateAgentWizard({
               onCreated={onCreated}
               onCancel={onClose}
               initialDraft={seedDraft ?? undefined}
+              initialScaffold={seedScaffold}
             />
           )}
           {path === "templates" && <TemplatesPath onPick={handlePickTemplate} />}

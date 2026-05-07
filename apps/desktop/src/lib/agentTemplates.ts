@@ -33,7 +33,29 @@ export interface AgentTemplate {
   /** UI grouping. */
   category: "engineering" | "writing" | "data" | "ops" | "support" | "automation";
   /** Used in the card icon — values match Lucide icon names available globally. */
-  icon: "git-pull-request" | "feather" | "binary" | "terminal" | "headphones" | "globe";
+  icon: "git-pull-request" | "feather" | "binary" | "terminal" | "headphones" | "globe" | "sparkles";
+  /** v1.5.5 — pre-wired dynamic prompt scaffolding. When set, the wizard
+   *  creates the agent with these variables, hooks, and memory policy in
+   *  addition to the system prompt. Shows users that agents are dynamic,
+   *  not just static system prompts. */
+  dynamicScaffold?: {
+    variables?: Array<{
+      name: string;
+      kind: "static" | "env" | "project-path" | "file" | "computed";
+      configJson: string; // JSON-encoded resolver config
+      enabled: boolean;
+    }>;
+    contextHooks?: Array<{
+      name: string;
+      kind: "file" | "computed" | "mcp-call" | "db-query";
+      configJson: string;
+      enabled: boolean;
+    }>;
+    memoryPolicy?: {
+      summarizeAfterMessages: number;
+      keepRecentMessages: number;
+    };
+  };
 }
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
@@ -205,6 +227,91 @@ Output style:
 Never invent page contents. If you didn't snapshot, you don't know.`,
     recommendedMcps: ["playwright", "fetch"],
     defaultPermissions: ["allow:browser_navigate", "allow:browser_click", "allow:browser_type", "allow:browser_screenshot", "approve:browser_close", "deny:browser_run_js"],
+  },
+  // v1.5.5 — Production-grade agent. Pre-wired with the dynamic-prompt
+  // primitives most users don't realize exist: variables resolved at
+  // dispatch time, a pre-call context hook, and a memory policy. Shows
+  // the production pattern on day one instead of leaving it buried in
+  // tabs nobody clicks.
+  {
+    id: "production-grade",
+    displayName: "Production-grade Agent",
+    description: "Variables, pre-call context hooks, memory policy — the dynamic-prompt pattern that makes agents adapt to context instead of running on a fixed string.",
+    runtime: "claude",
+    model: "claude-sonnet-4-6",
+    category: "automation",
+    icon: "sparkles",
+    goal: "Build an agent whose prompt adapts to who's asking, when, and what they're working on",
+    systemPrompt: `You are a context-aware assistant for {user_name} working on {project_name}.
+
+Today is {today}. The current working directory is {project_root}.
+
+When the user asks you something:
+1. Use the <context> block prepended to their message — it contains the latest project state pulled fresh on each turn.
+2. Reference the user by name when it feels natural; reference the project by name when relevant.
+3. If a variable wasn't resolved (you'll see {var:resolution-failed}), note that gracefully but don't break flow.
+4. Default tone: precise, no filler, no marketing language.
+
+Variables in use (resolved every turn):
+- {user_name} — pulled from the USER env var
+- {project_name} — folder name of the active project
+- {project_root} — absolute path to the project
+- {today} — current date
+
+Hooks fire before each call:
+- A "recent changes" hook reads the project's CHANGELOG.md (if present) so you stay in sync with what's just shipped.
+
+This template demonstrates the production pattern. Customize variables, add more hooks, set a memory policy in the agent's tabs.`,
+    recommendedMcps: ["filesystem"],
+    defaultPermissions: ["allow:read_files", "approve:write_files"],
+    dynamicScaffold: {
+      variables: [
+        {
+          name: "user_name",
+          kind: "env",
+          configJson: JSON.stringify({ envVar: "USER" }),
+          enabled: true,
+        },
+        {
+          name: "project_name",
+          kind: "computed",
+          configJson: JSON.stringify({
+            expression: "(projectPath ?? '').split('/').filter(Boolean).pop() ?? 'this project'",
+          }),
+          enabled: true,
+        },
+        {
+          name: "project_root",
+          kind: "project-path",
+          configJson: JSON.stringify({}),
+          enabled: true,
+        },
+        {
+          name: "today",
+          kind: "computed",
+          configJson: JSON.stringify({
+            expression: "new Date().toISOString().slice(0,10)",
+          }),
+          enabled: true,
+        },
+      ],
+      contextHooks: [
+        {
+          name: "Recent changes from CHANGELOG.md",
+          kind: "file",
+          configJson: JSON.stringify({
+            relativePath: "CHANGELOG.md",
+            maxBytes: 4000,
+            tail: true,
+          }),
+          enabled: true,
+        },
+      ],
+      memoryPolicy: {
+        summarizeAfterMessages: 30,
+        keepRecentMessages: 5,
+      },
+    },
   },
 ];
 

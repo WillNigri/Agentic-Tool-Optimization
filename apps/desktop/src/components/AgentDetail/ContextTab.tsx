@@ -158,12 +158,18 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
       <Layers size={20} className="text-cs-muted shrink-0" />
       <div className="flex-1 min-w-0">
         <p className="text-sm text-cs-text">
-          {t("agentDetail.context.emptyTitle", "No hooks yet")}
+          {t("agentDetail.context.emptyTitle", "Make your agent context-aware")}
         </p>
-        <p className="mt-1 text-xs text-cs-muted">
+        <p className="mt-1 text-xs text-cs-muted leading-relaxed">
           {t(
             "agentDetail.context.emptyBody",
-            "Hooks let you inject fresh data on every turn — a config file, a CRM webhook, an MCP tool result. The agent always has what it needs."
+            "Pre-call hooks fetch fresh data on every turn and inject it into a <context> block before the user message. A file the agent re-reads, a CRM webhook, an MCP tool — anything that should be current, not stale."
+          )}
+        </p>
+        <p className="mt-2 text-xs text-cs-muted">
+          {t(
+            "agentDetail.context.emptyKinds",
+            "Hook kinds: file · MCP call · database query · webhook · computed."
           )}
         </p>
         <button

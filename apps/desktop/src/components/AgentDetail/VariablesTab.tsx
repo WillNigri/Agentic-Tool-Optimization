@@ -171,12 +171,18 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
       <VariableIcon size={20} className="text-cs-muted shrink-0" />
       <div className="flex-1 min-w-0">
         <p className="text-sm text-cs-text">
-          {t("agentDetail.variables.emptyTitle", "No variables yet")}
+          {t("agentDetail.variables.emptyTitle", "Why your agent should have variables")}
         </p>
-        <p className="mt-1 text-xs text-cs-muted">
+        <p className="mt-1 text-xs text-cs-muted leading-relaxed">
           {t(
             "agentDetail.variables.emptyBody",
-            'Add a variable like {user_name} or {project_path}, and reference it in your system prompt.'
+            'A static system prompt is the same string every turn. Variables make it adapt: {user_name} pulls from the OS, {today} resolves at fire time, {project_root} reflects the active project, {recent_orders} hits a database. The agent reads them fresh on every dispatch.'
+          )}
+        </p>
+        <p className="mt-2 text-xs text-cs-muted">
+          {t(
+            "agentDetail.variables.emptyResolvers",
+            "Resolvers available: static · env var · project path · file · database query · MCP call · computed JS."
           )}
         </p>
         <button

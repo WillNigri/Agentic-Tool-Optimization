@@ -8,6 +8,7 @@ import {
   Headphones,
   Globe,
   Search,
+  Sparkles,
 } from "lucide-react";
 import { AGENT_TEMPLATES, type AgentTemplate } from "@/lib/agentTemplates";
 import { cn } from "@/lib/utils";
@@ -28,6 +29,7 @@ const ICONS: Record<AgentTemplate["icon"], React.ComponentType<{ size?: number; 
   terminal: Terminal,
   headphones: Headphones,
   globe: Globe,
+  sparkles: Sparkles,
 };
 
 const CATEGORY_LABELS: Record<AgentTemplate["category"], string> = {

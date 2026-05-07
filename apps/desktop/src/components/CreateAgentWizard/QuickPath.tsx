@@ -11,6 +11,8 @@ import {
   type QuickDraft,
 } from "@/lib/agentDraft";
 import { saveAgentHook, hookConfigToJson } from "@/lib/agentHooks";
+import { saveAgentVariable } from "@/lib/agentVariables";
+import { updateAgentMemoryPolicy } from "@/lib/agents";
 import { useDemoStore } from "@/stores/useDemoStore";
 import { cn } from "@/lib/utils";
 import { FileText, Plus, Trash2 } from "lucide-react";
@@ -26,6 +28,10 @@ interface Props {
   onCancel: () => void;
   /** Pre-fills the form on mount; overrides the persisted draft. Used by the Templates path. */
   initialDraft?: QuickDraft;
+  /** Dynamic-prompt scaffold from a template — variables, context hooks,
+   *  and memory policy applied to the agent post-create. The "Production-grade
+   *  Agent" template ships one; future templates can opt in. */
+  initialScaffold?: import("@/lib/agentTemplates").AgentTemplate["dynamicScaffold"];
 }
 
 const RUNTIMES: { id: AgentRuntime; label: string; modelHint: string }[] = [
@@ -48,7 +54,7 @@ const DEFAULT_DRAFT: QuickDraft = {
   contextFiles: [],
 };
 
-export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) {
+export default function QuickPath({ onCreated, onCancel, initialDraft, initialScaffold }: Props) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [submitting, setSubmitting] = useState(false);
@@ -157,6 +163,53 @@ export default function QuickPath({ onCreated, onCancel, initialDraft }: Props) 
           });
         } catch {
           // ignore — user can re-add manually under Context tab
+        }
+      }
+
+      // v1.5.5 — Apply the template's dynamic-prompt scaffold (variables,
+      // pre-call hooks, memory policy) so the production agent template
+      // ships ready-to-run instead of leaving the user to set everything
+      // up manually. All best-effort.
+      if (initialScaffold) {
+        for (const v of initialScaffold.variables ?? []) {
+          try {
+            await saveAgentVariable({
+              agentId: agent.id,
+              name: v.name,
+              kind: v.kind,
+              configJson: v.configJson,
+              enabled: v.enabled,
+            });
+          } catch {
+            // ignore — user can add manually under Variables tab
+          }
+        }
+        const startPos = cleanedFiles.length;
+        for (let i = 0; i < (initialScaffold.contextHooks ?? []).length; i++) {
+          const h = initialScaffold.contextHooks![i];
+          try {
+            await saveAgentHook({
+              agentId: agent.id,
+              position: startPos + i,
+              name: h.name,
+              kind: h.kind,
+              configJson: h.configJson,
+              enabled: h.enabled,
+            });
+          } catch {
+            // ignore — user can add manually under Context tab
+          }
+        }
+        if (initialScaffold.memoryPolicy) {
+          try {
+            await updateAgentMemoryPolicy(agent.id, {
+              summarizeAfterMessages: initialScaffold.memoryPolicy.summarizeAfterMessages,
+              keepRecentMessages: initialScaffold.memoryPolicy.keepRecentMessages,
+              summarizerModel: "",
+            });
+          } catch {
+            // ignore — user can set under Memory tab
+          }
         }
       }
       setCreatedAgentName(agent.displayName);
