@@ -1,6 +1,6 @@
 [package]
 name = "ato-desktop"
-version = "1.5.13"
+version = "1.5.14"
 edition = "2021"
 
 [lib]
@@ -11,7 +11,14 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `devtools` feature surfaces the WebKit inspector in release builds —
+# right-click → Inspect Element. Without this, even
+# `windows[].devtools = true` in tauri.conf.json is a no-op in release
+# bundles (Tauri v2 requires the Cargo feature to compile in the
+# inspector). v1.5.12 had the conf flag but not the feature, so the
+# right-click menu only showed "Reload" — diagnostic dead end. v1.5.14
+# enables it properly so we can finally see what's failing on signup.
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
