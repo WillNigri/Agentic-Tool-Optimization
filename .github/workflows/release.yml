@@ -108,13 +108,17 @@ jobs:
             echo "::warning::Bundle dir $BUNDLE_ROOT not found, skipping"
             exit 0
           fi
-          echo "Bundle dir contents:"
-          find "$BUNDLE_ROOT" -maxdepth 4 -type f \( -name "*.sig" -o -name "*.tar.gz" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) 2>&1 | head -30
-          echo "---"
-          # Two separate finds so the OR logic doesn't depend on parenthesis
-          # escaping inside YAML→bash. v1.5.5–v1.5.8 used `\( -name X -o -name Y \)`
-          # which silently produced zero results in some shell environments.
+          # Plain `ls -laR` so we see EVERYTHING there with no glob ambiguity.
+          # In v1.5.10 this print was empty even though Tauri's bundler had
+          # logged the .sig path moments earlier. Confirms whether
+          # tauri-action cleans up or whether my filters were broken.
+          echo "Bundle dir tree:"
+          ls -laR "$BUNDLE_ROOT" 2>&1 || true
+          echo "--- upload phase ---"
           UPLOADED=0
+          # Two separate finds piped together. The OLD `\( -name X -o -name Y \)`
+          # form silently produced zero matches in some shell environments;
+          # this avoids the problem entirely.
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             echo "Uploading $f"
@@ -123,7 +127,7 @@ jobs:
             else
               echo "::warning::upload failed for $f"
             fi
-          done < <(find "$BUNDLE_ROOT" -type f -name "*.sig"; find "$BUNDLE_ROOT" -type f -name "*.AppImage.tar.gz")
+          done < <(find "$BUNDLE_ROOT" -type f -name "*.sig" 2>/dev/null; find "$BUNDLE_ROOT" -type f -name "*.AppImage.tar.gz" 2>/dev/null)
           echo "Uploaded $UPLOADED updater artifacts"
           if [ "$UPLOADED" -eq 0 ]; then
             echo "::warning::No updater artifacts found under $BUNDLE_ROOT — auto-update will be broken for this platform."
