@@ -6,9 +6,12 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
+  serializeInlineChunks,
   type DeployBundleConfig,
   type GeneratedBundle,
+  type InlineKnowledgeChunk,
 } from "./shared";
 
 // v2.0.0 Wave 3 — Docker bundle generator.
@@ -22,6 +25,7 @@ import {
 export function generateDocker(
   agent: Agent,
   config: DeployBundleConfig,
+  knowledgeChunks: InlineKnowledgeChunk[] = [],
 ): GeneratedBundle {
   const model = chooseModel(agent, config);
   const templateVars = extractTemplateVars(agent.systemPrompt);
@@ -29,6 +33,8 @@ export function generateDocker(
   const allowedOriginsLiteral = jsonString(config.allowedOrigins);
   const callBlock = renderProviderCall(config.provider, model, "process.env.PROVIDER_API_KEY");
   const traceBlock = config.forwardTraces ? renderNodeTraceForward(agent) : "    // (trace forwarding disabled)";
+  const useKnowledge = config.useKnowledge && knowledgeChunks.length > 0;
+  const chunksLiteral = useKnowledge ? serializeInlineChunks(knowledgeChunks) : "[]";
 
   const indexJs = `${bannerComment("Docker Express server", agent, config, templateVars)}
 
@@ -37,9 +43,12 @@ import express from "express";
 const SYSTEM_PROMPT_TEMPLATE = ${systemPromptLiteral};
 const ALLOWED_ORIGINS = new Set(${allowedOriginsLiteral});
 const TEMPLATE_VARS = ${jsonString(templateVars)};
+const KNOWLEDGE_CHUNKS = ${chunksLiteral};
 const PORT = parseInt(process.env.PORT || "8080", 10);
 
 ${RESOLVE_PROMPT_HELPER}
+
+${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -69,10 +78,15 @@ app.post("/agent", async (req, res) => {
     return res.set(corsHeaders(origin)).status(403).json({ error: "origin not allowed" });
   }
 
-  const userMessage = String(req.body?.message ?? "").slice(0, 8000);
+  let userMessage = String(req.body?.message ?? "").slice(0, 8000);
   const history = Array.isArray(req.body?.history) ? req.body.history.slice(-20) : [];
   const systemPrompt = resolveSystemPrompt(SYSTEM_PROMPT_TEMPLATE, (n) => process.env[n], TEMPLATE_VARS);
   const startedAt = Date.now();
+
+  if (KNOWLEDGE_CHUNKS.length > 0) {
+    const ctx = await retrieveKnowledgeContext(userMessage, process.env.EMBED_API_KEY, KNOWLEDGE_CHUNKS, 5);
+    userMessage = ctx + userMessage;
+  }
 
   let response;
   try {
@@ -140,6 +154,7 @@ README*
     `# Pass via \`docker run -e PROVIDER_API_KEY=...\` or your orchestrator's secrets.`,
     `PROVIDER_API_KEY=`,
     ...templateVars.map((v) => `${envVarName(v)}=`),
+    ...(useKnowledge ? ["EMBED_API_KEY="] : []),
     ...(config.forwardTraces ? ["ATO_TRACE_KEY="] : []),
   ].join("\n") + "\n";
 
@@ -156,6 +171,7 @@ README*
       `docker run -p 8080:8080 \\`,
       `  -e PROVIDER_API_KEY=$PROVIDER_API_KEY \\`,
       ...templateVars.map((v) => `  -e ${envVarName(v)}=$${envVarName(v)} \\`),
+      ...(useKnowledge ? [`  -e EMBED_API_KEY=$EMBED_API_KEY \\`] : []),
       ...(config.forwardTraces ? [`  -e ATO_TRACE_KEY=$ATO_TRACE_KEY \\`] : []),
       `  ${agent.slug}`,
     ],

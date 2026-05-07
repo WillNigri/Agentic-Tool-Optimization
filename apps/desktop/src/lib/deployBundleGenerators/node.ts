@@ -6,9 +6,12 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
+  serializeInlineChunks,
   type DeployBundleConfig,
   type GeneratedBundle,
+  type InlineKnowledgeChunk,
 } from "./shared";
 
 // v2.0.0 Wave 3 — Standalone Node script generator.
@@ -21,6 +24,7 @@ import {
 export function generateNodeScript(
   agent: Agent,
   config: DeployBundleConfig,
+  knowledgeChunks: InlineKnowledgeChunk[] = [],
 ): GeneratedBundle {
   const model = chooseModel(agent, config);
   const templateVars = extractTemplateVars(agent.systemPrompt);
@@ -28,6 +32,8 @@ export function generateNodeScript(
   const allowedOriginsLiteral = jsonString(config.allowedOrigins);
   const callBlock = renderProviderCall(config.provider, model, "process.env.PROVIDER_API_KEY");
   const traceBlock = config.forwardTraces ? renderTraceForward(agent) : "    // (trace forwarding disabled)";
+  const useKnowledge = config.useKnowledge && knowledgeChunks.length > 0;
+  const chunksLiteral = useKnowledge ? serializeInlineChunks(knowledgeChunks) : "[]";
 
   const serverJs = `${bannerComment("standalone Node server", agent, config, templateVars)}
 
@@ -36,9 +42,12 @@ import http from "node:http";
 const SYSTEM_PROMPT_TEMPLATE = ${systemPromptLiteral};
 const ALLOWED_ORIGINS = new Set(${allowedOriginsLiteral});
 const TEMPLATE_VARS = ${jsonString(templateVars)};
+const KNOWLEDGE_CHUNKS = ${chunksLiteral};
 const PORT = parseInt(process.env.PORT || "8080", 10);
 
 ${RESOLVE_PROMPT_HELPER}
+
+${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -74,10 +83,15 @@ async function handleAgent(req, res) {
     return;
   }
 
-  const userMessage = String(payload?.message ?? "").slice(0, 8000);
+  let userMessage = String(payload?.message ?? "").slice(0, 8000);
   const history = Array.isArray(payload?.history) ? payload.history.slice(-20) : [];
   const systemPrompt = resolveSystemPrompt(SYSTEM_PROMPT_TEMPLATE, (n) => process.env[n], TEMPLATE_VARS);
   const startedAt = Date.now();
+
+  if (KNOWLEDGE_CHUNKS.length > 0) {
+    const ctx = await retrieveKnowledgeContext(userMessage, process.env.EMBED_API_KEY, KNOWLEDGE_CHUNKS, 5);
+    userMessage = ctx + userMessage;
+  }
 
   let response;
   try {
@@ -141,6 +155,7 @@ server.listen(PORT, () => {
     `# Or set them in your deploy provider's dashboard (Railway / Render / Fly).`,
     `PROVIDER_API_KEY=`,
     ...templateVars.map((v) => `${envVarName(v)}=`),
+    ...(useKnowledge ? ["EMBED_API_KEY="] : []),
     ...(config.forwardTraces ? ["ATO_TRACE_KEY="] : []),
     `# Optional — defaults to 8080`,
     `# PORT=8080`,

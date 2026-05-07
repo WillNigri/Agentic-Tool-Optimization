@@ -676,6 +676,30 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE agents ADD COLUMN kind TEXT NOT NULL DEFAULT 'internal'",
         [],
     );
+    // v2.0.0 Wave 2 — Local knowledge for external agents. Each row is one
+    // chunk of text + its OpenAI text-embedding-3-small vector. Embedding
+    // stored as a BLOB of f32 bytes (1536 floats = 6144 bytes per chunk).
+    // Storage trade-off: keeping the embedding alongside the text means the
+    // bundle inliner doesn't have to re-embed at deploy time, AND retrieval
+    // testing in the UI is just a SELECT + cosine sim in Rust.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_knowledge_chunks (
+            id          TEXT PRIMARY KEY,
+            agent_id    TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            tokens      INTEGER NOT NULL,
+            position    INTEGER NOT NULL,
+            embedding   BLOB NOT NULL,
+            embed_model TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kchunks_agent ON agent_knowledge_chunks(agent_id, position)",
+        [],
+    );
 }
 
 
@@ -931,6 +955,12 @@ pub fn run() {
             update_agent_memory_policy,
             // v2.0.0: Internal vs External agent kind
             update_agent_kind,
+            // v2.0.0 Wave 2: Local knowledge ingestion + retrieval
+            ingest_knowledge_text,
+            list_agent_knowledge,
+            delete_knowledge_chunk,
+            delete_knowledge_source,
+            retrieve_knowledge,
             // v1.4.0 F5: Per-task model selection
             update_agent_role_models,
             // v1.5.0: Update MCPs attached to an agent (one-click browser tools etc.)

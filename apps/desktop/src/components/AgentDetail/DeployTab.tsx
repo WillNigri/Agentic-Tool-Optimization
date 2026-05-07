@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Copy, Check, ExternalLink, Cloud, Server, Box, Layers, FolderDown, Loader2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Copy, Check, ExternalLink, Cloud, Server, Box, Layers, FolderDown, Loader2, BookOpen } from "lucide-react";
 import type { Agent } from "@/lib/agents";
 import { generateCloudflareWorker } from "@/lib/deployBundleGenerators/cloudflare";
 import { generateVercelEdge } from "@/lib/deployBundleGenerators/vercel";
@@ -11,7 +12,9 @@ import {
   type DeployBundleConfig,
   type DeployProvider,
   type GeneratedBundle,
+  type InlineKnowledgeChunk,
 } from "@/lib/deployBundleGenerators/shared";
+import { listAgentKnowledge } from "@/lib/agentKnowledge";
 import { cn } from "@/lib/utils";
 
 // v2.0.0 Wave 1 + Wave 3 — Deploy tab.
@@ -59,14 +62,39 @@ export default function DeployTab({ agent }: Props) {
   });
   const [activeFile, setActiveFile] = useState<string | null>(null);
 
+  // Pull chunks WITH embeddings if useKnowledge is on so generators can
+  // inline them. Skipped when toggle is off — saves a 1536-floats-per-row
+  // serialization round-trip.
+  const { data: knowledgeChunks = [] } = useQuery({
+    queryKey: ["agent-knowledge-with-emb", agent.id, config.useKnowledge],
+    queryFn: () => listAgentKnowledge(agent.id, true),
+    enabled: agent.kind === "external" && config.useKnowledge,
+    staleTime: 30_000,
+  });
+
+  const inlineChunks: InlineKnowledgeChunk[] = useMemo(
+    () =>
+      knowledgeChunks
+        .filter((c) => Array.isArray(c.embedding) && c.embedding.length > 0)
+        .map((c) => ({ s: c.source, c: c.content, e: c.embedding ?? [] })),
+    [knowledgeChunks],
+  );
+
   const bundle: GeneratedBundle | null = useMemo(() => {
     switch (target) {
-      case "cloudflare": return generateCloudflareWorker(agent, config);
-      case "vercel":     return generateVercelEdge(agent, config);
-      case "docker":     return generateDocker(agent, config);
-      case "node":       return generateNodeScript(agent, config);
+      case "cloudflare": return generateCloudflareWorker(agent, config, inlineChunks);
+      case "vercel":     return generateVercelEdge(agent, config, inlineChunks);
+      case "docker":     return generateDocker(agent, config, inlineChunks);
+      case "node":       return generateNodeScript(agent, config, inlineChunks);
     }
-  }, [agent, config, target]);
+  }, [agent, config, target, inlineChunks]);
+
+  const bundleSizeKb = useMemo(() => {
+    if (!bundle) return 0;
+    return Math.round(
+      Object.values(bundle.files).reduce((s, f) => s + f.length, 0) / 1024,
+    );
+  }, [bundle]);
 
   if (agent.kind !== "external") {
     return (
@@ -183,24 +211,65 @@ export default function DeployTab({ agent }: Props) {
         </p>
       </section>
 
-      <section className="flex items-center gap-3">
-        <input
-          id="forward-traces"
-          type="checkbox"
-          checked={config.forwardTraces}
-          onChange={(e) => setConfig((c) => ({ ...c, forwardTraces: e.target.checked }))}
-          className="h-4 w-4 rounded border-cs-border bg-cs-bg accent-cs-accent"
-        />
-        <label htmlFor="forward-traces" className="text-sm text-cs-text">
-          {t("agentDetail.deploy.forwardTraces", "Stream traces to ATO Insights")}
-          <span className="ml-2 text-[11px] text-cs-muted">
-            {t(
-              "agentDetail.deploy.forwardTracesHint",
-              "Pro+ — needs ATO_TRACE_KEY env var on the deployed bundle",
-            )}
-          </span>
-        </label>
+      <section className="space-y-2">
+        <div className="flex items-center gap-3">
+          <input
+            id="use-knowledge"
+            type="checkbox"
+            checked={config.useKnowledge}
+            onChange={(e) => setConfig((c) => ({ ...c, useKnowledge: e.target.checked }))}
+            className="h-4 w-4 rounded border-cs-border bg-cs-bg accent-cs-accent"
+          />
+          <label htmlFor="use-knowledge" className="text-sm text-cs-text">
+            <span className="inline-flex items-center gap-1.5">
+              <BookOpen size={11} />
+              {t("agentDetail.deploy.useKnowledge", "Inline knowledge for RAG retrieval")}
+            </span>
+            <span className="ml-2 text-[11px] text-cs-muted">
+              {config.useKnowledge && knowledgeChunks.length === 0
+                ? t(
+                    "agentDetail.deploy.useKnowledgeEmpty",
+                    "No chunks yet — open the Knowledge tab to add some",
+                  )
+                : t(
+                    "agentDetail.deploy.useKnowledgeHint",
+                    "Bake chunks + embeddings into the bundle. Needs EMBED_API_KEY (OpenAI) at deploy time.",
+                  )}
+            </span>
+          </label>
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            id="forward-traces"
+            type="checkbox"
+            checked={config.forwardTraces}
+            onChange={(e) => setConfig((c) => ({ ...c, forwardTraces: e.target.checked }))}
+            className="h-4 w-4 rounded border-cs-border bg-cs-bg accent-cs-accent"
+          />
+          <label htmlFor="forward-traces" className="text-sm text-cs-text">
+            {t("agentDetail.deploy.forwardTraces", "Stream traces to ATO Insights")}
+            <span className="ml-2 text-[11px] text-cs-muted">
+              {t(
+                "agentDetail.deploy.forwardTracesHint",
+                "Pro+ — needs ATO_TRACE_KEY env var on the deployed bundle",
+              )}
+            </span>
+          </label>
+        </div>
       </section>
+
+      {/* Cloudflare Worker hard-fails to deploy if the script exceeds 1MB.
+          Warn at 800KB so the user has headroom — typical FAQ bundles
+          land at 50-300KB so this only fires on really large knowledge sets. */}
+      {target === "cloudflare" && bundleSizeKb > 800 && (
+        <section className="rounded-md border border-cs-warn/40 bg-cs-warn/10 p-3 text-xs text-cs-text">
+          ⚠️ {t(
+            "agentDetail.deploy.bundleSizeWarn",
+            "Bundle is {{size}} KB — Cloudflare Workers cap at 1 MB. Consider trimming knowledge or splitting the agent.",
+            { size: bundleSizeKb },
+          )}
+        </section>
+      )}
 
       {/* File preview */}
       {bundle && (

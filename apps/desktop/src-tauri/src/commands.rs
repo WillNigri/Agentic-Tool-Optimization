@@ -9688,6 +9688,392 @@ pub fn update_agent_kind(
     Ok(())
 }
 
+// ── v2.0.0 Wave 2 — Local knowledge ──────────────────────────────────────
+//
+// Embedding via OpenAI text-embedding-3-small. Free choice of provider for
+// the LLM at deploy time, but for embeddings we standardize on a single
+// model so chunks ingested today are still retrievable when the user
+// changes LLM providers tomorrow. The customer's OpenAI key (from
+// `llm_api_keys` where provider='openai') is the only secret needed.
+//
+// Chunks are stored locally in `agent_knowledge_chunks`. Cloud sync is
+// v2.1's job — for v2.0 alpha we inline chunks into the deployed bundle
+// at generation time, so the deployed agent is fully self-contained.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeChunk {
+    pub id: String,
+    pub agent_id: String,
+    pub source: String,
+    pub content: String,
+    pub tokens: i64,
+    pub position: i64,
+    pub embed_model: String,
+    pub created_at: String,
+    /// Embedding as a flat f32 array. Decoded from the BLOB on read.
+    /// Skipped when listing chunks (UI doesn't need 1536 floats per row);
+    /// included when generating deploy bundles.
+    pub embedding: Option<Vec<f32>>,
+}
+
+const EMBED_MODEL: &str = "text-embedding-3-small";
+const EMBED_DIMS: usize = 1536;
+/// Hard cap so a runaway paste doesn't try to embed an entire book in one
+/// request. Beyond this we'd need to batch — keep it simple for v2.0.
+const MAX_CHARS_PER_INGEST: usize = 200_000;
+/// Target chunk size in characters. ~375 tokens for English text. Small
+/// enough that 5–8 chunks fit in any LLM context, large enough that a
+/// chunk has actual context.
+const CHUNK_CHARS: usize = 1500;
+const CHUNK_OVERLAP: usize = 200;
+
+fn chunk_text(text: &str) -> Vec<String> {
+    // Naive char-window chunker with overlap. Splits on paragraph boundary
+    // when one is within the overlap region so chunks don't tear sentences.
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let end = (i + CHUNK_CHARS).min(chars.len());
+        // Try to back off to a paragraph break (\n\n) within the overlap
+        // region so we don't tear mid-sentence.
+        let mut split_at = end;
+        if end < chars.len() {
+            let lookback_start = end.saturating_sub(CHUNK_OVERLAP);
+            for j in (lookback_start..end).rev() {
+                if chars[j] == '\n' && j > 0 && chars[j - 1] == '\n' {
+                    split_at = j + 1;
+                    break;
+                }
+            }
+        }
+        let slice: String = chars[i..split_at].iter().collect();
+        let trimmed = slice.trim().to_string();
+        if !trimmed.is_empty() {
+            chunks.push(trimmed);
+        }
+        if split_at >= chars.len() {
+            break;
+        }
+        i = split_at.saturating_sub(CHUNK_OVERLAP);
+    }
+    chunks
+}
+
+fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for &f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
+fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
+    let n = blob.len() / 4;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let bytes = [blob[i * 4], blob[i * 4 + 1], blob[i * 4 + 2], blob[i * 4 + 3]];
+        out.push(f32::from_le_bytes(bytes));
+    }
+    out
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
+}
+
+/// Read the customer's OpenAI key from the local LLM keys table. We pick
+/// the first active key with provider='openai'. If none exists, fail with
+/// a friendly message that the UI can surface.
+fn read_openai_key(conn: &rusqlite::Connection) -> Result<String, String> {
+    // Use match instead of .optional() to avoid pulling in OptionalExtension
+    // — rusqlite::Error::QueryReturnedNoRows distinguishes "key not on file"
+    // from a real DB error, which deserves a different message.
+    match conn.query_row::<String, _, _>(
+        "SELECT encrypted_key FROM llm_api_keys WHERE provider = 'openai' AND is_active = 1 ORDER BY created_at DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(encrypted) => simple_decrypt(&encrypted),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(
+            "No OpenAI API key on file. Add one in Settings → API Keys (provider: openai) — required for knowledge embeddings.".to_string(),
+        ),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIEmbeddingRequest<'a> {
+    input: &'a [String],
+    model: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIEmbeddingResponse {
+    data: Vec<OpenAIEmbeddingItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIEmbeddingItem {
+    embedding: Vec<f32>,
+    index: usize,
+}
+
+async fn embed_batch(api_key: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = reqwest::Client::new();
+    let payload = OpenAIEmbeddingRequest { input: inputs, model: EMBED_MODEL };
+    let response = client
+        .post("https://api.openai.com/v1/embeddings")
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("OpenAI embeddings request failed: {}", e))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("OpenAI embeddings {}: {}", status, body));
+    }
+    let parsed: OpenAIEmbeddingResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("OpenAI embeddings parse error: {}", e))?;
+    // Reorder by `index` so results align with `inputs`. OpenAI normally
+    // returns them in order, but the spec lets them come back unordered.
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); inputs.len()];
+    for item in parsed.data {
+        if item.index < out.len() && item.embedding.len() == EMBED_DIMS {
+            out[item.index] = item.embedding;
+        }
+    }
+    if out.iter().any(|v| v.len() != EMBED_DIMS) {
+        return Err("OpenAI embeddings: missing or wrong-dimension vector in response".to_string());
+    }
+    Ok(out)
+}
+
+/// Approximate token count — char count / 4 for English text. Matches
+/// OpenAI's rough rule of thumb close enough for the UI's storage display.
+fn approx_tokens(s: &str) -> i64 {
+    (s.chars().count() / 4) as i64
+}
+
+/// Ingest a chunk of plain text (typically a .md or .txt file's contents).
+/// Replaces any prior chunks for the same `source` so re-uploading the same
+/// file overwrites instead of duplicating.
+#[tauri::command]
+pub async fn ingest_knowledge_text(
+    db: State<'_, DbState>,
+    agent_id: String,
+    source: String,
+    content: String,
+) -> Result<Vec<KnowledgeChunk>, String> {
+    if content.is_empty() {
+        return Err("content cannot be empty".to_string());
+    }
+    if content.len() > MAX_CHARS_PER_INGEST {
+        return Err(format!(
+            "content too large ({} chars, max {}). Split the file before uploading.",
+            content.len(),
+            MAX_CHARS_PER_INGEST
+        ));
+    }
+
+    let chunks = chunk_text(&content);
+    if chunks.is_empty() {
+        return Err("nothing to embed — the file is whitespace only".to_string());
+    }
+
+    // Read OpenAI key BEFORE making the network call so we fail fast on
+    // a misconfigured machine.
+    let api_key = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        read_openai_key(&conn)?
+    };
+
+    let embeddings = embed_batch(&api_key, &chunks).await?;
+    if embeddings.len() != chunks.len() {
+        return Err("embedder returned the wrong number of vectors".to_string());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // Replace prior chunks from this same source so re-uploading overwrites.
+    conn.execute(
+        "DELETE FROM agent_knowledge_chunks WHERE agent_id = ?1 AND source = ?2",
+        params![agent_id, source],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut out: Vec<KnowledgeChunk> = Vec::with_capacity(chunks.len());
+    for (i, (text, embedding)) in chunks.into_iter().zip(embeddings.into_iter()).enumerate() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let tokens = approx_tokens(&text);
+        let blob = f32_vec_to_blob(&embedding);
+        conn.execute(
+            "INSERT INTO agent_knowledge_chunks
+             (id, agent_id, source, content, tokens, position, embedding, embed_model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, agent_id, source, text, tokens, i as i64, blob, EMBED_MODEL, now],
+        )
+        .map_err(|e| e.to_string())?;
+        out.push(KnowledgeChunk {
+            id,
+            agent_id: agent_id.clone(),
+            source: source.clone(),
+            content: text,
+            tokens,
+            position: i as i64,
+            embed_model: EMBED_MODEL.to_string(),
+            created_at: now.clone(),
+            embedding: Some(embedding),
+        });
+    }
+    Ok(out)
+}
+
+/// List chunks for an agent. By default `include_embedding=false` so the UI
+/// gets a fast list view; deploy-bundle generation passes `true`.
+#[tauri::command]
+pub fn list_agent_knowledge(
+    db: State<'_, DbState>,
+    agent_id: String,
+    include_embedding: Option<bool>,
+) -> Result<Vec<KnowledgeChunk>, String> {
+    let with_embed = include_embedding.unwrap_or(false);
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, agent_id, source, content, tokens, position, embedding, embed_model, created_at
+             FROM agent_knowledge_chunks
+             WHERE agent_id = ?1
+             ORDER BY source, position",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![agent_id], |row| {
+            let blob: Vec<u8> = row.get(6)?;
+            let embedding = if with_embed {
+                Some(blob_to_f32_vec(&blob))
+            } else {
+                None
+            };
+            Ok(KnowledgeChunk {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                source: row.get(2)?,
+                content: row.get(3)?,
+                tokens: row.get(4)?,
+                position: row.get(5)?,
+                embed_model: row.get(7)?,
+                created_at: row.get(8)?,
+                embedding,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_knowledge_chunk(
+    db: State<'_, DbState>,
+    chunk_id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM agent_knowledge_chunks WHERE id = ?1",
+        params![chunk_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_knowledge_source(
+    db: State<'_, DbState>,
+    agent_id: String,
+    source: String,
+) -> Result<u64, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let n = conn
+        .execute(
+            "DELETE FROM agent_knowledge_chunks WHERE agent_id = ?1 AND source = ?2",
+            params![agent_id, source],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n as u64)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalHit {
+    pub chunk: KnowledgeChunk,
+    pub score: f32,
+}
+
+/// Retrieval — embed the query and return the top-K matching chunks. Used
+/// by the "Test retrieval" panel in the UI; deploy bundles do their own
+/// cosine-sim at request time using the inlined chunks.
+#[tauri::command]
+pub async fn retrieve_knowledge(
+    db: State<'_, DbState>,
+    agent_id: String,
+    query: String,
+    k: Option<u32>,
+) -> Result<Vec<RetrievalHit>, String> {
+    let k = k.unwrap_or(5).max(1).min(20) as usize;
+    if query.trim().is_empty() {
+        return Err("query cannot be empty".to_string());
+    }
+
+    let api_key = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        read_openai_key(&conn)?
+    };
+
+    let query_embeddings = embed_batch(&api_key, &[query.clone()]).await?;
+    let query_vec = query_embeddings
+        .into_iter()
+        .next()
+        .ok_or_else(|| "embedder returned no vector for the query".to_string())?;
+
+    let chunks = list_agent_knowledge(db, agent_id, Some(true))?;
+    let mut scored: Vec<RetrievalHit> = chunks
+        .into_iter()
+        .filter_map(|c| {
+            let v = c.embedding.clone().unwrap_or_default();
+            if v.is_empty() {
+                None
+            } else {
+                let s = cosine_similarity(&query_vec, &v);
+                Some(RetrievalHit { chunk: c, score: s })
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    Ok(scored)
+}
+
 /// v1.4.0 F3 — persist memory policy JSON for the agent.
 #[tauri::command]
 pub fn update_agent_memory_policy(

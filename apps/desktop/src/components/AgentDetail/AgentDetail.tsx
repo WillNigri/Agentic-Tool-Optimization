@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
-import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock } from "lucide-react";
+import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
 import { updateAgentKind } from "@/lib/agents";
@@ -23,13 +23,14 @@ const MemoryTab = lazy(() => import("./MemoryTab"));
 const ModelsTab = lazy(() => import("./ModelsTab"));
 const EvaluatorsTab = lazy(() => import("./EvaluatorsTab"));
 const DeployTab = lazy(() => import("./DeployTab"));
+const KnowledgeTab = lazy(() => import("./KnowledgeTab"));
 
 interface Props {
   agent: Agent;
   onClose: () => void;
 }
 
-type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators" | "deploy";
+type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators" | "deploy" | "knowledge";
 
 export default function AgentDetail({ agent, onClose }: Props) {
   const { t } = useTranslation();
@@ -118,6 +119,11 @@ export default function AgentDetail({ agent, onClose }: Props) {
             {t("agentDetail.tabs.evaluators", "Evaluators")}
           </TabPill>
           {isExternal && (
+            <TabPill active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={12} />}>
+              {t("agentDetail.tabs.knowledge", "Knowledge")}
+            </TabPill>
+          )}
+          {isExternal && (
             <TabPill active={tab === "deploy"} onClick={() => setTab("deploy")} icon={<Globe size={12} />}>
               {t("agentDetail.tabs.deploy", "Deploy")}
             </TabPill>
@@ -140,6 +146,7 @@ export default function AgentDetail({ agent, onClose }: Props) {
               {tab === "models" && <ModelsTab agent={agent} />}
               {tab === "evaluators" && <EvaluatorsTab agent={agent} />}
               {tab === "deploy" && <DeployTab agent={agent} />}
+              {tab === "knowledge" && <KnowledgeTab agent={agent} />}
             </Suspense>
           </ErrorBoundary>
         </div>

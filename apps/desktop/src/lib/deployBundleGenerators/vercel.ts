@@ -6,9 +6,12 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
+  serializeInlineChunks,
   type DeployBundleConfig,
   type GeneratedBundle,
+  type InlineKnowledgeChunk,
 } from "./shared";
 
 // v2.0.0 Wave 3 — Vercel Edge Function generator.
@@ -23,6 +26,7 @@ import {
 export function generateVercelEdge(
   agent: Agent,
   config: DeployBundleConfig,
+  knowledgeChunks: InlineKnowledgeChunk[] = [],
 ): GeneratedBundle {
   const model = chooseModel(agent, config);
   const templateVars = extractTemplateVars(agent.systemPrompt);
@@ -30,6 +34,8 @@ export function generateVercelEdge(
   const allowedOriginsLiteral = jsonString(config.allowedOrigins);
   const callBlock = renderProviderCall(config.provider, model, "process.env.PROVIDER_API_KEY");
   const traceBlock = config.forwardTraces ? renderVercelTraceForward(agent) : "  // (trace forwarding disabled)";
+  const useKnowledge = config.useKnowledge && knowledgeChunks.length > 0;
+  const chunksLiteral = useKnowledge ? serializeInlineChunks(knowledgeChunks) : "[]";
 
   // .ts file so Next picks up types automatically. Using globalThis.fetch
   // and process.env keeps it compatible with both Edge and Node runtimes.
@@ -40,8 +46,11 @@ export const runtime = "edge";
 const SYSTEM_PROMPT_TEMPLATE = ${systemPromptLiteral};
 const ALLOWED_ORIGINS = new Set<string>(${allowedOriginsLiteral});
 const TEMPLATE_VARS = ${jsonString(templateVars)};
+const KNOWLEDGE_CHUNKS: { s: string; c: string; e: number[] }[] = ${chunksLiteral};
 
 ${RESOLVE_PROMPT_HELPER}
+
+${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
 function corsHeaders(origin: string): Record<string, string> {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -77,10 +86,15 @@ export async function POST(request: Request): Promise<Response> {
     });
   }
 
-  const userMessage = String(payload?.message ?? "").slice(0, 8000);
+  let userMessage = String(payload?.message ?? "").slice(0, 8000);
   const history = Array.isArray(payload?.history) ? payload.history.slice(-20) : [];
   const systemPrompt = resolveSystemPrompt(SYSTEM_PROMPT_TEMPLATE, (n) => process.env[n], TEMPLATE_VARS);
   const startedAt = Date.now();
+
+  if (KNOWLEDGE_CHUNKS.length > 0) {
+    const ctx = await retrieveKnowledgeContext(userMessage, process.env.EMBED_API_KEY, KNOWLEDGE_CHUNKS, 5);
+    userMessage = ctx + userMessage;
+  }
 
   let response: string;
   try {
@@ -119,6 +133,7 @@ ${traceBlock}
     `# This file is for local development only — Next.js loads it automatically.`,
     `PROVIDER_API_KEY=`,
     ...templateVars.map((v) => `${envVarName(v)}=`),
+    ...(useKnowledge ? ["EMBED_API_KEY="] : []),
     ...(config.forwardTraces ? ["ATO_TRACE_KEY="] : []),
   ].join("\n") + "\n";
 
@@ -134,6 +149,7 @@ ${traceBlock}
       "# After deploy, set the same env vars in production:",
       "vercel env add PROVIDER_API_KEY production",
       ...templateVars.map((v) => `vercel env add ${envVarName(v)} production`),
+      ...(useKnowledge ? ["vercel env add EMBED_API_KEY production"] : []),
       ...(config.forwardTraces ? ["vercel env add ATO_TRACE_KEY production"] : []),
     ],
   };

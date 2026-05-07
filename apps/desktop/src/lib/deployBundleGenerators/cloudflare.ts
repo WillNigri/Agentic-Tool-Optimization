@@ -6,17 +6,22 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
+  serializeInlineChunks,
   type DeployBundleConfig,
   type GeneratedBundle,
+  type InlineKnowledgeChunk,
 } from "./shared";
 
 // v2.0.0 Wave 1 — Cloudflare Worker code generator. See ./shared.ts for the
 // pieces this shares with the other targets.
+// Wave 2 — optional inlined knowledge for RAG retrieval.
 
 export function generateCloudflareWorker(
   agent: Agent,
   config: DeployBundleConfig,
+  knowledgeChunks: InlineKnowledgeChunk[] = [],
 ): GeneratedBundle {
   const model = chooseModel(agent, config);
   const templateVars = extractTemplateVars(agent.systemPrompt);
@@ -24,14 +29,19 @@ export function generateCloudflareWorker(
   const allowedOriginsLiteral = jsonString(config.allowedOrigins);
   const callBlock = renderProviderCall(config.provider, model, "env.PROVIDER_API_KEY");
   const traceBlock = config.forwardTraces ? renderTraceForward(agent) : "    // (trace forwarding disabled)";
+  const useKnowledge = config.useKnowledge && knowledgeChunks.length > 0;
+  const chunksLiteral = useKnowledge ? serializeInlineChunks(knowledgeChunks) : "[]";
 
   const workerJs = `${bannerComment("Cloudflare Worker", agent, config, templateVars)}
 
 const SYSTEM_PROMPT_TEMPLATE = ${systemPromptLiteral};
 const ALLOWED_ORIGINS = new Set(${allowedOriginsLiteral});
 const TEMPLATE_VARS = ${jsonString(templateVars)};
+const KNOWLEDGE_CHUNKS = ${chunksLiteral};
 
 ${RESOLVE_PROMPT_HELPER}
+
+${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -72,10 +82,18 @@ export default {
       });
     }
 
-    const userMessage = String(payload?.message ?? "").slice(0, 8000);
+    let userMessage = String(payload?.message ?? "").slice(0, 8000);
     const history = Array.isArray(payload?.history) ? payload.history.slice(-20) : [];
     const systemPrompt = resolveSystemPrompt(SYSTEM_PROMPT_TEMPLATE, (n) => env[n], TEMPLATE_VARS);
     const startedAt = Date.now();
+
+    // RAG: prepend top-K matching knowledge chunks to the user message.
+    // No-op when KNOWLEDGE_CHUNKS is empty or EMBED_API_KEY isn't set —
+    // we don't fail the request; the agent just runs without RAG.
+    if (KNOWLEDGE_CHUNKS.length > 0) {
+      const ctx = await retrieveKnowledgeContext(userMessage, env.EMBED_API_KEY, KNOWLEDGE_CHUNKS, 5);
+      userMessage = ctx + userMessage;
+    }
 
     let response;
     try {
@@ -113,6 +131,7 @@ ${templateVars.length === 0 ? "# (no template variables — system prompt is sta
     postInstall: [
       "wrangler secret put PROVIDER_API_KEY",
       ...templateVars.map((v) => `wrangler secret put ${envVarName(v)}`),
+      ...(useKnowledge ? ["wrangler secret put EMBED_API_KEY"] : []),
       ...(config.forwardTraces ? ["wrangler secret put ATO_TRACE_KEY"] : []),
       "wrangler deploy",
     ],

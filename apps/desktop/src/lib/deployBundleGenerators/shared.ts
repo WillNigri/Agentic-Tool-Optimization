@@ -26,6 +26,19 @@ export interface DeployBundleConfig {
   provider: DeployProvider;
   model?: string;
   forwardTraces: boolean;
+  /** v2.0 Wave 2 — when true, the generator inlines the agent's local
+   *  knowledge chunks into the deployed bundle, and the bundle does
+   *  cosine-similarity retrieval per-request before calling the LLM. */
+  useKnowledge: boolean;
+}
+
+export interface InlineKnowledgeChunk {
+  /** source filename — shown in the <context> block as a header. */
+  s: string;
+  /** chunk content. */
+  c: string;
+  /** 1536 floats from text-embedding-3-small. */
+  e: number[];
 }
 
 export const DEFAULT_DEPLOY_CONFIG: DeployBundleConfig = {
@@ -33,6 +46,7 @@ export const DEFAULT_DEPLOY_CONFIG: DeployBundleConfig = {
   allowedOrigins: ["https://example.com"],
   provider: "anthropic",
   forwardTraces: false,
+  useKnowledge: false,
 };
 
 export interface GeneratedBundle {
@@ -85,6 +99,60 @@ export const RESOLVE_PROMPT_HELPER = `function resolveSystemPrompt(template, loo
   }
   return out;
 }`;
+
+/** RAG retrieval helper. Embeds the user query via OpenAI, scores it
+ *  against the inlined chunk embeddings via cosine similarity, returns the
+ *  top-K chunks formatted as a <context> block. The bundle prepends this
+ *  to the user message before the LLM call. */
+export const RETRIEVE_KNOWLEDGE_HELPER = `async function retrieveKnowledgeContext(query, embedKey, chunks, k) {
+  if (!embedKey || !chunks || chunks.length === 0 || !query) return "";
+  // Embed the query — same model used at ingest time so vectors live in
+  // the same space (text-embedding-3-small, 1536 dims).
+  const r = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + embedKey, "content-type": "application/json" },
+    body: JSON.stringify({ model: "text-embedding-3-small", input: query }),
+  });
+  if (!r.ok) {
+    // Don't break the agent on an embedding outage — proceed without RAG.
+    return "";
+  }
+  const data = await r.json();
+  const q = data?.data?.[0]?.embedding;
+  if (!q) return "";
+  // Cosine sim against every chunk. For the bundle sizes we ship (~50
+  // chunks max) this is fast enough at request time. Larger corpora
+  // belong in a real vector DB — Pro feature in v2.1.
+  let qNorm = 0;
+  for (let i = 0; i < q.length; i++) qNorm += q[i] * q[i];
+  qNorm = Math.sqrt(qNorm);
+  const scored = [];
+  for (const c of chunks) {
+    let dot = 0, cn = 0;
+    for (let i = 0; i < q.length; i++) {
+      dot += q[i] * c.e[i];
+      cn += c.e[i] * c.e[i];
+    }
+    const denom = qNorm * Math.sqrt(cn);
+    scored.push({ c: c, score: denom === 0 ? 0 : dot / denom });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored.slice(0, k);
+  if (top.length === 0) return "";
+  const blocks = top.map(s => "## " + s.c.s + "\\n\\n" + s.c.c).join("\\n\\n---\\n\\n");
+  return "<context>\\n" + blocks + "\\n</context>\\n\\n";
+}`;
+
+/** Compact JSON serializer for the inlined chunk array. Floats are rounded
+ *  to 6 decimal places — plenty of precision for cosine similarity, cuts
+ *  the size of a 1536-dim vector by ~30% vs default JSON.stringify. */
+export function serializeInlineChunks(chunks: InlineKnowledgeChunk[]): string {
+  const rows = chunks.map((chunk) => {
+    const e = chunk.e.map((f) => Number(f.toFixed(6)));
+    return JSON.stringify({ s: chunk.s, c: chunk.c, e });
+  });
+  return "[\n  " + rows.join(",\n  ") + "\n]";
+}
 
 /** Build the per-provider fetch snippet. Returns JS source that assigns the
  *  assistant text to a variable named `response` after awaiting the call. */
@@ -160,6 +228,9 @@ export function bannerComment(target: string, agent: Agent, config: DeployBundle
   ];
   for (const v of templateVars) {
     lines.push(`//   - ${envVarName(v).padEnd(24)} (template variable {${v}})`);
+  }
+  if (config.useKnowledge) {
+    lines.push("//   - EMBED_API_KEY          (OpenAI key for query embeddings — text-embedding-3-small)");
   }
   if (config.forwardTraces) {
     lines.push("//   - ATO_TRACE_KEY          (issued in ATO desktop → Deploy tab)");
