@@ -1000,5 +1000,21 @@
     "globalConfigWarning": "I understand this edits a global config that affects all projects using this runtime.",
     "computingDiff": "Computing diff…",
     "noChanges": "Files are identical."
+  },
+  "demo": {
+    "subtitles": {
+      "intro": "ATO — the GUI for daily agentic work.",
+      "oneWorkspace": "One workspace for Claude, Codex, Gemini, OpenClaw, Hermes, Ollama.",
+      "threeWays": "Three ways to create an agent. Let's see all of them.",
+      "oneClickSave": "One click to save — file written, agent registered, ready to run.",
+      "bundleGroup": "Bundle them into a group. Router decides who handles what.",
+      "twoGroupTypes": "Two group types: routed (router picks one) and automation (pipeline).",
+      "automationPipeline": "Now the automation pipeline — one prompt, the whole workflow runs.",
+      "swapMidThread": "Now swap to Codex mid-thread — the full history travels.",
+      "scheduleUnattended": "And you can schedule it to run unattended.",
+      "wakeFromSleep": "Wake-from-sleep on macOS, Linux, and Windows — jobs fire even when ATO is closed.",
+      "closeBuildBundle": "Build the agents. Bundle them into a workflow. Run on demand or on a schedule.",
+      "closeBranding": "ATO. Local-first. MIT licensed. agentictool.ai"
+    }
   }
 }

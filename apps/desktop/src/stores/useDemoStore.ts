@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import i18n from "@/i18n";
 import type { AgentRuntime } from "@/lib/agents";
 import type { Section } from "@/components/Sidebar";
 import { useUiStore, type WizardPath } from "@/stores/useUiStore";
@@ -44,7 +45,7 @@ interface CreateGroupSpec {
 // arrives (typing complete, dispatch returned, timer fired).
 
 export type DemoStep =
-  | { kind: "subtitle"; text: string; durationMs?: number }
+  | { kind: "subtitle"; text: string; textKey?: string; durationMs?: number }
   | { kind: "wait"; ms: number }
   | { kind: "navigate"; section: Section }
   | { kind: "openWizard"; path?: WizardPath; templateId?: string | null }
@@ -235,7 +236,13 @@ export const useDemoStore = create<DemoState>((set, get) => ({
 
       switch (step.kind) {
         case "subtitle": {
-          set({ caption: step.text });
+          // Translate when a textKey is provided; fall back to the English
+          // text otherwise. New subtitles can ship without a key and just
+          // render in English until translations land.
+          const caption = step.textKey
+            ? i18n.t(step.textKey, { defaultValue: step.text })
+            : step.text;
+          set({ caption });
           await sleep(step.durationMs ?? 1800);
           // Auto-clear so subtitles don't bleed into typing animations.
           // Persistent narration would override the visual focus on what

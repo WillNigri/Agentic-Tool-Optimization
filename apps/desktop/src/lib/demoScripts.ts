@@ -76,11 +76,13 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "navigate", section: "home" },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.intro",
       text: "ATO — the GUI for daily agentic work.",
       durationMs: 2400,
     },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.oneWorkspace",
       text: "One workspace for Claude, Codex, Gemini, OpenClaw, Hermes, Ollama.",
       durationMs: 2800,
     },
@@ -90,6 +92,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "navigate", section: "agents" },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.threeWays",
       text: "Three ways to create an agent. Let's see all of them.",
       durationMs: 2400,
     },
@@ -184,6 +187,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "wait", ms: 400 },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.oneClickSave",
       text: "One click to save — file written, agent registered, ready to run.",
       durationMs: 2400,
     },
@@ -250,12 +254,14 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     // ── Build the group ──────────────────────────────────────────────────
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.bundleGroup",
       text: "Bundle them into a group. Router decides who handles what.",
       durationMs: 2800,
     },
     // ── Two group types — both created so viewers see both patterns ─────
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.twoGroupTypes",
       text: "Two group types: routed (router picks one) and automation (pipeline).",
       durationMs: 3000,
     },
@@ -350,6 +356,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "setChatPaneOpen", open: true },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.automationPipeline",
       text: "Now the automation pipeline — one prompt, the whole workflow runs.",
       durationMs: 2800,
     },
@@ -378,6 +385,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     // ── Cross-runtime mid-thread ─────────────────────────────────────────
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.swapMidThread",
       text: "Now swap to Codex mid-thread — the full history travels.",
       durationMs: 2400,
     },
@@ -405,6 +413,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     //    Runs → Schedules so it appears in the list.
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.scheduleUnattended",
       text: "And you can schedule it to run unattended.",
       durationMs: 2400,
     },
@@ -444,6 +453,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "wait", ms: 1200 },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.wakeFromSleep",
       text: "Wake-from-sleep on macOS, Linux, and Windows — jobs fire even when ATO is closed.",
       durationMs: 3600,
     },
@@ -452,11 +462,13 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     // ── Close ────────────────────────────────────────────────────────────
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.closeBuildBundle",
       text: "Build the agents. Bundle them into a workflow. Run on demand or on a schedule.",
       durationMs: 3400,
     },
     {
       kind: "subtitle",
+      textKey: "demo.subtitles.closeBranding",
       text: "ATO. Local-first. MIT licensed. agentictool.ai",
       durationMs: 3200,
     },

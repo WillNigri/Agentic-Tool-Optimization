@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle, Loader2, CheckCircle2, XCircle, Code } from "lucide-react";
+import { RefreshCw, X, Server, Wrench, Terminal, Globe, ChevronRight, AlertCircle, Loader2, CheckCircle2, XCircle, Code, Copy, Check } from "lucide-react";
 import { getMcpServers, restartMcpServer, getMcpServersWithTools, discoverMcpServerTools, type McpServer, type McpServerDetails } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import ToolDescriptionRewrite from "@/components/ToolDescriptionRewrite";
@@ -242,13 +242,7 @@ export default function McpDashboard() {
 
                   {/* Error state */}
                   {details?.error && (
-                    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
-                      <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
-                      <div>
-                        <p className="text-xs font-medium text-red-400">Connection Error</p>
-                        <p className="text-[10px] text-red-400/80 mt-0.5">{details.error}</p>
-                      </div>
-                    </div>
+                    <McpErrorBanner error={details.error} />
                   )}
 
                   {/* Discovered Tools */}
@@ -330,6 +324,39 @@ function LoadingSkeleton() {
       {[1, 2, 3].map((i) => (
         <div key={i} className="card h-16" />
       ))}
+    </div>
+  );
+}
+
+function McpErrorBanner({ error }: { error: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(error);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable — silent.
+    }
+  };
+  return (
+    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+      <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-medium text-red-400">Connection Error</p>
+          <button
+            type="button"
+            onClick={onCopy}
+            className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-red-300 hover:text-red-100 hover:bg-red-500/20 transition"
+            title="Copy error message"
+          >
+            {copied ? <Check size={10} /> : <Copy size={10} />}
+            {copied ? "copied" : "copy"}
+          </button>
+        </div>
+        <p className="text-[10px] text-red-400/80 mt-0.5 break-words font-mono whitespace-pre-wrap">{error}</p>
+      </div>
     </div>
   );
 }

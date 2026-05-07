@@ -813,5 +813,21 @@
     "globalConfigWarning": "Entendo que isso edita uma config global que afeta todos os projetos usando este runtime.",
     "computingDiff": "Calculando diff…",
     "noChanges": "Arquivos sao identicos."
+  },
+  "demo": {
+    "subtitles": {
+      "intro": "ATO — o GUI para o trabalho diario com agentes.",
+      "oneWorkspace": "Um workspace para Claude, Codex, Gemini, OpenClaw, Hermes e Ollama.",
+      "threeWays": "Tres formas de criar um agente. Vamos ver todas.",
+      "oneClickSave": "Um clique para salvar — arquivo gravado, agente registrado, pronto para rodar.",
+      "bundleGroup": "Agrupe-os. O roteador decide quem cuida de cada prompt.",
+      "twoGroupTypes": "Dois tipos de grupo: roteado (o router escolhe um) e automacao (pipeline).",
+      "automationPipeline": "Agora o pipeline de automacao — um prompt, o fluxo inteiro roda.",
+      "swapMidThread": "Agora troque para o Codex no meio da conversa — o historico inteiro viaja junto.",
+      "scheduleUnattended": "E voce pode agendar para rodar sem supervisao.",
+      "wakeFromSleep": "Acorda da suspensao no macOS, Linux e Windows — os jobs disparam mesmo com o ATO fechado.",
+      "closeBuildBundle": "Construa os agentes. Agrupe-os em um fluxo. Rode sob demanda ou no agendamento.",
+      "closeBranding": "ATO. Local-first. Licenca MIT. agentictool.ai"
+    }
   }
 }
