@@ -1,112 +1,37 @@
 import type { Agent } from "@/lib/agents";
+import {
+  bannerComment,
+  chooseModel,
+  envVarName,
+  extractTemplateVars,
+  jsonString,
+  RESOLVE_PROMPT_HELPER,
+  renderProviderCall,
+  type DeployBundleConfig,
+  type GeneratedBundle,
+} from "./shared";
 
-// v2.0.0 Wave 1 — Cloudflare Worker code generator.
-//
-// Emits a complete `worker.js` the customer can `wrangler deploy` to their
-// own Cloudflare account. The Worker:
-//   - Reads the LLM provider key from `env.PROVIDER_API_KEY` (Worker secret)
-//   - Resolves variables from the Worker env (one Worker var per template var)
-//   - Calls the customer's chosen provider via OpenAI-compatible chat-completions
-//   - Returns CORS-friendly JSON for the embed widget
-//   - Optionally POSTs a trace to ato-cloud /agent-traces if ATO_TRACE_KEY is set
-//
-// Provider coverage in v2.0 starts with the 4 most common (Anthropic, OpenAI,
-// Gemini, Groq); the others land alongside their first customer.
-
-export type DeployProvider =
-  | "anthropic"
-  | "openai"
-  | "gemini"
-  | "groq"
-  | "mistral"
-  | "deepseek"
-  | "xai"
-  | "together"
-  | "fireworks";
-
-export interface DeployBundleConfig {
-  /** Display name used in CORS headers + the widget greeting. */
-  brandName: string;
-  /** Origin allowlist for the embed widget — only these origins can call the Worker. */
-  allowedOrigins: string[];
-  /** Customer's chosen LLM provider. */
-  provider: DeployProvider;
-  /** Override model — falls back to agent.model. */
-  model?: string;
-  /** Forward traces to ato-cloud Insights. Requires ATO_TRACE_KEY env on Worker. */
-  forwardTraces: boolean;
-}
-
-export const DEFAULT_DEPLOY_CONFIG: DeployBundleConfig = {
-  brandName: "Support",
-  allowedOrigins: ["https://example.com"],
-  provider: "anthropic",
-  forwardTraces: false,
-};
-
-const PROVIDER_ENDPOINTS: Record<DeployProvider, { url: string; openaiCompat: boolean }> = {
-  anthropic:  { url: "https://api.anthropic.com/v1/messages",                 openaiCompat: false },
-  openai:     { url: "https://api.openai.com/v1/chat/completions",            openaiCompat: true  },
-  gemini:     { url: "https://generativelanguage.googleapis.com/v1beta/models", openaiCompat: false },
-  groq:       { url: "https://api.groq.com/openai/v1/chat/completions",       openaiCompat: true  },
-  mistral:    { url: "https://api.mistral.ai/v1/chat/completions",            openaiCompat: true  },
-  deepseek:   { url: "https://api.deepseek.com/v1/chat/completions",          openaiCompat: true  },
-  xai:        { url: "https://api.x.ai/v1/chat/completions",                  openaiCompat: true  },
-  together:   { url: "https://api.together.xyz/v1/chat/completions",          openaiCompat: true  },
-  fireworks:  { url: "https://api.fireworks.ai/inference/v1/chat/completions", openaiCompat: true },
-};
-
-/** Pull `{var}` tokens out of the system prompt so we know what env vars the
- *  Worker needs. Each one becomes `WORKER_VAR_<UPPER>` at runtime. */
-function extractTemplateVars(systemPrompt: string | null): string[] {
-  if (!systemPrompt) return [];
-  const matches = systemPrompt.match(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g) ?? [];
-  return Array.from(new Set(matches.map((m) => m.slice(1, -1))));
-}
-
-function jsonString(value: unknown): string {
-  // Stable, indented JSON for readability of the emitted file.
-  return JSON.stringify(value, null, 2);
-}
-
-export interface GeneratedBundle {
-  /** Path → contents. Customer drops these into a wrangler project. */
-  files: Record<string, string>;
-  /** Shell commands the customer runs after writing the files. */
-  postInstall: string[];
-}
+// v2.0.0 Wave 1 — Cloudflare Worker code generator. See ./shared.ts for the
+// pieces this shares with the other targets.
 
 export function generateCloudflareWorker(
   agent: Agent,
   config: DeployBundleConfig,
 ): GeneratedBundle {
-  const provider = PROVIDER_ENDPOINTS[config.provider];
-  const model = config.model ?? agent.model ?? "claude-sonnet-4-6";
+  const model = chooseModel(agent, config);
   const templateVars = extractTemplateVars(agent.systemPrompt);
   const systemPromptLiteral = jsonString(agent.systemPrompt ?? "You are a helpful assistant.");
   const allowedOriginsLiteral = jsonString(config.allowedOrigins);
+  const callBlock = renderProviderCall(config.provider, model, "env.PROVIDER_API_KEY");
+  const traceBlock = config.forwardTraces ? renderTraceForward(agent) : "    // (trace forwarding disabled)";
 
-  // Anthropic uses a different request shape (Messages API). All other
-  // providers in this set are OpenAI-compatible chat-completions.
-  const callBlock = config.provider === "anthropic"
-    ? renderAnthropicCall(model)
-    : config.provider === "gemini"
-    ? renderGeminiCall(model)
-    : renderOpenAICompatCall(provider.url, model);
-
-  const traceBlock = config.forwardTraces ? renderTraceForward(agent) : "  // (trace forwarding disabled)";
-
-  const workerJs = `// Auto-generated by ATO v2.0.0 — Cloudflare Worker for "${agent.displayName}".
-// Deploy with: wrangler deploy
-//
-// Required Worker secrets (set via \`wrangler secret put NAME\`):
-//   - PROVIDER_API_KEY       (your ${config.provider} API key)
-${templateVars.length > 0 ? templateVars.map((v) => `//   - WORKER_VAR_${v.toUpperCase().padEnd(20)} (template variable {${v}})`).join("\n") + "\n" : ""}${config.forwardTraces ? "//   - ATO_TRACE_KEY          (issued in ATO desktop → Deploy tab)\n" : ""}//
-// Embed allowed origins are baked into the bundle below — re-deploy after edits.
+  const workerJs = `${bannerComment("Cloudflare Worker", agent, config, templateVars)}
 
 const SYSTEM_PROMPT_TEMPLATE = ${systemPromptLiteral};
 const ALLOWED_ORIGINS = new Set(${allowedOriginsLiteral});
 const TEMPLATE_VARS = ${jsonString(templateVars)};
+
+${RESOLVE_PROMPT_HELPER}
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -116,16 +41,6 @@ function corsHeaders(origin) {
     "Access-Control-Allow-Headers": "content-type",
     "Access-Control-Max-Age": "86400",
   };
-}
-
-function resolveSystemPrompt(env) {
-  let out = SYSTEM_PROMPT_TEMPLATE;
-  for (const name of TEMPLATE_VARS) {
-    const envKey = "WORKER_VAR_" + name.toUpperCase();
-    const value = env[envKey] ?? "";
-    out = out.replaceAll("{" + name + "}", value);
-  }
-  return out;
 }
 
 export default {
@@ -159,7 +74,7 @@ export default {
 
     const userMessage = String(payload?.message ?? "").slice(0, 8000);
     const history = Array.isArray(payload?.history) ? payload.history.slice(-20) : [];
-    const systemPrompt = resolveSystemPrompt(env);
+    const systemPrompt = resolveSystemPrompt(SYSTEM_PROMPT_TEMPLATE, (n) => env[n], TEMPLATE_VARS);
     const startedAt = Date.now();
 
     let response;
@@ -187,7 +102,7 @@ compatibility_date = "2025-01-01"
 
 [vars]
 # Non-secret config — edit and re-deploy. Secrets go via \`wrangler secret put\`.
-${templateVars.length === 0 ? "# (no template variables — system prompt is static)" : templateVars.map((v) => `# WORKER_VAR_${v.toUpperCase()} = "..."`).join("\n")}
+${templateVars.length === 0 ? "# (no template variables — system prompt is static)" : templateVars.map((v) => `# ${envVarName(v)} = "..."`).join("\n")}
 `;
 
   return {
@@ -197,73 +112,11 @@ ${templateVars.length === 0 ? "# (no template variables — system prompt is sta
     },
     postInstall: [
       "wrangler secret put PROVIDER_API_KEY",
-      ...templateVars.map((v) => `wrangler secret put WORKER_VAR_${v.toUpperCase()}`),
+      ...templateVars.map((v) => `wrangler secret put ${envVarName(v)}`),
       ...(config.forwardTraces ? ["wrangler secret put ATO_TRACE_KEY"] : []),
       "wrangler deploy",
     ],
   };
-}
-
-function renderAnthropicCall(model: string): string {
-  return `      const r = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": env.PROVIDER_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: ${JSON.stringify(model)},
-          system: systemPrompt,
-          max_tokens: 1024,
-          messages: [...history, { role: "user", content: userMessage }],
-        }),
-      });
-      if (!r.ok) throw new Error("anthropic " + r.status + ": " + await r.text());
-      const data = await r.json();
-      response = data?.content?.[0]?.text ?? "";`;
-}
-
-function renderGeminiCall(model: string): string {
-  return `      const r = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=" + env.PROVIDER_API_KEY,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            contents: [
-              ...history.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
-              { role: "user", parts: [{ text: userMessage }] },
-            ],
-          }),
-        },
-      );
-      if (!r.ok) throw new Error("gemini " + r.status + ": " + await r.text());
-      const data = await r.json();
-      response = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";`;
-}
-
-function renderOpenAICompatCall(url: string, model: string): string {
-  return `      const r = await fetch(${JSON.stringify(url)}, {
-        method: "POST",
-        headers: {
-          "Authorization": "Bearer " + env.PROVIDER_API_KEY,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: ${JSON.stringify(model)},
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...history,
-            { role: "user", content: userMessage },
-          ],
-          max_tokens: 1024,
-        }),
-      });
-      if (!r.ok) throw new Error("provider " + r.status + ": " + await r.text());
-      const data = await r.json();
-      response = data?.choices?.[0]?.message?.content ?? "";`;
 }
 
 function renderTraceForward(agent: Agent): string {
@@ -288,3 +141,7 @@ function renderTraceForward(agent: Agent): string {
       );
     }`;
 }
+
+// Re-export shared types so existing imports keep working.
+export type { DeployProvider, DeployBundleConfig, GeneratedBundle } from "./shared";
+export { DEFAULT_DEPLOY_CONFIG } from "./shared";

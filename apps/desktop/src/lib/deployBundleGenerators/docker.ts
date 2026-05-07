@@ -1,0 +1,184 @@
+import type { Agent } from "@/lib/agents";
+import {
+  bannerComment,
+  chooseModel,
+  envVarName,
+  extractTemplateVars,
+  jsonString,
+  RESOLVE_PROMPT_HELPER,
+  renderProviderCall,
+  type DeployBundleConfig,
+  type GeneratedBundle,
+} from "./shared";
+
+// v2.0.0 Wave 3 — Docker bundle generator.
+//
+// Emits a Dockerfile (alpine + node 22) and a single-file Express server.
+// The customer runs `docker build -t my-agent .` then deploys the image
+// to whatever orchestrator they use (Railway, Render, Fly, ECS, k8s).
+// Express + node:22-alpine is small (~120 MB) and the no-build path
+// (require/import directly) keeps cold start fast.
+
+export function generateDocker(
+  agent: Agent,
+  config: DeployBundleConfig,
+): GeneratedBundle {
+  const model = chooseModel(agent, config);
+  const templateVars = extractTemplateVars(agent.systemPrompt);
+  const systemPromptLiteral = jsonString(agent.systemPrompt ?? "You are a helpful assistant.");
+  const allowedOriginsLiteral = jsonString(config.allowedOrigins);
+  const callBlock = renderProviderCall(config.provider, model, "process.env.PROVIDER_API_KEY");
+  const traceBlock = config.forwardTraces ? renderNodeTraceForward(agent) : "    // (trace forwarding disabled)";
+
+  const indexJs = `${bannerComment("Docker Express server", agent, config, templateVars)}
+
+import express from "express";
+
+const SYSTEM_PROMPT_TEMPLATE = ${systemPromptLiteral};
+const ALLOWED_ORIGINS = new Set(${allowedOriginsLiteral});
+const TEMPLATE_VARS = ${jsonString(templateVars)};
+const PORT = parseInt(process.env.PORT || "8080", 10);
+
+${RESOLVE_PROMPT_HELPER}
+
+function corsHeaders(origin) {
+  const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+const app = express();
+app.use(express.json({ limit: "1mb" }));
+
+app.options("/agent", (req, res) => {
+  const origin = req.get("Origin") ?? "";
+  res.set(corsHeaders(origin)).status(204).end();
+});
+
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", agent: ${JSON.stringify(agent.slug)} });
+});
+
+app.post("/agent", async (req, res) => {
+  const origin = req.get("Origin") ?? "";
+  if (!ALLOWED_ORIGINS.has(origin)) {
+    return res.set(corsHeaders(origin)).status(403).json({ error: "origin not allowed" });
+  }
+
+  const userMessage = String(req.body?.message ?? "").slice(0, 8000);
+  const history = Array.isArray(req.body?.history) ? req.body.history.slice(-20) : [];
+  const systemPrompt = resolveSystemPrompt(SYSTEM_PROMPT_TEMPLATE, (n) => process.env[n], TEMPLATE_VARS);
+  const startedAt = Date.now();
+
+  let response;
+  try {
+${callBlock}
+  } catch (err) {
+    return res.set(corsHeaders(origin)).status(502).json({ error: String(err) });
+  }
+
+${traceBlock}
+
+  res.set(corsHeaders(origin)).json({ message: response, latencyMs: Date.now() - startedAt });
+});
+
+app.listen(PORT, () => {
+  console.log("[" + ${JSON.stringify(agent.slug)} + "] listening on :" + PORT);
+});
+`;
+
+  const packageJson = jsonString({
+    name: agent.slug,
+    version: "1.0.0",
+    type: "module",
+    main: "index.js",
+    scripts: {
+      start: "node index.js",
+    },
+    dependencies: {
+      express: "^4.21.0",
+    },
+    engines: {
+      node: ">=20",
+    },
+  });
+
+  // Multi-stage Dockerfile — install deps in builder, copy node_modules into a
+  // slim runtime image. Smaller end image, faster cold pulls. Pinning the
+  // alpine SHA keeps the build reproducible.
+  const dockerfile = `# Multi-stage so the final image doesn't include the build cache.
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=8080
+COPY --from=deps /app/node_modules ./node_modules
+COPY index.js ./
+COPY package.json ./
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8080/health || exit 1
+CMD ["node", "index.js"]
+`;
+
+  const dockerignore = `node_modules
+npm-debug.log
+.env*
+README*
+.git*
+`;
+
+  const envTemplate = [
+    `# Required by the Docker container at runtime.`,
+    `# Pass via \`docker run -e PROVIDER_API_KEY=...\` or your orchestrator's secrets.`,
+    `PROVIDER_API_KEY=`,
+    ...templateVars.map((v) => `${envVarName(v)}=`),
+    ...(config.forwardTraces ? ["ATO_TRACE_KEY="] : []),
+  ].join("\n") + "\n";
+
+  return {
+    files: {
+      "Dockerfile": dockerfile,
+      ".dockerignore": dockerignore,
+      "index.js": indexJs,
+      "package.json": packageJson,
+      ".env.example": envTemplate,
+    },
+    postInstall: [
+      `docker build -t ${agent.slug} .`,
+      `docker run -p 8080:8080 \\`,
+      `  -e PROVIDER_API_KEY=$PROVIDER_API_KEY \\`,
+      ...templateVars.map((v) => `  -e ${envVarName(v)}=$${envVarName(v)} \\`),
+      ...(config.forwardTraces ? [`  -e ATO_TRACE_KEY=$ATO_TRACE_KEY \\`] : []),
+      `  ${agent.slug}`,
+    ],
+  };
+}
+
+function renderNodeTraceForward(agent: Agent): string {
+  return `    // Best-effort trace forward — fire and forget.
+    if (process.env.ATO_TRACE_KEY) {
+      fetch("https://api.agentictool.ai/api/agent-traces", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + process.env.ATO_TRACE_KEY,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          agentSlug: ${JSON.stringify(agent.slug)},
+          origin,
+          userMessage,
+          response,
+          latencyMs: Date.now() - startedAt,
+          timestamp: new Date().toISOString(),
+        }),
+      }).catch(() => {});
+    }`;
+}
