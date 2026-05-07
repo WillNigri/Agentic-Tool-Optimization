@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop"
-version = "1.5.14"
+version = "1.5.15"
 dependencies = [
  "base64 0.22.1",
  "chrono",

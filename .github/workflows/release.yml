@@ -9,7 +9,37 @@ permissions:
   contents: write
 
 jobs:
+  # Pre-create the GitHub release shell so the matrix jobs can upload
+  # to it concurrently via `gh release upload --clobber`. Done in a
+  # dedicated job so we don't race four matrix jobs on `gh release
+  # create` simultaneously.
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ github.ref_name }}
+    steps:
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — leaving as-is"
+          else
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --notes "## ATO $TAG
+
+          Multi-runtime AI agentic workspace. Local-first, MIT-licensed.
+
+          Download the installer for your platform below."
+          fi
+
   build:
+    needs: prepare-release
     outputs:
       version: ${{ steps.get_version.outputs.version }}
     strategy:
@@ -59,49 +89,34 @@ jobs:
         working-directory: apps/desktop
 
       - name: Build Tauri app
-        # Pinned to a recent version — @v0 floats to whatever's "latest"
-        # which has produced the "Signature not found for the updater
-        # JSON. Skipping upload..." regression on v1.5.0–1.5.4 even with
-        # a valid no-password signing key. v0.5.x has the bundle/.sig
-        # rename fix.
+        # IMPORTANT: no `tagName` / `releaseName` / `releaseBody` —
+        # without these, tauri-action runs `tauri build` only and
+        # SKIPS its release-upload phase entirely. That's what we
+        # want, because tauri-action's upload phase silently deletes
+        # `.sig` files (verified across v1.5.6–v1.5.13: Tauri's
+        # bundler emits .sig at T+0, tauri-action deletes it by T+6).
+        # The next step uploads everything ourselves to the release
+        # shell created by the `prepare-release` job.
         uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: '${{ github.ref_name }}'
-          releaseBody: |
-            ## ATO ${{ github.ref_name }}
-
-            Multi-LLM control panel for Claude Code, Codex, OpenClaw, and Hermes.
-
-            Download the installer for your platform below.
-          releaseDraft: false
-          prerelease: false
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
-          # NB: includeUpdaterJson is OFF because tauri-action's
-          # latest.json construction was deleting the .sig files 4s
-          # before our explicit upload step could find them (verified
-          # via ls -laR diff between Tauri's "Finished 2 bundles" line
-          # at 17:41:37 and our step at 17:41:41 — .sig vanished).
-          # Our aggregator job builds latest.json from the .sig files
-          # we upload below, so we don't need tauri-action's version.
-          includeUpdaterJson: false
 
-      # tauri-action's `includeUpdaterJson` upload logic has had a long-running
-      # regression on matrix builds (v1.5.0–1.5.7 all reproduced "Signature
-      # not found for the updater JSON. Skipping upload..."). The `.sig` files
-      # ARE created by Tauri's bundler but never make it onto the release.
-      # Workaround: explicitly upload every `.sig` and the `.nsis.zip` /
-      # `.AppImage.tar.gz` updater bundles ourselves. The aggregator job
-      # below then constructs `latest.json` from these.
+      # We upload EVERYTHING ourselves — installers AND updater artifacts —
+      # because tauri-action's release-upload phase silently deletes `.sig`
+      # files (the updater signatures) before our explicit upload step runs.
+      # Verified across v1.5.6–v1.5.13: Tauri's bundler creates the .sig at
+      # T+0, tauri-action wipes them at T+6, our step at T+10 finds nothing.
       #
-      # PowerShell on Windows + bash on Unix — bash on Windows runners
-      # mangled the path globs in v1.5.6.
-      - name: Upload updater artifacts (Unix)
+      # Now that we removed `tagName` from tauri-action's `with:` block,
+      # tauri-action skips its release-upload phase entirely, leaving the
+      # bundle dir intact. We upload to the release shell pre-created by
+      # the `prepare-release` job.
+      - name: Upload all bundle artifacts (Unix)
         if: success() && matrix.platform != 'windows-latest'
         shell: bash
         env:
@@ -111,35 +126,43 @@ jobs:
           set -e
           BUNDLE_ROOT="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
           if [ ! -d "$BUNDLE_ROOT" ]; then
-            echo "::warning::Bundle dir $BUNDLE_ROOT not found, skipping"
-            exit 0
+            echo "::error::Bundle dir $BUNDLE_ROOT not found"
+            exit 1
           fi
-          # Plain `ls -laR` so we see EVERYTHING there with no glob ambiguity.
-          # In v1.5.10 this print was empty even though Tauri's bundler had
-          # logged the .sig path moments earlier. Confirms whether
-          # tauri-action cleans up or whether my filters were broken.
           echo "Bundle dir tree:"
           ls -laR "$BUNDLE_ROOT" 2>&1 || true
           echo "--- upload phase ---"
           UPLOADED=0
-          # Two separate finds piped together. The OLD `\( -name X -o -name Y \)`
-          # form silently produced zero matches in some shell environments;
-          # this avoids the problem entirely.
+          SIGS=0
+          # Upload installers (.dmg .deb .AppImage), updater bundles
+          # (.app.tar.gz .AppImage.tar.gz), and the matching .sig files.
+          # Skip .rpm (we don't ship it).
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             echo "Uploading $f"
             if gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber; then
               UPLOADED=$((UPLOADED+1))
+              case "$f" in *.sig) SIGS=$((SIGS+1)) ;; esac
             else
               echo "::warning::upload failed for $f"
             fi
-          done < <(find "$BUNDLE_ROOT" -type f -name "*.sig" 2>/dev/null; find "$BUNDLE_ROOT" -type f -name "*.AppImage.tar.gz" 2>/dev/null)
-          echo "Uploaded $UPLOADED updater artifacts"
-          if [ "$UPLOADED" -eq 0 ]; then
-            echo "::warning::No updater artifacts found under $BUNDLE_ROOT — auto-update will be broken for this platform."
+          done < <(
+            find "$BUNDLE_ROOT" -type f \( \
+              -name "*.dmg" -o \
+              -name "*.deb" -o \
+              -name "*.AppImage" -o \
+              -name "*.app.tar.gz" -o \
+              -name "*.AppImage.tar.gz" -o \
+              -name "*.sig" \
+            \) 2>/dev/null
+          )
+          echo "Uploaded $UPLOADED files ($SIGS signatures)"
+          if [ "$SIGS" -eq 0 ]; then
+            echo "::error::No .sig files found — auto-update will be broken for this platform."
+            exit 1
           fi
 
-      - name: Upload updater artifacts (Windows)
+      - name: Upload all bundle artifacts (Windows)
         if: success() && matrix.platform == 'windows-latest'
         shell: pwsh
         env:
@@ -148,21 +171,28 @@ jobs:
         run: |
           $bundleRoot = "apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
           if (-not (Test-Path $bundleRoot)) {
-            Write-Warning "Bundle dir $bundleRoot not found, skipping"
-            exit 0
+            Write-Error "Bundle dir $bundleRoot not found"
+            exit 1
           }
           Write-Host "Bundle dir contents:"
-          Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Name -match '\.(sig|tar\.gz|nsis\.zip|exe|msi)$' } | ForEach-Object { Write-Host $_.FullName }
+          Get-ChildItem -Path $bundleRoot -Recurse -File | ForEach-Object { Write-Host $_.FullName }
           Write-Host "---"
           $uploaded = 0
-          Get-ChildItem -Path $bundleRoot -Recurse -File -Include *.sig, *.nsis.zip | ForEach-Object {
+          $sigs = 0
+          Get-ChildItem -Path $bundleRoot -Recurse -File -Include *.exe, *.msi, *.nsis.zip, *.sig | ForEach-Object {
             Write-Host "Uploading $($_.FullName)"
             gh release upload $env:TAG $_.FullName --repo "${{ github.repository }}" --clobber
-            if ($LASTEXITCODE -eq 0) { $uploaded++ } else { Write-Warning "upload failed for $($_.FullName)" }
+            if ($LASTEXITCODE -eq 0) {
+              $uploaded++
+              if ($_.Name -like '*.sig') { $sigs++ }
+            } else {
+              Write-Warning "upload failed for $($_.FullName)"
+            }
           }
-          Write-Host "Uploaded $uploaded updater artifacts"
-          if ($uploaded -eq 0) {
-            Write-Warning "No updater artifacts found under $bundleRoot — auto-update will be broken for this platform."
+          Write-Host "Uploaded $uploaded files ($sigs signatures)"
+          if ($sigs -eq 0) {
+            Write-Error "No .sig files found — auto-update will be broken for this platform."
+            exit 1
           }
 
   # Aggregator job: pull all .sig files from the release after the matrix
