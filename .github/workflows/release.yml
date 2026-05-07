@@ -82,8 +82,14 @@ jobs:
           prerelease: false
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
-          includeUpdaterJson: true
-          updaterJsonKeepUniversal: true
+          # NB: includeUpdaterJson is OFF because tauri-action's
+          # latest.json construction was deleting the .sig files 4s
+          # before our explicit upload step could find them (verified
+          # via ls -laR diff between Tauri's "Finished 2 bundles" line
+          # at 17:41:37 and our step at 17:41:41 — .sig vanished).
+          # Our aggregator job builds latest.json from the .sig files
+          # we upload below, so we don't need tauri-action's version.
+          includeUpdaterJson: false
 
       # tauri-action's `includeUpdaterJson` upload logic has had a long-running
       # regression on matrix builds (v1.5.0–1.5.7 all reproduced "Signature
