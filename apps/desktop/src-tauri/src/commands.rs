@@ -2703,7 +2703,10 @@ pub async fn prompt_agent(runtime: String, prompt: String, config: Option<String
             })?;
             // Codex's CLI shape is `codex [OPTIONS] [PROMPT]` with `exec` as
             // the non-interactive subcommand. It does NOT accept `--print`.
-            let mut args: Vec<String> = vec!["exec".into()];
+            // Always pass `--skip-git-repo-check` because ATO can dispatch
+            // from any cwd (including non-repo dirs); without it Codex bails
+            // with "Not inside a trusted directory" — Felipe's bug.
+            let mut args: Vec<String> = vec!["exec".into(), "--skip-git-repo-check".into()];
             if let Some(m) = &model_override {
                 args.push("--model".into());
                 args.push(m.clone());
@@ -12705,7 +12708,10 @@ async fn spawn_streaming_dispatch(
             let mut c = TokioCommand::new(codex_path);
             // Codex uses `exec` as the headless subcommand; the prompt is a
             // positional argument. `--print` is invalid for codex.
-            c.arg("exec");
+            // `--skip-git-repo-check` mirrors the non-streaming dispatch —
+            // ATO can be run from any cwd, including non-repo dirs, and
+            // Codex bails with "Not inside a trusted directory" otherwise.
+            c.arg("exec").arg("--skip-git-repo-check");
             if let Some(m) = &model_override {
                 c.arg("--model").arg(m);
             }
