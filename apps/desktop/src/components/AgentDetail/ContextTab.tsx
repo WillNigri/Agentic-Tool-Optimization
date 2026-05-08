@@ -102,6 +102,20 @@ function ContextEditor({ agent }: { agent: Agent }) {
         </p>
       </header>
 
+      {/* Cross-reference to Knowledge tab for static text — pairs with the
+          inverse note in KnowledgeTab. Beatriz feedback (2026-05-08). */}
+      <div className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3 text-[11px] text-cs-muted">
+        <div className="text-xs font-semibold text-cs-text mb-1">
+          {t("agentDetail.context.liveVsStatic", "Live data vs static knowledge")}
+        </div>
+        <p>
+          {t(
+            "agentDetail.context.liveVsStaticBody",
+            "Hooks here fire EVERY TURN to fetch live data (DB queries, CRM lookups, API calls, MCP tools). For static text that doesn't change per customer (FAQs, policies, product docs), use the Knowledge tab — those embed once and bake into the deploy bundle.",
+          )}
+        </p>
+      </div>
+
       {error && (
         <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
           <AlertCircle size={14} className="text-cs-danger shrink-0 mt-0.5" />

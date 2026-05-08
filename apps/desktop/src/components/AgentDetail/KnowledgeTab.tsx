@@ -153,13 +153,30 @@ export default function KnowledgeTab({ agent }: Props) {
 
   return (
     <div className="space-y-6">
+      {/* Cross-reference to Context tab for live data sources. Beatriz
+          feedback (2026-05-08): "Knowledge" sounded like the catch-all
+          for everything the agent knows, but it only handles static text.
+          Per-customer DB queries / CRM lookups / live API calls belong in
+          Context (hooks) — which fires on every turn, not at deploy time. */}
+      <section className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3 text-[11px] text-cs-muted">
+        <div className="text-xs font-semibold text-cs-text mb-1">
+          {t("agentDetail.knowledge.staticVsLive", "Static knowledge vs live data")}
+        </div>
+        <p>
+          {t(
+            "agentDetail.knowledge.staticVsLiveBody",
+            "Knowledge ingests STATIC text (FAQs, policies, docs) — embedded once and baked into the deploy bundle. For LIVE data per customer (DB queries, CRM lookups, API calls, MCP tools), use the Context tab — hooks fire per-turn with optional keyword / LLM gating.",
+          )}
+        </p>
+      </section>
+
       {/* ── Add ────────────────────────────────────────────────────────── */}
       <section className="space-y-3">
         <SectionHeader
           title={t("agentDetail.knowledge.addTitle", "Add knowledge")}
           hint={t(
             "agentDetail.knowledge.addHint",
-            "Drop a .md / .txt file or paste text. Each chunk is embedded via OpenAI text-embedding-3-small and stored locally. Bundle generation inlines the chunks into the deployed agent.",
+            "Drop a .md / .txt file or paste text. Each chunk is embedded via your active embedding provider (OpenAI / Voyage / Gemini / Cohere / Ollama) and stored locally. Bundle generation inlines the chunks into the deployed agent.",
           )}
         />
 
