@@ -372,20 +372,24 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
         />
       </Field>
 
-      <Field label={t("createAgent.quick.project", "Project")}>
-        <select
-          value={draft.projectId ?? ""}
-          onChange={(e) => update("projectId", e.target.value || null)}
-          className="w-full rounded-lg border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none"
-        >
-          <option value="">{t("createAgent.quick.noProject", "(global / no project)")}</option>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </Field>
+      {/* Project picker is Internal-only — external agents run in the
+          customer's deployed infra, not in your local project workspace. */}
+      {draft.kind === "internal" && (
+        <Field label={t("createAgent.quick.project", "Project")}>
+          <select
+            value={draft.projectId ?? ""}
+            onChange={(e) => update("projectId", e.target.value || null)}
+            className="w-full rounded-lg border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none"
+          >
+            <option value="">{t("createAgent.quick.noProject", "(global / no project)")}</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
 
       <Field label={t("createAgent.quick.description", "Description")}>
         <input
@@ -417,38 +421,83 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
         />
       </Field>
 
-      <MultiSelect
-        label={t("createAgent.quick.skills", "Skills")}
-        items={runtimeSkills.map((s) => ({ id: s.id, label: s.name, hint: s.description }))}
-        selected={draft.skills}
-        onToggle={(id) =>
-          update(
-            "skills",
-            draft.skills.includes(id)
-              ? draft.skills.filter((s) => s !== id)
-              : [...draft.skills, id]
-          )
-        }
-        emptyHint={t("createAgent.quick.noSkillsAvailable", "No skills installed for this runtime.")}
-      />
+      {/* Skills + MCPs + on-disk context files are Internal-only.
+          - Most skills + MCPs assume filesystem / shell capabilities, which
+            external (read-only, deployed-to-customer-infra) agents lack.
+          - Context files (.txt / .md the agent always reads from disk)
+            don't make sense in a deployed Worker — the customer's server
+            doesn't have the developer's files.
+          External agents get the equivalent on the post-create AgentDetail
+          tabs: Knowledge (RAG-backed docs that ship in the bundle) and
+          Context (hooks fired before each LLM call). */}
+      {draft.kind === "internal" ? (
+        <>
+          <MultiSelect
+            label={t("createAgent.quick.skills", "Skills")}
+            items={runtimeSkills.map((s) => ({ id: s.id, label: s.name, hint: s.description }))}
+            selected={draft.skills}
+            onToggle={(id) =>
+              update(
+                "skills",
+                draft.skills.includes(id)
+                  ? draft.skills.filter((s) => s !== id)
+                  : [...draft.skills, id]
+              )
+            }
+            emptyHint={t("createAgent.quick.noSkillsAvailable", "No skills installed for this runtime.")}
+          />
 
-      <MultiSelect
-        label={t("createAgent.quick.mcps", "MCPs")}
-        items={allMcps.map((m) => ({ id: m.name, label: m.name, hint: m.transport }))}
-        selected={draft.mcps}
-        onToggle={(id) =>
-          update(
-            "mcps",
-            draft.mcps.includes(id) ? draft.mcps.filter((m) => m !== id) : [...draft.mcps, id]
-          )
-        }
-        emptyHint={t("createAgent.quick.noMcpsAvailable", "No MCP servers configured.")}
-      />
+          <MultiSelect
+            label={t("createAgent.quick.mcps", "MCPs")}
+            items={allMcps.map((m) => ({ id: m.name, label: m.name, hint: m.transport }))}
+            selected={draft.mcps}
+            onToggle={(id) =>
+              update(
+                "mcps",
+                draft.mcps.includes(id) ? draft.mcps.filter((m) => m !== id) : [...draft.mcps, id]
+              )
+            }
+            emptyHint={t("createAgent.quick.noMcpsAvailable", "No MCP servers configured.")}
+          />
 
-      <ContextFilesField
-        files={draft.contextFiles}
-        onChange={(files) => update("contextFiles", files)}
-      />
+          <ContextFilesField
+            files={draft.contextFiles}
+            onChange={(files) => update("contextFiles", files)}
+          />
+        </>
+      ) : (
+        <div className="rounded-lg border border-cs-border bg-cs-bg-raised/40 px-3 py-3 text-[11px] text-cs-muted">
+          <div className="text-xs font-semibold text-cs-text mb-1">
+            {t("createAgent.quick.externalNextSteps", "After saving, you'll get two tabs:")}
+          </div>
+          <ul className="space-y-1 list-disc list-inside">
+            <li>
+              <span className="text-cs-text">{t("createAgent.quick.externalKnowledge", "Knowledge")}</span>
+              {" — "}
+              {t(
+                "createAgent.quick.externalKnowledgeHint",
+                "drop .md / .txt files; ATO embeds + bakes them into the deploy bundle for RAG retrieval.",
+              )}
+            </li>
+            <li>
+              <span className="text-cs-text">{t("createAgent.quick.externalDeploy", "Deploy")}</span>
+              {" — "}
+              {t(
+                "createAgent.quick.externalDeployHint",
+                "generate worker.js / Vercel route / Dockerfile / Node script. Customer's API key, customer's infra.",
+              )}
+            </li>
+            <li>
+              <span className="text-cs-text">{t("createAgent.quick.externalContext", "Context (existing tab)")}</span>
+              {" — "}
+              {t(
+                "createAgent.quick.externalContextHint",
+                "pre-call hooks for live data (DB query, webhook, MCP call) that should fire before every customer message.",
+              )}
+            </li>
+          </ul>
+        </div>
+      )}
 
       {error && (
         <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3">
