@@ -7,6 +7,7 @@ import {
   jsonString,
   RESOLVE_PROMPT_HELPER,
   RETRIEVE_KNOWLEDGE_HELPER,
+  THIRD_PARTY_TRACE_FORWARDS,
   renderProviderCall,
   serializeInlineChunks,
   type DeployBundleConfig,
@@ -43,6 +44,8 @@ const KNOWLEDGE_CHUNKS = ${chunksLiteral};
 ${RESOLVE_PROMPT_HELPER}
 
 ${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
+
+${THIRD_PARTY_TRACE_FORWARDS}
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -149,15 +152,13 @@ ${templateVars.length === 0 ? "# (no template variables — system prompt is sta
 }
 
 function renderTraceForward(agent: Agent): string {
-  return `    // Best-effort trace forward — never blocks the user response.
-    if (env.ATO_TRACE_KEY) {
-      ctx.waitUntil(
-        fetch("https://api.agentictool.ai/api/agent-traces", {
+  // ATO Insights + Langfuse + generic webhook all run in parallel via
+  // ctx.waitUntil so none of them block the user-facing response.
+  return `    // Best-effort trace forwards — none of these block the user response.
+    var atoTracePromise = env.ATO_TRACE_KEY
+      ? fetch("https://api.agentictool.ai/api/agent-traces", {
           method: "POST",
-          headers: {
-            "Authorization": "Bearer " + env.ATO_TRACE_KEY,
-            "content-type": "application/json",
-          },
+          headers: { "Authorization": "Bearer " + env.ATO_TRACE_KEY, "content-type": "application/json" },
           body: JSON.stringify({
             agentSlug: ${JSON.stringify(agent.slug)},
             origin,
@@ -166,9 +167,13 @@ function renderTraceForward(agent: Agent): string {
             latencyMs: Date.now() - startedAt,
             timestamp: new Date().toISOString(),
           }),
-        }).catch(() => {}),
-      );
-    }`;
+        }).catch(function () {})
+      : Promise.resolve();
+    ctx.waitUntil(Promise.all([
+      atoTracePromise,
+      forwardLangfuse(env, ${JSON.stringify(agent.slug)}, userMessage, response, Date.now() - startedAt, origin),
+      forwardWebhook(env, ${JSON.stringify(agent.slug)}, userMessage, response, Date.now() - startedAt, origin),
+    ]));`;
 }
 
 // Re-export shared types so existing imports keep working.

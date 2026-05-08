@@ -9,6 +9,7 @@ import {
   RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
   serializeInlineChunks,
+  THIRD_PARTY_TRACE_FORWARDS,
   type DeployBundleConfig,
   type GeneratedBundle,
   type InlineKnowledgeChunk,
@@ -52,6 +53,8 @@ const KNOWLEDGE_CHUNKS: { s: string; c: string; e: number[] }[] = ${chunksLitera
 ${RESOLVE_PROMPT_HELPER}
 
 ${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
+
+${THIRD_PARTY_TRACE_FORWARDS}
 
 function corsHeaders(origin: string): Record<string, string> {
   const allowed = ALLOWED_ORIGINS.has(origin) ? origin : [...ALLOWED_ORIGINS][0] ?? "*";
@@ -166,22 +169,21 @@ function renderVercelTraceForward(agent: Agent): string {
   // Edge runtime: no `ctx.waitUntil`. Use fetch().catch() and don't await —
   // the platform may cut us off after the response, which is fine for
   // best-effort telemetry.
-  return `  // Best-effort trace forward — fire and forget.
+  return `  // Best-effort trace forwards — fire and forget. ATO Insights +
+  // Langfuse + generic webhook all run in parallel; each is gated on
+  // its own env var so the customer opts in per-sink.
   if (process.env.ATO_TRACE_KEY) {
     fetch("https://api.agentictool.ai/api/agent-traces", {
       method: "POST",
-      headers: {
-        "Authorization": "Bearer " + process.env.ATO_TRACE_KEY,
-        "content-type": "application/json",
-      },
+      headers: { "Authorization": "Bearer " + process.env.ATO_TRACE_KEY, "content-type": "application/json" },
       body: JSON.stringify({
         agentSlug: ${JSON.stringify(agent.slug)},
-        origin,
-        userMessage,
-        response,
+        origin, userMessage, response,
         latencyMs: Date.now() - startedAt,
         timestamp: new Date().toISOString(),
       }),
     }).catch(() => {});
-  }`;
+  }
+  forwardLangfuse(process.env, ${JSON.stringify(agent.slug)}, userMessage, response, Date.now() - startedAt, origin);
+  forwardWebhook(process.env, ${JSON.stringify(agent.slug)}, userMessage, response, Date.now() - startedAt, origin);`;
 }

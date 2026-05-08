@@ -100,6 +100,62 @@ export const RESOLVE_PROMPT_HELPER = `function resolveSystemPrompt(template, loo
   return out;
 }`;
 
+/** v2.0.0 Wave 4 — third-party trace sinks. Emitted into every bundle's
+ *  trace-forward block. Each one is gated on its own env var so the
+ *  customer opts in PER provider — they can stream to ATO Insights
+ *  AND Langfuse simultaneously, or just one, or neither.
+ *
+ *  - LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY → Langfuse Cloud (or
+ *    self-hosted via LANGFUSE_HOST). The dominant open-source LLM
+ *    observability stack.
+ *  - TRACE_WEBHOOK_URL → POST the same payload to any HTTP endpoint
+ *    (e.g. an OpenTelemetry collector with the OTLP HTTP receiver, or
+ *    a custom warehouse). Single env var = generic.
+ *
+ *  Helicone deliberately omitted — they proxy the LLM call itself
+ *  rather than receive trace POSTs, which is a different integration
+ *  pattern (route the chat URL through oai.helicone.ai). Adding that
+ *  needs the provider-call snippet to change per-provider; v2.0.x
+ *  follow-up. */
+export const THIRD_PARTY_TRACE_FORWARDS = `// Best-effort: also forward to Langfuse if configured. Format follows
+  // their /api/public/ingestion schema (one trace event with one
+  // observation). Auth is HTTP Basic with public:secret. Failures are
+  // swallowed — sink outages must not break the user-facing response.
+  function forwardLangfuse(env, agentSlug, userMessage, response, latencyMs, origin) {
+    if (!env.LANGFUSE_PUBLIC_KEY || !env.LANGFUSE_SECRET_KEY) return Promise.resolve();
+    var host = env.LANGFUSE_HOST || "https://cloud.langfuse.com";
+    var traceId = "ato-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+    var auth = "Basic " + btoa(env.LANGFUSE_PUBLIC_KEY + ":" + env.LANGFUSE_SECRET_KEY);
+    var now = new Date().toISOString();
+    return fetch(host + "/api/public/ingestion", {
+      method: "POST",
+      headers: { "Authorization": auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        batch: [
+          {
+            id: traceId + "-evt",
+            type: "trace-create",
+            timestamp: now,
+            body: { id: traceId, name: agentSlug, input: userMessage, output: response, metadata: { origin: origin, latencyMs: latencyMs } },
+          },
+        ],
+      }),
+    }).catch(function () {});
+  }
+  // Best-effort: also POST to a generic webhook. Useful for OpenTelemetry
+  // OTLP HTTP receivers or your own warehouse.
+  function forwardWebhook(env, agentSlug, userMessage, response, latencyMs, origin) {
+    if (!env.TRACE_WEBHOOK_URL) return Promise.resolve();
+    return fetch(env.TRACE_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentSlug: agentSlug, origin: origin, userMessage: userMessage,
+        response: response, latencyMs: latencyMs, timestamp: new Date().toISOString(),
+      }),
+    }).catch(function () {});
+  }`;
+
 /** RAG retrieval helper. Embeds the user query via OpenAI, scores it
  *  against the inlined chunk embeddings via cosine similarity, returns the
  *  top-K chunks formatted as a <context> block. The bundle prepends this
