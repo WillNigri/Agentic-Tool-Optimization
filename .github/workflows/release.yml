@@ -116,13 +116,22 @@ jobs:
         # signs the updater bundles. Without it, no .sig files are ever
         # produced. We do the signing ourselves in the next step.
         #
-        # macOS code signing + notarization (v2.0.0): tauri-action picks up
+        # macOS code signing (v2.0.0): tauri-action picks up
         # APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
         # automatically when set as env vars — it imports the .p12 into a
         # temporary keychain on the runner and uses it during `tauri build`.
-        # APPLE_API_KEY (the 10-char Key ID) + APPLE_API_KEY_PATH +
-        # APPLE_API_ISSUER together drive the notarization step. Other
-        # platforms inherit harmless empty values; only macOS uses them.
+        #
+        # Notarization is intentionally NOT wired in here yet: tauri-action's
+        # built-in notarization step blocks the build until Apple's notary
+        # service responds, polling every few seconds. v2.0.0-alpha.2/.3
+        # both failed at ~41 min on transient GitHub-runner DNS hiccups
+        # mid-poll (NSURLErrorDomain Code=-1009). The submission itself
+        # succeeded — we just couldn't wait for the result. v2.0.0-alpha.5
+        # will move notarization into a separate job that retries + staples
+        # asynchronously. For now, alpha.4 ships signed-only DMGs.
+        # Gatekeeper will still warn ("developer not verified — open
+        # anyway?") on first launch but the "ATO is damaged" / `xattr -d
+        # com.apple.quarantine` regression is gone.
         uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -132,10 +141,6 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # macOS notarization via App Store Connect API key
-          # (APPLE_API_KEY_PATH was set on $GITHUB_ENV above for macOS only)
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         with:
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
