@@ -53,6 +53,12 @@ function providerLabel(provider: string): string {
     case "anthropic": return "Anthropic";
     case "openai":    return "OpenAI";
     case "gemini":    return "Google AI Studio";
+    case "groq":      return "Groq";
+    case "mistral":   return "Mistral";
+    case "deepseek":  return "DeepSeek";
+    case "xai":       return "xAI Grok";
+    case "together":  return "Together AI";
+    case "fireworks": return "Fireworks";
     default:          return provider;
   }
 }
@@ -64,9 +70,23 @@ function signupUrl(provider: string): string {
     case "anthropic": return "https://console.anthropic.com/settings/keys";
     case "openai":    return "https://platform.openai.com/api-keys";
     case "gemini":    return "https://aistudio.google.com/apikey";
+    case "groq":      return "https://console.groq.com/keys";
+    case "mistral":   return "https://console.mistral.ai/api-keys";
+    case "deepseek":  return "https://platform.deepseek.com/api_keys";
+    case "xai":       return "https://console.x.ai/";
+    case "together":  return "https://api.together.ai/settings/api-keys";
+    case "fireworks": return "https://fireworks.ai/account/api-keys";
     default:          return "";
   }
 }
+
+/** All chat-capable providers the deploy bundle generators support.
+ *  Used for the External-agent variant of AuthRequirements where the
+ *  user can pick any of these at Deploy time. */
+const CHAT_PROVIDERS = [
+  "anthropic", "openai", "gemini", "groq", "mistral",
+  "deepseek", "xai", "together", "fireworks",
+] as const;
 
 export default function AuthRequirements({ kind, runtime }: Props) {
   const { t } = useTranslation();
@@ -78,7 +98,37 @@ export default function AuthRequirements({ kind, runtime }: Props) {
     staleTime: 5_000,
   });
 
-  // Self-hosted runtimes need no key — show nothing.
+  if (keysLoading) {
+    return (
+      <div className="text-xs text-cs-muted">
+        <Loader2 size={11} className="inline animate-spin mr-1" />
+        {t("createAgent.auth.loading", "Checking available keys…")}
+      </div>
+    );
+  }
+
+  // External agents can use ANY of the 9 chat-capable providers at deploy
+  // time — the runtime selection in the wizard mostly determines the
+  // *internal* dispatch path, but external bundles pick their provider in
+  // the Deploy tab. So the wizard panel should surface ALL provider keys
+  // the user has, not just the one matching the runtime. Beatriz feedback
+  // 2026-05-08.
+  if (kind === "external") {
+    const matching = keys.filter(
+      (k) => CHAT_PROVIDERS.includes(k.provider as typeof CHAT_PROVIDERS[number]) && k.is_active,
+    );
+    return (
+      <div className="space-y-2">
+        <ExternalProviderSummary count={matching.length} />
+        {matching.length > 0 && <KeyList keys={matching} />}
+        <InlineAddKey kind="external" />
+      </div>
+    );
+  }
+
+  // Internal agents: runtime → provider mapping is meaningful (the local
+  // CLI dispatch path is tied to the runtime). Self-hosted runtimes need
+  // no key.
   if (provider === null) {
     return (
       <div className="rounded-lg border border-cs-border bg-cs-bg-raised/40 px-3 py-2 text-[11px] text-cs-muted">
@@ -93,15 +143,6 @@ export default function AuthRequirements({ kind, runtime }: Props) {
     );
   }
 
-  if (keysLoading) {
-    return (
-      <div className="text-xs text-cs-muted">
-        <Loader2 size={11} className="inline animate-spin mr-1" />
-        {t("createAgent.auth.loading", "Checking available keys…")}
-      </div>
-    );
-  }
-
   const matching = keys.filter((k) => k.provider === provider && k.is_active);
 
   return (
@@ -112,10 +153,41 @@ export default function AuthRequirements({ kind, runtime }: Props) {
         matchingCount={matching.length}
       />
       {matching.length === 0 ? (
-        <InlineAddKey provider={provider} />
+        <InlineAddKey kind="internal" provider={provider} />
       ) : (
         <KeyList keys={matching} />
       )}
+    </div>
+  );
+}
+
+function ExternalProviderSummary({ count }: { count: number }) {
+  const { t } = useTranslation();
+  const have = count > 0;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border px-3 py-2 text-[11px]",
+        have
+          ? "border-cs-accent/40 bg-cs-accent/10 text-cs-accent"
+          : "border-cs-warn/40 bg-cs-warn/10 text-cs-text",
+      )}
+    >
+      <span className="inline-flex items-start gap-1.5">
+        {have ? <CheckCircle2 size={11} className="mt-0.5 shrink-0" /> : <AlertCircle size={11} className="mt-0.5 shrink-0" />}
+        <span>
+          {have
+            ? t(
+                "createAgent.auth.externalAnyReady",
+                "{{c}} chat-provider key{{plural}} on file — pick which one at Deploy time. Add more below if you want options.",
+                { c: count, plural: count === 1 ? "" : "s" },
+              )
+            : t(
+                "createAgent.auth.externalAnyMissing",
+                "External bundles need a chat-LLM key (Anthropic / OpenAI / Gemini / Groq / Mistral / DeepSeek / xAI / Together / Fireworks). Add at least one — you'll pick which to use per-deployment.",
+              )}
+        </span>
+      </span>
     </div>
   );
 }
@@ -211,14 +283,25 @@ function KeyList({
   );
 }
 
-function InlineAddKey({ provider }: { provider: string }) {
+function InlineAddKey({
+  kind,
+  provider: pinnedProvider,
+}: {
+  kind: AgentKind;
+  /** When set, the form is locked to this provider (Internal path).
+   *  When unset (External), the form lets the user pick from CHAT_PROVIDERS. */
+  provider?: string;
+}) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [keyName, setKeyName] = useState("");
   const [keyValue, setKeyValue] = useState("");
+  const [pickedProvider, setPickedProvider] = useState<string>(pinnedProvider ?? "anthropic");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const provider = pinnedProvider ?? pickedProvider;
 
   const onSave = async () => {
     if (!keyValue.trim()) {
@@ -249,9 +332,11 @@ function InlineAddKey({ provider }: { provider: string }) {
         className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-bg-raised px-3 py-1.5 text-[11px] font-medium text-cs-text hover:border-cs-accent/40 hover:text-cs-accent"
       >
         <Plus size={11} />
-        {t("createAgent.auth.addKey", "Add {{provider}} API key", {
-          provider: providerLabel(provider),
-        })}
+        {pinnedProvider
+          ? t("createAgent.auth.addKey", "Add {{provider}} API key", {
+              provider: providerLabel(pinnedProvider),
+            })
+          : t("createAgent.auth.addAnyKey", "Add a chat-provider API key")}
       </button>
     );
   }
@@ -272,6 +357,24 @@ function InlineAddKey({ provider }: { provider: string }) {
           <X size={12} />
         </button>
       </div>
+
+      {/* External path lets the user pick which provider the key belongs
+          to. Internal path is locked because the runtime already determines
+          the provider. */}
+      {kind === "external" && !pinnedProvider && (
+        <select
+          value={pickedProvider}
+          onChange={(e) => setPickedProvider(e.target.value)}
+          className="w-full rounded-md border border-cs-border bg-cs-bg px-2.5 py-1.5 text-xs text-cs-text [&>option]:bg-cs-bg-raised [&>option]:text-cs-text"
+        >
+          {CHAT_PROVIDERS.map((p) => (
+            <option key={p} value={p}>
+              {providerLabel(p)}
+            </option>
+          ))}
+        </select>
+      )}
+
       <input
         type="text"
         value={keyName}
