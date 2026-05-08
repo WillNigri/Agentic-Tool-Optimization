@@ -477,47 +477,106 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     },
     {
       kind: "subtitle",
-      text: "Pick External when creating an agent — permissions auto-lock to read-only, no shell, no fs writes.",
-      durationMs: 3500,
-    },
-    // Open the seeded external agent's detail view.
-    { kind: "highlight", id: "agent-configure-acme-support", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "agent-configure-acme-support" },
-    { kind: "wait", ms: 1000 },
-    {
-      kind: "subtitle",
-      text: "External agents get two new tabs — Knowledge and Deploy.",
+      text: "Pick External when creating — permissions auto-lock to read-only, no shell, no fs writes.",
       durationMs: 3000,
     },
-    // Click into Knowledge tab.
+    // Open acme-support's detail view (seeded external agent).
+    { kind: "highlight", id: "agent-configure-acme-support", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-configure-acme-support" },
+    { kind: "wait", ms: 1200 },
+    {
+      kind: "subtitle",
+      text: "External agents get four power tabs: Knowledge, Context, Deploy, and Raw. Let's walk through each.",
+      durationMs: 4000,
+    },
+
+    // ── 1) Knowledge — static RAG ──────────────────────────────────────
     { kind: "highlight", id: "agent-tab-knowledge", durationMs: 1200 },
     { kind: "clickByDemoId", id: "agent-tab-knowledge" },
-    { kind: "wait", ms: 800 },
-    {
-      kind: "subtitle",
-      text: "Knowledge: drop a .md or .txt — ATO chunks + embeds via OpenAI text-embedding-3-small. Local SQLite.",
-      durationMs: 4200,
-    },
-    {
-      kind: "subtitle",
-      text: "Test retrieval right here — see the top-K chunks the deployed agent will inject as <context>.",
-      durationMs: 3800,
-    },
-    // Click into Deploy tab.
-    { kind: "highlight", id: "agent-tab-deploy", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "agent-tab-deploy" },
     { kind: "wait", ms: 1000 },
     {
       kind: "subtitle",
-      text: "Deploy: Cloudflare Worker / Vercel Edge / Docker / Node. Pick one — get a self-contained bundle.",
+      text: "Knowledge — STATIC text the agent should always know. FAQs, policies, product docs.",
+      durationMs: 3800,
+    },
+    {
+      kind: "subtitle",
+      text: "Drop .md / .txt → ATO chunks + embeds locally. Auto-routes to OpenAI / Voyage / Gemini / Cohere / Ollama.",
+      durationMs: 4500,
+    },
+    {
+      kind: "subtitle",
+      text: "Test retrieval right here. The deployed agent runs the same cosine-similarity search per request, baked into the bundle.",
+      durationMs: 4500,
+    },
+
+    // ── 2) Context — live data per turn ────────────────────────────────
+    { kind: "highlight", id: "agent-tab-context", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-context" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "Context — LIVE data per turn. DB queries, CRM lookups, API calls, MCP tools.",
+      durationMs: 3800,
+    },
+    {
+      kind: "subtitle",
+      text: "New: fire-mode picker. Always (every turn) / On keyword / LLM decides (cheap classifier ~$0.0001/turn).",
+      durationMs: 4500,
+    },
+    {
+      kind: "subtitle",
+      text: "So 'fetch billing history' only fires when the user actually mentions billing. No wasted API calls.",
+      durationMs: 4500,
+    },
+
+    // ── 3) Deploy — generate the bundle ────────────────────────────────
+    { kind: "highlight", id: "agent-tab-deploy", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-deploy" },
+    { kind: "wait", ms: 1200 },
+    {
+      kind: "subtitle",
+      text: "Deploy — pick a target. Cloudflare Worker, Vercel Edge, Docker image, Node script.",
       durationMs: 4000,
     },
     {
       kind: "subtitle",
-      text: "Knowledge inlined into the bundle. Customer's API key. Customer's infra. Your IDE.",
+      text: "Pick a chat provider — 9 supported (Anthropic / OpenAI / Gemini / Groq / Mistral / DeepSeek / xAI / Together / Fireworks).",
+      durationMs: 4500,
+    },
+    {
+      kind: "subtitle",
+      text: "Inline knowledge for RAG → chunks + embeddings baked into the worker.js. Self-contained, no external vector DB.",
+      durationMs: 4500,
+    },
+    {
+      kind: "subtitle",
+      text: "Save bundle → folder full of files ready to wrangler deploy / vercel deploy / docker build.",
       durationMs: 4000,
     },
-    { kind: "wait", ms: 800 },
+
+    // ── 4) Raw — power-user surface ────────────────────────────────────
+    { kind: "highlight", id: "agent-tab-raw", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-raw" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "Raw — advanced view. Full SQLite state as JSON: variables, hooks, knowledge sources, memory, role models.",
+      durationMs: 4500,
+    },
+    {
+      kind: "subtitle",
+      text: "Internal agents also see the on-disk file editor with hash-checked save + auto-backup.",
+      durationMs: 4000,
+    },
+
+    // Closing
+    {
+      kind: "subtitle",
+      text: "Customer's API key. Customer's infra. Your IDE. ATO never holds inference compute.",
+      durationMs: 4500,
+    },
+    { kind: "wait", ms: 600 },
     // Close the AgentDetail overlay so the closing subtitles render on
     // top of the regular dashboard, not over the detail modal.
     { kind: "clickByDemoId", id: "agent-detail-close" },

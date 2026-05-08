@@ -123,7 +123,7 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
           <TabPill active={tab === "variables"} onClick={() => setTab("variables")} icon={<Variable size={12} />}>
             {t("agentDetail.tabs.variables", "Variables")}
           </TabPill>
-          <TabPill active={tab === "context"} onClick={() => setTab("context")} icon={<Layers size={12} />}>
+          <TabPill active={tab === "context"} onClick={() => setTab("context")} icon={<Layers size={12} />} demoId="agent-tab-context">
             {t("agentDetail.tabs.context", "Context")}
           </TabPill>
           <TabPill active={tab === "memory"} onClick={() => setTab("memory")} icon={<Brain size={12} />}>
@@ -145,7 +145,7 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
               {t("agentDetail.tabs.deploy", "Deploy")}
             </TabPill>
           )}
-          <TabPill active={tab === "raw"} onClick={() => setTab("raw")} icon={<Code2 size={12} />}>
+          <TabPill active={tab === "raw"} onClick={() => setTab("raw")} icon={<Code2 size={12} />} demoId="agent-tab-raw">
             {t("agentDetail.tabs.raw", "Raw")}
           </TabPill>
         </nav>
