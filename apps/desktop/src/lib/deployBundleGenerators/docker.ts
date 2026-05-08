@@ -13,6 +13,7 @@ import {
   type GeneratedBundle,
   type InlineKnowledgeChunk,
 } from "./shared";
+import { generateEmbedFiles } from "./embed";
 
 // v2.0.0 Wave 3 — Docker bundle generator.
 //
@@ -158,6 +159,12 @@ README*
     ...(config.forwardTraces ? ["ATO_TRACE_KEY="] : []),
   ].join("\n") + "\n";
 
+  // v2.0.0 Wave 4 — emit the embed widget files for a working chat bubble.
+  // Docker bundles host them under static/ — but Docker is backend-only,
+  // so the embed files are mainly reference for the customer to copy to
+  // their actual frontend.
+  const embedFiles = generateEmbedFiles(agent, config);
+
   return {
     files: {
       "Dockerfile": dockerfile,
@@ -165,6 +172,9 @@ README*
       "index.js": indexJs,
       "package.json": packageJson,
       ".env.example": envTemplate,
+      ...Object.fromEntries(
+        Object.entries(embedFiles).map(([name, content]) => [`embed/${name}`, content]),
+      ),
     },
     postInstall: [
       `docker build -t ${agent.slug} .`,

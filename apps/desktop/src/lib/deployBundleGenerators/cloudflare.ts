@@ -13,6 +13,7 @@ import {
   type GeneratedBundle,
   type InlineKnowledgeChunk,
 } from "./shared";
+import { generateEmbedFiles } from "./embed";
 
 // v2.0.0 Wave 1 — Cloudflare Worker code generator. See ./shared.ts for the
 // pieces this shares with the other targets.
@@ -123,10 +124,17 @@ compatibility_date = "2025-01-01"
 ${templateVars.length === 0 ? "# (no template variables — system prompt is static)" : templateVars.map((v) => `# ${envVarName(v)} = "..."`).join("\n")}
 `;
 
+  // v2.0.0 Wave 4 — also emit the embed widget files so the customer
+  // gets a working chat-bubble alongside the backend bundle. embed.html
+  // is a local test page; embed.js is the vanilla widget they paste a
+  // <script> tag for on their real site.
+  const embedFiles = generateEmbedFiles(agent, config);
+
   return {
     files: {
       "worker.js": workerJs,
       "wrangler.toml": wranglerToml,
+      ...embedFiles,
     },
     postInstall: [
       "wrangler secret put PROVIDER_API_KEY",
@@ -134,6 +142,8 @@ ${templateVars.length === 0 ? "# (no template variables — system prompt is sta
       ...(useKnowledge ? ["wrangler secret put EMBED_API_KEY"] : []),
       ...(config.forwardTraces ? ["wrangler secret put ATO_TRACE_KEY"] : []),
       "wrangler deploy",
+      "# After wrangler deploy prints your URL, edit embed.html's data-endpoint",
+      "# to match it, then host embed.html + embed.js on your site.",
     ],
   };
 }

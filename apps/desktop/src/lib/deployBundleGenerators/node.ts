@@ -13,6 +13,7 @@ import {
   type GeneratedBundle,
   type InlineKnowledgeChunk,
 } from "./shared";
+import { generateEmbedFiles } from "./embed";
 
 // v2.0.0 Wave 3 — Standalone Node script generator.
 //
@@ -164,12 +165,18 @@ server.listen(PORT, () => {
   // Tiny Procfile so Railway / Heroku / Fly auto-detect the start command.
   const procfile = "web: node server.js\n";
 
+  // v2.0.0 Wave 4 — emit the embed widget files alongside the server.
+  const embedFiles = generateEmbedFiles(agent, config);
+
   return {
     files: {
       "server.js": serverJs,
       "package.json": packageJson,
       "Procfile": procfile,
       ".env.example": envTemplate,
+      ...Object.fromEntries(
+        Object.entries(embedFiles).map(([name, content]) => [`embed/${name}`, content]),
+      ),
     },
     postInstall: [
       "cp .env.example .env  # fill in the values, then `source .env`",

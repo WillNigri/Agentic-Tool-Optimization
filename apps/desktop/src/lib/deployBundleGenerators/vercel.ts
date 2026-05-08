@@ -13,6 +13,7 @@ import {
   type GeneratedBundle,
   type InlineKnowledgeChunk,
 } from "./shared";
+import { generateEmbedFiles } from "./embed";
 
 // v2.0.0 Wave 3 — Vercel Edge Function generator.
 //
@@ -137,11 +138,17 @@ ${traceBlock}
     ...(config.forwardTraces ? ["ATO_TRACE_KEY="] : []),
   ].join("\n") + "\n";
 
+  // v2.0.0 Wave 4 — emit the embed widget files for a working chat bubble.
+  const embedFiles = generateEmbedFiles(agent, config);
+
   return {
     files: {
       "app/api/agent/route.ts": routeTs,
       "vercel.json": vercelJson,
       ".env.local.example": envTemplate,
+      ...Object.fromEntries(
+        Object.entries(embedFiles).map(([name, content]) => [`public/${name}`, content]),
+      ),
     },
     postInstall: [
       "cp .env.local.example .env.local  # fill in the values",

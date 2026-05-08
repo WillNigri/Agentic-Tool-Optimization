@@ -303,6 +303,30 @@ export default function DeployTab({ agent }: Props) {
         </section>
       )}
 
+      {/* v2.0.0 Wave 4 — embed widget snippet preview. Every bundle now
+          ships `embed.html` (test page) + `embed.js` (the chat-bubble
+          widget). Customer drops one <script> tag on their site after
+          replacing data-endpoint with their deployed URL. */}
+      {bundle && (bundle.files["embed.js"] || bundle.files["public/embed.js"] || bundle.files["embed/embed.js"]) && (
+        <section className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3 space-y-2">
+          <SectionHeader
+            title={t("agentDetail.deploy.embedTitle", "Embed widget — paste this on your site")}
+            hint={t(
+              "agentDetail.deploy.embedHint",
+              "Bundle includes embed.html (a working test page) and embed.js (the chat-bubble widget). Host embed.js on your CDN, then paste the snippet below into any HTML page. Replace data-endpoint with your deployed URL after wrangler/vercel/docker deploy prints it.",
+            )}
+          />
+          <pre className="rounded border border-cs-border bg-cs-bg p-3 text-[11px] text-cs-text font-mono whitespace-pre-wrap break-all">
+            {`<script src="https://your-cdn.example.com/embed.js"
+        data-endpoint="https://your-deployed-agent.example.com"
+        data-brand=${JSON.stringify(config.brandName || agent.displayName)}
+        data-color="#00FFB2"
+        data-greeting="Hi! How can I help?"
+        data-agent-slug=${JSON.stringify(agent.slug)}></script>`}
+          </pre>
+        </section>
+      )}
+
       {/* Post-install commands */}
       {bundle && bundle.postInstall.length > 0 && (
         <section>
