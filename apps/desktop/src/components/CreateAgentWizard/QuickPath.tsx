@@ -17,6 +17,7 @@ import { useDemoStore } from "@/stores/useDemoStore";
 import { cn } from "@/lib/utils";
 import { FileText, Plus, Trash2 } from "lucide-react";
 import AuthRequirements from "./AuthRequirements";
+import { useUiStore } from "@/stores/useUiStore";
 
 // Quick (form) path — wired to Rust create_agent. T3.b adds:
 //   - Draft persistence via localStorage (auto-save on change, cleared on success)
@@ -62,6 +63,10 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdAgentName, setCreatedAgentName] = useState<string | null>(null);
+  const [createdAgentSlug, setCreatedAgentSlug] = useState<string | null>(null);
+  const [createdAgentKind, setCreatedAgentKind] = useState<"internal" | "external">("internal");
+  const openAgentDetail = useUiStore((s) => s.openAgentDetail);
+  const setSection = useUiStore((s) => s.setSection);
 
   // Draft (auto-saved). initialDraft (from a template pick) wins over the
   // persisted draft so the user lands on the pre-filled form. Merge with
@@ -216,6 +221,8 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
         }
       }
       setCreatedAgentName(agent.displayName);
+      setCreatedAgentSlug(agent.slug);
+      setCreatedAgentKind(agent.kind === "external" ? "external" : "internal");
       clearQuickDraft();
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
       void queryClient.invalidateQueries({ queryKey: ["recent-agents"] });
@@ -247,6 +254,14 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
   }, [demoSubmit]);
 
   if (createdAgentName) {
+    const isExternalCreated = createdAgentKind === "external";
+    const goToAgent = (tab: string) => {
+      if (createdAgentSlug) {
+        setSection("agents");
+        openAgentDetail(createdAgentSlug, tab);
+      }
+      onCancel(); // close wizard
+    };
     return (
       <div className="rounded-lg border border-cs-accent/40 bg-cs-accent/10 p-6 flex items-start gap-3">
         <CheckCircle2 size={20} className="text-cs-accent shrink-0" />
@@ -255,11 +270,35 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
             {t("createAgent.quick.successTitle", "Agent created")}
           </h3>
           <p className="mt-1 text-xs text-cs-muted">
-            {t("createAgent.quick.successBody", "{{name}} is ready. Open it from the Agents list.", {
-              name: createdAgentName,
-            })}
+            {isExternalCreated
+              ? t(
+                  "createAgent.quick.successBodyExternal",
+                  "{{name}} is ready. Next: drop knowledge files and pick a deploy target.",
+                  { name: createdAgentName },
+                )
+              : t("createAgent.quick.successBody", "{{name}} is ready. Open it from the Agents list.", {
+                  name: createdAgentName,
+                })}
           </p>
-          <div className="mt-4 flex items-center gap-2">
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {isExternalCreated && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => goToAgent("knowledge")}
+                  className="rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
+                >
+                  {t("createAgent.quick.openKnowledge", "Add knowledge →")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goToAgent("deploy")}
+                  className="rounded-md border border-cs-accent/40 bg-cs-accent/10 px-3 py-1.5 text-xs font-medium text-cs-accent hover:bg-cs-accent/20"
+                >
+                  {t("createAgent.quick.openDeploy", "Generate deploy bundle →")}
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={onCancel}
@@ -271,9 +310,10 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
               type="button"
               onClick={() => {
                 setCreatedAgentName(null);
+                setCreatedAgentSlug(null);
                 reset();
               }}
-              className="rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
+              className="rounded-md border border-cs-border bg-cs-bg-raised px-3 py-1.5 text-xs font-medium text-cs-text hover:border-cs-hover"
             >
               {t("createAgent.quick.createAnother", "Create another")}
             </button>

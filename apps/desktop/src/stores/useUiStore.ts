@@ -37,6 +37,16 @@ interface UiState {
    *  runner open a specific group's detail view. GroupsList consumes this. */
   selectedGroupSlug: string | null;
   selectGroupSlug: (slug: string | null) => void;
+
+  /** v2.0.0 — when set, MyAgentsList opens the agent detail overlay for
+   *  this slug as soon as it mounts (or the moment the agent shows up in
+   *  list results). Optional `tab` lets the wizard's "Set up Knowledge"
+   *  CTA land the user directly on the Knowledge tab instead of Variables.
+   *  Consumed once by MyAgentsList, then cleared. */
+  pendingOpenAgentSlug: string | null;
+  pendingOpenAgentTab: string | null;
+  openAgentDetail: (slug: string, tab?: string | null) => void;
+  consumePendingOpenAgent: () => { slug: string | null; tab: string | null };
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -72,4 +82,15 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   selectedGroupSlug: null,
   selectGroupSlug: (slug) => set({ selectedGroupSlug: slug }),
+
+  pendingOpenAgentSlug: null,
+  pendingOpenAgentTab: null,
+  openAgentDetail: (slug, tab = null) =>
+    set({ pendingOpenAgentSlug: slug, pendingOpenAgentTab: tab }),
+  consumePendingOpenAgent: () => {
+    const slug = get().pendingOpenAgentSlug;
+    const tab = get().pendingOpenAgentTab;
+    if (slug) set({ pendingOpenAgentSlug: null, pendingOpenAgentTab: null });
+    return { slug, tab };
+  },
 }));

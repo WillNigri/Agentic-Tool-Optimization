@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useUiStore } from "@/stores/useUiStore";
 import {
   Bot,
   Trash2,
@@ -50,7 +51,10 @@ export default function MyAgentsList() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [runningAgent, setRunningAgent] = useState<Agent | null>(null);
   const [configuringAgent, setConfiguringAgent] = useState<Agent | null>(null);
+  const [initialTab, setInitialTab] = useState<string | null>(null);
   const requestShell = useTerminalStore((s) => s.requestShell);
+  const pendingOpenSlug = useUiStore((s) => s.pendingOpenAgentSlug);
+  const consumePendingOpen = useUiStore((s) => s.consumePendingOpenAgent);
 
   // Primary "Run" — open the embedded interactive shell scoped to this agent
   // so the user keeps memory across turns. Uses the per-runtime capability
@@ -88,6 +92,20 @@ export default function MyAgentsList() {
           (a.description ?? "").toLowerCase().includes(search.toLowerCase())
       )
     : agents;
+
+  // v2.0.0 — consume `openAgentDetail(slug, tab)` from useUiStore. Set by
+  // the wizard's "Set up Knowledge & Deploy" CTA so the user lands inside
+  // their freshly-created external agent on the right tab. Re-runs when
+  // agents arrive (the wizard fires before invalidate finishes).
+  useEffect(() => {
+    if (!pendingOpenSlug) return;
+    const found = agents.find((a) => a.slug === pendingOpenSlug);
+    if (found) {
+      setConfiguringAgent(found);
+      const { tab } = consumePendingOpen();
+      setInitialTab(tab);
+    }
+  }, [pendingOpenSlug, agents, consumePendingOpen]);
 
   if (isLoading) {
     return (
@@ -177,7 +195,11 @@ export default function MyAgentsList() {
       {configuringAgent && (
         <AgentDetail
           agent={configuringAgent}
-          onClose={() => setConfiguringAgent(null)}
+          initialTab={initialTab}
+          onClose={() => {
+            setConfiguringAgent(null);
+            setInitialTab(null);
+          }}
         />
       )}
     </div>

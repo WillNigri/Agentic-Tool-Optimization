@@ -28,15 +28,30 @@ const KnowledgeTab = lazy(() => import("./KnowledgeTab"));
 interface Props {
   agent: Agent;
   onClose: () => void;
+  /** v2.0.0 — initial tab to land on when the detail opens. Used by the
+   *  Create Agent wizard's "Set up Knowledge & Deploy" CTA so the user
+   *  drops directly into Knowledge after saving an external agent. */
+  initialTab?: string | null;
 }
 
 type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators" | "deploy" | "knowledge";
 
-export default function AgentDetail({ agent, onClose }: Props) {
+export default function AgentDetail({ agent, onClose, initialTab }: Props) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<TabId>("variables");
   const isExternal = agent.kind === "external";
+  const [tab, setTab] = useState<TabId>(() => {
+    // Honor the caller's initialTab when it's a valid TabId, otherwise
+    // default to "knowledge" for new external agents (v2.0.0 — landing
+    // on Variables for an empty external agent felt like the wrong
+    // first thing to show; Knowledge is where they actually start).
+    const valid: TabId[] = [
+      "overview", "variables", "context", "memory",
+      "models", "evaluators", "deploy", "knowledge",
+    ];
+    if (initialTab && (valid as string[]).includes(initialTab)) return initialTab as TabId;
+    return "variables";
+  });
 
   const flipKind = async () => {
     const next = isExternal ? "internal" : "external";
