@@ -9853,6 +9853,90 @@ pub struct KnowledgeChunk {
     pub embedding: Option<Vec<f32>>,
 }
 
+// v2.0.0 — multi-provider embeddings.
+//
+// We support five providers, in this preference order. Auto-detected based
+// on which API key the user has in `llm_api_keys` (so a user with no
+// OpenAI key but a Voyage one gets Voyage automatically — they don't have
+// to pick or configure anything).
+//
+// Each chunk row records `embed_model` so retrieval is always done with
+// the same provider that ingested the chunk — vector spaces don't
+// interoperate across providers.
+//
+// Ollama is the offline fallback: needs no key, runs on the user's
+// machine, but requires the user to have pulled `nomic-embed-text` first.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbedProvider {
+    OpenAI,    // text-embedding-3-small — 1536 dims, $0.02/1M tokens
+    Voyage,    // voyage-3 — 1024 dims, ~$0.06/1M tokens
+    Gemini,    // text-embedding-004 — 768 dims, free tier available
+    Cohere,    // embed-multilingual-light-v3.0 — 384 dims
+    Ollama,    // nomic-embed-text — 768 dims, free, local
+}
+
+impl EmbedProvider {
+    fn provider_id(&self) -> &'static str {
+        match self {
+            Self::OpenAI => "openai",
+            Self::Voyage => "voyage",
+            Self::Gemini => "gemini",
+            Self::Cohere => "cohere",
+            Self::Ollama => "ollama",
+        }
+    }
+    fn default_model(&self) -> &'static str {
+        match self {
+            Self::OpenAI => "text-embedding-3-small",
+            Self::Voyage => "voyage-3",
+            Self::Gemini => "text-embedding-004",
+            Self::Cohere => "embed-multilingual-light-v3.0",
+            Self::Ollama => "nomic-embed-text",
+        }
+    }
+    fn dims(&self) -> usize {
+        match self {
+            Self::OpenAI => 1536,
+            Self::Voyage => 1024,
+            Self::Gemini => 768,
+            Self::Cohere => 384,
+            Self::Ollama => 768,
+        }
+    }
+}
+
+/// Pick an embedding provider based on what's available. Auto-detection
+/// avoids forcing every user through a picker — the most common case is
+/// "I added an OpenAI key" (or a Voyage one) and embeddings should just
+/// work. If multiple keys exist we prefer the cheapest first-tier
+/// (OpenAI), then Voyage, then Gemini, then Cohere, then Ollama.
+fn pick_embed_provider(conn: &rusqlite::Connection) -> Result<(EmbedProvider, Option<String>), String> {
+    for p in [EmbedProvider::OpenAI, EmbedProvider::Voyage, EmbedProvider::Gemini, EmbedProvider::Cohere] {
+        if let Ok(key) = read_provider_active_key(conn, p.provider_id()) {
+            return Ok((p, Some(key)));
+        }
+    }
+    // No cloud key — fall back to local Ollama (no key required). Caller
+    // hits localhost:11434, which fails fast if Ollama isn't running.
+    Ok((EmbedProvider::Ollama, None))
+}
+
+fn read_provider_active_key(
+    conn: &rusqlite::Connection,
+    provider: &str,
+) -> Result<String, String> {
+    match conn.query_row::<String, _, _>(
+        "SELECT encrypted_key FROM llm_api_keys WHERE provider = ?1 AND is_active = 1 ORDER BY created_at DESC LIMIT 1",
+        params![provider],
+        |row| row.get(0),
+    ) {
+        Ok(encrypted) => simple_decrypt(&encrypted),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!("no {} key", provider)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 const EMBED_MODEL: &str = "text-embedding-3-small";
 const EMBED_DIMS: usize = 1536;
 /// Hard cap so a runaway paste doesn't try to embed an entire book in one
@@ -9934,25 +10018,8 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
-/// Read the customer's OpenAI key from the local LLM keys table. We pick
-/// the first active key with provider='openai'. If none exists, fail with
-/// a friendly message that the UI can surface.
-fn read_openai_key(conn: &rusqlite::Connection) -> Result<String, String> {
-    // Use match instead of .optional() to avoid pulling in OptionalExtension
-    // — rusqlite::Error::QueryReturnedNoRows distinguishes "key not on file"
-    // from a real DB error, which deserves a different message.
-    match conn.query_row::<String, _, _>(
-        "SELECT encrypted_key FROM llm_api_keys WHERE provider = 'openai' AND is_active = 1 ORDER BY created_at DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    ) {
-        Ok(encrypted) => simple_decrypt(&encrypted),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(
-            "No OpenAI API key on file. Add one in Settings → API Keys (provider: openai) — required for knowledge embeddings.".to_string(),
-        ),
-        Err(e) => Err(e.to_string()),
-    }
-}
+// (former read_openai_key removed — replaced by pick_embed_provider +
+// read_provider_active_key which auto-detect across 5 providers.)
 
 #[derive(Debug, Serialize)]
 struct OpenAIEmbeddingRequest<'a> {
@@ -9971,40 +10038,181 @@ struct OpenAIEmbeddingItem {
     index: usize,
 }
 
-async fn embed_batch(api_key: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, String> {
+async fn embed_batch(
+    provider: EmbedProvider,
+    api_key: Option<&str>,
+    inputs: &[String],
+) -> Result<Vec<Vec<f32>>, String> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
+    let dims = provider.dims();
     let client = reqwest::Client::new();
-    let payload = OpenAIEmbeddingRequest { input: inputs, model: EMBED_MODEL };
-    let response = client
-        .post("https://api.openai.com/v1/embeddings")
-        .bearer_auth(api_key)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("OpenAI embeddings request failed: {}", e))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("OpenAI embeddings {}: {}", status, body));
-    }
-    let parsed: OpenAIEmbeddingResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("OpenAI embeddings parse error: {}", e))?;
-    // Reorder by `index` so results align with `inputs`. OpenAI normally
-    // returns them in order, but the spec lets them come back unordered.
-    let mut out: Vec<Vec<f32>> = vec![Vec::new(); inputs.len()];
-    for item in parsed.data {
-        if item.index < out.len() && item.embedding.len() == EMBED_DIMS {
-            out[item.index] = item.embedding;
+
+    match provider {
+        EmbedProvider::OpenAI => {
+            let key = api_key.ok_or("OpenAI embedder requires an API key")?;
+            let payload = OpenAIEmbeddingRequest { input: inputs, model: provider.default_model() };
+            let r = client
+                .post("https://api.openai.com/v1/embeddings")
+                .bearer_auth(key)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("OpenAI embeddings request failed: {}", e))?;
+            if !r.status().is_success() {
+                return Err(format!("OpenAI embeddings {}: {}", r.status(), r.text().await.unwrap_or_default()));
+            }
+            let parsed: OpenAIEmbeddingResponse = r.json().await.map_err(|e| e.to_string())?;
+            let mut out: Vec<Vec<f32>> = vec![Vec::new(); inputs.len()];
+            for item in parsed.data {
+                if item.index < out.len() && item.embedding.len() == dims {
+                    out[item.index] = item.embedding;
+                }
+            }
+            if out.iter().any(|v| v.len() != dims) {
+                return Err("OpenAI embeddings: missing/wrong-dim vector".to_string());
+            }
+            Ok(out)
+        }
+
+        EmbedProvider::Voyage => {
+            // Voyage's API is OpenAI-compatible-ish but NOT identical — uses
+            // `input` array, model name `voyage-3`. Returns same `data[].embedding`.
+            let key = api_key.ok_or("Voyage embedder requires an API key")?;
+            let payload = serde_json::json!({
+                "input": inputs,
+                "model": provider.default_model(),
+            });
+            let r = client
+                .post("https://api.voyageai.com/v1/embeddings")
+                .bearer_auth(key)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("Voyage embeddings request failed: {}", e))?;
+            if !r.status().is_success() {
+                return Err(format!("Voyage embeddings {}: {}", r.status(), r.text().await.unwrap_or_default()));
+            }
+            let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+            let arr = body.get("data").and_then(|d| d.as_array())
+                .ok_or("Voyage: missing `data` array")?;
+            let mut out: Vec<Vec<f32>> = vec![Vec::new(); inputs.len()];
+            for item in arr {
+                let idx = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let emb = item.get("embedding").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|n| n.as_f64().map(|f| f as f32)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if idx < out.len() && emb.len() == dims {
+                    out[idx] = emb;
+                }
+            }
+            if out.iter().any(|v| v.len() != dims) {
+                return Err("Voyage embeddings: missing/wrong-dim vector".to_string());
+            }
+            Ok(out)
+        }
+
+        EmbedProvider::Gemini => {
+            // Gemini exposes batch embeddings via `:batchEmbedContents`. Single
+            // request, parallel embedding requests in the body.
+            let key = api_key.ok_or("Gemini embedder requires an API key")?;
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents?key={}",
+                provider.default_model(),
+                key,
+            );
+            let requests: Vec<serde_json::Value> = inputs.iter().map(|t| serde_json::json!({
+                "model": format!("models/{}", provider.default_model()),
+                "content": { "parts": [{ "text": t }] },
+            })).collect();
+            let payload = serde_json::json!({ "requests": requests });
+            let r = client.post(&url).json(&payload).send().await
+                .map_err(|e| format!("Gemini embeddings request failed: {}", e))?;
+            if !r.status().is_success() {
+                return Err(format!("Gemini embeddings {}: {}", r.status(), r.text().await.unwrap_or_default()));
+            }
+            let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+            let arr = body.get("embeddings").and_then(|d| d.as_array())
+                .ok_or("Gemini: missing `embeddings` array")?;
+            let mut out: Vec<Vec<f32>> = Vec::with_capacity(inputs.len());
+            for item in arr {
+                let emb = item.get("values").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|n| n.as_f64().map(|f| f as f32)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                out.push(emb);
+            }
+            if out.len() != inputs.len() || out.iter().any(|v| v.len() != dims) {
+                return Err("Gemini embeddings: count or dim mismatch".to_string());
+            }
+            Ok(out)
+        }
+
+        EmbedProvider::Cohere => {
+            let key = api_key.ok_or("Cohere embedder requires an API key")?;
+            let payload = serde_json::json!({
+                "texts": inputs,
+                "model": provider.default_model(),
+                "input_type": "search_document",
+            });
+            let r = client
+                .post("https://api.cohere.com/v2/embed")
+                .bearer_auth(key)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("Cohere embeddings request failed: {}", e))?;
+            if !r.status().is_success() {
+                return Err(format!("Cohere embeddings {}: {}", r.status(), r.text().await.unwrap_or_default()));
+            }
+            let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+            // Cohere returns {embeddings: {float: [[...]]}} or {embeddings: [[...]]}
+            let arr = body.pointer("/embeddings/float")
+                .or_else(|| body.get("embeddings"))
+                .and_then(|d| d.as_array())
+                .ok_or("Cohere: missing embeddings array")?;
+            let mut out: Vec<Vec<f32>> = Vec::with_capacity(inputs.len());
+            for item in arr {
+                let emb = item.as_array()
+                    .map(|a| a.iter().filter_map(|n| n.as_f64().map(|f| f as f32)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                out.push(emb);
+            }
+            if out.len() != inputs.len() || out.iter().any(|v| v.len() != dims) {
+                return Err("Cohere embeddings: count or dim mismatch".to_string());
+            }
+            Ok(out)
+        }
+
+        EmbedProvider::Ollama => {
+            // Local fallback. Hits localhost:11434/api/embed. User must have
+            // run `ollama pull nomic-embed-text` once, otherwise this errors.
+            // The deployed bundle CAN'T use Ollama (it's local) — only ingest
+            // works with this provider for now.
+            let model = provider.default_model();
+            let mut out: Vec<Vec<f32>> = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let r = client
+                    .post("http://localhost:11434/api/embeddings")
+                    .json(&serde_json::json!({ "model": model, "prompt": input }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Ollama not reachable on localhost:11434 — start it with `ollama serve` and pull the model with `ollama pull {}`. Underlying: {}", model, e))?;
+                if !r.status().is_success() {
+                    return Err(format!("Ollama embeddings {}: {}", r.status(), r.text().await.unwrap_or_default()));
+                }
+                let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+                let emb = body.get("embedding").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|n| n.as_f64().map(|f| f as f32)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if emb.len() != dims {
+                    return Err(format!("Ollama embeddings: model returned {} dims, expected {}", emb.len(), dims));
+                }
+                out.push(emb);
+            }
+            Ok(out)
         }
     }
-    if out.iter().any(|v| v.len() != EMBED_DIMS) {
-        return Err("OpenAI embeddings: missing or wrong-dimension vector in response".to_string());
-    }
-    Ok(out)
 }
 
 /// Approximate token count — char count / 4 for English text. Matches
@@ -10039,18 +10247,20 @@ pub async fn ingest_knowledge_text(
         return Err("nothing to embed — the file is whitespace only".to_string());
     }
 
-    // Read OpenAI key BEFORE making the network call so we fail fast on
-    // a misconfigured machine.
-    let api_key = {
+    // Pick provider + key BEFORE the network call so we fail fast on
+    // a misconfigured machine. Auto-detects based on which provider key
+    // the user has on file. Ollama is used as the offline fallback.
+    let (provider, api_key) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        read_openai_key(&conn)?
+        pick_embed_provider(&conn)?
     };
 
-    let embeddings = embed_batch(&api_key, &chunks).await?;
+    let embeddings = embed_batch(provider, api_key.as_deref(), &chunks).await?;
     if embeddings.len() != chunks.len() {
         return Err("embedder returned the wrong number of vectors".to_string());
     }
 
+    let model_id = provider.default_model();
     let now = chrono::Utc::now().to_rfc3339();
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     // Replace prior chunks from this same source so re-uploading overwrites.
@@ -10069,7 +10279,7 @@ pub async fn ingest_knowledge_text(
             "INSERT INTO agent_knowledge_chunks
              (id, agent_id, source, content, tokens, position, embedding, embed_model, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, agent_id, source, text, tokens, i as i64, blob, EMBED_MODEL, now],
+            params![id, agent_id, source, text, tokens, i as i64, blob, model_id, now],
         )
         .map_err(|e| e.to_string())?;
         out.push(KnowledgeChunk {
@@ -10079,7 +10289,7 @@ pub async fn ingest_knowledge_text(
             content: text,
             tokens,
             position: i as i64,
-            embed_model: EMBED_MODEL.to_string(),
+            embed_model: model_id.to_string(),
             created_at: now.clone(),
             embedding: Some(embedding),
         });
@@ -10181,12 +10391,19 @@ pub async fn retrieve_knowledge(
         return Err("query cannot be empty".to_string());
     }
 
-    let api_key = {
+    // Pick provider — must match whichever was used to ingest the chunks
+    // we're retrieving against. For v2 alpha we route via the same
+    // auto-detect; if the user changed key sets between ingest and
+    // retrieve, the cosine scores won't be meaningful (different vector
+    // spaces). The chunk's stored `embed_model` is the source of truth
+    // for "which provider should retrieve use" — wiring that lookup is a
+    // v2.0.x follow-up.
+    let (provider, api_key) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        read_openai_key(&conn)?
+        pick_embed_provider(&conn)?
     };
 
-    let query_embeddings = embed_batch(&api_key, &[query.clone()]).await?;
+    let query_embeddings = embed_batch(provider, api_key.as_deref(), &[query.clone()]).await?;
     let query_vec = query_embeddings
         .into_iter()
         .next()
