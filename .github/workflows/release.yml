@@ -88,6 +88,24 @@ jobs:
         run: npm install
         working-directory: apps/desktop
 
+      # v2.0.0 — Decode the App Store Connect API .p8 file from its
+      # base64 secret and stash it on disk, so tauri-action can point at
+      # APPLE_API_KEY_PATH for notarization. macOS-only; the secret
+      # contains the .p8 contents, not the Key ID (the Key ID lives in
+      # APPLE_API_KEY_ID). The .p8 is short-lived: lives only for the
+      # duration of the runner.
+      - name: Stage Apple notarization key
+        if: success() && matrix.platform == 'macos-latest'
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/apple"
+          KEY_PATH="$RUNNER_TEMP/apple/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_B64" | base64 -d > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
       - name: Build Tauri app
         # IMPORTANT: no `tagName` / `releaseName` / `releaseBody` — without
         # these, tauri-action runs `tauri build` only and skips its
@@ -97,11 +115,27 @@ jobs:
         # The catch: tauri-action's release-upload phase is ALSO where it
         # signs the updater bundles. Without it, no .sig files are ever
         # produced. We do the signing ourselves in the next step.
+        #
+        # macOS code signing + notarization (v2.0.0): tauri-action picks up
+        # APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
+        # automatically when set as env vars — it imports the .p12 into a
+        # temporary keychain on the runner and uses it during `tauri build`.
+        # APPLE_API_KEY (the 10-char Key ID) + APPLE_API_KEY_PATH +
+        # APPLE_API_ISSUER together drive the notarization step. Other
+        # platforms inherit harmless empty values; only macOS uses them.
         uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS Developer ID code signing
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # macOS notarization via App Store Connect API key
+          # (APPLE_API_KEY_PATH was set on $GITHUB_ENV above for macOS only)
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         with:
           projectPath: apps/desktop
           args: --target ${{ matrix.target }}
