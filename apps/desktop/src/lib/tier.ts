@@ -77,11 +77,19 @@ export const FEATURE_MIN_TIER: Record<Feature, Tier> = {
  *  users (no account) stay on Free, which is the upgrade hook on the UI.
  *  Team / Enterprise carriers keep their cached tier (no downgrade).
  *
- *  When we re-introduce paid Pro, remove the `if (isCloudUser …)` branch. */
+ *  v2.0.0 — Tauri desktop users also default to Pro (no cloud login
+ *  needed). Beatriz feedback: she couldn't log in locally and was
+ *  blocked from testing Pro features in dev mode. The desktop install
+ *  is the trusted path during the alpha; we'll re-tier when we ship
+ *  paid Pro post-alpha.
+ *
+ *  When we re-introduce paid Pro, remove both the cloud and Tauri
+ *  branches. */
 export function useTier(): Tier {
   const cachedTier = useAuthStore((s) => s.tier);
   const isCloudUser = useAuthStore((s) => s.isCloudUser);
-  if (isCloudUser && cachedTier === "free") return "pro";
+  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if ((isTauri || isCloudUser) && cachedTier === "free") return "pro";
   return cachedTier;
 }
 
