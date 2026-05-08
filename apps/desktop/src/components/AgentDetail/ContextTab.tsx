@@ -15,6 +15,10 @@ import {
 import {
   listAgentHooks,
   saveAgentHook,
+  parseFireEval,
+  CLASSIFIER_MODELS,
+  CLASSIFIER_PROVIDERS,
+  type HookFireMode,
   deleteAgentHook,
   parseHookConfig,
   hookConfigToJson,
@@ -273,10 +277,24 @@ function HookEditor({
   const initial: HookConfig = existing
     ? parseHookConfig(existing)
     : { kind: "file", path: "", maxBytes: 8192 };
+  const initialFire = existing ? parseFireEval(existing) : {};
   const [name, setName] = useState(existing?.name ?? "");
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [kind, setKind] = useState<HookKind>(initial.kind);
   const [config, setConfig] = useState<HookConfig>(initial);
+  // v2.0.0 fire-mode state — reads from existing hook's config when
+  // editing, defaults to "always" + sensible classifier model otherwise.
+  const [fireMode, setFireMode] = useState<HookFireMode>(existing?.fireMode ?? "always");
+  const [whenKeywords, setWhenKeywords] = useState<string>(
+    (initialFire.whenKeywords ?? []).join(", "),
+  );
+  const [whenDescription, setWhenDescription] = useState<string>(initialFire.whenDescription ?? "");
+  const [classifierProvider, setClassifierProvider] = useState<string>(
+    initialFire.classifierProvider ?? "anthropic",
+  );
+  const [classifierModel, setClassifierModel] = useState<string>(
+    initialFire.classifierModel ?? CLASSIFIER_MODELS["anthropic"],
+  );
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [proPrompt, setProPrompt] = useState(false);
@@ -286,14 +304,24 @@ function HookEditor({
     setErr(null);
     setSaving(true);
     try {
+      const fireEval = {
+        whenKeywords:
+          fireMode === "keyword"
+            ? whenKeywords.split(",").map((s) => s.trim()).filter(Boolean)
+            : undefined,
+        whenDescription: fireMode === "llm-decides" ? whenDescription.trim() : undefined,
+        classifierModel: fireMode === "llm-decides" ? classifierModel : undefined,
+        classifierProvider: fireMode === "llm-decides" ? classifierProvider : undefined,
+      };
       await saveAgentHook({
         id: existing?.id,
         agentId,
         position: existing?.position,
         name: name.trim(),
         kind,
-        configJson: hookConfigToJson(config),
+        configJson: hookConfigToJson(config, fireEval),
         enabled,
+        fireMode,
       });
       onSaved();
     } catch (e) {
@@ -374,6 +402,118 @@ function HookEditor({
       </Field>
 
       <KindConfigEditor kind={kind} config={config} onChange={setConfig} />
+
+      {/* v2.0.0 — fire-mode picker. Decides whether the hook actually
+          runs for THIS user message. Beatriz's design (2026-05-08):
+          "Always" is wasteful; users want to gate dynamic data on
+          relevance. */}
+      <Field
+        label={t("agentDetail.context.fireMode", "When should this hook fire?")}
+        hint={t(
+          "agentDetail.context.fireModeHint",
+          "Always = run every turn. Keyword = only when user message contains a match. LLM = ask a cheap classifier whether the user's message is relevant.",
+        )}
+      >
+        <div className="grid grid-cols-3 gap-2">
+          {(["always", "keyword", "llm-decides"] as const).map((m) => {
+            const active = fireMode === m;
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setFireMode(m)}
+                className={cn(
+                  "rounded-lg border px-2 py-2 text-left text-[11px] transition-colors",
+                  active
+                    ? "border-cs-accent bg-cs-accent/10 text-cs-text"
+                    : "border-cs-border bg-cs-bg text-cs-muted hover:border-cs-accent/40 hover:text-cs-text",
+                )}
+              >
+                <div className="text-xs font-medium text-cs-text">
+                  {m === "always"
+                    ? t("agentDetail.context.fireAlways", "Always")
+                    : m === "keyword"
+                    ? t("agentDetail.context.fireKeyword", "On keyword")
+                    : t("agentDetail.context.fireLlm", "LLM decides")}
+                </div>
+                <div className="mt-0.5 text-[10px] leading-tight text-cs-muted">
+                  {m === "always"
+                    ? t("agentDetail.context.fireAlwaysHint", "Every turn. Static info.")
+                    : m === "keyword"
+                    ? t("agentDetail.context.fireKeywordHint", "Cheap, deterministic gate.")
+                    : t("agentDetail.context.fireLlmHint", "Smart but ~$0.0001/turn.")}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
+      {fireMode === "keyword" && (
+        <Field
+          label={t("agentDetail.context.whenKeywords", "Match if user message contains")}
+          hint={t(
+            "agentDetail.context.whenKeywordsHint",
+            "Comma-separated. Case-insensitive. Any match fires the hook.",
+          )}
+        >
+          <input
+            type="text"
+            value={whenKeywords}
+            onChange={(e) => setWhenKeywords(e.target.value)}
+            placeholder="billing, invoice, payment, subscription"
+            className="w-full rounded-md border border-cs-border bg-cs-bg px-2.5 py-1.5 text-sm text-cs-text font-mono"
+          />
+        </Field>
+      )}
+
+      {fireMode === "llm-decides" && (
+        <>
+          <Field
+            label={t("agentDetail.context.whenDescription", "Fire when (plain English)")}
+            hint={t(
+              "agentDetail.context.whenDescriptionHint",
+              "Describe the situation when this data is relevant. The classifier judges YES/NO per turn.",
+            )}
+          >
+            <textarea
+              rows={2}
+              value={whenDescription}
+              onChange={(e) => setWhenDescription(e.target.value)}
+              placeholder="user is asking about their account, billing, or open tickets"
+              className="w-full rounded-md border border-cs-border bg-cs-bg px-2.5 py-1.5 text-sm text-cs-text"
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label={t("agentDetail.context.classifierProvider", "Classifier provider")}>
+              <select
+                value={classifierProvider}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setClassifierProvider(next);
+                  // Auto-pick a sensible default model for the chosen provider
+                  // unless the user has already typed a custom model.
+                  if (CLASSIFIER_MODELS[next]) setClassifierModel(CLASSIFIER_MODELS[next]);
+                }}
+                className="w-full rounded-md border border-cs-border bg-cs-bg px-2.5 py-1.5 text-sm text-cs-text [&>option]:bg-cs-bg-raised [&>option]:text-cs-text"
+              >
+                {CLASSIFIER_PROVIDERS.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label={t("agentDetail.context.classifierModel", "Classifier model")}>
+              <input
+                type="text"
+                value={classifierModel}
+                onChange={(e) => setClassifierModel(e.target.value)}
+                placeholder={CLASSIFIER_MODELS[classifierProvider] ?? "claude-haiku-4-5"}
+                className="w-full rounded-md border border-cs-border bg-cs-bg px-2.5 py-1.5 text-sm text-cs-text font-mono"
+              />
+            </Field>
+          </div>
+        </>
+      )}
 
       {err && (
         <div className="flex items-start gap-2 rounded-md border border-cs-danger/40 bg-cs-danger/10 p-2 text-xs text-cs-text">

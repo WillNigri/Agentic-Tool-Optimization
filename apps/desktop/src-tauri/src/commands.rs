@@ -10896,9 +10896,21 @@ pub struct AgentHook {
     ///   mcp-call → { "server": "...", "tool": "...", "args": {...} }
     ///   db-query → { "connection": "...", "sql": "..." }
     ///   computed → { "expr": "..." }
+    ///
+    /// v2.0.0 — When fire_mode != 'always', the config additionally
+    /// carries fire-evaluation knobs:
+    ///   keyword     → { ..., "whenKeywords": ["billing", "invoice"] }
+    ///   llm-decides → { ..., "whenDescription": "user asks about billing",
+    ///                   "classifierModel": "claude-haiku-4-5",
+    ///                   "classifierProvider": "anthropic" }
     pub config_json: String,
     pub enabled: bool,
     pub created_at: String,
+    /// 'always' (default) | 'keyword' | 'llm-decides'.
+    /// Read in `run_pre_call_hooks` to decide whether to actually run
+    /// the hook for a given user message — saves wasted API calls and
+    /// noisy <context> blocks when the data isn't relevant.
+    pub fire_mode: String,
 }
 
 #[tauri::command]
@@ -10909,7 +10921,7 @@ pub fn list_agent_hooks(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at
+            "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at, fire_mode
              FROM agent_hooks WHERE agent_id = ?1 ORDER BY position ASC, created_at ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -10924,6 +10936,7 @@ pub fn list_agent_hooks(
                 config_json: row.get(5)?,
                 enabled: row.get::<_, i32>(6)? != 0,
                 created_at: row.get(7)?,
+                fire_mode: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "always".to_string()),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -10940,6 +10953,7 @@ pub fn save_agent_hook(
     kind: String,
     config_json: String,
     enabled: Option<bool>,
+    fire_mode: Option<String>,
 ) -> Result<AgentHook, String> {
     let allowed = ["file", "webhook", "mcp-call", "db-query", "computed"];
     if !allowed.contains(&kind.as_str()) {
@@ -10950,6 +10964,11 @@ pub fn save_agent_hook(
     }
     serde_json::from_str::<serde_json::Value>(&config_json)
         .map_err(|e| format!("Invalid hook config JSON: {}", e))?;
+
+    let fire_mode_val = fire_mode.unwrap_or_else(|| "always".to_string());
+    if !["always", "keyword", "llm-decides"].contains(&fire_mode_val.as_str()) {
+        return Err(format!("Unsupported hook fire_mode: {}", fire_mode_val));
+    }
 
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -10966,15 +10985,16 @@ pub fn save_agent_hook(
     let enabled_int: i32 = if enabled.unwrap_or(true) { 1 } else { 0 };
 
     conn.execute(
-        "INSERT INTO agent_hooks (id, agent_id, position, name, kind, config_json, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO agent_hooks (id, agent_id, position, name, kind, config_json, enabled, created_at, fire_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
            position = excluded.position,
            name = excluded.name,
            kind = excluded.kind,
            config_json = excluded.config_json,
-           enabled = excluded.enabled",
-        params![final_id, agent_id, final_pos, name, kind, config_json, enabled_int, now],
+           enabled = excluded.enabled,
+           fire_mode = excluded.fire_mode",
+        params![final_id, agent_id, final_pos, name, kind, config_json, enabled_int, now, fire_mode_val],
     )
     .map_err(|e| e.to_string())?;
 
@@ -10987,6 +11007,7 @@ pub fn save_agent_hook(
         config_json,
         enabled: enabled.unwrap_or(true),
         created_at: now,
+        fire_mode: fire_mode_val,
     })
 }
 
@@ -10998,11 +11019,76 @@ pub fn delete_agent_hook(db: State<'_, DbState>, id: String) -> Result<(), Strin
     Ok(())
 }
 
+/// Decide whether a hook should fire for THIS particular user message.
+/// Returns true if the hook should run, false to skip it. Skipped hooks
+/// don't contribute to the `<context>` block — saves API cost and keeps
+/// the prompt tight when data isn't relevant. Beatriz's design (2026-05-08).
+async fn should_fire_hook(hook: &AgentHook, user_prompt: &str) -> bool {
+    let mode = hook.fire_mode.as_str();
+    if mode == "always" {
+        return true;
+    }
+    // Parse the JSON config once — the fire-eval knobs live here too.
+    let cfg: serde_json::Value = match serde_json::from_str(&hook.config_json) {
+        Ok(v) => v,
+        // Malformed config falls back to firing — better to inject possibly
+        // stale data than silently skip and have the agent ignorant.
+        Err(_) => return true,
+    };
+
+    if mode == "keyword" {
+        let keywords = cfg
+            .get("whenKeywords")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_lowercase))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if keywords.is_empty() {
+            return false; // no rules → never fires
+        }
+        let lower = user_prompt.to_lowercase();
+        return keywords.iter().any(|k| lower.contains(k));
+    }
+
+    if mode == "llm-decides" {
+        let when_desc = cfg
+            .get("whenDescription")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if when_desc.is_empty() {
+            return false; // no rule → never fires
+        }
+        let model = cfg
+            .get("classifierModel")
+            .and_then(|v| v.as_str())
+            .unwrap_or("claude-haiku-4-5")
+            .to_string();
+        let provider = cfg
+            .get("classifierProvider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("anthropic")
+            .to_string();
+        match classify_should_fire(&provider, &model, when_desc, user_prompt).await {
+            Ok(should) => should,
+            // Classifier outage → fail-safe to firing the hook so the
+            // agent doesn't suddenly lose data context.
+            Err(_) => true,
+        }
+    } else {
+        true
+    }
+}
+
 /// Run all enabled hooks for an agent and return a formatted `<context>`
 /// block. Failures don't break dispatch — they're surfaced as inline error
 /// notes inside the same block so the model sees what couldn't be fetched.
 async fn run_pre_call_hooks(
     hooks: Vec<AgentHook>,
+    user_prompt: &str,
 ) -> String {
     if hooks.is_empty() {
         return String::new();
@@ -11010,6 +11096,9 @@ async fn run_pre_call_hooks(
     let mut sections: Vec<String> = Vec::new();
     for hook in hooks {
         if !hook.enabled {
+            continue;
+        }
+        if !should_fire_hook(&hook, user_prompt).await {
             continue;
         }
         let result = execute_hook(&hook).await;
@@ -11027,6 +11116,119 @@ async fn run_pre_call_hooks(
         String::new()
     } else {
         format!("<context>\n{}\n</context>\n\n", sections.join("\n\n"))
+    }
+}
+
+/// Lightweight LLM classifier — asks "should the hook fire?" and parses
+/// the response. Designed for cheap fast models (Haiku, GPT-4o-mini,
+/// Gemini Flash, etc.). Cost per call is in the order of $0.0001.
+async fn classify_should_fire(
+    provider: &str,
+    model: &str,
+    when_description: &str,
+    user_prompt: &str,
+) -> Result<bool, String> {
+    // Use the provider's stored API key — we expect the same key that
+    // powers the agent's chat dispatch to be on file.
+    let api_key = read_provider_api_key(provider)?;
+    let system = "You are a fast classifier. Respond with ONLY \"YES\" or \"NO\" (no other text). Decide whether the data described by the rule is relevant to the user's message.";
+    let user = format!(
+        "Rule: this data should fire when: {when_description}\n\nUser message: {user_prompt}\n\nShould the data fire? Reply YES or NO."
+    );
+
+    let client = reqwest::Client::new();
+    let text = match provider {
+        "anthropic" => {
+            let payload = serde_json::json!({
+                "model": model,
+                "max_tokens": 8,
+                "system": system,
+                "messages": [{ "role": "user", "content": user }],
+            });
+            let r = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("classifier request failed: {}", e))?;
+            if !r.status().is_success() {
+                return Err(format!("classifier {}: {}", r.status(), r.text().await.unwrap_or_default()));
+            }
+            let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+            body.get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+        // OpenAI-compatible chat completions for the rest. Covers OpenAI,
+        // Groq, xAI, Mistral, DeepSeek, Together, Fireworks. Gemini uses
+        // its own format and isn't supported as classifier in v2.0 alpha.
+        _ => {
+            let url = match provider {
+                "openai"   => "https://api.openai.com/v1/chat/completions",
+                "groq"     => "https://api.groq.com/openai/v1/chat/completions",
+                "xai"      => "https://api.x.ai/v1/chat/completions",
+                "mistral"  => "https://api.mistral.ai/v1/chat/completions",
+                "deepseek" => "https://api.deepseek.com/v1/chat/completions",
+                "together" => "https://api.together.xyz/v1/chat/completions",
+                "fireworks"=> "https://api.fireworks.ai/inference/v1/chat/completions",
+                _ => return Err(format!("classifier provider not supported: {}", provider)),
+            };
+            let payload = serde_json::json!({
+                "model": model,
+                "max_tokens": 8,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": user },
+                ],
+            });
+            let r = client
+                .post(url)
+                .bearer_auth(&api_key)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("classifier request failed: {}", e))?;
+            if !r.status().is_success() {
+                return Err(format!("classifier {}: {}", r.status(), r.text().await.unwrap_or_default()));
+            }
+            let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+            body.get("choices")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+    };
+    Ok(text.to_uppercase().contains("YES"))
+}
+
+/// Look up the active API key for a given provider in `llm_api_keys`,
+/// decrypted. Returns the most recently-created key. Used by the
+/// classifier — same provider system as the agent's chat dispatch.
+fn read_provider_api_key(provider: &str) -> Result<String, String> {
+    use rusqlite::Connection;
+    let path = home_dir().join(".ato").join("local.db");
+    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    match conn.query_row::<String, _, _>(
+        "SELECT encrypted_key FROM llm_api_keys WHERE provider = ?1 AND is_active = 1 ORDER BY created_at DESC LIMIT 1",
+        params![provider],
+        |row| row.get(0),
+    ) {
+        Ok(encrypted) => simple_decrypt(&encrypted),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!(
+            "No {} API key on file. Add one in Settings → API Keys (or in the create-agent wizard).",
+            provider
+        )),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -11114,7 +11316,7 @@ pub async fn prompt_agent_with_context(
     let rendered_prompt = substitute_variables(&prompt, &resolved);
 
     // Step 3: run pre-call hooks → format as <context> block.
-    let context_block = run_pre_call_hooks(hooks).await;
+    let context_block = run_pre_call_hooks(hooks, &prompt).await;
 
     // Step 4: prepend context block to the user prompt.
     let final_prompt = if context_block.is_empty() {
@@ -11291,8 +11493,10 @@ pub async fn prompt_agent_with_history(
     // Stitch everything together.
     let stitched = build_final_prompt(summary.as_deref(), &recent, &rendered_new);
 
-    // Pre-call hooks.
-    let context_block = run_pre_call_hooks(hooks).await;
+    // Pre-call hooks. fire_mode evaluation uses the new turn's user
+    // message (`new_prompt`), not the stitched history — keyword/LLM
+    // gating cares about what THIS turn is asking for.
+    let context_block = run_pre_call_hooks(hooks, &new_prompt).await;
     let final_prompt = if context_block.is_empty() {
         stitched
     } else {
@@ -11358,7 +11562,7 @@ fn merge_model_into_config(
 
 fn load_agent_hooks(conn: &Connection, agent_id: &str) -> Vec<AgentHook> {
     let mut stmt = match conn.prepare(
-        "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at
+        "SELECT id, agent_id, position, name, kind, config_json, enabled, created_at, fire_mode
          FROM agent_hooks WHERE agent_id = ?1 ORDER BY position ASC, created_at ASC",
     ) {
         Ok(s) => s,
@@ -11374,6 +11578,7 @@ fn load_agent_hooks(conn: &Connection, agent_id: &str) -> Vec<AgentHook> {
             config_json: row.get(5)?,
             enabled: row.get::<_, i32>(6).unwrap_or(1) != 0,
             created_at: row.get(7)?,
+            fire_mode: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "always".to_string()),
         })
     }) {
         Ok(r) => r,
@@ -13235,7 +13440,8 @@ pub async fn prompt_agent_with_history_stream(
 
     let rendered_new = substitute_variables(&new_prompt, &resolved);
     let stitched = build_final_prompt(summary.as_deref(), &recent, &rendered_new);
-    let context_block = run_pre_call_hooks(hooks).await;
+    // fire_mode evaluation uses the current turn's user message.
+    let context_block = run_pre_call_hooks(hooks, &new_prompt).await;
     let final_prompt = if context_block.is_empty() {
         stitched
     } else {
@@ -13528,7 +13734,7 @@ async fn headless_dispatch_agent(
     let (response_model, fallback_model) = load_agent_response_model(conn, agent_id);
 
     let rendered = substitute_variables(prompt, &resolved);
-    let context_block = run_pre_call_hooks(hooks).await;
+    let context_block = run_pre_call_hooks(hooks, &prompt).await;
     let final_prompt = if context_block.is_empty() {
         rendered
     } else {

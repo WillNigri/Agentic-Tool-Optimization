@@ -700,6 +700,16 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_kchunks_agent ON agent_knowledge_chunks(agent_id, position)",
         [],
     );
+    // v2.0.0 Wave 4 — fire-mode for context hooks.
+    // 'always'      = current behavior, hook fires every turn
+    // 'keyword'     = fire only when user_prompt matches one of the
+    //                 keywords stored in config_json.whenKeywords[]
+    // 'llm-decides' = ask config_json.classifierModel "should this hook
+    //                 fire?" given config_json.whenDescription
+    let _ = conn.execute(
+        "ALTER TABLE agent_hooks ADD COLUMN fire_mode TEXT NOT NULL DEFAULT 'always'",
+        [],
+    );
 }
 
 
