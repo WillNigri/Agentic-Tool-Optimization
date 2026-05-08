@@ -338,11 +338,155 @@ jobs:
             exit 1
           }
 
+  # v2.0.0-alpha.5 — Notarize macOS bundles in a SEPARATE job after the
+  # build matrix completes. tauri-action's built-in notarization step
+  # blocked the build until Apple's notary service responded, polling
+  # every few seconds. alpha.2 + alpha.3 both failed at ~41 min on
+  # transient GitHub-runner DNS hiccups mid-poll. By splitting:
+  #
+  #   1. The build job uploads SIGNED-BUT-NOT-NOTARIZED .dmg / .app.tar.gz
+  #   2. THIS job downloads them, runs `xcrun notarytool submit --wait`
+  #      (more robust polling than tauri's), then `xcrun stapler staple`
+  #      to attach the notarization ticket to the bundle directly. The
+  #      .app.tar.gz gets re-tarred (with the now-stapled .app inside)
+  #      and re-signed via `tauri signer sign` so the auto-updater
+  #      verification still passes.
+  #   3. The aggregator job builds latest.json from the FINAL .sig files
+  #      (depends: notarize-macos so it runs last).
+  #
+  # If notarization fails, the release still has signed-but-not-notarized
+  # macOS bundles — Gatekeeper's softer "developer not verified" prompt
+  # instead of hard rejection. Auto-update keeps working in that case;
+  # we just lose the "zero warnings" win until next release retries.
+  notarize-macos:
+    needs: build
+    runs-on: macos-latest
+    # Don't fail the whole pipeline if notarization fails — degrade
+    # gracefully to the signed-only state. The aggregator still builds
+    # latest.json from whatever's on the release.
+    continue-on-error: true
+    steps:
+      - name: Stage Apple notarization key
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/apple"
+          KEY_PATH="$RUNNER_TEMP/apple/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_B64" | base64 -d > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Download signed bundles from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          mkdir -p macos
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            -p "*.dmg" -p "*.app.tar.gz" -D macos/ --clobber
+          ls -la macos/
+
+      - name: Set up Node (for tauri signer sign)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install tauri CLI
+        run: npm install -g @tauri-apps/cli@2
+
+      - name: Notarize + staple .dmg files
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -e
+          shopt -s nullglob
+          for dmg in macos/*.dmg; do
+            echo "::group::Notarizing $dmg"
+            # `submit --wait` polls until Apple returns Accepted/Invalid.
+            # notarytool retries internally on transient network errors,
+            # unlike tauri-action's polling which dies on the first
+            # NSURLErrorDomain Code=-1009.
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait \
+              --timeout 1800
+            echo "Stapling $dmg..."
+            xcrun stapler staple "$dmg"
+            echo "::endgroup::"
+          done
+
+      - name: Notarize + staple .app inside .app.tar.gz, re-sign
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          shopt -s nullglob
+          for tarball in macos/*.app.tar.gz; do
+            base="$(basename "$tarball")"
+            echo "::group::Processing $base"
+            workdir="${tarball%.tar.gz}-work"
+            rm -rf "$workdir"
+            mkdir -p "$workdir"
+            tar xzf "$tarball" -C "$workdir"
+            app_path="$(find "$workdir" -maxdepth 2 -name "*.app" -type d | head -1)"
+            if [ -z "$app_path" ]; then
+              echo "::warning::no .app found inside $tarball — skipping"
+              continue
+            fi
+            echo "Found app: $app_path"
+            # notarytool wants a wrapper container — zip the .app first.
+            zip_path="$workdir/$(basename "$app_path").zip"
+            ditto -c -k --keepParent "$app_path" "$zip_path"
+            xcrun notarytool submit "$zip_path" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait \
+              --timeout 1800
+            # Stapler attaches the ticket directly to the .app bundle —
+            # works on .app even though we submitted a .zip.
+            xcrun stapler staple "$app_path"
+            # Re-tar with the stapled .app. Bytes change → previous .sig
+            # is stale → must re-sign.
+            (cd "$workdir" && tar czf "../$base" "$(basename "$app_path")")
+            # Re-sign the new .app.tar.gz with the same minisign key the
+            # auto-updater trusts. tauri-action env var conventions —
+            # tauri signer reads the key from TAURI_SIGNING_PRIVATE_KEY.
+            tauri signer sign "$tarball"
+            echo "::endgroup::"
+          done
+
+      - name: Re-upload notarized bundles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in macos/*.dmg macos/*.app.tar.gz macos/*.app.tar.gz.sig; do
+            [ -f "$f" ] || continue
+            echo "Re-uploading $(basename "$f")"
+            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber
+          done
+
   # Aggregator job: pull all .sig files from the release after the matrix
   # finishes, construct latest.json, upload it. Replaces tauri-action's
   # broken updater-json generation step.
   generate-updater-manifest:
-    needs: build
+    # Depends on notarize-macos so latest.json reflects the FINAL .sig
+    # files (post-notarization re-signing). If notarize-macos errored
+    # (continue-on-error), the .sig files from the build job are still
+    # there and valid — we just don't have notarization tickets on the
+    # macOS bundles.
+    needs: [build, notarize-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Build + upload latest.json
