@@ -1,6 +1,6 @@
 {
   "name": "ato",
-  "version": "1.5.22",
+  "version": "2.0.0-alpha.1",
   "private": true,
   "description": "Agentic Tool Optimization — the control panel for AI coding tools",
   "license": "MIT",
