@@ -16,6 +16,7 @@ import { updateAgentMemoryPolicy } from "@/lib/agents";
 import { useDemoStore } from "@/stores/useDemoStore";
 import { cn } from "@/lib/utils";
 import { FileText, Plus, Trash2 } from "lucide-react";
+import AuthRequirements from "./AuthRequirements";
 
 // Quick (form) path — wired to Rust create_agent. T3.b adds:
 //   - Draft persistence via localStorage (auto-save on change, cleared on success)
@@ -328,6 +329,13 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
           })}
         </div>
       </Field>
+
+      {/* Live auth/availability summary that responds to kind + runtime.
+          Shows whether the user has the right key, hard-blocks External
+          with no key behind an inline "Add API key" form. Beatriz feedback
+          (2026-05-08): the kind toggle didn't change anything in the form
+          before this. */}
+      <AuthRequirements kind={draft.kind} runtime={draft.runtime} />
 
       <Field label={t("createAgent.quick.name", "Name")} required>
         <input
