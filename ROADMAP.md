@@ -190,24 +190,49 @@ The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers
 - Agent performance benchmarking across runtimes
 - **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine
 
-### v2.0.0 — External Agents / Hosted Deployment (Planned)
+### v2.0.0 — External Agents / Hosted Deployment (Released May 2026)
 The strategic v2 release: ATO becomes the place where companies build customer-facing chatbots, deploy them to their own infrastructure (any LLM provider), and track their behavior — without us competing with hosting providers. ([detailed plan](docs/V2.0.0-EXTERNAL-AGENTS.md))
 
-- **"Internal vs External" toggle on agent create** — external agents get a Deploy tab + Knowledge tab, lock to read-only permissions by default.
-- **Knowledge ingestion** — drag-drop PDFs, MD files, URLs. RAG'd via context hooks. pgvector under the hood; users see a file list.
-- **External API + DB connections** — point-and-click integration with the customer's APIs / databases as scoped tools the agent can call.
-- **Deploy targets** — generate a deployable bundle for: Anthropic Claude API, OpenAI API, any of the 15 providers via the customer's own key. Templates for Cloudflare Worker / Vercel Edge Function / Docker / Railway / standalone Node.
-- **Embed widget** — `<script src="embed.agentictool.ai/v1.js" data-agent="...">`. Bubble chat for any website. Talks to whichever endpoint the customer deployed to.
-- **Multi-runtime support stays first-class** — the customer always picks which provider runs the dispatch. ATO never holds inference compute.
-- **Tracking dashboard** — opt-in trace stream from the deployed agent back to ato-cloud. Conversations/day, escalation triggers, cost-per-conversation, eval scores.
-- **Trace sink integrations** — one-click forward to Langfuse / Helicone / LangSmith / OpenTelemetry. We don't compete with request-level observability tools; we own agent-level + multi-runtime + embed-side analytics.
+Shipped across alpha.1–alpha.5:
+- **"Internal vs External" toggle on agent create** — external agents get a Deploy tab + Knowledge tab + Raw tab, surface the relevant chat-LLM provider keys (all 9 providers), and skip Skills/MCPs/Project that don't apply.
+- **Knowledge ingestion** — drag-drop text + ingest, multi-provider embeddings auto-detected across OpenAI / Voyage / Gemini / Cohere / Ollama. Stored locally in SQLite (`agent_knowledge_chunks` table) with cosine similarity retrieval. Inlined into deploy bundles so the deployed agent stays self-contained.
+- **Deploy targets** — generate a deployable bundle for any of the 9 chat-LLM providers (Anthropic, OpenAI, Gemini, Groq, Mistral, DeepSeek, xAI, Together, Fireworks). Templates: Cloudflare Worker, Vercel Edge Function, Docker, standalone Node script.
+- **Embed widget** — vanilla-JS chat-bubble (~250 LOC, IIFE, no deps) emitted with every deploy bundle. `data-*` attribute config, localStorage history, customer-brandable.
+- **Trace sink integrations** — one-click forward from each bundle to Langfuse + generic webhook (OTLP shape) in addition to the ATO Insights pipeline. We don't compete with request-level tools; we own agent-level + multi-runtime + embed-side.
+- **Insights → External tab** — per-agent metric cards (run count / success rate / p50/p95 latency / cost over 7/30/90d window), drill-down trace explorer. Reads cloud `/api/agent-traces*` (Pro tier).
+- **Apple Developer signing + notarization** — production CI signs and notarizes every macOS DMG so customers don't see Gatekeeper warnings.
 
-### v2.1.0+ — Multi-Runtime Differentiated Observability (Planned)
-The unique-value layer on top of v2.0's deployment surface — what existing observability tools cannot do because they don't have our multi-runtime + agent-design context:
+Deferred to a v2.0.x patch:
+- **Bundle → cloud trace forwarding auth** — bundles POST `Bearer ATO_TRACE_KEY`, cloud expects JWT. External-bundle traces silently 401 today; internal-agent traces flow correctly.
+- **External API + DB connections as scoped tools** — pushed to v2.1+ alongside the eval workbench.
+
+### v2.1.0 — Multi-Runtime Differentiated Observability (In Progress, May 2026)
+The unique-value layer on top of v2.0's deployment surface — what existing observability tools cannot do because they don't have our multi-runtime + agent-design context.
+
+Phase 1 — Trace pipeline (shipped):
+- **Embed-key auth path** — `users.embed_key` column + `POST /api/agent-traces/embed` Bearer-auth route. Bundles deployed to Cloudflare/Vercel/Docker/Node now successfully forward traces back to ato-cloud (the Wave 5 write-side gap is closed).
+- **Gateway routes** — `/api/agent-traces` and `/api/agent-traces/embed` properly proxied (the v1.4.0 skills route was orphaned for 6 months).
+- **Embed key UI** — DeployTab surfaces the per-account ATO_TRACE_KEY with reveal/copy/rotate.
+
+Phase 2 — Configuration impact ledger (shipped):
+- **`agent_config_changes` table** — versioned audit of every model swap, prompt edit, hook add. Recorded automatically by `createAgent` + `updateAgentMcps` + `updateAgentMemoryPolicy` + `updateAgentRoleModels` + `updateAgentKind`.
+- **AgentDetail History tab** — per-agent timeline of changes with field, old→new diff, actor, timestamp.
+- **Dashboard overlay** — External Insights drill-down merges traces + change markers chronologically so regressions tie back to specific edits.
+
+Phase 3 — File attribution per dispatch (shipped):
+- **Mtime-snapshot diff** — Rust `file_attribution` module captures pre/post project-state snapshots around every dispatch; diffs them into the list of files the agent touched. Works for every runtime since it's filesystem-level.
+- **`agent_traces.files_touched` JSONB column** — populated by every `prompt_agent_with_context` and streaming dispatch; surfaced in External Insights drill-down with collapsible per-trace file list.
+- **The "detective work" answer** — multi-agent runs (sequential pipelines, routed groups) now show which agent touched which files without manual git-blame.
+
+Phase 4 — Live runs registry (shipped):
+- **In-memory active-runs map** (Rust `active_runs.rs`) — every `prompt_agent_with_context` dispatch registers `(run_id, agent_slug, runtime, workspace, started_at, status)` for the duration of the run.
+- **Insights → Live sub-tab** — polled every 2s; shows what's running with workspace/runtime/elapsed time + a one-click Kill button per row. Default tab so the live state is the first thing users see.
+- **The "missing ops layer"** answer (Twitter feedback): no more reading every terminal buffer to find the stuck dispatch.
+
+Phase 5 — Still planned:
 - **Cross-runtime regression detection** — "Switching @reviewer from Sonnet 4.6 → 4.7 dropped evaluator score from 0.91 → 0.74 across 412 conversations. Here are the 14 newly-failing examples."
 - **Cost optimization recommendations** — shadow-evaluate alternative runtimes, surface "switching @triage from GPT-4 → Haiku saves $312/mo with no measurable quality drop."
 - **Pipeline trace visualizer** — sequential groups (Claude → Codex → Gemini) rendered as a single conversation flow with handoff inspection.
-- **Configuration impact ledger** — every variable / hook / system-prompt change versioned + correlated with quality scores.
 - **Eval workbench** — replay last week's failures against tweaked configs in batch; compare per runtime.
 - **Embed-side analytics** — page where the chat lives, time-to-first-message, drop-off rate per message turn, escalation keyword clusters.
 

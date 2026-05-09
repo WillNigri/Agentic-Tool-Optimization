@@ -1,0 +1,680 @@
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Loader2,
+  AlertCircle,
+  Globe,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  DollarSign,
+  Zap,
+  Database,
+  ExternalLink,
+  Sparkles,
+} from "lucide-react";
+import {
+  getAgentTraceMetrics,
+  getAgentTraces,
+  getTracesByFile,
+  canQueryCloudTraces,
+  type CloudAgentTrace,
+  type CloudAgentTraceMetric,
+} from "@/lib/cloudAgentTraces";
+import { listAgents, type Agent } from "@/lib/agents";
+import { listConfigChanges, type ConfigChange } from "@/lib/cloudConfigChanges";
+import { useFeatureFlag } from "@/lib/tier";
+import { cn } from "@/lib/utils";
+
+// v2.0.0 Wave 5 — External Agents dashboard.
+//
+// Surfaces traces flowing back from the deployed Cloudflare Worker /
+// Vercel Edge / Docker / Node bundles. Read-only view; the heavy
+// lifting (POST /agent-traces from the bundles, retention enforcement,
+// per-tier limits) lives on ato-cloud.
+//
+// Three slices:
+//   1. Per-agent metric cards (run count, success rate, p50/p95
+//      latency, total cost over the window)
+//   2. Drill-down for a selected agent: recent traces with status,
+//      runtime, latency, error if any
+//   3. Empty states for the various blocked paths (no cloud login,
+//      free tier, no traces yet)
+
+type Days = 7 | 30 | 90;
+
+export default function ExternalAgentsInsights() {
+  const { t } = useTranslation();
+  const isPro = useFeatureFlag("cloud-traces");
+  const canQuery = canQueryCloudTraces();
+  const [windowDays, setWindowDays] = useState<Days>(30);
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  // v2.1.0 — when set, opens the FileHistoryModal showing every run
+  // that touched this path across all agents. Twitter ask: "who
+  // changed this file and why?" — this is the answer.
+  const [openFile, setOpenFile] = useState<string | null>(null);
+
+  // Local agent list — used to mark which slugs are EXTERNAL (not just
+  // any agent the cloud has traces for) so we surface only the
+  // customer-facing dispatch surface here. Internal-agent traces are
+  // shown in the existing Agents tab via local jsonl.
+  const { data: agents = [] } = useQuery({
+    queryKey: ["agents-for-external-insights"],
+    queryFn: () => listAgents(),
+    staleTime: 30_000,
+  });
+  const externalAgents = agents.filter((a) => a.kind === "external");
+  const externalSlugs = new Set(externalAgents.map((a) => a.slug));
+
+  const metricsQuery = useQuery({
+    queryKey: ["cloud-agent-trace-metrics", windowDays],
+    queryFn: () => getAgentTraceMetrics(windowDays),
+    enabled: canQuery && isPro,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+
+  const detailQuery = useQuery({
+    queryKey: ["cloud-agent-traces", selectedSlug],
+    queryFn: () => getAgentTraces(selectedSlug ?? undefined, 50),
+    enabled: canQuery && isPro && !!selectedSlug,
+    staleTime: 15_000,
+  });
+
+  // v2.1.0 — config changes for the selected agent, in the same window
+  // as the trace list. Merged into the timeline so the operator can
+  // see "p95 spiked AFTER this model swap, before this prompt edit."
+  const changesQuery = useQuery({
+    queryKey: ["cloud-config-changes", selectedSlug, windowDays],
+    queryFn: () =>
+      listConfigChanges({ agentSlug: selectedSlug!, days: windowDays, limit: 100 }),
+    enabled: canQuery && isPro && !!selectedSlug,
+    staleTime: 15_000,
+  });
+
+  // ── Empty / blocked states ─────────────────────────────────────────
+  if (!isPro) {
+    return (
+      <Empty
+        icon={<Zap size={20} />}
+        title={t("insights.external.proRequired", "External agent traces are a Pro feature")}
+        body={t(
+          "insights.external.proBody",
+          "Traces from your deployed Cloudflare / Vercel / Docker / Node bundles get streamed back here so you can see how customers actually use the agent. Cloud sign-up gives you Pro free during the alpha.",
+        )}
+      />
+    );
+  }
+  if (!canQuery) {
+    return (
+      <Empty
+        icon={<Globe size={20} />}
+        title={t("insights.external.signInRequired", "Sign in to see deployed-agent traces")}
+        body={t(
+          "insights.external.signInBody",
+          "Settings → Cloud → Sign in. Trace data lives on ato-cloud so it's accessible across all your machines + survives a desktop reinstall.",
+        )}
+      />
+    );
+  }
+  if (externalAgents.length === 0) {
+    return (
+      <Empty
+        icon={<Globe size={20} />}
+        title={t("insights.external.noExternal", "No external agents yet")}
+        body={t(
+          "insights.external.noExternalBody",
+          "External agents are designed for customer-facing deployment. Create one via + New Agent → External, then deploy a bundle to start collecting traces.",
+        )}
+      />
+    );
+  }
+  if (metricsQuery.isLoading) {
+    return (
+      <div className="flex items-center justify-center h-32 text-cs-muted">
+        <Loader2 size={18} className="animate-spin mr-2" />
+        {t("insights.external.loading", "Loading metrics…")}
+      </div>
+    );
+  }
+  if (metricsQuery.isError) {
+    return (
+      <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+        <AlertCircle size={14} className="text-cs-danger shrink-0 mt-0.5" />
+        <span>
+          {t("insights.external.error", "Couldn't load trace metrics from cloud")}: {String(metricsQuery.error)}
+        </span>
+      </div>
+    );
+  }
+
+  const allMetrics = metricsQuery.data?.metrics ?? [];
+  // Filter to ONLY external-agent slugs the user owns locally — keeps
+  // the surface focused on deployed-agent observability.
+  const externalMetrics = allMetrics.filter((m) => externalSlugs.has(m.agent_slug));
+
+  // ── Render ────────────────────────────────────────────────────────
+  return (
+    <div className="space-y-4">
+      {/* Window selector + summary */}
+      <header className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium text-cs-text">
+            {t("insights.external.title", "External agent traces")}
+          </h3>
+          <p className="mt-0.5 text-[11px] text-cs-muted">
+            {t(
+              "insights.external.subtitle",
+              "Live data from your deployed Cloudflare / Vercel / Docker / Node bundles, streamed via the agent_traces pipeline.",
+            )}
+          </p>
+        </div>
+        <div className="inline-flex rounded-md border border-cs-border bg-cs-bg-raised p-0.5">
+          {([7, 30, 90] as const).map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setWindowDays(d)}
+              className={cn(
+                "rounded px-3 py-1.5 text-[11px] font-medium transition",
+                windowDays === d
+                  ? "bg-cs-accent/15 text-cs-accent"
+                  : "text-cs-muted hover:text-cs-text",
+              )}
+            >
+              {t("insights.external.daysLabel", "{{d}}d", { d })}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {externalMetrics.length === 0 ? (
+        <NoTracesYet externalAgents={externalAgents} />
+      ) : (
+        <ul className="space-y-2">
+          {externalMetrics.map((m) => (
+            <MetricCard
+              key={m.agent_slug}
+              metric={m}
+              agent={externalAgents.find((a) => a.slug === m.agent_slug)}
+              selected={selectedSlug === m.agent_slug}
+              onSelect={() => setSelectedSlug((s) => (s === m.agent_slug ? null : m.agent_slug))}
+            />
+          ))}
+        </ul>
+      )}
+
+      {/* Drill-down */}
+      {selectedSlug && (
+        <section className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-cs-text">
+              {t("insights.external.recent", "Recent traces — @{{slug}}", { slug: selectedSlug })}
+            </h4>
+            <button
+              type="button"
+              onClick={() => setSelectedSlug(null)}
+              className="text-[11px] text-cs-muted hover:text-cs-text"
+            >
+              {t("common.close", "Close")}
+            </button>
+          </div>
+          {detailQuery.isLoading ? (
+            <div className="text-xs text-cs-muted">
+              <Loader2 size={11} className="inline animate-spin mr-1" />
+              {t("insights.external.loadingTraces", "Loading traces…")}
+            </div>
+          ) : (
+            <MergedTimeline
+              traces={detailQuery.data?.traces ?? []}
+              changes={changesQuery.data?.changes ?? []}
+              onFileClick={setOpenFile}
+            />
+          )}
+        </section>
+      )}
+
+      {openFile && (
+        <FileHistoryModal path={openFile} onClose={() => setOpenFile(null)} />
+      )}
+    </div>
+  );
+}
+
+// ── Sub-components ─────────────────────────────────────────────────────
+
+function MetricCard({
+  metric,
+  agent,
+  selected,
+  onSelect,
+}: {
+  metric: CloudAgentTraceMetric;
+  agent: Agent | undefined;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const { t } = useTranslation();
+  const successRate = metric.run_count > 0 ? metric.ok_count / metric.run_count : 0;
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={onSelect}
+        className={cn(
+          "w-full text-left rounded-lg border p-3 transition-colors",
+          selected
+            ? "border-cs-accent bg-cs-accent/10"
+            : "border-cs-border bg-cs-bg-raised/40 hover:border-cs-accent/40",
+        )}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Globe size={12} className="text-cs-accent" />
+              <code className="font-mono text-sm text-cs-text">{metric.agent_slug}</code>
+              {agent?.runtime && (
+                <span className="text-[10px] uppercase tracking-wide text-cs-muted">
+                  {agent.runtime}
+                </span>
+              )}
+            </div>
+            {agent?.description && (
+              <p className="mt-0.5 text-[11px] text-cs-muted truncate">{agent.description}</p>
+            )}
+          </div>
+          <SuccessBadge rate={successRate} />
+        </div>
+        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+          <Stat
+            icon={<Database size={10} />}
+            label={t("insights.external.runs", "Runs")}
+            value={metric.run_count.toLocaleString()}
+          />
+          <Stat
+            icon={<Clock size={10} />}
+            label={t("insights.external.latency", "p50 / p95")}
+            value={`${metric.p50_ms}ms / ${metric.p95_ms}ms`}
+          />
+          <Stat
+            icon={<XCircle size={10} />}
+            label={t("insights.external.fails", "Failures")}
+            value={metric.fail_count.toLocaleString()}
+          />
+          <Stat
+            icon={<DollarSign size={10} />}
+            label={t("insights.external.cost", "Cost")}
+            value={`$${metric.cost_usd.toFixed(2)}`}
+          />
+        </div>
+      </button>
+    </li>
+  );
+}
+
+function SuccessBadge({ rate }: { rate: number }) {
+  const pct = Math.round(rate * 100);
+  const ok = rate >= 0.95;
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
+        ok
+          ? "border border-cs-accent/40 bg-cs-accent/10 text-cs-accent"
+          : "border border-cs-warn/40 bg-cs-warn/10 text-cs-text",
+      )}
+    >
+      {ok ? <CheckCircle2 size={10} /> : <AlertCircle size={10} />}
+      {pct}% ok
+    </span>
+  );
+}
+
+function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <div className="rounded border border-cs-border bg-cs-bg p-2">
+      <div className="flex items-center gap-1 text-cs-muted">
+        {icon}
+        <span className="text-[10px] uppercase tracking-wide">{label}</span>
+      </div>
+      <div className="mt-0.5 font-mono text-cs-text">{value}</div>
+    </div>
+  );
+}
+
+// v2.1.0 — Merged timeline of traces + config changes. Renders both
+// in chronological order so a reviewer can see "model swap → 6h of
+// degraded p95 → prompt edit → recovery" as one coherent story.
+function MergedTimeline({
+  traces,
+  changes,
+  onFileClick,
+}: {
+  traces: CloudAgentTrace[];
+  changes: ConfigChange[];
+  onFileClick?: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  if (traces.length === 0 && changes.length === 0) {
+    return (
+      <p className="text-[11px] text-cs-muted">
+        {t("insights.external.noActivity", "No traces or config changes in this window.")}
+      </p>
+    );
+  }
+
+  // Tag and merge by timestamp, descending (newest first — matches the
+  // trace list's existing order so the reviewer doesn't have to mentally
+  // re-orient when changes appear).
+  type Row =
+    | { kind: "trace"; at: string; data: CloudAgentTrace }
+    | { kind: "change"; at: string; data: ConfigChange };
+  const rows: Row[] = [
+    ...traces.map((d) => ({ kind: "trace" as const, at: d.started_at, data: d })),
+    ...changes.map((d) => ({ kind: "change" as const, at: d.changed_at, data: d })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
+
+  return (
+    <ul className="space-y-1">
+      {rows.map((row) =>
+        row.kind === "trace" ? (
+          <TraceRow key={`t-${row.data.id}`} trace={row.data} onFileClick={onFileClick} />
+        ) : (
+          <ChangeRow key={`c-${row.data.id}`} change={row.data} />
+        ),
+      )}
+    </ul>
+  );
+}
+
+function TraceRow({
+  trace: tr,
+  onFileClick,
+}: {
+  trace: CloudAgentTrace;
+  onFileClick?: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [showFiles, setShowFiles] = useState(false);
+  const origin =
+    tr.metadata && typeof (tr.metadata as { origin?: unknown }).origin === "string"
+      ? (tr.metadata as { origin: string }).origin
+      : null;
+  const files = tr.files_touched ?? [];
+  const fileCount = files.length;
+  return (
+    <li className="rounded border border-cs-border bg-cs-bg text-[11px]">
+      <div className="flex items-center gap-2 px-2 py-1">
+        {tr.ok ? (
+          <CheckCircle2 size={10} className="text-cs-accent shrink-0" />
+        ) : (
+          <XCircle size={10} className="text-cs-danger shrink-0" />
+        )}
+        <code className="font-mono text-cs-muted shrink-0">
+          {new Date(tr.started_at).toLocaleTimeString()}
+        </code>
+        <span className="text-[10px] uppercase tracking-wide text-cs-muted shrink-0">
+          {tr.runtime}
+        </span>
+        <span className="font-mono text-cs-muted shrink-0">{tr.duration_ms}ms</span>
+        {tr.error && <span className="text-cs-danger truncate flex-1">{tr.error}</span>}
+        {!tr.error && origin && (
+          <span className="text-cs-muted truncate flex-1">{origin}</span>
+        )}
+        {fileCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowFiles((v) => !v)}
+            className="ml-auto inline-flex items-center gap-1 rounded-sm border border-cs-border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] text-cs-muted hover:text-cs-accent shrink-0"
+            title="Files touched during this dispatch"
+          >
+            📁 {fileCount} {fileCount === 1 ? "file" : "files"}
+          </button>
+        )}
+      </div>
+      {showFiles && fileCount > 0 && (
+        <ul className="border-t border-cs-border bg-cs-bg-raised/40 px-3 py-1.5 space-y-0.5">
+          {files.map((f) => (
+            <li key={f} className="flex items-center gap-1.5 font-mono text-[10px]">
+              <span className="text-cs-text truncate flex-1">{f}</span>
+              {onFileClick && (
+                <button
+                  type="button"
+                  onClick={() => onFileClick(f)}
+                  className="shrink-0 text-cs-muted hover:text-cs-accent transition-colors"
+                  title={t("insights.external.fileHistory", "Show every run that touched this file")}
+                >
+                  {t("insights.external.fileHistoryLabel", "history →")}
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function ChangeRow({ change }: { change: ConfigChange }) {
+  // Visually distinct: full-width bar with accent background so the
+  // operator's eye picks it out from the noise of trace rows.
+  const summary =
+    typeof change.new_value === "string"
+      ? change.new_value
+      : change.new_value !== null && change.new_value !== undefined
+        ? JSON.stringify(change.new_value)
+        : "changed";
+  return (
+    <li className="flex items-center gap-2 rounded border border-cs-accent/30 bg-cs-accent/5 px-2 py-1 text-[11px]">
+      <Sparkles size={10} className="text-cs-accent shrink-0" />
+      <code className="font-mono text-cs-accent shrink-0">
+        {new Date(change.changed_at).toLocaleTimeString()}
+      </code>
+      <span className="text-[10px] uppercase tracking-wide text-cs-accent shrink-0">
+        {change.field}
+      </span>
+      <span className="text-cs-text truncate flex-1">{summary}</span>
+      <span className="text-[10px] text-cs-muted shrink-0 truncate max-w-[140px]">
+        {change.changed_by}
+      </span>
+    </li>
+  );
+}
+
+function NoTracesYet({ externalAgents }: { externalAgents: Agent[] }) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-lg border border-dashed border-cs-border bg-cs-bg-raised/40 p-6 text-center text-sm text-cs-muted">
+      <Globe size={20} className="mx-auto mb-2 text-cs-muted" />
+      <p className="text-cs-text font-medium mb-1">
+        {t("insights.external.noTraces", "No traces in this window")}
+      </p>
+      <p className="text-[12px] mb-3">
+        {t(
+          "insights.external.noTracesBody",
+          "You have {{n}} external agent{{plural}} but none have streamed traces back yet. The deployed bundle POSTs to /api/agent-traces only when ATO_TRACE_KEY is set as an env var.",
+          { n: externalAgents.length, plural: externalAgents.length === 1 ? "" : "s" },
+        )}
+      </p>
+      <a
+        href="https://github.com/WillNigri/Agentic-Tool-Optimization#external-agents"
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex items-center gap-1 text-[11px] text-cs-accent hover:underline"
+      >
+        <ExternalLink size={11} />
+        {t("insights.external.docsLink", "How to enable trace forwarding")}
+      </a>
+    </div>
+  );
+}
+
+function Empty({
+  icon,
+  title,
+  body,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="rounded-lg border border-dashed border-cs-border bg-cs-bg-raised/40 p-6 text-center text-sm">
+      <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-cs-accent/10 text-cs-accent">
+        {icon}
+      </div>
+      <p className="text-cs-text font-medium mb-1">{title}</p>
+      <p className="text-[12px] text-cs-muted">{body}</p>
+    </div>
+  );
+}
+
+// v2.1.0 — File history modal. Answers "who changed this file and why,
+// across every dispatch in every agent." Twitter ask: Timur Yessenov.
+//
+// Each row in the modal is a trace where this file appears in
+// files_touched. Sorted newest-first. Shows agent slug + runtime +
+// timestamp + duration + error if any so the operator can pivot from
+// "what changed in this file?" to "what was that run trying to do?"
+// without leaving the dashboard.
+function FileHistoryModal({
+  path,
+  onClose,
+}: {
+  path: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const query = useQuery({
+    queryKey: ["traces-by-file", path],
+    queryFn: () => getTracesByFile(path, 200),
+    staleTime: 15_000,
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-lg border border-cs-border bg-cs-bg-raised shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-cs-border p-4">
+          <div className="min-w-0">
+            <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
+              <Database size={14} className="text-cs-accent shrink-0" />
+              {t("insights.fileHistory.title", "File history")}
+            </h3>
+            <code className="mt-1 block font-mono text-[11px] text-cs-muted truncate" title={path}>
+              {path}
+            </code>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+          >
+            {t("common.close", "Close")}
+          </button>
+        </header>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+          {query.isLoading ? (
+            <div className="flex items-center justify-center h-32 text-cs-muted text-xs">
+              <Loader2 size={14} className="animate-spin mr-2" />
+              {t("insights.fileHistory.loading", "Loading file history…")}
+            </div>
+          ) : query.isError ? (
+            <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+              <AlertCircle size={14} className="text-cs-danger shrink-0 mt-0.5" />
+              <span>
+                {t("insights.fileHistory.error", "Couldn't load history")}: {String(query.error)}
+              </span>
+            </div>
+          ) : (query.data?.traces ?? []).length === 0 ? (
+            <p className="text-xs text-cs-muted text-center py-8">
+              {t(
+                "insights.fileHistory.empty",
+                "No traces touched this file yet. Either it was edited before v2.1.0 (when attribution was added) or by a runtime path that doesn't track files yet.",
+              )}
+            </p>
+          ) : (
+            <ol className="space-y-1.5">
+              {(query.data?.traces ?? []).map((tr) => (
+                <li
+                  key={tr.id}
+                  className="rounded-md border border-cs-border bg-cs-bg p-2.5 text-[11px]"
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    {tr.ok ? (
+                      <CheckCircle2 size={11} className="text-cs-accent shrink-0" />
+                    ) : (
+                      <XCircle size={11} className="text-cs-danger shrink-0" />
+                    )}
+                    <code className="font-mono text-cs-text font-medium">
+                      @{tr.agent_slug}
+                    </code>
+                    <span className="text-[10px] uppercase tracking-wide text-cs-muted shrink-0">
+                      {tr.runtime}
+                    </span>
+                    <span className="ml-auto font-mono text-cs-muted shrink-0">
+                      {new Date(tr.started_at).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 text-cs-muted text-[10px]">
+                    <span>
+                      <Clock size={9} className="inline mr-0.5" />
+                      {tr.duration_ms}ms
+                    </span>
+                    {tr.routed_to && (
+                      <span>
+                        →{" "}
+                        <code className="font-mono text-cs-text">@{tr.routed_to}</code>
+                      </span>
+                    )}
+                    {tr.cost_usd !== null && tr.cost_usd > 0 && (
+                      <span>
+                        <DollarSign size={9} className="inline" />
+                        {tr.cost_usd.toFixed(4)}
+                      </span>
+                    )}
+                    {tr.source && (
+                      <span className="font-mono">{tr.source}</span>
+                    )}
+                  </div>
+                  {tr.error && (
+                    <div className="mt-1 text-cs-danger break-words">{tr.error}</div>
+                  )}
+                  {/* Other files this same dispatch touched — gives
+                       context for "what was that run actually doing?"
+                       without making the user open another modal. */}
+                  {tr.files_touched && tr.files_touched.length > 1 && (
+                    <details className="mt-1.5">
+                      <summary className="cursor-pointer text-[10px] text-cs-muted hover:text-cs-text">
+                        {t("insights.fileHistory.otherFiles", "{{n}} other files in this dispatch", {
+                          n: tr.files_touched.length - 1,
+                        })}
+                      </summary>
+                      <ul className="mt-1 ml-3 space-y-0.5">
+                        {tr.files_touched
+                          .filter((f) => f !== path)
+                          .slice(0, 20)
+                          .map((f) => (
+                            <li key={f} className="font-mono text-[10px] text-cs-muted truncate">
+                              {f}
+                            </li>
+                          ))}
+                      </ul>
+                    </details>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

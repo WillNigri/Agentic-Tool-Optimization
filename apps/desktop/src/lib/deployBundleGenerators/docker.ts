@@ -195,14 +195,20 @@ function renderNodeTraceForward(agent: Agent): string {
   return `    // Best-effort trace forwards — ATO Insights + Langfuse + generic
     // webhook all run in parallel, each gated on its own env var.
     if (process.env.ATO_TRACE_KEY) {
-      fetch("https://api.agentictool.ai/api/agent-traces", {
+      // v2.1.0 — /embed sub-path with canonical batched payload.
+      fetch("https://api.agentictool.ai/api/agent-traces/embed", {
         method: "POST",
         headers: { "Authorization": "Bearer " + process.env.ATO_TRACE_KEY, "content-type": "application/json" },
         body: JSON.stringify({
-          agentSlug: ${JSON.stringify(agent.slug)},
-          origin, userMessage, response,
-          latencyMs: Date.now() - startedAt,
-          timestamp: new Date().toISOString(),
+          traces: [{
+            agentSlug: ${JSON.stringify(agent.slug)},
+            runtime: "external",
+            startedAt: new Date(startedAt).toISOString(),
+            durationMs: Date.now() - startedAt,
+            ok: true,
+            source: "embed-docker",
+            metadata: { origin },
+          }],
         }),
       }).catch(() => {});
     }

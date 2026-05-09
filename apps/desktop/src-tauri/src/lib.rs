@@ -2,6 +2,8 @@ mod openclaw_ws;
 mod log_watcher;
 mod health_poller;
 mod telemetry;
+mod file_attribution;
+mod active_runs;
 pub mod pty;
 
 use rusqlite::{Connection, params};
@@ -1003,6 +1005,16 @@ pub fn run() {
             // v1.0.0: Real-time Agent Monitoring
             get_monitoring_snapshot,
             get_token_timeline,
+            // v2.1.0: Per-dispatch file attribution — answers "which agent
+            // touched which files" by mtime-snapshotting the project root
+            // before/after each dispatch.
+            file_attribution::snapshot_project_files,
+            file_attribution::diff_project_files,
+            // v2.1.0 Phase 4: Active runs registry — answers "which
+            // runtime is running where" + enables one-click kill from
+            // the dashboard, no terminal-buffer hunting required.
+            active_runs::list_active_runs,
+            active_runs::kill_active_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

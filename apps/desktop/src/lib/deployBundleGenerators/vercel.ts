@@ -173,14 +173,21 @@ function renderVercelTraceForward(agent: Agent): string {
   // Langfuse + generic webhook all run in parallel; each is gated on
   // its own env var so the customer opts in per-sink.
   if (process.env.ATO_TRACE_KEY) {
-    fetch("https://api.agentictool.ai/api/agent-traces", {
+    // v2.1.0 — /embed sub-path accepts Bearer ATO_TRACE_KEY (no JWT
+    // needed); canonical batched payload, metadata-only (no PII).
+    fetch("https://api.agentictool.ai/api/agent-traces/embed", {
       method: "POST",
       headers: { "Authorization": "Bearer " + process.env.ATO_TRACE_KEY, "content-type": "application/json" },
       body: JSON.stringify({
-        agentSlug: ${JSON.stringify(agent.slug)},
-        origin, userMessage, response,
-        latencyMs: Date.now() - startedAt,
-        timestamp: new Date().toISOString(),
+        traces: [{
+          agentSlug: ${JSON.stringify(agent.slug)},
+          runtime: "external",
+          startedAt: new Date(startedAt).toISOString(),
+          durationMs: Date.now() - startedAt,
+          ok: true,
+          source: "embed-vercel",
+          metadata: { origin },
+        }],
       }),
     }).catch(() => {});
   }

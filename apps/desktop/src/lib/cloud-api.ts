@@ -472,4 +472,21 @@ export async function getCloudSkills(): Promise<CloudSkill[]> {
   return apiRequest<CloudSkill[]>('/api/skills');
 }
 
+// v2.1.0 — Embed key for deployed-bundle trace ingestion. Mint-on-read
+// (the cloud generates the key the first time GET hits and persists
+// it). Pro+ only — free tier gets a 403 + TIER_REQUIRED error code.
+export async function getEmbedKey(): Promise<string> {
+  const data = await apiRequest<{ embedKey: string }>('/api/auth/me/embed-key');
+  return data.embedKey;
+}
+
+// Rotates the embed key — old key stops working immediately. Use when
+// a deployed bundle's key is suspected leaked. Returns the fresh key.
+export async function rotateEmbedKey(): Promise<string> {
+  const data = await apiRequest<{ embedKey: string }>('/api/auth/me/embed-key/rotate', {
+    method: 'POST',
+  });
+  return data.embedKey;
+}
+
 export { CloudApiError };

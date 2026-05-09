@@ -1,6 +1,29 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { uploadAgentTrace } from "@/lib/agentTraceUpload";
 
+// v2.1.0 — pre/post mtime snapshots so traces carry "files touched"
+// attribution. Gated on activeProjectPath; cheap (<200ms typical) and
+// silent on failure so the dispatch path never breaks.
+async function snapshotBefore(activeProjectPath?: string): Promise<Record<string, number> | null> {
+  if (!activeProjectPath) return null;
+  try {
+    return await invoke<Record<string, number>>("snapshot_project_files", { root: activeProjectPath });
+  } catch {
+    return null;
+  }
+}
+async function diffAfter(
+  before: Record<string, number> | null,
+  activeProjectPath?: string,
+): Promise<string[] | undefined> {
+  if (!before || !activeProjectPath) return undefined;
+  try {
+    return await invoke<string[]>("diff_project_files", { root: activeProjectPath, prior: before });
+  } catch {
+    return undefined;
+  }
+}
+
 // v1.4.0 F1 — Frontend wrappers for agent variables (dynamic prompt resolvers).
 //
 // The Rust source of truth is `apps/desktop/src-tauri/src/commands.rs`:
@@ -96,6 +119,7 @@ export async function promptAgentWithContext(input: {
 }): Promise<string> {
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
+  const before = await snapshotBefore(input.activeProjectPath);
   try {
     const result = await invoke<string>("prompt_agent_with_context", {
       agentId: input.agentId,
@@ -104,6 +128,7 @@ export async function promptAgentWithContext(input: {
       config: input.config ?? null,
       activeProjectPath: input.activeProjectPath ?? null,
     });
+    const filesTouched = await diffAfter(before, input.activeProjectPath);
     void uploadAgentTrace({
       agentSlug: input.agentSlug ?? input.agentId,
       runtime: input.runtime,
@@ -111,6 +136,7 @@ export async function promptAgentWithContext(input: {
       durationMs: Date.now() - t0,
       ok: true,
       source: input.source ?? "desktop:quick_test",
+      filesTouched,
     });
     return result;
   } catch (err) {
@@ -158,6 +184,9 @@ export async function promptAgentWithHistoryStream(input: {
 }): Promise<string> {
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
+  // Snapshot eagerly — we kick off async snapshot in parallel with the
+  // stream invocation so attribution doesn't add wall-clock latency.
+  const beforePromise = snapshotBefore(input.activeProjectPath);
   return new Promise<string>((resolve, reject) => {
     const channel = new Channel<StreamEvent>();
     let settled = false;
@@ -167,15 +196,19 @@ export async function promptAgentWithHistoryStream(input: {
         input.onChunk(msg.text);
       } else if (msg.kind === "done") {
         settled = true;
-        void uploadAgentTrace({
-          agentSlug: input.agentSlug ?? input.agentId,
-          runtime: input.runtime,
-          startedAt,
-          durationMs: Date.now() - t0,
-          ok: true,
-          source: input.source ?? "desktop:promptbar:stream",
-          metadata: { historyLength: input.history.length, streamed: true },
-        });
+        void (async () => {
+          const filesTouched = await diffAfter(await beforePromise, input.activeProjectPath);
+          void uploadAgentTrace({
+            agentSlug: input.agentSlug ?? input.agentId,
+            runtime: input.runtime,
+            startedAt,
+            durationMs: Date.now() - t0,
+            ok: true,
+            source: input.source ?? "desktop:promptbar:stream",
+            metadata: { historyLength: input.history.length, streamed: true },
+            filesTouched,
+          });
+        })();
         resolve(msg.full);
       } else if (msg.kind === "error") {
         settled = true;

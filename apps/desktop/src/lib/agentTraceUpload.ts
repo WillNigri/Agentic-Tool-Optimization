@@ -26,6 +26,10 @@ export interface AgentTraceInput {
   error?: string;
   source?: string;
   metadata?: Record<string, unknown>;
+  /** v2.1.0 — relative file paths touched during this dispatch.
+   *  Populated by the desktop's pre/post mtime snapshot; absent for
+   *  group-level rollup traces and embed-bundle traces. */
+  filesTouched?: string[];
 }
 
 const CLOUD_API_URL =

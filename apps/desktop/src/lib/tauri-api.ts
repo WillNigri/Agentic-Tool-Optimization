@@ -411,9 +411,26 @@ export async function detectAgentRuntimes(): Promise<DetectedRuntime[]> {
 export async function promptAgent(
   runtime: AgentRuntime,
   prompt: string,
-  config?: RuntimeConfig
+  config?: RuntimeConfig,
+  /** v2.1.0 — when provided, ATO snapshots files within this directory
+   *  before/after the dispatch and tags the log entry with the list of
+   *  files the agent touched. Cheap enough to leave on (<200ms typical
+   *  overhead, scales linearly with project size, capped at 50k files). */
+  projectRoot?: string,
 ): Promise<string> {
   const startTime = Date.now();
+  // v2.1.0 — pre-dispatch snapshot. Best-effort: if it fails (missing
+  // perms, non-existent root, etc) we silently fall through to a
+  // no-attribution dispatch.
+  let snapshotBefore: Record<string, number> | null = null;
+  if (projectRoot) {
+    try {
+      snapshotBefore = await invoke<Record<string, number>>('snapshot_project_files', { root: projectRoot });
+    } catch {
+      // attribution is optional — never block the dispatch on it
+    }
+  }
+
   try {
     let result: string;
     try {
@@ -426,18 +443,30 @@ export async function promptAgent(
       }
     }
 
-    // Log successful execution
+    // v2.1.0 — diff post-dispatch and stash on the log entry.
+    let filesTouched: string[] | undefined;
+    if (snapshotBefore && projectRoot) {
+      try {
+        filesTouched = await invoke<string[]>('diff_project_files', {
+          root: projectRoot,
+          prior: snapshotBefore,
+        });
+      } catch {
+        // ignore — log entry just won't have files
+      }
+    }
+
     appendAgentLog({
       timestamp: new Date().toISOString(),
       runtime,
       level: 'info',
       message: `Execution completed (${prompt.slice(0, 80)}...)`,
       durationMs: Date.now() - startTime,
+      filesTouched,
     }).catch(() => {});
 
     return result;
   } catch (err) {
-    // Log failed execution
     appendAgentLog({
       timestamp: new Date().toISOString(),
       runtime,
@@ -493,6 +522,14 @@ export interface AgentLogEntry {
   message: string;
   jobId?: string;
   durationMs?: number;
+  /** v2.1.0 — relative paths the agent touched during this dispatch.
+   *  Captured by mtime snapshot; absent for runs without a project
+   *  root and for failures (we don't attribute on errors since the
+   *  pre-error state is undefined). */
+  filesTouched?: string[];
+  /** Optional. Set by callers that already know the agent slug (e.g.
+   *  promptAgentWithContext) so the trace upload can attribute. */
+  agentSlug?: string;
 }
 
 /**

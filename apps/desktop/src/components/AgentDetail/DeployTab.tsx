@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
-import { Copy, Check, ExternalLink, Cloud, Server, Box, Layers, FolderDown, Loader2, BookOpen } from "lucide-react";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { Copy, Check, ExternalLink, Cloud, Server, Box, Layers, FolderDown, Loader2, BookOpen, Key, RefreshCw } from "lucide-react";
 import type { Agent } from "@/lib/agents";
 import { generateCloudflareWorker } from "@/lib/deployBundleGenerators/cloudflare";
 import { generateVercelEdge } from "@/lib/deployBundleGenerators/vercel";
@@ -15,6 +15,8 @@ import {
   type InlineKnowledgeChunk,
 } from "@/lib/deployBundleGenerators/shared";
 import { listAgentKnowledge } from "@/lib/agentKnowledge";
+import { getEmbedKey, rotateEmbedKey, CloudApiError } from "@/lib/cloud-api";
+import { useAuthStore } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 
 // v2.0.0 Wave 1 + Wave 3 — Deploy tab.
@@ -256,6 +258,7 @@ export default function DeployTab({ agent }: Props) {
             </span>
           </label>
         </div>
+        {config.forwardTraces && <EmbedKeyPanel />}
       </section>
 
       {/* Cloudflare Worker hard-fails to deploy if the script exceeds 1MB.
@@ -474,5 +477,163 @@ function CopyButton({ value }: { value: string }) {
       {copied ? <Check size={11} className="text-cs-accent" /> : <Copy size={11} />}
       {copied ? "Copied" : "Copy"}
     </button>
+  );
+}
+
+/** v2.1.0 — Embed key surface for the trace-forwarding flow.
+ *
+ *  Shown only when "Stream traces to ATO Insights" is enabled. Mints
+ *  the user's embed key on demand (server-side first-read), shows a
+ *  masked + copyable preview, and offers a rotate button. Free-tier
+ *  users see a friendly upgrade hint instead of the key. Local-only
+ *  users (no cloud login) see a sign-in prompt. */
+function EmbedKeyPanel() {
+  const { t } = useTranslation();
+  const isCloudUser = useAuthStore((s) => s.isCloudUser);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // Mint-on-read: the cloud creates the key the first time this fires.
+  // Pro+ check happens server-side; free returns 403 / TIER_REQUIRED
+  // which we surface as the upgrade hint.
+  const keyQuery = useQuery({
+    queryKey: ["embed-key", accessToken],
+    queryFn: getEmbedKey,
+    enabled: !!isCloudUser && !!accessToken,
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  const rotateMut = useMutation({
+    mutationFn: rotateEmbedKey,
+    onSuccess: (newKey) => {
+      keyQuery.refetch();
+      // Reset reveal/copy state so the operator explicitly handles the
+      // new value instead of trusting stale UI.
+      setRevealed(true);
+      setCopied(false);
+      void newKey;
+    },
+  });
+
+  if (!isCloudUser || !accessToken) {
+    return (
+      <div className="ml-7 mt-2 rounded-md border border-cs-border bg-cs-bg-raised/40 p-3 text-[11px] text-cs-muted">
+        {t(
+          "agentDetail.deploy.embedKeySignIn",
+          "Sign in via Settings → Cloud to mint the embed key the deployed bundle needs.",
+        )}
+      </div>
+    );
+  }
+
+  if (keyQuery.isLoading) {
+    return (
+      <div className="ml-7 mt-2 text-[11px] text-cs-muted">
+        <Loader2 size={11} className="inline animate-spin mr-1" />
+        {t("agentDetail.deploy.embedKeyLoading", "Fetching embed key…")}
+      </div>
+    );
+  }
+
+  if (keyQuery.error) {
+    const err = keyQuery.error;
+    if (err instanceof CloudApiError && err.code === "TIER_REQUIRED") {
+      return (
+        <div className="ml-7 mt-2 rounded-md border border-cs-warn/40 bg-cs-warn/10 p-3 text-[11px] text-cs-text">
+          {t(
+            "agentDetail.deploy.embedKeyTierRequired",
+            "Embed keys (and the cloud Insights dashboard) require Pro tier. Upgrade in Settings → Cloud to enable trace forwarding.",
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="ml-7 mt-2 rounded-md border border-cs-danger/40 bg-cs-danger/10 p-3 text-[11px] text-cs-text">
+        {t("agentDetail.deploy.embedKeyError", "Couldn't load embed key:")} {String(err)}
+      </div>
+    );
+  }
+
+  const key = keyQuery.data ?? "";
+  // Show a masked preview by default — the key is plaintext-equivalent
+  // to a long-lived bearer token and shouldn't be casually visible
+  // over-the-shoulder during demos / screen shares.
+  const masked = key ? `${key.slice(0, 8)}${"•".repeat(20)}${key.slice(-4)}` : "";
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard blocked — silent */
+    }
+  };
+
+  return (
+    <div className="ml-7 mt-2 rounded-md border border-cs-border bg-cs-bg-raised/40 p-3 space-y-2">
+      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-cs-muted">
+        <Key size={11} />
+        {t("agentDetail.deploy.embedKeyLabel", "ATO_TRACE_KEY for this account")}
+      </div>
+      <div className="flex items-center gap-2">
+        <code className="flex-1 truncate rounded border border-cs-border bg-cs-bg px-2 py-1.5 font-mono text-[11px] text-cs-text">
+          {revealed ? key : masked}
+        </code>
+        <button
+          type="button"
+          onClick={() => setRevealed((v) => !v)}
+          className="rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+        >
+          {revealed
+            ? t("agentDetail.deploy.embedKeyHide", "Hide")
+            : t("agentDetail.deploy.embedKeyReveal", "Reveal")}
+        </button>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="inline-flex items-center gap-1 rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+        >
+          {copied ? <Check size={11} className="text-cs-accent" /> : <Copy size={11} />}
+          {copied
+            ? t("common.copied", "Copied")
+            : t("common.copy", "Copy")}
+        </button>
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] text-cs-muted">
+          {t(
+            "agentDetail.deploy.embedKeyHint",
+            "Set as ATO_TRACE_KEY env var on the deployed bundle. Same key for every external agent on this account.",
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            if (
+              confirm(
+                t(
+                  "agentDetail.deploy.embedKeyRotateConfirm",
+                  "Rotate the key? The current key will stop working immediately — every deployed bundle using it will need to be re-deployed with the new value.",
+                ),
+              )
+            ) {
+              rotateMut.mutate();
+            }
+          }}
+          disabled={rotateMut.isPending}
+          className="inline-flex items-center gap-1 text-[11px] text-cs-muted hover:text-cs-accent disabled:opacity-50"
+        >
+          {rotateMut.isPending ? (
+            <Loader2 size={11} className="animate-spin" />
+          ) : (
+            <RefreshCw size={11} />
+          )}
+          {t("agentDetail.deploy.embedKeyRotate", "Rotate key")}
+        </button>
+      </div>
+    </div>
   );
 }

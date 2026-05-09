@@ -1,0 +1,121 @@
+// v2.0.0 Wave 5 — Frontend wrappers for the cloud /api/agent-traces endpoints.
+//
+// Pro+ desktop clients can read traces from any agent the user owns —
+// internal (uploaded by the desktop's own telemetry pipeline) and
+// external (POSTed back from deployed Cloudflare/Vercel/Docker/Node
+// bundles). This module wraps the GET endpoints; POST is owned by the
+// internal telemetry uploader (lib/agentTraceUpload.ts) and the
+// deployed bundles themselves.
+//
+// All these endpoints require:
+//   1. JWT auth (the user must be cloud-logged-in)
+//   2. Pro tier (free users get a 403)
+// Returns null when neither holds — caller renders an upgrade prompt.
+
+import { useAuthStore } from "@/hooks/useAuth";
+
+const CLOUD_API_URL =
+  import.meta.env.VITE_CLOUD_API_URL || "https://api.agentictool.ai";
+
+export interface CloudAgentTraceMetric {
+  agent_slug: string;
+  run_count: number;
+  ok_count: number;
+  fail_count: number;
+  prompt_tokens: number;
+  response_tokens: number;
+  cost_usd: number;
+  p50_ms: number;
+  p95_ms: number;
+}
+
+export interface CloudAgentTrace {
+  id: string;
+  user_id: string;
+  agent_slug: string;
+  runtime: string;
+  started_at: string;
+  duration_ms: number;
+  ok: boolean;
+  routed_to: string | null;
+  variables: Record<string, unknown> | null;
+  hooks_fired: unknown[] | null;
+  prompt_tokens: number | null;
+  response_tokens: number | null;
+  cost_usd: number | null;
+  error: string | null;
+  source: string | null;
+  metadata: Record<string, unknown> | null;
+  // v2.1.0 — relative file paths the agent touched during this dispatch.
+  // Captured by mtime diff in the desktop layer; null for traces from
+  // bundles (the customer-facing deploy doesn't have a "project root").
+  files_touched: string[] | null;
+}
+
+/** Read auth headers from the local store. Returns null if the user
+ *  isn't cloud-logged-in or doesn't have a token. */
+function authHeaders(): Record<string, string> | null {
+  const { isCloudUser, accessToken } = useAuthStore.getState();
+  if (!isCloudUser || !accessToken) return null;
+  return {
+    "Authorization": `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+  };
+}
+
+async function cloudGet<T>(path: string): Promise<T | null> {
+  const headers = authHeaders();
+  if (!headers) return null;
+  const r = await fetch(`${CLOUD_API_URL}${path}`, { headers });
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) return null;
+    throw new Error(`cloud GET ${path}: ${r.status}`);
+  }
+  const body = await r.json();
+  return (body?.data ?? body) as T;
+}
+
+/** Per-agent rollup over the past `days` days. Server-side aggregation
+ *  via percentile_cont; cheap to call. */
+export async function getAgentTraceMetrics(
+  days = 30,
+): Promise<{ metrics: CloudAgentTraceMetric[]; days: number } | null> {
+  return cloudGet<{ metrics: CloudAgentTraceMetric[]; days: number }>(
+    `/api/agent-traces/metrics?days=${days}`,
+  );
+}
+
+/** Recent individual traces — used for the drill-down explorer. */
+export async function getAgentTraces(
+  agentSlug?: string,
+  limit = 50,
+): Promise<{ traces: CloudAgentTrace[] } | null> {
+  const params = new URLSearchParams();
+  if (agentSlug) params.set("agentSlug", agentSlug);
+  params.set("limit", String(limit));
+  return cloudGet<{ traces: CloudAgentTrace[] }>(
+    `/api/agent-traces?${params.toString()}`,
+  );
+}
+
+/** v2.1.0 — every dispatch that touched a specific file, across all
+ *  agents. Powers the "who changed this file when" view. Returns the
+ *  full trace records so the modal can show agent + runtime + time +
+ *  duration + error per touch. */
+export async function getTracesByFile(
+  filePath: string,
+  limit = 200,
+): Promise<{ traces: CloudAgentTrace[] } | null> {
+  const params = new URLSearchParams();
+  params.set("file", filePath);
+  params.set("limit", String(limit));
+  return cloudGet<{ traces: CloudAgentTrace[] }>(
+    `/api/agent-traces?${params.toString()}`,
+  );
+}
+
+/** Returns true when the cloud features are usable from this client. */
+export function canQueryCloudTraces(): boolean {
+  const { isCloudUser, accessToken } = useAuthStore.getState();
+  return Boolean(isCloudUser && accessToken);
+}

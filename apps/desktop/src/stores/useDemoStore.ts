@@ -124,12 +124,25 @@ export type DemoStep =
   // Open a specific group's detail view by slug.
   | { kind: "selectGroup"; slug: string | null }
   // Wipe specific agents + groups so a re-run starts clean. Best-effort
-  // (silently skips anything that doesn't exist).
+  // (silently skips anything that doesn't exist). Also wipes any
+  // `apiKeyNames` so a demo-seeded fake key from a prior run doesn't
+  // linger in the keystore.
   | {
       kind: "cleanup";
       agentSlugs?: string[];
       groupSlugs?: string[];
+      apiKeyNames?: string[];
       runtime?: AgentRuntime;
+    }
+  // v2.0.0 — seed a fake API key during the demo so the wizard's
+  // External path renders the "key on file" success state instead of
+  // the "no keys" warning. Marked as demo-only via the `name` prefix
+  // so cleanup can find it by name.
+  | {
+      kind: "seedDemoApiKey";
+      provider: string;
+      name: string;
+      value: string;
     };
 
 export interface DemoScript {
@@ -538,16 +551,19 @@ export const useDemoStore = create<DemoState>((set, get) => ({
           try {
             interface AgentRow { id: string; slug: string; runtime: string }
             interface GroupRow { id: string; slug: string }
+            interface KeyRow { id: string; name: string }
             const agents = (await invoke<AgentRow[]>("list_agents", { runtime: null })) ?? [];
             for (const slug of step.agentSlugs ?? []) {
-              const match = agents.find(
-                (a) =>
-                  a.slug === slug &&
-                  (!step.runtime || a.runtime === step.runtime)
-              );
-              if (match) {
+              // Delete ALL agents with this slug, regardless of runtime.
+              // The previous runtime-filter let stale entries from earlier
+              // runs (e.g. a code-writer that ended up on a different
+              // runtime) survive cleanup, which then made the next
+              // createAgent fail silently on a slug collision and leave
+              // the demo with one agent missing.
+              const matches = agents.filter((a) => a.slug === slug);
+              for (const m of matches) {
                 try {
-                  await invoke("delete_agent", { id: match.id, deleteFile: true });
+                  await invoke("delete_agent", { id: m.id, deleteFile: true });
                 } catch {
                   // ignore individual failures
                 }
@@ -564,10 +580,44 @@ export const useDemoStore = create<DemoState>((set, get) => ({
                 }
               }
             }
+            // v2.0 — also wipe demo-seeded API keys by name so a re-run
+            // starts with a clean keystore. Real user keys are skipped
+            // because the demo names are prefixed with `[DEMO]`.
+            if (step.apiKeyNames && step.apiKeyNames.length > 0) {
+              const keys = (await invoke<KeyRow[]>("list_llm_api_keys", {})) ?? [];
+              for (const name of step.apiKeyNames) {
+                const match = keys.find((k) => k.name === name);
+                if (match) {
+                  try {
+                    await invoke("delete_llm_api_key", { id: match.id });
+                  } catch {
+                    // ignore
+                  }
+                }
+              }
+            }
           } catch {
             // Fully silent — cleanup is best-effort.
           }
           await sleep(300);
+          break;
+        }
+        case "seedDemoApiKey": {
+          // Demo-only: write a fake API key so the External wizard's
+          // AuthRequirements panel shows the "key on file" success state.
+          // The matching cleanup step at the start of the demo wipes it.
+          try {
+            await invoke("save_llm_api_key", {
+              provider: step.provider,
+              name: step.name,
+              apiKey: step.value,
+              projectId: null,
+              runtime: null,
+            });
+          } catch {
+            // ignore — demo continues without the key (panel shows warning instead)
+          }
+          await sleep(200);
           break;
         }
         case "stop":

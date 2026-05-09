@@ -11520,13 +11520,22 @@ pub async fn prompt_agent_with_context(
     active_project_path: Option<String>,
 ) -> Result<String, String> {
     // Step 1: resolve variables + load hooks + read role-model preferences
-    // (single short-lived lock).
-    let (resolved, hooks, response_model, fallback_model) = {
+    // (single short-lived lock). Also pull the agent slug for the
+    // active-runs registry (Phase 4) — Beatriz: showing slugs in the
+    // Live panel matters more than UUIDs.
+    let (resolved, hooks, response_model, fallback_model, agent_slug) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let resolved = resolve_agent_variables(&conn, &agent_id, active_project_path.as_deref());
         let hooks = load_agent_hooks(&conn, &agent_id);
         let (rm, fb) = load_agent_response_model(&conn, &agent_id);
-        (resolved, hooks, rm, fb)
+        let slug: Option<String> = conn
+            .query_row(
+                "SELECT slug FROM agents WHERE id = ?1",
+                rusqlite::params![&agent_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        (resolved, hooks, rm, fb, slug)
     };
 
     // Step 2: substitute into the prompt.
@@ -11547,7 +11556,18 @@ pub async fn prompt_agent_with_context(
     // agents.model — that's the whole point of per-task models.
     let merged_config = merge_model_into_config(config, response_model, fallback_model);
 
-    prompt_agent(runtime, final_prompt, merged_config).await
+    // Phase 4: register in the active-runs map for the duration of the
+    // dispatch. Always finish_run via a guard so panics + early returns
+    // don't leak entries.
+    let run_id = crate::active_runs::begin_run(
+        &runtime,
+        agent_slug.as_deref(),
+        active_project_path.as_deref(),
+        Some("desktop:context-dispatch"),
+    );
+    let result = prompt_agent(runtime, final_prompt, merged_config).await;
+    crate::active_runs::finish_run(&run_id);
+    result
 }
 
 // ── Conversation summarization (F3) ──────────────────────────────────────
@@ -13611,7 +13631,8 @@ pub async fn prompt_agent_stream(
     config: Option<String>,
     on_event: tauri::ipc::Channel<StreamEvent>,
 ) -> Result<(), String> {
-    spawn_streaming_dispatch(&runtime, &prompt, config.as_deref(), on_event).await
+    // Ad-hoc — no agent context. Registry will show "no slug, runtime X".
+    spawn_streaming_dispatch(&runtime, &prompt, config.as_deref(), on_event, None, None).await
 }
 
 /// Stream a multi-turn dispatch. Resolves variables / hooks / role models
@@ -13629,14 +13650,22 @@ pub async fn prompt_agent_with_history_stream(
 ) -> Result<(), String> {
     // Same prelude as prompt_agent_with_history — keep them in sync if you
     // change one, change the other.
-    let (resolved, hooks, response_model, fallback_model, policy, summarizer_model) = {
+    let (resolved, hooks, response_model, fallback_model, policy, summarizer_model, agent_slug) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let resolved = resolve_agent_variables(&conn, &agent_id, active_project_path.as_deref());
         let hooks = load_agent_hooks(&conn, &agent_id);
         let (rm, fb) = load_agent_response_model(&conn, &agent_id);
         let policy = load_memory_policy(&conn, &agent_id);
         let summ = load_agent_summarizer_model(&conn, &agent_id);
-        (resolved, hooks, rm, fb, policy, summ)
+        // v2.1.0 Phase 4 — fetch the slug for active-runs registry labeling.
+        let slug: Option<String> = conn
+            .query_row(
+                "SELECT slug FROM agents WHERE id = ?1",
+                rusqlite::params![&agent_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        (resolved, hooks, rm, fb, policy, summ, slug)
     };
 
     // Summarize older history (best-effort, non-streaming — summaries are
@@ -13666,7 +13695,14 @@ pub async fn prompt_agent_with_history_stream(
     };
     let merged_config = merge_model_into_config(config, response_model, fallback_model);
 
-    spawn_streaming_dispatch(&runtime, &final_prompt, merged_config.as_deref(), on_event).await
+    spawn_streaming_dispatch(
+        &runtime,
+        &final_prompt,
+        merged_config.as_deref(),
+        on_event,
+        agent_slug.as_deref(),
+        active_project_path.as_deref(),
+    ).await
 }
 
 async fn spawn_streaming_dispatch(
@@ -13674,10 +13710,18 @@ async fn spawn_streaming_dispatch(
     prompt: &str,
     config: Option<&str>,
     on_event: tauri::ipc::Channel<StreamEvent>,
+    // v2.1.0 Phase 4 — context for the active-runs registry. Either
+    // can be None for ad-hoc dispatches that don't have the info
+    // (e.g. plain prompt_agent_stream from the chat pane without a
+    // selected agent).
+    agent_slug: Option<&str>,
+    workspace: Option<&str>,
 ) -> Result<(), String> {
     use std::process::Stdio;
+    use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::process::Command as TokioCommand;
+    use tokio::sync::Mutex as AsyncMutex;
 
     let user_path = get_user_path();
     let cfg_json: Option<serde_json::Value> = config.and_then(|c| serde_json::from_str(c).ok());
@@ -13762,13 +13806,71 @@ async fn spawn_streaming_dispatch(
 
     cmd.env("PATH", &user_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // kill_on_drop ensures the child dies if we panic or the task
+        // is aborted before we get to wait — important for keeping the
+        // registry honest about what's actually running.
+        .kill_on_drop(true);
 
-    let mut child = match cmd.spawn() {
+    // Register BEFORE spawn so that even a spawn failure lights up
+    // the registry briefly (next finish_run cleans it up). Beatriz's
+    // model of "intent first, outcome second" — the user clicked the
+    // dispatch button, so the run exists conceptually even if the
+    // process never started.
+    let run_id = crate::active_runs::begin_run(
+        runtime,
+        agent_slug,
+        workspace,
+        Some("desktop:stream"),
+    );
+    // Guard so we always finish_run on early returns / errors.
+    struct FinishOnDrop(String);
+    impl Drop for FinishOnDrop {
+        fn drop(&mut self) {
+            crate::active_runs::finish_run(&self.0);
+        }
+    }
+    let _finish_guard = FinishOnDrop(run_id.clone());
+
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let _ = on_event.send(StreamEvent::Error {
                 message: format!("Failed to spawn {}: {}", runtime, e),
+            });
+            return Ok(());
+        }
+    };
+
+    // Wrap in Arc<AsyncMutex<Option<Child>>> so the kill closure can
+    // take() the child and call .kill().await without fighting the
+    // dispatch path for ownership. Option<Child> means the kill path
+    // can't accidentally try to kill twice.
+    let child_arc = Arc::new(AsyncMutex::new(Some(child)));
+    let child_for_kill = child_arc.clone();
+    crate::active_runs::attach_kill_handler(&run_id, move || {
+        // The registry's kill() is sync; bridge into async via
+        // tokio::spawn so we can await the kill on tokio::Child.
+        tokio::spawn(async move {
+            let mut guard = child_for_kill.lock().await;
+            if let Some(child) = guard.as_mut() {
+                let _ = child.kill().await;
+            }
+        });
+    });
+
+    // Take the child out of the mutex for the duration of the wait —
+    // we hold ownership locally so wait/read calls don't fight the
+    // kill closure for the lock. The kill closure's Option<Child> is
+    // None during this window, which is the right behavior: if a kill
+    // request races our completion, the kill is a no-op and finish_run
+    // tidies up.
+    let mut child = match child_arc.lock().await.take() {
+        Some(c) => c,
+        None => {
+            // Should be unreachable — we just inserted Some above.
+            let _ = on_event.send(StreamEvent::Error {
+                message: "child-handle-missing".into(),
             });
             return Ok(());
         }

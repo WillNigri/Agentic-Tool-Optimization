@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
-import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen, Code2 } from "lucide-react";
+import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen, Code2, History } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
 import { updateAgentKind } from "@/lib/agents";
@@ -25,6 +25,7 @@ const EvaluatorsTab = lazy(() => import("./EvaluatorsTab"));
 const DeployTab = lazy(() => import("./DeployTab"));
 const KnowledgeTab = lazy(() => import("./KnowledgeTab"));
 const RawTab = lazy(() => import("./RawTab"));
+const HistoryTab = lazy(() => import("./HistoryTab"));
 
 interface Props {
   agent: Agent;
@@ -35,7 +36,7 @@ interface Props {
   initialTab?: string | null;
 }
 
-type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators" | "deploy" | "knowledge" | "raw";
+type TabId = "overview" | "variables" | "context" | "memory" | "models" | "evaluators" | "deploy" | "knowledge" | "raw" | "history";
 
 export default function AgentDetail({ agent, onClose, initialTab }: Props) {
   const { t } = useTranslation();
@@ -48,7 +49,7 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
     // first thing to show; Knowledge is where they actually start).
     const valid: TabId[] = [
       "overview", "variables", "context", "memory",
-      "models", "evaluators", "deploy", "knowledge", "raw",
+      "models", "evaluators", "deploy", "knowledge", "raw", "history",
     ];
     if (initialTab && (valid as string[]).includes(initialTab)) return initialTab as TabId;
     return "variables";
@@ -148,6 +149,9 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
           <TabPill active={tab === "raw"} onClick={() => setTab("raw")} icon={<Code2 size={12} />} demoId="agent-tab-raw">
             {t("agentDetail.tabs.raw", "Raw")}
           </TabPill>
+          <TabPill active={tab === "history"} onClick={() => setTab("history")} icon={<History size={12} />} demoId="agent-tab-history">
+            {t("agentDetail.tabs.history", "History")}
+          </TabPill>
         </nav>
 
         <div className="flex-1 overflow-y-auto p-5 min-h-0">
@@ -168,6 +172,7 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
               {tab === "deploy" && <DeployTab agent={agent} />}
               {tab === "knowledge" && <KnowledgeTab agent={agent} />}
               {tab === "raw" && <RawTab agent={agent} />}
+              {tab === "history" && <HistoryTab agent={agent} />}
             </Suspense>
           </ErrorBoundary>
         </div>

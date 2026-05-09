@@ -152,20 +152,28 @@ ${templateVars.length === 0 ? "# (no template variables — system prompt is sta
 }
 
 function renderTraceForward(agent: Agent): string {
+  // v2.1.0: hits /api/agent-traces/embed with the canonical batched
+  // payload so the cloud route's existing schema accepts it. We send
+  // metadata only — no userMessage / response content — because the
+  // agent_traces table doesn't store those (PII), and there's no point
+  // shipping bytes the server discards.
   // ATO Insights + Langfuse + generic webhook all run in parallel via
   // ctx.waitUntil so none of them block the user-facing response.
   return `    // Best-effort trace forwards — none of these block the user response.
     var atoTracePromise = env.ATO_TRACE_KEY
-      ? fetch("https://api.agentictool.ai/api/agent-traces", {
+      ? fetch("https://api.agentictool.ai/api/agent-traces/embed", {
           method: "POST",
           headers: { "Authorization": "Bearer " + env.ATO_TRACE_KEY, "content-type": "application/json" },
           body: JSON.stringify({
-            agentSlug: ${JSON.stringify(agent.slug)},
-            origin,
-            userMessage,
-            response,
-            latencyMs: Date.now() - startedAt,
-            timestamp: new Date().toISOString(),
+            traces: [{
+              agentSlug: ${JSON.stringify(agent.slug)},
+              runtime: "external",
+              startedAt: new Date(startedAt).toISOString(),
+              durationMs: Date.now() - startedAt,
+              ok: true,
+              source: "embed-cloudflare",
+              metadata: { origin: origin },
+            }],
           }),
         }).catch(function () {})
       : Promise.resolve();

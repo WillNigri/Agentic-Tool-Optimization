@@ -91,23 +91,26 @@ export function parseMemoryPolicy(agent: Agent): MemoryPolicy {
 }
 
 export async function updateAgentMemoryPolicy(id: string, policy: MemoryPolicy | null): Promise<void> {
-  return invoke("update_agent_memory_policy", {
+  await invoke("update_agent_memory_policy", {
     id,
     policyJson: policy ? JSON.stringify(policy) : null,
   });
+  void recordChangeFor(id, "memory_policy", policy);
 }
 
 /** Replace the MCPs attached to an agent. Used by the one-click "Add
  *  browser tools" flow and any future MCP-attach UX. */
 export async function updateAgentMcps(id: string, mcps: string[]): Promise<void> {
-  return invoke("update_agent_mcps", { id, mcps });
+  await invoke("update_agent_mcps", { id, mcps });
+  void recordChangeFor(id, "mcps", mcps);
 }
 
 export async function updateAgentRoleModels(id: string, models: RoleModels | null): Promise<void> {
-  return invoke("update_agent_role_models", {
+  await invoke("update_agent_role_models", {
     id,
     roleModelsJson: models ? JSON.stringify(models) : null,
   });
+  void recordChangeFor(id, "role_models", models);
 }
 
 export interface CreateAgentInput {
@@ -128,7 +131,7 @@ export interface CreateAgentInput {
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<Agent> {
-  return invoke<Agent>("create_agent", {
+  const agent = await invoke<Agent>("create_agent", {
     displayName: input.displayName,
     runtime: input.runtime,
     description: input.description ?? null,
@@ -142,10 +145,50 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     writeFile: input.writeFile ?? true,
     kind: input.kind ?? "internal",
   });
+  // v2.1.0 — record the genesis event so the dashboard has a "v0"
+  // marker per agent. Subsequent edits chain off this. Best-effort.
+  try {
+    const { recordConfigChange } = await import("./cloudConfigChanges");
+    void recordConfigChange({
+      agentSlug: agent.slug,
+      field: "created",
+      newValue: {
+        runtime: agent.runtime,
+        model: agent.model ?? null,
+        kind: agent.kind,
+      },
+      metadata: { genesis: true },
+    });
+  } catch {
+    // ignore
+  }
+  return agent;
 }
 
 export async function updateAgentKind(id: string, kind: AgentKind): Promise<void> {
-  return invoke("update_agent_kind", { id, kind });
+  await invoke("update_agent_kind", { id, kind });
+  void recordChangeFor(id, "kind", kind);
+}
+
+// v2.1.0 — Configuration impact ledger. Each update fn fires this
+// post-success so the cloud has a timestamped audit of every meaningful
+// change. Best-effort — silently no-ops when not signed in or offline.
+async function recordChangeFor(
+  id: string,
+  field: import("./cloudConfigChanges").ConfigChangeField,
+  newValue: unknown,
+): Promise<void> {
+  try {
+    const agent = await getAgent(id);
+    const { recordConfigChange } = await import("./cloudConfigChanges");
+    await recordConfigChange({
+      agentSlug: agent.slug,
+      field,
+      newValue,
+    });
+  } catch {
+    // Telemetry must never break the local edit.
+  }
 }
 
 export async function listAgents(filter?: {

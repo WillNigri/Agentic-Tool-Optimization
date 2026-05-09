@@ -579,16 +579,23 @@ jobs:
 
       - name: Update Homebrew cask
         env:
-          # Use the tap PAT when present; fall back to the in-repo token (which
-          # will fail with 403 against the tap, but that's caught below).
+          # Tap PAT enables cross-repo push; without it the in-repo
+          # GITHUB_TOKEN can clone but NOT push (403). Skip cleanly when
+          # the secret isn't configured rather than running through the
+          # whole sed pipeline only to fail at git push.
+          HOMEBREW_TAP_TOKEN_PRESENT: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
           TAG: ${{ github.ref_name }}
           ARM_SHA: ${{ steps.sha.outputs.arm_sha }}
           X64_SHA: ${{ steps.sha.outputs.x64_sha }}
         run: |
+          if [ "${HOMEBREW_TAP_TOKEN_PRESENT}" != "true" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping Homebrew cask update. Create a fine-grained PAT with Contents:Read+Write on WillNigri/homebrew-ato and add it as a secret to enable."
+            exit 0
+          fi
           if ! git clone https://x-access-token:${GH_TOKEN}@github.com/WillNigri/homebrew-ato.git /tmp/homebrew-ato 2>/dev/null; then
-            echo "::warning::Cannot push to homebrew-ato. Set HOMEBREW_TAP_TOKEN secret (PAT with repo scope) to enable cask updates."
+            echo "::warning::Cannot clone homebrew-ato. Verify HOMEBREW_TAP_TOKEN scope/expiration."
             exit 0
           fi
           cat > /tmp/homebrew-ato/Casks/ato.rb << 'CASK'
@@ -627,4 +634,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/ato.rb
           git commit -m "chore: bump ATO to ${TAG}"
-          git push
+          if ! git push 2>&1; then
+            echo "::warning::git push to homebrew-ato failed — PAT may lack Contents:Write. Cask not updated for ${TAG}."
+            exit 0
+          fi

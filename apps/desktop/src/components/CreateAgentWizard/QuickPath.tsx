@@ -285,6 +285,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
               <>
                 <button
                   type="button"
+                  data-demo-id="quick-success-knowledge"
                   onClick={() => goToAgent("knowledge")}
                   className="rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
                 >
@@ -292,6 +293,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
                 </button>
                 <button
                   type="button"
+                  data-demo-id="quick-success-deploy"
                   onClick={() => goToAgent("deploy")}
                   className="rounded-md border border-cs-accent/40 bg-cs-accent/10 px-3 py-1.5 text-xs font-medium text-cs-accent hover:bg-cs-accent/20"
                 >
@@ -340,6 +342,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
               <button
                 key={k}
                 type="button"
+                data-demo-id={`agent-kind-${k}`}
                 onClick={() => update("kind", k)}
                 className={cn(
                   "rounded-lg border px-3 py-3 text-left text-xs transition-colors",

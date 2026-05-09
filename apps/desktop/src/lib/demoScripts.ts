@@ -38,10 +38,6 @@ const SECURITY_SYSTEM_PROMPT = `You are a security-focused code reviewer. Only f
 
 Be specific. No generic warnings. If you don't see a security issue, say "No security issues found" and stop.`;
 
-const PERF_SYSTEM_PROMPT = `You are a performance-focused code reviewer. Only flag real performance issues — N+1 queries, unbounded loops, blocking I/O on hot paths, allocations in tight loops.
-
-Be specific. Estimate the cost ("this is N queries where 1 would do"). If you don't see a perf issue, say "No performance issues found" and stop.`;
-
 const WRITER_SYSTEM_PROMPT = `You are a code writer. When asked to write code, return ONLY the code in a fenced code block — no preamble, no explanation, no trailing commentary.
 
 Rules:
@@ -66,8 +62,19 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     {
       kind: "cleanup",
       runtime: "claude",
-      agentSlugs: ["code-reviewer", "code-writer", "security-reviewer", "perf-reviewer", "acme-support"],
+      agentSlugs: ["code-reviewer", "code-writer", "security-reviewer", "perf-reviewer", "acme-support", "support-bot"],
       groupSlugs: ["code-review-team", "write-and-review"],
+      apiKeyNames: ["[DEMO] Anthropic"],
+    },
+    // v2.0.0 — pre-seed a fake Anthropic key so the External wizard shows
+    // the "key on file" success state during the demo. Cleanup above
+    // wipes it on next run. The key value is a placeholder; nothing
+    // actually dispatches to the network during the demo.
+    {
+      kind: "seedDemoApiKey",
+      provider: "anthropic",
+      name: "[DEMO] Anthropic",
+      value: "sk-ant-demo-DO-NOT-USE-this-is-a-placeholder-key",
     },
     // ── Open: Home ───────────────────────────────────────────────────────
     // Collapse the chat pane while we tour sections so each one gets full
@@ -99,7 +106,7 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     { kind: "openWizard", path: "templates" },
     {
       kind: "subtitle",
-      text: "Templates — five production-quality starters.",
+      text: "Templates — production-quality starters across engineering, writing, ops, and data.",
       durationMs: 2400,
     },
     { kind: "wait", ms: 800 },
@@ -211,8 +218,8 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     //    write→review workflow we'll route through a group.
     {
       kind: "subtitle",
-      text: "Now three more — a code writer + two specialized reviewers.",
-      durationMs: 2600,
+      text: "Now two more — a code writer + a security reviewer. The group below will chain them.",
+      durationMs: 2800,
     },
     {
       kind: "createAgent",
@@ -238,38 +245,13 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
         goal: "Surface security-only review notes",
       },
     },
-    {
-      kind: "createAgent",
-      spec: {
-        displayName: "perf-reviewer",
-        runtime: "claude",
-        model: "claude-sonnet-4-6",
-        description: "Reviews code for performance issues only.",
-        systemPrompt: PERF_SYSTEM_PROMPT,
-        goal: "Surface performance-only review notes",
-      },
-    },
     { kind: "wait", ms: 600 },
-    // v2.0 seed — an external agent to walk through the v2 segment at the
-    // end of the demo. Created silently (no form animation) — the v2
-    // segment opens it, clicks the Knowledge + Deploy tabs, and narrates
-    // what each does. The systemPrompt mentions a {company_name} variable
-    // so the Variables tab demonstrates a live template.
-    {
-      kind: "createAgent",
-      spec: {
-        displayName: "acme-support",
-        runtime: "claude",
-        model: "claude-sonnet-4-6",
-        description: "Customer support chatbot for {company_name}. RAG-backed. Deploys to Cloudflare Worker.",
-        systemPrompt:
-          "You are the customer support agent for {company_name}. " +
-          "Answer using the policies provided in the <context> block when available. " +
-          "If you don't know, say so and offer to escalate.",
-        goal: "Customer-facing support chatbot",
-        kind: "external",
-      },
-    },
+    // v2.0 — the External agent is created LIVE through the wizard so
+    // the viewer sees the kind picker, AuthRequirements panel, and the
+    // External-specific success-state CTAs. The walkthrough of the
+    // Knowledge / Context / Deploy / Raw tabs happens later, AFTER the
+    // creation, when we click "Generate deploy bundle →" from the
+    // success state.
     { kind: "wait", ms: 400 },
 
     // ── Build the group ──────────────────────────────────────────────────
@@ -459,31 +441,94 @@ export const FULL_TOUR_SCRIPT: DemoScript = {
     },
     { kind: "wait", ms: 1200 },
 
-    // ── v2.0 — External agents + Knowledge + Deploy ─────────────────────
+    // ── v2.0 — External agents: live creation + tab walkthrough ────────
     // The cross-runtime + scheduling story above is the developer-facing
     // surface. v2.0 turns ATO into the place where you build agents for
     // OTHER PEOPLE — customer chatbots that deploy to your customers' own
-    // infrastructure. Walks through the seeded `acme-support` external
-    // agent so the viewer SEES the new tabs (Knowledge + Deploy), not
-    // just hears about them.
+    // infrastructure. We CREATE the external agent live through the
+    // wizard so the viewer sees the kind picker, AuthRequirements panel,
+    // and the External-specific success-state CTAs. Then we click
+    // "Generate deploy bundle →" to land on Deploy and walk through the
+    // four power tabs (Knowledge / Context / Deploy / Raw).
     { kind: "setChatPaneOpen", open: false },
     { kind: "navigate", section: "agents" },
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },
-    { kind: "wait", ms: 800 },
+    { kind: "wait", ms: 600 },
     {
       kind: "subtitle",
       text: "v2.0 — agents you build for your CUSTOMERS, not just yourself.",
       durationMs: 3000,
     },
+    // Open the Quick wizard for a hand-built External agent.
+    { kind: "openWizard", path: "quick" },
+    { kind: "wait", ms: 700 },
     {
       kind: "subtitle",
-      text: "Pick External when creating — permissions auto-lock to read-only, no shell, no fs writes.",
-      durationMs: 3000,
+      text: "First decision in the wizard: Internal (you) vs External (your customers).",
+      durationMs: 3200,
     },
-    // Open acme-support's detail view (seeded external agent).
-    { kind: "highlight", id: "agent-configure-acme-support", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "agent-configure-acme-support" },
+    // Highlight + click the External kind tile so the AuthRequirements
+    // panel shows below it.
+    { kind: "highlight", id: "agent-kind-external", durationMs: 1500 },
+    { kind: "clickByDemoId", id: "agent-kind-external" },
+    { kind: "wait", ms: 700 },
+    {
+      kind: "subtitle",
+      text: "External: read-only by default, no shell, no filesystem writes — safe for customer-facing deploys.",
+      durationMs: 3800,
+    },
+    {
+      kind: "subtitle",
+      text: "AuthRequirements panel: ATO checks for chat-provider keys you can deploy with. Anthropic key on file ✓.",
+      durationMs: 4000,
+    },
+    // Type the rest of the form — name, description, system prompt with
+    // a template variable so the prompt animation is meaningful.
+    { kind: "setAgentField", field: "runtime", value: "claude" },
+    { kind: "setAgentField", field: "model", value: "claude-sonnet-4-6" },
+    { kind: "wait", ms: 200 },
+    { kind: "typeAgentField", field: "name", text: "support-bot" },
+    { kind: "wait", ms: 350 },
+    {
+      kind: "typeAgentField",
+      field: "description",
+      text: "Customer support chatbot for {company_name}. RAG-backed. Deploys to Cloudflare Worker.",
+      charsPerSec: 42,
+    },
+    { kind: "wait", ms: 350 },
+    {
+      kind: "typeAgentField",
+      field: "systemPrompt",
+      text:
+        "You are the customer support agent for {company_name}. " +
+        "Answer using the policies in the <context> block when available. " +
+        "If you don't know, say so and offer to escalate.",
+      charsPerSec: 90,
+    },
+    { kind: "wait", ms: 600 },
+    { kind: "scrollIntoView", id: "quick-form-save", block: "center" },
+    { kind: "wait", ms: 400 },
+    {
+      kind: "subtitle",
+      text: "Save — the agent record is written, ready to wire knowledge + deploy.",
+      durationMs: 2800,
+    },
+    { kind: "highlight", id: "quick-form-save", durationMs: 1200 },
+    { kind: "submitAgentForm" },
     { kind: "wait", ms: 1200 },
+    // Success state — show the External-specific CTAs the viewer hasn't
+    // seen on Internal saves earlier in the demo.
+    {
+      kind: "subtitle",
+      text: "Created. External agents get two CTAs: Add knowledge, or jump straight to Generate deploy bundle.",
+      durationMs: 4200,
+    },
+    { kind: "wait", ms: 600 },
+    // Click "Generate deploy bundle →" — this calls openAgentDetail()
+    // which routes us into the AgentDetail on the Deploy tab.
+    { kind: "highlight", id: "quick-success-deploy", durationMs: 1500 },
+    { kind: "clickByDemoId", id: "quick-success-deploy" },
+    { kind: "wait", ms: 1500 },
     {
       kind: "subtitle",
       text: "External agents get four power tabs: Knowledge, Context, Deploy, and Raw. Let's walk through each.",
