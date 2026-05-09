@@ -24,6 +24,7 @@ import {
   type CloudAgentTraceMetric,
 } from "@/lib/cloudAgentTraces";
 import { listAgents, type Agent } from "@/lib/agents";
+import TraceCompareModal from "@/components/TraceCompareModal";
 import { listConfigChanges, type ConfigChange } from "@/lib/cloudConfigChanges";
 import { useFeatureFlag } from "@/lib/tier";
 import { cn } from "@/lib/utils";
@@ -60,6 +61,10 @@ export default function ExternalAgentsInsights() {
   // by parent_run_id. The trace list shows a "↪ pipeline" link on
   // any trace that has a parent.
   const [openPipeline, setOpenPipeline] = useState<string | null>(null);
+  // v2.1.0 Phase 9 — Eval workbench (compare). When set, opens the
+  // TraceCompareModal with this trace as the baseline; the modal
+  // lets the user pick a comparison from same-slug recent traces.
+  const [openCompare, setOpenCompare] = useState<{ id: string; slug: string | null } | null>(null);
 
   // Local agent list — used to mark which slugs are EXTERNAL (not just
   // any agent the cloud has traces for) so we surface only the
@@ -237,6 +242,7 @@ export default function ExternalAgentsInsights() {
               changes={changesQuery.data?.changes ?? []}
               onFileClick={setOpenFile}
               onPipelineClick={setOpenPipeline}
+              onCompareClick={(id, slug) => setOpenCompare({ id, slug })}
             />
           )}
         </section>
@@ -250,6 +256,13 @@ export default function ExternalAgentsInsights() {
           parentRunId={openPipeline}
           onClose={() => setOpenPipeline(null)}
           onFileClick={setOpenFile}
+        />
+      )}
+      {openCompare && (
+        <TraceCompareModal
+          baselineTraceId={openCompare.id}
+          agentSlug={openCompare.slug}
+          onClose={() => setOpenCompare(null)}
         />
       )}
     </div>
@@ -365,11 +378,13 @@ function MergedTimeline({
   changes,
   onFileClick,
   onPipelineClick,
+  onCompareClick,
 }: {
   traces: CloudAgentTrace[];
   changes: ConfigChange[];
   onFileClick?: (path: string) => void;
   onPipelineClick?: (parentRunId: string) => void;
+  onCompareClick?: (traceId: string, agentSlug: string | null) => void;
 }) {
   const { t } = useTranslation();
   if (traces.length === 0 && changes.length === 0) {
@@ -400,6 +415,7 @@ function MergedTimeline({
             trace={row.data}
             onFileClick={onFileClick}
             onPipelineClick={onPipelineClick}
+            onCompareClick={onCompareClick}
           />
         ) : (
           <ChangeRow key={`c-${row.data.id}`} change={row.data} />
@@ -413,10 +429,12 @@ function TraceRow({
   trace: tr,
   onFileClick,
   onPipelineClick,
+  onCompareClick,
 }: {
   trace: CloudAgentTrace;
   onFileClick?: (path: string) => void;
   onPipelineClick?: (parentRunId: string) => void;
+  onCompareClick?: (traceId: string, agentSlug: string | null) => void;
 }) {
   const { t } = useTranslation();
   const [showFiles, setShowFiles] = useState(false);
@@ -455,49 +473,58 @@ function TraceRow({
         {!tr.error && origin && (
           <span className="text-cs-muted truncate flex-1">{origin}</span>
         )}
-        {tr.parent_run_id && onPipelineClick && (
-          <button
-            type="button"
-            onClick={() => onPipelineClick(tr.parent_run_id!)}
-            className="ml-auto inline-flex items-center gap-1 rounded-sm border border-cs-accent/40 bg-cs-accent/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-accent shrink-0 hover:bg-cs-accent/20"
-            title={t("insights.external.pipelineTitle", "Open the full pipeline view for this dispatch")}
-          >
-            ↪ {t("insights.external.pipelineLabel", "pipeline")}
-          </button>
-        )}
-        {overlapCount > 0 && (
-          <span
-            className={cn(
-              "inline-flex items-center gap-1 rounded-sm border border-cs-warn/40 bg-cs-warn/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-warn shrink-0",
-              !tr.parent_run_id && "ml-auto",
-            )}
-            title={t(
-              "insights.external.overlapTitle",
-              "Overlapped with {{n}} other run{{p}} in the same workspace — file attribution ambiguous.",
-              { n: overlapCount, p: overlapCount === 1 ? "" : "s" },
-            )}
-          >
-            ⚠ {t("insights.external.overlapBadge", "ambiguous ×{{n}}", { n: overlapCount })}
-          </span>
-        )}
-        {fileCount > 0 && (
-          <button
-            type="button"
-            onClick={() => setShowFiles((v) => !v)}
-            className={cn(
-              "inline-flex items-center gap-1 rounded-sm border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] hover:text-cs-accent shrink-0",
-              // ml-auto only when there's no pipeline link AND no
-              // overlap badge already pushing to the right edge.
-              !tr.parent_run_id && overlapCount === 0 && "ml-auto",
-              overlapCount > 0
-                ? "border-cs-warn/40 text-cs-warn"
-                : "border-cs-border text-cs-muted",
-            )}
-            title="Files touched during this dispatch"
-          >
-            📁 {fileCount} {fileCount === 1 ? "file" : "files"}
-          </button>
-        )}
+        {/* Right-side controls cluster. Single ml-auto on the wrapper
+            so badges/buttons inside don't fight each other for the
+            right edge. */}
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {tr.parent_run_id && onPipelineClick && (
+            <button
+              type="button"
+              onClick={() => onPipelineClick(tr.parent_run_id!)}
+              className="inline-flex items-center gap-1 rounded-sm border border-cs-accent/40 bg-cs-accent/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-accent hover:bg-cs-accent/20"
+              title={t("insights.external.pipelineTitle", "Open the full pipeline view for this dispatch")}
+            >
+              ↪ {t("insights.external.pipelineLabel", "pipeline")}
+            </button>
+          )}
+          {onCompareClick && (
+            <button
+              type="button"
+              onClick={() => onCompareClick(tr.id, tr.agent_slug)}
+              className="inline-flex items-center gap-1 rounded-sm border border-cs-border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] text-cs-muted hover:text-cs-accent hover:border-cs-accent/40"
+              title={t("insights.external.compareTitle", "Open this trace side-by-side with another run")}
+            >
+              ↔ {t("insights.external.compareLabel", "compare")}
+            </button>
+          )}
+          {overlapCount > 0 && (
+            <span
+              className="inline-flex items-center gap-1 rounded-sm border border-cs-warn/40 bg-cs-warn/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-warn"
+              title={t(
+                "insights.external.overlapTitle",
+                "Overlapped with {{n}} other run{{p}} in the same workspace — file attribution ambiguous.",
+                { n: overlapCount, p: overlapCount === 1 ? "" : "s" },
+              )}
+            >
+              ⚠ {t("insights.external.overlapBadge", "ambiguous ×{{n}}", { n: overlapCount })}
+            </span>
+          )}
+          {fileCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowFiles((v) => !v)}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-sm border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] hover:text-cs-accent",
+                overlapCount > 0
+                  ? "border-cs-warn/40 text-cs-warn"
+                  : "border-cs-border text-cs-muted",
+              )}
+              title="Files touched during this dispatch"
+            >
+              📁 {fileCount} {fileCount === 1 ? "file" : "files"}
+            </button>
+          )}
+        </div>
       </div>
       {showFiles && fileCount > 0 && (
         <ul className="border-t border-cs-border bg-cs-bg-raised/40 px-3 py-1.5 space-y-0.5">

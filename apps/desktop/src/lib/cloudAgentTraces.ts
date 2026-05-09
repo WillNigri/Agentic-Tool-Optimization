@@ -159,6 +159,23 @@ export async function getCostBenchmarks(opts?: {
   }>(`/api/agent-traces/cost-benchmarks?${params.toString()}`);
 }
 
+/** v2.1.0 Phase 9 — Eval workbench (compare). Fetches a single trace
+ *  by id so the side-by-side view can show two traces against each
+ *  other. We could batch this server-side, but two parallel GETs are
+ *  fine at human-trigger volume and the cache lines them up.
+ *
+ *  Returns null when not signed in / blocked. */
+export async function getTraceById(id: string): Promise<CloudAgentTrace | null> {
+  // No dedicated /traces/:id endpoint today — query the list endpoint
+  // with a high limit and filter client-side. The list is already
+  // user-scoped and limit-bounded; fine until we hit a workload that
+  // blows past 500 recent traces, at which point the right move is
+  // a real /traces/:id endpoint.
+  const data = await getAgentTraces(undefined, 500);
+  if (!data) return null;
+  return data.traces.find((t) => t.id === id) ?? null;
+}
+
 /** v2.1.0 Phase 7 — Pipeline visualizer fetch. Returns every stage of
  *  a multi-stage dispatch (sequential pipeline / routed group) by
  *  parent_run_id, ordered started_at ascending so the UI can render
