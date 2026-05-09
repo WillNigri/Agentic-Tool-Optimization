@@ -204,12 +204,13 @@ export default function ExternalAgentsInsights() {
         <NoTracesYet externalAgents={externalAgents} />
       ) : (
         <ul className="space-y-2">
-          {externalMetrics.map((m) => (
+          {externalMetrics.map((m, i) => (
             <MetricCard
               key={m.agent_slug}
               metric={m}
               agent={externalAgents.find((a) => a.slug === m.agent_slug)}
               selected={selectedSlug === m.agent_slug}
+              isFirst={i === 0}
               onSelect={() => setSelectedSlug((s) => (s === m.agent_slug ? null : m.agent_slug))}
             />
           ))}
@@ -275,11 +276,13 @@ function MetricCard({
   metric,
   agent,
   selected,
+  isFirst,
   onSelect,
 }: {
   metric: CloudAgentTraceMetric;
   agent: Agent | undefined;
   selected: boolean;
+  isFirst?: boolean;
   onSelect: () => void;
 }) {
   const { t } = useTranslation();
@@ -288,6 +291,11 @@ function MetricCard({
     <li>
       <button
         type="button"
+        // v2.1.0+ — demo IDs let standalone verification scripts click
+        // the first card without knowing the slug ahead of time.
+        // `agent-metric-<slug>` is stable for known agents; -first
+        // works in tests / demos with arbitrary trace data.
+        data-demo-id={isFirst ? "agent-metric-first" : `agent-metric-${metric.agent_slug}`}
         onClick={onSelect}
         className={cn(
           "w-full text-left rounded-lg border p-3 transition-colors",
@@ -406,13 +414,19 @@ function MergedTimeline({
     ...changes.map((d) => ({ kind: "change" as const, at: d.changed_at, data: d })),
   ].sort((a, b) => b.at.localeCompare(a.at));
 
+  // Find the index of the first trace row (skipping any change rows
+  // that appear before it). Demo scripts clicking "first trace" use
+  // -first demo IDs, so this single source of truth keeps them stable
+  // regardless of what change events landed in the merged stream.
+  const firstTraceIndex = rows.findIndex((r) => r.kind === "trace");
   return (
     <ul className="space-y-1">
-      {rows.map((row) =>
+      {rows.map((row, i) =>
         row.kind === "trace" ? (
           <TraceRow
             key={`t-${row.data.id}`}
             trace={row.data}
+            isFirst={i === firstTraceIndex}
             onFileClick={onFileClick}
             onPipelineClick={onPipelineClick}
             onCompareClick={onCompareClick}
@@ -427,11 +441,13 @@ function MergedTimeline({
 
 function TraceRow({
   trace: tr,
+  isFirst,
   onFileClick,
   onPipelineClick,
   onCompareClick,
 }: {
   trace: CloudAgentTrace;
+  isFirst?: boolean;
   onFileClick?: (path: string) => void;
   onPipelineClick?: (parentRunId: string) => void;
   onCompareClick?: (traceId: string, agentSlug: string | null) => void;
@@ -480,6 +496,7 @@ function TraceRow({
           {tr.parent_run_id && onPipelineClick && (
             <button
               type="button"
+              data-demo-id={isFirst ? "trace-pipeline-first" : undefined}
               onClick={() => onPipelineClick(tr.parent_run_id!)}
               className="inline-flex items-center gap-1 rounded-sm border border-cs-accent/40 bg-cs-accent/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-accent hover:bg-cs-accent/20"
               title={t("insights.external.pipelineTitle", "Open the full pipeline view for this dispatch")}
@@ -490,6 +507,7 @@ function TraceRow({
           {onCompareClick && (
             <button
               type="button"
+              data-demo-id={isFirst ? "trace-compare-first" : undefined}
               onClick={() => onCompareClick(tr.id, tr.agent_slug)}
               className="inline-flex items-center gap-1 rounded-sm border border-cs-border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] text-cs-muted hover:text-cs-accent hover:border-cs-accent/40"
               title={t("insights.external.compareTitle", "Open this trace side-by-side with another run")}

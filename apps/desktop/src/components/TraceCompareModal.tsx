@@ -298,10 +298,11 @@ function CandidatePicker({
         {t("insights.compare.pickHeader", "Pick comparison ({{n}})", { n: candidates.length })}
       </h4>
       <ul className="space-y-1 max-h-64 overflow-y-auto">
-        {candidates.map((tr) => (
+        {candidates.map((tr, i) => (
           <li key={tr.id}>
             <button
               type="button"
+              data-demo-id={i === 0 ? "compare-candidate-first" : undefined}
               onClick={() => onPick(tr.id)}
               className="w-full text-left flex items-center gap-2 rounded border border-cs-border bg-cs-bg px-2 py-1.5 text-[11px] hover:border-cs-accent/40"
             >

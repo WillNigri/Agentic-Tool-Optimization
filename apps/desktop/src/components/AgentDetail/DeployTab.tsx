@@ -243,6 +243,7 @@ export default function DeployTab({ agent }: Props) {
         <div className="flex items-center gap-3">
           <input
             id="forward-traces"
+            data-demo-id="deploy-forward-traces"
             type="checkbox"
             checked={config.forwardTraces}
             onChange={(e) => setConfig((c) => ({ ...c, forwardTraces: e.target.checked }))}
@@ -584,6 +585,7 @@ function EmbedKeyPanel() {
         </code>
         <button
           type="button"
+          data-demo-id="embed-key-reveal"
           onClick={() => setRevealed((v) => !v)}
           className="rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
         >
@@ -593,6 +595,7 @@ function EmbedKeyPanel() {
         </button>
         <button
           type="button"
+          data-demo-id="embed-key-copy"
           onClick={onCopy}
           className="inline-flex items-center gap-1 rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
         >
