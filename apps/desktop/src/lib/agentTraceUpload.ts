@@ -55,11 +55,17 @@ const CLOUD_API_URL =
 
 export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
   const { isCloudUser, accessToken, tier } = useAuthStore.getState();
-  if (!isCloudUser || !accessToken) return;
-  if (!tierMeetsRequirement(tier, "pro")) return;
+  if (!isCloudUser || !accessToken) {
+    console.warn("[agent-trace] upload skipped: not signed in to cloud", { isCloudUser, hasToken: !!accessToken });
+    return;
+  }
+  if (!tierMeetsRequirement(tier, "pro")) {
+    console.warn("[agent-trace] upload skipped: tier gate failed", { tier });
+    return;
+  }
 
   try {
-    await fetch(`${CLOUD_API_URL}/api/agent-traces`, {
+    const response = await fetch(`${CLOUD_API_URL}/api/agent-traces`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -67,9 +73,19 @@ export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
       },
       body: JSON.stringify({ traces: [trace] }),
     });
-  } catch {
-    // Local log already has it. Silent failure is the right call here —
-    // never let observability upload break the dispatch path.
+    if (!response.ok) {
+      const body = await response.text().catch(() => "<unreadable>");
+      console.error("[agent-trace] upload rejected", {
+        status: response.status,
+        body,
+        agentSlug: trace.agentSlug,
+        parentRunId: trace.parentRunId,
+      });
+    }
+  } catch (err) {
+    // Local log already has it. Surface to console so we can diagnose
+    // when the Pipelines panel comes up empty despite a successful run.
+    console.error("[agent-trace] upload threw", err, { agentSlug: trace.agentSlug });
   }
 }
 

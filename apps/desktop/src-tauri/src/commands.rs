@@ -3041,7 +3041,8 @@ async fn prompt_agent_inner(
     };
     cmd.env("PATH", &user_path);
 
-    dispatch_command_killable(
+    let started = std::time::Instant::now();
+    let result = dispatch_command_killable(
         cmd,
         &runtime,
         &runtime,
@@ -3050,7 +3051,56 @@ async fn prompt_agent_inner(
         "desktop:prompt_agent",
         existing_run_id.as_deref(),
     )
-    .await
+    .await;
+    // Persist into execution_logs so Runs → History reflects every
+    // dispatch. Was unwired before — `add_execution_log` existed as a
+    // Tauri command but no JS code called it, so the table stayed
+    // empty and Beatriz's verified runs never appeared in History.
+    // Doing it here covers every caller (UI dispatch, group stages,
+    // MCP run_agent, headless cron) since they all funnel through
+    // prompt_agent_inner.
+    let duration_ms = started.elapsed().as_millis() as i32;
+    persist_execution_log(&runtime, &prompt, &result, duration_ms);
+    result
+}
+
+/// Best-effort insert into the execution_logs table. Opens its own
+/// connection because callers may be outside the Tauri State context
+/// (group stages, headless cron). Errors are swallowed — observability
+/// must never break the dispatch path.
+fn persist_execution_log(runtime: &str, prompt: &str, result: &Result<String, String>, duration_ms: i32) {
+    let db_path = crate::get_db_path();
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let (response, status, error_message): (Option<String>, &str, Option<String>) = match result {
+        Ok(r) => (Some(truncate_for_log(r)), "success", None),
+        Err(e) => (None, "error", Some(truncate_for_log(e))),
+    };
+    let _ = conn.execute(
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, NULL, ?8)",
+        rusqlite::params![
+            id,
+            runtime,
+            truncate_for_log(prompt),
+            response,
+            duration_ms,
+            status,
+            error_message,
+            now,
+        ],
+    );
+}
+
+/// 64 KB cap on prompt/response/error text persisted into SQLite. A
+/// runaway tool that dumps a giant log shouldn't bloat the History
+/// table beyond what's useful at a glance.
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 64 * 1024;
+    if s.len() <= MAX { s.to_string() } else { format!("{}…[truncated]", &s[..MAX]) }
 }
 
 // ── Cron Job Persistence ─────────────────────────────────────────────────
@@ -13216,7 +13266,13 @@ async fn run_sequential_dispatch(
             child.agent_runtime.clone()
         };
         let stage_start = std::time::Instant::now();
-        let stage_started_at = chrono::Utc::now().to_rfc3339();
+        // `to_rfc3339_opts(_, true)` forces the `Z` UTC suffix instead of
+        // `+00:00`. The cloud's zod schema (z.string().datetime()) rejects
+        // the offset form even though it's valid RFC3339 — caused
+        // pipeline trace uploads to 400 and the Pipelines panel to stay
+        // empty (2026-05-09).
+        let stage_started_at = chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         // v2.1.0+ — pass agent_slug to prompt_agent so each stage's
         // Live runs row labels with @<slug> instead of "ad-hoc".
         // prompt_agent registers itself, so we don't begin_run here.

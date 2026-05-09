@@ -931,28 +931,25 @@ export const PIPELINE_VIEWER_SCRIPT: DemoScript = {
     // the canonical fixture parent_id which has 2 mock stages.
     { kind: "wait", ms: 2500 },
     { kind: "navigate", section: "insights" },
-    // External tab filters by kind=external. pipe-writer/reviewer are
-    // INTERNAL agents so their real traces don't appear there. In
-    // mock mode the fixtures DO show up (mock fixtures include
-    // code-writer + security-reviewer as external for demo purposes).
-    // For real-data verification, use the Agents sub-tab instead.
-    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
+    // Pipelines sub-tab — purpose-built for multi-stage dispatches
+    // grouped by parent_run_id. Works for ANY agent kind (internal
+    // pipe-writer/reviewer included), unlike External which is
+    // strict to deployed bundles.
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "pipelines" },
     { kind: "wait", ms: 1500 },
     {
       kind: "subtitle",
-      text: "Open the first agent card to drill in.",
+      text: "Pipelines: every multi-stage dispatch grouped by parent_run_id.",
+      durationMs: 2800,
+    },
+    { kind: "wait", ms: 600 },
+    {
+      kind: "subtitle",
+      text: "Click the first pipeline to see the per-stage flow.",
       durationMs: 2400,
     },
-    { kind: "highlight", id: "agent-metric-first", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "agent-metric-first" },
-    { kind: "wait", ms: 1500 },
-    {
-      kind: "subtitle",
-      text: "Stage rows show ↪ pipeline. Click it to open the flow view.",
-      durationMs: 3500,
-    },
-    { kind: "highlight", id: "trace-pipeline-first", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "trace-pipeline-first" },
+    { kind: "highlight", id: "pipeline-row-first", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "pipeline-row-first" },
     { kind: "wait", ms: 1500 },
     {
       kind: "subtitle",
@@ -1067,6 +1064,9 @@ export const COMPARE_TRACES_SCRIPT: DemoScript = {
     {
       kind: "createAgent",
       spec: {
+        // Plain internal agent now — Compare lives in its own sub-tab
+        // and is kind-agnostic, so we don't have to dress an internal
+        // agent up as external just to satisfy a panel filter.
         displayName: "compare-demo",
         runtime: "claude",
         model: "claude-sonnet-4-6",
@@ -1105,23 +1105,17 @@ export const COMPARE_TRACES_SCRIPT: DemoScript = {
     // baseline trace but no candidates).
     { kind: "wait", ms: 4000 },
     { kind: "navigate", section: "insights" },
-    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
+    // Compare sub-tab — kind-agnostic eval workbench. Lists agents
+    // with ≥2 cloud traces and opens the diff modal directly.
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "compare" },
     { kind: "wait", ms: 1500 },
     {
       kind: "subtitle",
-      text: "Open the first agent card to drill in.",
+      text: "Compare: any agent with ≥2 cloud traces lands here.",
       durationMs: 2400,
     },
-    { kind: "highlight", id: "agent-metric-first", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "agent-metric-first" },
-    { kind: "wait", ms: 1500 },
-    {
-      kind: "subtitle",
-      text: "Each trace row has a ↔ compare button.",
-      durationMs: 2400,
-    },
-    { kind: "highlight", id: "trace-compare-first", durationMs: 1200 },
-    { kind: "clickByDemoId", id: "trace-compare-first" },
+    { kind: "highlight", id: "compare-agent-first", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "compare-agent-first" },
     { kind: "wait", ms: 1500 },
     {
       kind: "subtitle",

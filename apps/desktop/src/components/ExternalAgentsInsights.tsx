@@ -129,9 +129,10 @@ export default function ExternalAgentsInsights() {
       />
     );
   }
-  // In mock mode we skip the "no external agents" gate so the
-  // fixture metrics render even when the user hasn't created any
-  // external agents locally yet. Production builds keep the gate.
+  // External tab is strict-by-design: deployed bundles only (kind=external).
+  // Internal-agent pipeline traces live in cloud too but belong on the
+  // Pipelines sub-tab, not here. Mock mode still skips the gate so the
+  // fixtures render without requiring a real external agent locally.
   const isMock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
   if (!isMock && externalAgents.length === 0) {
     return (
@@ -140,7 +141,7 @@ export default function ExternalAgentsInsights() {
         title={t("insights.external.noExternal", "No external agents yet")}
         body={t(
           "insights.external.noExternalBody",
-          "External agents are designed for customer-facing deployment. Create one via + New Agent → External, then deploy a bundle to start collecting traces.",
+          "External agents are designed for customer-facing deployment. Create one via + New Agent → External, then deploy a bundle to start collecting traces. For internal multi-agent pipelines, see the Pipelines tab.",
         )}
       />
     );
@@ -165,10 +166,8 @@ export default function ExternalAgentsInsights() {
   }
 
   const allMetrics = metricsQuery.data?.metrics ?? [];
-  // Filter to ONLY external-agent slugs the user owns locally — keeps
-  // the surface focused on deployed-agent observability. In mock
-  // mode the local agent list won't match fixture slugs, so we skip
-  // the filter and show every metric the mock returns.
+  // Strict External-only filter (deployed bundles). Internal multi-agent
+  // pipelines have their own Pipelines sub-tab — keeps surfaces honest.
   const externalMetrics = isMock
     ? allMetrics
     : allMetrics.filter((m) => externalSlugs.has(m.agent_slug));
@@ -874,7 +873,7 @@ function FileHistoryModal({
 //     row, mixed with unrelated traces. The flow view groups them.
 //   - The handoff itself is the interesting bit (what runtime took
 //     over from what); the per-row layout buries it.
-function PipelineModal({
+export function PipelineModal({
   parentRunId,
   onClose,
   onFileClick,

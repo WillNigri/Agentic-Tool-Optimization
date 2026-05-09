@@ -5,7 +5,7 @@ import type { AgentRuntime } from "@/lib/agents";
 import type { Section } from "@/components/Sidebar";
 import { useUiStore, type WizardPath } from "@/stores/useUiStore";
 import type { QuickDraft } from "@/lib/agentDraft";
-import { queryClient } from "@/main";
+import { queryClient } from "@/lib/queryClient";
 
 interface CreateAgentSpec {
   displayName: string;

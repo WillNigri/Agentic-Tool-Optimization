@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { refreshToken as refreshTokenApi } from "@/lib/api";
-import { getCurrentUser } from "@/lib/cloud-api";
+import { getCurrentUser, storeTokens, clearTokens } from "@/lib/cloud-api";
 
 interface User {
   id: string;
@@ -47,7 +47,13 @@ export const useAuthStore = create<AuthState>()(
       isCloudUser: false,
       tier: "free",
 
-      setAuth: (user, accessToken, refreshToken, tier) =>
+      setAuth: (user, accessToken, refreshToken, tier) => {
+        // Mirror tokens into the localStorage slot that `lib/cloud-api.ts`
+        // reads via `getStoredTokens()`. Without this, anything routed
+        // through `cloudApi*` (Deploy tab embed key, agent-suggest,
+        // backups) fails with "Not authenticated" even though zustand
+        // says we're signed in. Two stores; one truth.
+        storeTokens({ accessToken, refreshToken });
         set({
           user,
           accessToken,
@@ -55,11 +61,13 @@ export const useAuthStore = create<AuthState>()(
           isAuthenticated: true,
           isCloudUser: true,
           tier: tier ?? "pro", // signed-in cloud users default to pro until /auth/me reports otherwise
-        }),
+        });
+      },
 
       setTier: (tier) => set({ tier }),
 
-      logout: () =>
+      logout: () => {
+        clearTokens(); // wipe the localStorage mirror so cloud-api stops sending stale Bearer
         set({
           user: localUser,
           accessToken: null,
@@ -67,7 +75,8 @@ export const useAuthStore = create<AuthState>()(
           isAuthenticated: true, // stays true — local mode
           isCloudUser: false,
           tier: "free",
-        }),
+        });
+      },
 
       refreshAccessToken: async () => {
         const { refreshTokenValue } = get();
@@ -75,6 +84,8 @@ export const useAuthStore = create<AuthState>()(
         try {
           const result = await refreshTokenApi(refreshTokenValue);
           set({ accessToken: result.accessToken });
+          // Keep the cloud-api localStorage mirror in sync after rotation.
+          storeTokens({ accessToken: result.accessToken, refreshToken: refreshTokenValue });
           return true;
         } catch {
           return true; // don't break local mode
@@ -101,8 +112,26 @@ export const useAuthStore = create<AuthState>()(
         accessToken: state.accessToken,
         refreshTokenValue: state.refreshTokenValue,
         isAuthenticated: state.isAuthenticated,
+        // Without persisting isCloudUser, every reload reset it to false
+        // even though tokens were intact — Pro gates then showed
+        // "Sign in for Pro" despite a valid session. Beatriz hit this
+        // 2026-05-09 right after the localStorage-mirror fix.
+        isCloudUser: state.isCloudUser,
         tier: state.tier,
       }),
+      // Mirror persisted tokens into the legacy localStorage slot that
+      // lib/cloud-api.ts reads via getStoredTokens(). Without this, an
+      // existing session predating the setAuth-mirror fix rehydrates
+      // with tokens in zustand but nothing in localStorage, and the
+      // Deploy-tab embed key path keeps 401-ing.
+      onRehydrateStorage: () => (state) => {
+        if (state?.accessToken && state?.refreshTokenValue) {
+          storeTokens({
+            accessToken: state.accessToken,
+            refreshToken: state.refreshTokenValue,
+          });
+        }
+      },
     }
   )
 );

@@ -1,9 +1,11 @@
 import { lazy } from "react";
 import { useTranslation } from "react-i18next";
-import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign } from "lucide-react";
+import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign, Sparkles, ArrowLeftRight } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
 const AgentObservability = lazy(() => import("@/components/AgentObservability/Dashboard"));
+const PipelinesPanel = lazy(() => import("@/components/PipelinesPanel"));
+const CompareTracesPanel = lazy(() => import("@/components/CompareTracesPanel"));
 const ExternalAgentsInsights = lazy(() => import("@/components/ExternalAgentsInsights"));
 const LiveRuns = lazy(() => import("@/components/LiveRuns"));
 const RegressionsPanel = lazy(() => import("@/components/RegressionsPanel"));
@@ -33,6 +35,27 @@ export default function InsightsSection() {
       label: t("subnav.insightsAgents", "Agents"),
       icon: Bot,
       Component: AgentObservability,
+    },
+    {
+      // v2.0.0 — Multi-stage dispatches grouped by parent_run_id.
+      // Sequential groups (writer → reviewer), routed groups, anything
+      // that fans out across runtimes lands here regardless of agent
+      // kind. Bridge between Agents (single-agent local view) and
+      // External (deployed bundles only).
+      id: "pipelines",
+      label: t("subnav.insightsPipelines", "Pipelines"),
+      icon: Sparkles,
+      Component: PipelinesPanel,
+    },
+    {
+      // v2.0.0 — Eval workbench. Diffs any two cloud traces of the same
+      // agent regardless of kind. Lives outside External so internal
+      // CLI dispatches don't have to be tagged kind=external just to
+      // be comparable (the prior dishonest pattern Beatriz flagged).
+      id: "compare",
+      label: t("subnav.insightsCompare", "Compare"),
+      icon: ArrowLeftRight,
+      Component: CompareTracesPanel,
     },
     {
       // v2.0.0 Wave 5 — traces from deployed Cloudflare/Vercel/Docker/Node bundles.
