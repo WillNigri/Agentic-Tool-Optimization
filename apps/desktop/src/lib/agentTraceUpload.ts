@@ -44,6 +44,10 @@ export interface AgentTraceInput {
    *  trying to do?" alongside the agent slug. Truncate with care —
    *  long prompts come pre-trimmed by `summarizePrompt`. */
   promptSummary?: string;
+  /** v2.1.0 Phase 7 — When this trace is one stage of a multi-stage
+   *  dispatch (sequential pipeline / routed group), all stages share
+   *  the same UUID. The pipeline visualizer groups by this field. */
+  parentRunId?: string;
 }
 
 const CLOUD_API_URL =

@@ -45,6 +45,7 @@ import {
 import { useProjectStore } from "@/stores/useProjectStore";
 import { useDemoStore } from "@/stores/useDemoStore";
 import { listAgentGroups, dispatchToGroup, type AgentGroup } from "@/lib/agentGroups";
+import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 import type { AgentRuntime } from "@/components/cron/types";
 import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
 import MarkdownContent from "./MarkdownContent";
@@ -419,6 +420,42 @@ export default function PromptBar() {
               runtime: s.runtime,
               response: s.response,
             }));
+          }
+          // v2.1.0 Phase 7 — Pipeline trace correlation. Emit one
+          // trace per stage with a shared parent_run_id so the
+          // pipeline visualizer can render Claude → Codex → Gemini
+          // as a flow with per-stage timing + status. Single
+          // dispatch (routed groups with 1 stage) gets the same
+          // treatment so the UI is uniform.
+          if (result.stages && result.stages.length > 0) {
+            const parentRunId =
+              typeof crypto !== "undefined" && "randomUUID" in crypto
+                ? crypto.randomUUID()
+                : `pipeline-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const promptSummary = summarizePrompt(prompt);
+            for (const s of result.stages) {
+              const startedAt =
+                s.startedAt ?? new Date().toISOString();
+              const durationMs = s.durationMs ?? 0;
+              void uploadAgentTrace({
+                agentSlug: s.agentSlug,
+                runtime: s.runtime,
+                startedAt,
+                durationMs,
+                ok: s.ok,
+                error: s.error,
+                source: "desktop:promptbar:pipeline",
+                parentRunId,
+                promptSummary,
+                metadata: {
+                  groupSlug: selectedGroup.slug,
+                  routedTo: result.routedTo,
+                  routingReason: result.routingReason,
+                  stageIndex: result.stages.indexOf(s),
+                  totalStages: result.stages.length,
+                },
+              });
+            }
           }
         } else if (selectedAgent) {
           // Agent-attributed multi-turn streaming dispatch — full thread

@@ -18,6 +18,7 @@ import {
   getAgentTraceMetrics,
   getAgentTraces,
   getTracesByFile,
+  getPipelineTraces,
   canQueryCloudTraces,
   type CloudAgentTrace,
   type CloudAgentTraceMetric,
@@ -54,6 +55,11 @@ export default function ExternalAgentsInsights() {
   // that touched this path across all agents. Twitter ask: "who
   // changed this file and why?" — this is the answer.
   const [openFile, setOpenFile] = useState<string | null>(null);
+  // v2.1.0 Phase 7 — when set, opens the PipelineModal showing every
+  // stage of a multi-agent dispatch (Claude → Codex → Gemini) keyed
+  // by parent_run_id. The trace list shows a "↪ pipeline" link on
+  // any trace that has a parent.
+  const [openPipeline, setOpenPipeline] = useState<string | null>(null);
 
   // Local agent list — used to mark which slugs are EXTERNAL (not just
   // any agent the cloud has traces for) so we surface only the
@@ -230,6 +236,7 @@ export default function ExternalAgentsInsights() {
               traces={detailQuery.data?.traces ?? []}
               changes={changesQuery.data?.changes ?? []}
               onFileClick={setOpenFile}
+              onPipelineClick={setOpenPipeline}
             />
           )}
         </section>
@@ -237,6 +244,13 @@ export default function ExternalAgentsInsights() {
 
       {openFile && (
         <FileHistoryModal path={openFile} onClose={() => setOpenFile(null)} />
+      )}
+      {openPipeline && (
+        <PipelineModal
+          parentRunId={openPipeline}
+          onClose={() => setOpenPipeline(null)}
+          onFileClick={setOpenFile}
+        />
       )}
     </div>
   );
@@ -350,10 +364,12 @@ function MergedTimeline({
   traces,
   changes,
   onFileClick,
+  onPipelineClick,
 }: {
   traces: CloudAgentTrace[];
   changes: ConfigChange[];
   onFileClick?: (path: string) => void;
+  onPipelineClick?: (parentRunId: string) => void;
 }) {
   const { t } = useTranslation();
   if (traces.length === 0 && changes.length === 0) {
@@ -379,7 +395,12 @@ function MergedTimeline({
     <ul className="space-y-1">
       {rows.map((row) =>
         row.kind === "trace" ? (
-          <TraceRow key={`t-${row.data.id}`} trace={row.data} onFileClick={onFileClick} />
+          <TraceRow
+            key={`t-${row.data.id}`}
+            trace={row.data}
+            onFileClick={onFileClick}
+            onPipelineClick={onPipelineClick}
+          />
         ) : (
           <ChangeRow key={`c-${row.data.id}`} change={row.data} />
         ),
@@ -391,9 +412,11 @@ function MergedTimeline({
 function TraceRow({
   trace: tr,
   onFileClick,
+  onPipelineClick,
 }: {
   trace: CloudAgentTrace;
   onFileClick?: (path: string) => void;
+  onPipelineClick?: (parentRunId: string) => void;
 }) {
   const { t } = useTranslation();
   const [showFiles, setShowFiles] = useState(false);
@@ -432,9 +455,22 @@ function TraceRow({
         {!tr.error && origin && (
           <span className="text-cs-muted truncate flex-1">{origin}</span>
         )}
+        {tr.parent_run_id && onPipelineClick && (
+          <button
+            type="button"
+            onClick={() => onPipelineClick(tr.parent_run_id!)}
+            className="ml-auto inline-flex items-center gap-1 rounded-sm border border-cs-accent/40 bg-cs-accent/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-accent shrink-0 hover:bg-cs-accent/20"
+            title={t("insights.external.pipelineTitle", "Open the full pipeline view for this dispatch")}
+          >
+            ↪ {t("insights.external.pipelineLabel", "pipeline")}
+          </button>
+        )}
         {overlapCount > 0 && (
           <span
-            className="ml-auto inline-flex items-center gap-1 rounded-sm border border-cs-warn/40 bg-cs-warn/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-warn shrink-0"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-sm border border-cs-warn/40 bg-cs-warn/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-warn shrink-0",
+              !tr.parent_run_id && "ml-auto",
+            )}
             title={t(
               "insights.external.overlapTitle",
               "Overlapped with {{n}} other run{{p}} in the same workspace — file attribution ambiguous.",
@@ -450,9 +486,12 @@ function TraceRow({
             onClick={() => setShowFiles((v) => !v)}
             className={cn(
               "inline-flex items-center gap-1 rounded-sm border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] hover:text-cs-accent shrink-0",
+              // ml-auto only when there's no pipeline link AND no
+              // overlap badge already pushing to the right edge.
+              !tr.parent_run_id && overlapCount === 0 && "ml-auto",
               overlapCount > 0
                 ? "border-cs-warn/40 text-cs-warn"
-                : "ml-auto border-cs-border text-cs-muted",
+                : "border-cs-border text-cs-muted",
             )}
             title="Files touched during this dispatch"
           >
@@ -727,5 +766,213 @@ function FileHistoryModal({
         </div>
       </div>
     </div>
+  );
+}
+
+// v2.1.0 Phase 7 — Pipeline trace visualizer.
+//
+// Multi-agent dispatches (sequential pipelines, routed groups) emit
+// one trace per stage with a shared parent_run_id. This modal queries
+// /api/agent-traces/pipeline/<id> and renders the chain as a flow:
+// Claude → Codex → Gemini, with per-stage status, runtime, latency,
+// files touched, and prompt summary.
+//
+// Why this view earns its keep beyond the linear trace list:
+//   - In the per-agent drill-down each stage shows up as a separate
+//     row, mixed with unrelated traces. The flow view groups them.
+//   - The handoff itself is the interesting bit (what runtime took
+//     over from what); the per-row layout buries it.
+function PipelineModal({
+  parentRunId,
+  onClose,
+  onFileClick,
+}: {
+  parentRunId: string;
+  onClose: () => void;
+  onFileClick?: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  const query = useQuery({
+    queryKey: ["pipeline-traces", parentRunId],
+    queryFn: () => getPipelineTraces(parentRunId),
+    staleTime: 15_000,
+  });
+
+  const stages = query.data?.stages ?? [];
+  const totalDuration = stages.reduce((acc, s) => acc + (s.duration_ms ?? 0), 0);
+  // Group dispatch metadata is on each stage's metadata; pull from
+  // the first stage so the header can summarize "@write-and-review,
+  // 3 stages, 2.3s total".
+  const groupSlug =
+    stages[0]?.metadata && typeof (stages[0].metadata as { groupSlug?: unknown }).groupSlug === "string"
+      ? (stages[0].metadata as { groupSlug: string }).groupSlug
+      : null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl max-h-[85vh] overflow-hidden rounded-lg border border-cs-border bg-cs-bg-raised shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-cs-border p-4">
+          <div className="min-w-0">
+            <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
+              <Sparkles size={14} className="text-cs-accent shrink-0" />
+              {t("insights.pipeline.title", "Pipeline trace")}
+            </h3>
+            <div className="mt-1 flex items-center gap-3 text-[11px] text-cs-muted">
+              {groupSlug && (
+                <code className="font-mono text-cs-text">@{groupSlug}</code>
+              )}
+              <span>
+                {stages.length}{" "}
+                {stages.length === 1
+                  ? t("insights.pipeline.stage", "stage")
+                  : t("insights.pipeline.stages", "stages")}
+              </span>
+              <span className="font-mono">
+                {totalDuration > 1000 ? `${(totalDuration / 1000).toFixed(1)}s` : `${totalDuration}ms`} total
+              </span>
+              <code className="font-mono text-[10px] text-cs-muted truncate" title={parentRunId}>
+                {parentRunId.slice(0, 8)}…
+              </code>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+          >
+            {t("common.close", "Close")}
+          </button>
+        </header>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+          {query.isLoading ? (
+            <div className="flex items-center justify-center h-32 text-cs-muted text-xs">
+              <Loader2 size={14} className="animate-spin mr-2" />
+              {t("insights.pipeline.loading", "Loading pipeline…")}
+            </div>
+          ) : query.isError ? (
+            <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+              <AlertCircle size={14} className="text-cs-danger shrink-0 mt-0.5" />
+              <span>
+                {t("insights.pipeline.error", "Couldn't load pipeline")}: {String(query.error)}
+              </span>
+            </div>
+          ) : stages.length === 0 ? (
+            <p className="text-xs text-cs-muted text-center py-8">
+              {t(
+                "insights.pipeline.empty",
+                "No stages found for this dispatch. Either the upload is still in flight or the parent_run_id is invalid.",
+              )}
+            </p>
+          ) : (
+            <ol className="space-y-2">
+              {stages.map((stage, i) => (
+                <PipelineStageRow
+                  key={stage.id}
+                  stage={stage}
+                  index={i}
+                  isLast={i === stages.length - 1}
+                  onFileClick={onFileClick}
+                />
+              ))}
+            </ol>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PipelineStageRow({
+  stage,
+  index,
+  isLast,
+  onFileClick,
+}: {
+  stage: CloudAgentTrace;
+  index: number;
+  isLast: boolean;
+  onFileClick?: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  const files = stage.files_touched ?? [];
+  return (
+    <li>
+      <div
+        className={cn(
+          "rounded-lg border p-3",
+          stage.ok
+            ? "border-cs-border bg-cs-bg-raised/40"
+            : "border-cs-danger/40 bg-cs-danger/5",
+        )}
+      >
+        <div className="flex items-center gap-2">
+          {/* Stage number — visual anchor for "this is step N." */}
+          <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-cs-accent/15 text-[10px] font-mono font-bold text-cs-accent">
+            {index + 1}
+          </span>
+          {stage.ok ? (
+            <CheckCircle2 size={11} className="text-cs-accent shrink-0" />
+          ) : (
+            <XCircle size={11} className="text-cs-danger shrink-0" />
+          )}
+          <code className="font-mono text-sm text-cs-text font-medium">
+            @{stage.agent_slug}
+          </code>
+          <span className="text-[10px] uppercase tracking-wide text-cs-muted shrink-0">
+            {stage.runtime}
+          </span>
+          <span className="ml-auto font-mono text-[10px] text-cs-muted shrink-0">
+            <Clock size={9} className="inline mr-0.5" />
+            {stage.duration_ms}ms
+          </span>
+        </div>
+        {stage.prompt_summary && index === 0 && (
+          <div className="mt-1.5 rounded border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-text">
+            <span className="text-cs-muted uppercase tracking-wide text-[9px] mr-1.5">
+              {t("insights.pipeline.userPrompt", "user")}
+            </span>
+            {stage.prompt_summary}
+          </div>
+        )}
+        {stage.error && (
+          <div className="mt-1.5 text-[11px] text-cs-danger break-words">{stage.error}</div>
+        )}
+        {files.length > 0 && (
+          <details className="mt-1.5">
+            <summary className="cursor-pointer text-[10px] text-cs-muted hover:text-cs-text">
+              📁 {files.length} {files.length === 1 ? "file" : "files"} touched
+            </summary>
+            <ul className="mt-1 ml-3 space-y-0.5">
+              {files.map((f) => (
+                <li key={f} className="flex items-center gap-1.5 text-[10px]">
+                  <span className="font-mono text-cs-text truncate flex-1">{f}</span>
+                  {onFileClick && (
+                    <button
+                      type="button"
+                      onClick={() => onFileClick(f)}
+                      className="shrink-0 font-mono text-cs-muted hover:text-cs-accent"
+                    >
+                      history →
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+      {/* Arrow between stages — visual handoff. Only render between
+          adjacent stages so the last one isn't followed by a dangler. */}
+      {!isLast && (
+        <div className="flex justify-center my-1 text-cs-accent text-sm font-mono">↓</div>
+      )}
+    </li>
   );
 }

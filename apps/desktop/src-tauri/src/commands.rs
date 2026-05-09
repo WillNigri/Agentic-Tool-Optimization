@@ -12913,6 +12913,18 @@ pub struct GroupStageResult {
     pub runtime: String,
     pub response: String,
     pub ok: bool,
+    /// v2.1.0 Phase 7 — start time of this stage (ISO 8601 UTC).
+    /// Frontend uses it to upload one trace per stage with the correct
+    /// per-stage timing rather than approximating from the group total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// Wall-clock duration of this stage in ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Error string when ok=false. Lets the frontend upload a precise
+    /// per-stage error instead of repeating the rolled-up group error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -13020,6 +13032,9 @@ pub async fn dispatch_to_group(
             runtime: group.runtime.clone(),
             response,
             ok: true,
+            started_at: None,
+            duration_ms: None,
+            error: None,
         }],
     })
 }
@@ -13065,16 +13080,23 @@ async fn run_sequential_dispatch(
         } else {
             child.agent_runtime.clone()
         };
-        let (stage_response, ok) = match prompt_agent(
+        let stage_start = std::time::Instant::now();
+        let stage_started_at = chrono::Utc::now().to_rfc3339();
+        let (stage_response, ok, stage_error) = match prompt_agent(
             child_runtime.clone(),
             stage_prompt,
             config.map(|s| s.to_string()),
         )
         .await
         {
-            Ok(r) => (r, true),
-            Err(e) => (format!("(stage '{}' on {} failed: {})", child.agent_slug, child_runtime, e), false),
+            Ok(r) => (r, true, None),
+            Err(e) => (
+                format!("(stage '{}' on {} failed: {})", child.agent_slug, child_runtime, e),
+                false,
+                Some(e),
+            ),
         };
+        let stage_duration_ms = stage_start.elapsed().as_millis() as u64;
 
         if !transcript.is_empty() {
             transcript.push_str("\n\n---\n\n");
@@ -13088,6 +13110,9 @@ async fn run_sequential_dispatch(
             runtime: child_runtime,
             response: stage_response.clone(),
             ok,
+            started_at: Some(stage_started_at),
+            duration_ms: Some(stage_duration_ms),
+            error: stage_error,
         });
         last_output = stage_response;
     }

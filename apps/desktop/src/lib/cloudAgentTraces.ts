@@ -54,6 +54,10 @@ export interface CloudAgentTrace {
   // file-history modal so reviewers can answer "why was this file
   // changed?" not just who/when.
   prompt_summary: string | null;
+  // v2.1.0 Phase 7 — When this trace is one stage of a multi-stage
+  // dispatch, all stages share the same UUID. The pipeline visualizer
+  // groups by this field.
+  parent_run_id: string | null;
 }
 
 /** Read auth headers from the local store. Returns null if the user
@@ -115,6 +119,18 @@ export async function getTracesByFile(
   params.set("limit", String(limit));
   return cloudGet<{ traces: CloudAgentTrace[] }>(
     `/api/agent-traces?${params.toString()}`,
+  );
+}
+
+/** v2.1.0 Phase 7 — Pipeline visualizer fetch. Returns every stage of
+ *  a multi-stage dispatch (sequential pipeline / routed group) by
+ *  parent_run_id, ordered started_at ascending so the UI can render
+ *  Claude → Codex → Gemini as a flow. */
+export async function getPipelineTraces(
+  parentRunId: string,
+): Promise<{ stages: CloudAgentTrace[]; parentRunId: string } | null> {
+  return cloudGet<{ stages: CloudAgentTrace[]; parentRunId: string }>(
+    `/api/agent-traces/pipeline/${encodeURIComponent(parentRunId)}`,
   );
 }
 

@@ -132,6 +132,14 @@ export interface GroupStageResult {
   runtime: string;
   response: string;
   ok: boolean;
+  /** v2.1.0 Phase 7 — ISO 8601 UTC start time of this stage. Optional;
+   *  populated for sequential pipelines so the dashboard can render
+   *  per-stage timing in the visualizer. */
+  startedAt?: string;
+  /** Wall-clock duration of this stage in ms. Optional. */
+  durationMs?: number;
+  /** Error string when ok=false. Optional. */
+  error?: string;
 }
 
 export interface GroupDispatchResult {
