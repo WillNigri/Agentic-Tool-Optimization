@@ -449,17 +449,17 @@ function RecRow({ rec, windowDays }: { rec: CostRecommendation; windowDays: numb
         </span>
       </div>
       <div className="mt-1 grid grid-cols-3 gap-2 text-[10px] text-cs-muted">
-        <Stat
+        <RecStat
           label={t("insights.cost.recsCurrent", "Current")}
           value={`$${rec.current_cost_per_run.toFixed(4)}`}
           sub={`${rec.current_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(rec.current_ok_rate * 100).toFixed(0)}%${evalShown ? ` · eval ${(rec.current_eval_score ?? 0).toFixed(2)}` : ""}`}
         />
-        <Stat
+        <RecStat
           label={t("insights.cost.recsAlternative", "Alternative")}
           value={`$${rec.suggested_cost_per_run.toFixed(4)}`}
           sub={`${rec.suggested_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(rec.suggested_ok_rate * 100).toFixed(0)}%${evalShown ? ` · eval ${(rec.suggested_eval_score ?? 0).toFixed(2)}` : ""}`}
         />
-        <Stat
+        <RecStat
           label={t("insights.cost.recsProjMonthly", "Projected /mo")}
           value={`$${rec.projected_monthly_usd.toFixed(2)}`}
           sub={t(
@@ -473,7 +473,7 @@ function RecRow({ rec, windowDays }: { rec: CostRecommendation; windowDays: numb
   );
 }
 
-function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
+function RecStat({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
     <div className="rounded border border-cs-border bg-cs-bg-raised/30 p-1.5">
       <div className="text-[9px] uppercase tracking-wide text-cs-muted">{label}</div>
