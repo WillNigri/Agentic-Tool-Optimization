@@ -14,6 +14,32 @@ import {
   clearTokens,
   getStoredTokens,
 } from '@/lib/cloud-api';
+import { useAuthStore } from '@/hooks/useAuth';
+
+// v2.1.x — Bridge useCloudStore (Settings → Cloud) and useAuthStore
+// (LoginModal + every cloud-fetching Pro UI). Both used to be
+// independent zustand stores, which meant signing in via the
+// Settings panel populated useCloudStore but left useAuthStore
+// empty — Beatriz hit this when sign-in worked in Settings but
+// History tab + sidebar still asked her to log in. Mirroring
+// state on every auth-mutating action is the smallest fix.
+function syncToAuthStore(user: CloudUser | null) {
+  if (user) {
+    const tokens = getStoredTokens();
+    if (tokens?.accessToken && tokens?.refreshToken) {
+      useAuthStore.getState().setAuth(
+        // The two stores have slightly different user shapes; the
+        // legacy useAuthStore only needs id/email/name.
+        { id: user.id, email: user.email, name: user.name ?? '' },
+        tokens.accessToken,
+        tokens.refreshToken,
+        user.subscription_tier ?? 'pro',
+      );
+    }
+  } else {
+    useAuthStore.getState().logout();
+  }
+}
 
 interface CloudState {
   // Auth state
@@ -69,6 +95,7 @@ export const useCloudStore = create<CloudState>()(
             isAuthenticated: true,
             isLoading: false,
           });
+          syncToAuthStore(response.user);
           // Fetch teams after login
           await get().fetchTeams();
           await get().fetchPendingInvitations();
@@ -92,6 +119,7 @@ export const useCloudStore = create<CloudState>()(
             isAuthenticated: true,
             isLoading: false,
           });
+          syncToAuthStore(response.user);
         } catch (err) {
           set({
             isLoading: false,
@@ -112,6 +140,7 @@ export const useCloudStore = create<CloudState>()(
             isAuthenticated: true,
             isLoading: false,
           });
+          syncToAuthStore(user);
           // Fetch teams after login
           await get().fetchTeams();
           await get().fetchPendingInvitations();
@@ -136,6 +165,7 @@ export const useCloudStore = create<CloudState>()(
           selectedTeamId: null,
           error: null,
         });
+        syncToAuthStore(null);
       },
 
       // Refresh user data
@@ -208,6 +238,7 @@ export async function initializeCloudAuth() {
     try {
       const { user } = await getCurrentUser();
       useCloudStore.setState({ user, isAuthenticated: true });
+      syncToAuthStore(user);
       // Fetch teams in background
       useCloudStore.getState().fetchTeams();
       useCloudStore.getState().fetchPendingInvitations();
@@ -215,6 +246,7 @@ export async function initializeCloudAuth() {
       // Token invalid, clear it
       clearTokens();
       useCloudStore.setState({ user: null, isAuthenticated: false });
+      syncToAuthStore(null);
     }
   }
 }

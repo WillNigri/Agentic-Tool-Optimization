@@ -13915,10 +13915,19 @@ async fn spawn_streaming_dispatch(
     // can't accidentally try to kill twice.
     let child_arc = Arc::new(AsyncMutex::new(Some(child)));
     let child_for_kill = child_arc.clone();
+    // CAPTURE the tokio runtime handle at registration time. The kill
+    // closure is invoked from `kill_active_run`, which is a sync
+    // Tauri command running OUTSIDE a tokio runtime context. Calling
+    // bare `tokio::spawn(...)` inside that closure panics → the
+    // panic unwinds into the Tauri command bridge → the entire app
+    // process crashes (Beatriz hit "ato-desktop encerrou
+    // inesperadamente" 2026-05-09 from clicking the Live → Kill
+    // button). Capturing the handle from the async dispatch context
+    // and using `handle.spawn` makes the closure independent of
+    // wherever it's later invoked from.
+    let runtime_handle = tokio::runtime::Handle::current();
     crate::active_runs::attach_kill_handler(&run_id, move || {
-        // The registry's kill() is sync; bridge into async via
-        // tokio::spawn so we can await the kill on tokio::Child.
-        tokio::spawn(async move {
+        runtime_handle.spawn(async move {
             let mut guard = child_for_kill.lock().await;
             if let Some(child) = guard.as_mut() {
                 let _ = child.kill().await;

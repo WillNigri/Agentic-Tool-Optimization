@@ -258,8 +258,14 @@ pub fn list_active_runs() -> Vec<ActiveRun> {
     list_runs()
 }
 
+// async (vs `pub fn`) so Tauri runs us inside a tokio runtime
+// context. The streaming dispatch's kill closure captures a runtime
+// handle at registration time and uses `handle.spawn` regardless,
+// but this is belt-and-suspenders: any future kill closure that
+// accidentally uses bare `tokio::spawn` won't panic the app from
+// here.
 #[tauri::command]
-pub fn kill_active_run(run_id: String) -> Result<bool, String> {
+pub async fn kill_active_run(run_id: String) -> Result<bool, String> {
     Ok(kill_run(&run_id))
 }
 
