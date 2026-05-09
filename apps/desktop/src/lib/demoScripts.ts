@@ -713,4 +713,322 @@ export const SHORT_SCRIPT: DemoScript = {
   ],
 };
 
-export const DEMO_SCRIPTS: DemoScript[] = [FULL_TOUR_SCRIPT, HERO_SCRIPT, SHORT_SCRIPT];
+// ─────────────────────────────────────────────────────────────────────
+// v2.1 standalone verification scripts.
+//
+// Each script demos ONE feature so you can verify it works without
+// running the FULL_TOUR. They aren't shown in marketing video — these
+// are for product QA. Pattern: cleanup leftover state, navigate to
+// the feature, narrate via subtitle, perform a minimal action that
+// triggers the feature, dwell so the operator can read the result.
+//
+// Most v2.1 features need cloud trace data to populate richly; the
+// scripts gracefully fall through to empty-state copy when there's
+// nothing to show, so they still run cleanly on a fresh install.
+// ─────────────────────────────────────────────────────────────────────
+
+export const LIVE_RUNS_SCRIPT: DemoScript = {
+  id: "v21-live-runs",
+  label: "v2.1 — Live runs panel",
+  shortDescription: "Fire a dispatch, watch it appear in Insights → Live with kill button",
+  steps: [
+    { kind: "subtitle", text: "v2.1 ops layer — Live runs panel.", durationMs: 2000 },
+    { kind: "navigate", section: "insights" },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "live" },
+    { kind: "wait", ms: 800 },
+    {
+      kind: "subtitle",
+      text: "Empty when nothing's running. Let's fire something.",
+      durationMs: 2400,
+    },
+    { kind: "navigate", section: "home" },
+    { kind: "setChatPaneOpen", open: true },
+    { kind: "newThread" },
+    { kind: "setRuntime", runtime: "claude" },
+    { kind: "wait", ms: 400 },
+    {
+      kind: "type",
+      text: "Take a moment, then write a haiku about morning coffee.",
+    },
+    { kind: "wait", ms: 300 },
+    { kind: "send" },
+    { kind: "wait", ms: 1500 },
+    { kind: "navigate", section: "insights" },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "live" },
+    {
+      kind: "subtitle",
+      text: "There — runtime, workspace, elapsed. Kill button per row, no terminal-buffer hunting.",
+      durationMs: 4500,
+    },
+    { kind: "wait", ms: 1500 },
+  ],
+};
+
+export const CONFIG_HISTORY_SCRIPT: DemoScript = {
+  id: "v21-config-history",
+  label: "v2.1 — Config history (impact ledger)",
+  shortDescription: "Edit an agent, see the change recorded in the History tab",
+  steps: [
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["history-demo"],
+    },
+    {
+      kind: "createAgent",
+      spec: {
+        displayName: "history-demo",
+        runtime: "claude",
+        model: "claude-sonnet-4-6",
+        description: "Throwaway agent for the config-history demo.",
+        systemPrompt: "Demo agent.",
+        goal: "config-history demo",
+      },
+    },
+    { kind: "subtitle", text: "v2.1 — Configuration impact ledger.", durationMs: 2000 },
+    { kind: "navigate", section: "agents" },
+    { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },
+    { kind: "wait", ms: 800 },
+    {
+      kind: "subtitle",
+      text: "Open the agent we just created.",
+      durationMs: 1800,
+    },
+    { kind: "highlight", id: "agent-configure-history-demo", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-configure-history-demo" },
+    { kind: "wait", ms: 1200 },
+    {
+      kind: "subtitle",
+      text: "Genesis change was recorded automatically. Every model swap, prompt edit, hook add lands here.",
+      durationMs: 4200,
+    },
+    { kind: "highlight", id: "agent-tab-history", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-history" },
+    { kind: "wait", ms: 1500 },
+    {
+      kind: "subtitle",
+      text: "Each row: field changed, old → new diff (expand), actor, timestamp. Pro+ + cloud login required.",
+      durationMs: 5000,
+    },
+    { kind: "wait", ms: 1500 },
+  ],
+};
+
+export const PIPELINE_VIEWER_SCRIPT: DemoScript = {
+  id: "v21-pipeline-viewer",
+  label: "v2.1 — Pipeline trace visualizer",
+  shortDescription: "Fire a sequential group, click the pipeline link, see Claude → Codex flow",
+  steps: [
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["pipe-writer", "pipe-reviewer"],
+      groupSlugs: ["pipe-demo"],
+    },
+    {
+      kind: "createAgent",
+      spec: {
+        displayName: "pipe-writer",
+        runtime: "claude",
+        model: "claude-sonnet-4-6",
+        description: "Writes one short paragraph.",
+        systemPrompt: "Write ONE short paragraph on the topic given. No commentary.",
+        goal: "pipeline writer",
+      },
+    },
+    {
+      kind: "createAgent",
+      spec: {
+        displayName: "pipe-reviewer",
+        runtime: "codex",
+        model: "gpt-4.1",
+        description: "Reviews the paragraph.",
+        systemPrompt: "Review the previous paragraph for clarity. Reply in 2 short sentences.",
+        goal: "pipeline reviewer",
+      },
+    },
+    { kind: "subtitle", text: "v2.1 — Pipeline trace visualizer.", durationMs: 2000 },
+    { kind: "navigate", section: "agents" },
+    { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "groups" },
+    { kind: "wait", ms: 600 },
+    { kind: "clickByDemoId", id: "group-new" },
+    { kind: "wait", ms: 700 },
+    {
+      kind: "autoFillGroupForm",
+      spec: {
+        displayName: "pipe-demo",
+        runtime: "claude",
+        description: "Sequential demo: writer → reviewer.",
+        dispatchKind: "sequential",
+        childSlugs: ["pipe-writer", "pipe-reviewer"],
+      },
+    },
+    { kind: "wait", ms: 800 },
+    { kind: "scrollIntoView", id: "group-save", block: "center" },
+    { kind: "clickByDemoId", id: "group-save" },
+    { kind: "wait", ms: 1500 },
+    {
+      kind: "subtitle",
+      text: "Group saved. Fire it from chat — both children run, traces share a parent_run_id.",
+      durationMs: 3500,
+    },
+    { kind: "navigate", section: "home" },
+    { kind: "setChatPaneOpen", open: true },
+    { kind: "newThread" },
+    { kind: "selectChatGroup", slug: "pipe-demo" },
+    { kind: "wait", ms: 500 },
+    {
+      kind: "type",
+      text: "Topic: why morning routines matter for software engineers.",
+    },
+    { kind: "wait", ms: 300 },
+    { kind: "send" },
+    { kind: "wait", ms: 2000 },
+    { kind: "navigate", section: "insights" },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
+    {
+      kind: "subtitle",
+      text: "Open the agent's drill-down. Each stage has a ↪ pipeline link to see the full flow.",
+      durationMs: 4500,
+    },
+    { kind: "wait", ms: 1500 },
+  ],
+};
+
+export const EMBED_KEY_SCRIPT: DemoScript = {
+  id: "v21-embed-key",
+  label: "v2.1 — Deploy bundle embed key",
+  shortDescription: "Open Deploy tab on an external agent, reveal ATO_TRACE_KEY",
+  steps: [
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["embed-demo"],
+      apiKeyNames: ["[DEMO] Anthropic"],
+    },
+    {
+      kind: "seedDemoApiKey",
+      provider: "anthropic",
+      name: "[DEMO] Anthropic",
+      value: "sk-ant-demo-DO-NOT-USE-this-is-a-placeholder-key",
+    },
+    {
+      kind: "createAgent",
+      spec: {
+        displayName: "embed-demo",
+        runtime: "claude",
+        model: "claude-sonnet-4-6",
+        description: "External agent for embed-key demo.",
+        systemPrompt: "Customer support agent for {company_name}.",
+        goal: "embed key demo",
+        kind: "external",
+      },
+    },
+    { kind: "subtitle", text: "v2.1 — Deploy tab + embed key.", durationMs: 2000 },
+    { kind: "navigate", section: "agents" },
+    { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },
+    { kind: "wait", ms: 600 },
+    { kind: "highlight", id: "agent-configure-embed-demo", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-configure-embed-demo" },
+    { kind: "wait", ms: 1200 },
+    { kind: "highlight", id: "agent-tab-deploy", durationMs: 1200 },
+    { kind: "clickByDemoId", id: "agent-tab-deploy" },
+    { kind: "wait", ms: 1200 },
+    {
+      kind: "subtitle",
+      text: "Toggle 'Stream traces to ATO Insights' to surface the embed key panel.",
+      durationMs: 3500,
+    },
+    {
+      kind: "subtitle",
+      text: "Click reveal → masked → real key. Copy → paste as ATO_TRACE_KEY env var on the deployed bundle.",
+      durationMs: 5000,
+    },
+    {
+      kind: "subtitle",
+      text: "Free or signed-out users see the upgrade hint instead.",
+      durationMs: 2800,
+    },
+    { kind: "wait", ms: 1500 },
+  ],
+};
+
+export const COMPARE_TRACES_SCRIPT: DemoScript = {
+  id: "v21-compare-traces",
+  label: "v2.1 — Compare traces (eval workbench)",
+  shortDescription: "Insights → External → click ↔ compare on any trace",
+  steps: [
+    { kind: "subtitle", text: "v2.1 — Eval workbench (compare).", durationMs: 2000 },
+    { kind: "navigate", section: "insights" },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
+    { kind: "wait", ms: 1200 },
+    {
+      kind: "subtitle",
+      text: "Pick any agent card to drill in. Each trace row has a ↔ compare button.",
+      durationMs: 4000,
+    },
+    {
+      kind: "subtitle",
+      text: "Click compare on a trace, pick a comparison from same-slug recent runs, see them side-by-side with diff highlights.",
+      durationMs: 5500,
+    },
+    {
+      kind: "subtitle",
+      text: "Diff: duration delta, cost delta, ok-status change, files only-in-baseline / only-in-comparison.",
+      durationMs: 4500,
+    },
+    { kind: "wait", ms: 1500 },
+  ],
+};
+
+export const INSIGHTS_TOUR_SCRIPT: DemoScript = {
+  id: "v21-insights-tour",
+  label: "v2.1 — Insights tour (Live → External → Regressions → Cost)",
+  shortDescription: "Walk every v2.1 sub-tab in Insights so you can verify each renders",
+  steps: [
+    { kind: "subtitle", text: "v2.1 — Insights tour. Walking every sub-tab.", durationMs: 2400 },
+    { kind: "navigate", section: "insights" },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "live" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "Live — in-flight dispatches. Phase 4.",
+      durationMs: 2400,
+    },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "External — per-agent trace metrics + drill-down with files / pipeline / compare. Phases 3 + 7 + 9.",
+      durationMs: 4500,
+    },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "regressions" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "Regressions — model swap → eval drop, joined automatically. Phase 5.",
+      durationMs: 4000,
+    },
+    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "cost" },
+    { kind: "wait", ms: 1000 },
+    {
+      kind: "subtitle",
+      text: "Cost — per-(agent, runtime) cost-per-success with outlier flagging. Phase 8.",
+      durationMs: 4000,
+    },
+    { kind: "wait", ms: 1500 },
+  ],
+};
+
+export const DEMO_SCRIPTS: DemoScript[] = [
+  FULL_TOUR_SCRIPT,
+  HERO_SCRIPT,
+  SHORT_SCRIPT,
+  // v2.1 standalone verification scripts.
+  LIVE_RUNS_SCRIPT,
+  CONFIG_HISTORY_SCRIPT,
+  PIPELINE_VIEWER_SCRIPT,
+  EMBED_KEY_SCRIPT,
+  COMPARE_TRACES_SCRIPT,
+  INSIGHTS_TOUR_SCRIPT,
+];
