@@ -129,7 +129,11 @@ export default function ExternalAgentsInsights() {
       />
     );
   }
-  if (externalAgents.length === 0) {
+  // In mock mode we skip the "no external agents" gate so the
+  // fixture metrics render even when the user hasn't created any
+  // external agents locally yet. Production builds keep the gate.
+  const isMock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
+  if (!isMock && externalAgents.length === 0) {
     return (
       <Empty
         icon={<Globe size={20} />}
@@ -162,8 +166,12 @@ export default function ExternalAgentsInsights() {
 
   const allMetrics = metricsQuery.data?.metrics ?? [];
   // Filter to ONLY external-agent slugs the user owns locally — keeps
-  // the surface focused on deployed-agent observability.
-  const externalMetrics = allMetrics.filter((m) => externalSlugs.has(m.agent_slug));
+  // the surface focused on deployed-agent observability. In mock
+  // mode the local agent list won't match fixture slugs, so we skip
+  // the filter and show every metric the mock returns.
+  const externalMetrics = isMock
+    ? allMetrics
+    : allMetrics.filter((m) => externalSlugs.has(m.agent_slug));
 
   // ── Render ────────────────────────────────────────────────────────
   return (

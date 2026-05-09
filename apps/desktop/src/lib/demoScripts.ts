@@ -871,13 +871,13 @@ export const PIPELINE_VIEWER_SCRIPT: DemoScript = {
       },
     },
     { kind: "subtitle", text: "v2.1 — Pipeline trace visualizer.", durationMs: 2000 },
-    { kind: "navigate", section: "agents" },
-    { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "groups" },
-    { kind: "wait", ms: 600 },
-    { kind: "clickByDemoId", id: "group-new" },
-    { kind: "wait", ms: 700 },
+    // Skip the form-driven group creation. The form save raced the
+    // chat pane's group-list cache (selectChatGroup ran before
+    // pipe-demo was in the dropdown), and the dispatch ended up
+    // going to bare Claude with no agent. Programmatic createGroup
+    // bypasses both the form validation AND the cache timing.
     {
-      kind: "autoFillGroupForm",
+      kind: "createGroup",
       spec: {
         displayName: "pipe-demo",
         runtime: "claude",
@@ -887,27 +887,37 @@ export const PIPELINE_VIEWER_SCRIPT: DemoScript = {
       },
     },
     { kind: "wait", ms: 800 },
-    { kind: "scrollIntoView", id: "group-save", block: "center" },
-    { kind: "clickByDemoId", id: "group-save" },
-    { kind: "wait", ms: 1500 },
     {
       kind: "subtitle",
-      text: "Group saved. Fire it from chat — both children run, traces share a parent_run_id.",
+      text: "Group seeded. Fire it from chat — both children run, traces share a parent_run_id.",
       durationMs: 3500,
     },
     { kind: "navigate", section: "home" },
     { kind: "setChatPaneOpen", open: true },
     { kind: "newThread" },
+    // Select the group BEFORE typing so the dispatch path is locked
+    // in. wait long enough for React Query to refresh the group list
+    // after createGroup mutated SQLite.
+    { kind: "wait", ms: 1500 },
     { kind: "selectChatGroup", slug: "pipe-demo" },
-    { kind: "wait", ms: 500 },
+    { kind: "wait", ms: 800 },
     {
       kind: "type",
       text: "Topic: why morning routines matter for software engineers.",
     },
     { kind: "wait", ms: 300 },
     { kind: "send" },
-    { kind: "wait", ms: 2000 },
+    // Group dispatch (writer + reviewer) takes 15-30s. Wait for both
+    // stages to complete + traces to upload. In mock mode, the
+    // upload short-circuits — the pipeline visualizer falls back to
+    // the canonical fixture parent_id which has 2 mock stages.
+    { kind: "wait", ms: 2500 },
     { kind: "navigate", section: "insights" },
+    // External tab filters by kind=external. pipe-writer/reviewer are
+    // INTERNAL agents so their real traces don't appear there. In
+    // mock mode the fixtures DO show up (mock fixtures include
+    // code-writer + security-reviewer as external for demo purposes).
+    // For real-data verification, use the Agents sub-tab instead.
     { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
     { kind: "wait", ms: 1500 },
     {
