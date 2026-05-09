@@ -242,13 +242,26 @@ export interface RegressionRow {
   before_ok_rate: number;
   before_p95_ms: number;
   before_cost_per_run: number;
+  /** v2.1 Phase 5b — avg evaluator score over the before window.
+   *  null when no evaluators ran. */
+  before_eval_score: number | null;
+  before_eval_count: number;
   after_runs: number;
   after_ok_rate: number;
   after_p95_ms: number;
   after_cost_per_run: number;
+  after_eval_score: number | null;
+  after_eval_count: number;
   ok_delta_pp: number;
   p95_delta_pct: number;
   cost_delta_pct: number;
+  /** v2.1 Phase 5b — eval score delta in percentage points (a 0.91 → 0.74
+   *  drop is -17). null when neither side has evaluators. */
+  eval_delta_pp: number | null;
+  /** v2.1 Phase 5b — up to 10 post-change trace IDs that ok=false.
+   *  Used by the drill-down modal to show actual failing examples
+   *  rather than just an aggregate delta. */
+  failing_trace_ids: string[];
   severity: "regression" | "improvement" | "neutral";
 }
 export async function getRegressions(opts?: {

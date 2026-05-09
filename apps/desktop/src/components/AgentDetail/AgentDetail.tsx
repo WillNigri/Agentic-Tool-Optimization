@@ -1,7 +1,10 @@
 import { useState, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
-import { useQueryClient } from "@tanstack/react-query";
-import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen, Code2, History } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen, Code2, History, TrendingDown } from "lucide-react";
+import { getRegressions, type RegressionRow } from "@/lib/cloudAgentTraces";
+import { useFeatureFlag } from "@/lib/tier";
+import { useAuthStore } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
 import { updateAgentKind } from "@/lib/agents";
@@ -114,6 +117,11 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
           </button>
         </header>
 
+        {/* v2.1 Phase 5b — Regression banner. Surfaces an active
+            regression on this agent so users see the warning without
+            having to remember to check Insights → Regressions. */}
+        <RegressionBanner agentSlug={agent.slug} />
+
         <nav
           className="flex flex-wrap gap-1 px-5 pt-3 border-b border-cs-border"
           role="tablist"
@@ -176,6 +184,82 @@ export default function AgentDetail({ agent, onClose, initialTab }: Props) {
             </Suspense>
           </ErrorBoundary>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// v2.1 Phase 5b — small alert above the tabs when an active regression
+// exists for this agent. Inline summary; users can hop to Insights →
+// Regressions for the drill-down. Render-nothing on free / signed-out /
+// no-data so the modal stays clean by default.
+function RegressionBanner({ agentSlug }: { agentSlug: string }) {
+  const { t } = useTranslation();
+  const isPro = useFeatureFlag("cloud-traces");
+  const isCloudUser = useAuthStore((s) => s.isCloudUser);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const mock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
+  const canQuery = mock || (isCloudUser && !!accessToken);
+
+  const query = useQuery({
+    queryKey: ["regressions", 30],
+    queryFn: () => getRegressions({ days: 30 }),
+    enabled: !!canQuery && isPro,
+    staleTime: 60_000,
+  });
+
+  if (!canQuery || !isPro) return null;
+  const all = query.data?.regressions ?? [];
+  // Most-recent regression for THIS agent only.
+  const mine: RegressionRow | undefined = all
+    .filter((r) => r.agent_slug === agentSlug && r.severity === "regression")
+    .sort((a, b) => b.changed_at.localeCompare(a.changed_at))[0];
+  if (!mine) return null;
+
+  const okLine =
+    mine.ok_delta_pp <= -10
+      ? t("agentDetail.regressionBanner.okDrop", "ok rate {{n}}pp", {
+          n: mine.ok_delta_pp.toFixed(1),
+        })
+      : null;
+  const evalLine =
+    mine.eval_delta_pp !== null && mine.eval_delta_pp <= -15
+      ? t("agentDetail.regressionBanner.evalDrop", "eval score {{n}}pp", {
+          n: mine.eval_delta_pp.toFixed(1),
+        })
+      : null;
+  const p95Line =
+    mine.p95_delta_pct >= 50
+      ? t("agentDetail.regressionBanner.p95Up", "p95 latency +{{n}}%", {
+          n: mine.p95_delta_pct.toFixed(0),
+        })
+      : null;
+  const costLine =
+    mine.cost_delta_pct >= 25
+      ? t("agentDetail.regressionBanner.costUp", "cost +{{n}}%", {
+          n: mine.cost_delta_pct.toFixed(0),
+        })
+      : null;
+  const reasons = [okLine, evalLine, p95Line, costLine].filter(Boolean).join(" · ");
+
+  return (
+    <div className="border-b border-cs-danger/30 bg-cs-danger/5 px-5 py-2 text-[11px] text-cs-text flex items-start gap-2">
+      <TrendingDown size={12} className="text-cs-danger shrink-0 mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <span className="font-medium text-cs-danger">
+          {t("agentDetail.regressionBanner.title", "Regression detected")}
+        </span>{" "}
+        <span className="text-cs-muted">
+          {t("agentDetail.regressionBanner.body", "after the most recent {{field}} change", {
+            field: mine.field,
+          })}
+          {reasons ? ` — ${reasons}` : ""}
+          {". "}
+          {t(
+            "agentDetail.regressionBanner.see",
+            "See Insights → Regressions for failing examples and rollback options.",
+          )}
+        </span>
       </div>
     </div>
   );

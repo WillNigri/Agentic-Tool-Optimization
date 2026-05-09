@@ -14,8 +14,15 @@ import {
   Sparkles,
   Cloud,
   Zap,
+  XCircle,
+  Clock,
 } from "lucide-react";
-import { getRegressions, type RegressionRow } from "@/lib/cloudAgentTraces";
+import {
+  getRegressions,
+  getTraceById,
+  type RegressionRow,
+  type CloudAgentTrace,
+} from "@/lib/cloudAgentTraces";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
@@ -54,6 +61,7 @@ export default function RegressionsPanel() {
   const canQuery = mock || (isCloudUser && accessToken);
   const [days, setDays] = useState<7 | 30 | 90>(30);
   const [showAll, setShowAll] = useState(false);
+  const [openDrill, setOpenDrill] = useState<RegressionRow | null>(null);
 
   const query = useQuery({
     queryKey: ["regressions", days],
@@ -183,15 +191,31 @@ export default function RegressionsPanel() {
       ) : (
         <ul className="space-y-2">
           {visible.map((r) => (
-            <RegressionCard key={r.change_id} row={r} />
+            <RegressionCard
+              key={r.change_id}
+              row={r}
+              onDrillIn={() => setOpenDrill(r)}
+            />
           ))}
         </ul>
+      )}
+      {openDrill && (
+        <RegressionDrillModal
+          row={openDrill}
+          onClose={() => setOpenDrill(null)}
+        />
       )}
     </div>
   );
 }
 
-function RegressionCard({ row }: { row: RegressionRow }) {
+function RegressionCard({
+  row,
+  onDrillIn,
+}: {
+  row: RegressionRow;
+  onDrillIn: () => void;
+}) {
   const { t } = useTranslation();
   const Icon = FIELD_ICONS[row.field] ?? FileText;
   const severityClasses =
@@ -200,6 +224,10 @@ function RegressionCard({ row }: { row: RegressionRow }) {
       : row.severity === "improvement"
         ? "border-cs-accent/40 bg-cs-accent/5"
         : "border-cs-border bg-cs-bg-raised/40";
+  // v2.1 Phase 5b — eval score is null when neither side ran an evaluator.
+  // Render "—" rather than a misleading 0pp delta in that case.
+  const hasEval = row.eval_delta_pp !== null;
+  const failingCount = row.failing_trace_ids?.length ?? 0;
   return (
     <li className={cn("rounded-lg border p-3", severityClasses)}>
       <div className="flex items-start gap-2">
@@ -216,7 +244,12 @@ function RegressionCard({ row }: { row: RegressionRow }) {
           <p className="mt-1 text-[11px] text-cs-muted">
             {summarizeChange(row, t)}
           </p>
-          <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+          <div
+            className={cn(
+              "mt-2 grid gap-2 text-[11px]",
+              hasEval ? "grid-cols-4" : "grid-cols-3",
+            )}
+          >
             <DeltaStat
               label={t("insights.regressions.successRate", "Success rate")}
               before={`${(row.before_ok_rate * 100).toFixed(0)}%`}
@@ -224,6 +257,15 @@ function RegressionCard({ row }: { row: RegressionRow }) {
               delta={`${row.ok_delta_pp >= 0 ? "+" : ""}${row.ok_delta_pp.toFixed(1)}pp`}
               good={row.ok_delta_pp >= 0}
             />
+            {hasEval && (
+              <DeltaStat
+                label={t("insights.regressions.evalScore", "Eval score")}
+                before={(row.before_eval_score ?? 0).toFixed(2)}
+                after={(row.after_eval_score ?? 0).toFixed(2)}
+                delta={`${(row.eval_delta_pp ?? 0) >= 0 ? "+" : ""}${(row.eval_delta_pp ?? 0).toFixed(1)}pp`}
+                good={(row.eval_delta_pp ?? 0) >= 0}
+              />
+            )}
             <DeltaStat
               label={t("insights.regressions.p95Latency", "p95 latency")}
               before={`${row.before_p95_ms}ms`}
@@ -239,11 +281,26 @@ function RegressionCard({ row }: { row: RegressionRow }) {
               good={row.cost_delta_pct <= 0}
             />
           </div>
-          <div className="mt-1.5 text-[10px] text-cs-muted">
-            {t("insights.regressions.sampleSize", "{{n}} runs before · {{m}} after", {
-              n: row.before_runs,
-              m: row.after_runs,
-            })}
+          <div className="mt-1.5 flex items-center gap-2 text-[10px] text-cs-muted">
+            <span>
+              {t("insights.regressions.sampleSize", "{{n}} runs before · {{m}} after", {
+                n: row.before_runs,
+                m: row.after_runs,
+              })}
+            </span>
+            {failingCount > 0 && (
+              <button
+                type="button"
+                onClick={onDrillIn}
+                className="ml-auto inline-flex items-center gap-1 text-cs-warn hover:text-cs-text underline-offset-2 hover:underline"
+              >
+                {t(
+                  "insights.regressions.viewFailing",
+                  "View {{n}} failing example{{s}} →",
+                  { n: failingCount, s: failingCount === 1 ? "" : "s" },
+                )}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -353,5 +410,118 @@ function Empty({
       <p className="text-cs-text font-medium mb-1">{title}</p>
       <p className="text-[12px] text-cs-muted">{body}</p>
     </div>
+  );
+}
+
+// v2.1 Phase 5b — Drill-down modal showing the actual failing post-change
+// traces. The aggregate delta tells you something dropped; this tells you
+// WHICH conversations failed so you can read the prompts + errors and
+// decide whether to roll back or just patch the prompt.
+function RegressionDrillModal({
+  row,
+  onClose,
+}: {
+  row: RegressionRow;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl max-h-[85vh] overflow-hidden rounded-lg border border-cs-border bg-cs-bg-raised shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-cs-border p-4">
+          <div className="min-w-0">
+            <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
+              <TrendingDown size={14} className="text-cs-danger shrink-0" />
+              {t("insights.regressions.drillTitle", "Failing examples after the change")}
+            </h3>
+            <p className="mt-1 text-[11px] text-cs-muted">
+              <code className="font-mono text-cs-text">@{row.agent_slug}</code>
+              {" · "}
+              {summarizeChange(row, t)}
+              {" · "}
+              {new Date(row.changed_at).toLocaleString()}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+          >
+            {t("common.close", "Close")}
+          </button>
+        </header>
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+          <ul className="space-y-2">
+            {row.failing_trace_ids.map((traceId) => (
+              <FailingTraceRow key={traceId} traceId={traceId} />
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FailingTraceRow({ traceId }: { traceId: string }) {
+  const { t } = useTranslation();
+  const traceQuery = useQuery({
+    queryKey: ["trace-by-id", traceId],
+    queryFn: () => getTraceById(traceId),
+    staleTime: 60_000,
+  });
+  if (traceQuery.isLoading) {
+    return (
+      <li className="flex items-center gap-2 rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3 text-[11px] text-cs-muted">
+        <Loader2 size={12} className="animate-spin" />
+        {t("insights.regressions.loadingTrace", "Loading trace…")}
+      </li>
+    );
+  }
+  if (traceQuery.isError || !traceQuery.data) {
+    return (
+      <li className="rounded-lg border border-cs-danger/40 bg-cs-danger/5 p-3 text-[11px] text-cs-danger">
+        <code className="font-mono">{traceId.slice(0, 8)}…</code>{" "}
+        {t("insights.regressions.traceLoadError", "couldn't load")}
+      </li>
+    );
+  }
+  const tr: CloudAgentTrace = traceQuery.data;
+  return (
+    <li className="rounded-lg border border-cs-danger/30 bg-cs-danger/5 p-3">
+      <div className="flex items-center gap-2">
+        <XCircle size={11} className="text-cs-danger shrink-0" />
+        <code className="font-mono text-[11px] text-cs-text">{tr.id.slice(0, 8)}…</code>
+        <span className="text-[10px] uppercase tracking-wide text-cs-muted">{tr.runtime}</span>
+        <span className="ml-auto inline-flex items-center gap-1 text-[10px] font-mono text-cs-muted">
+          <Clock size={9} />
+          {tr.duration_ms}ms
+        </span>
+      </div>
+      {tr.prompt_summary && (
+        <div className="mt-1.5 rounded border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-text">
+          <span className="text-cs-muted uppercase tracking-wide text-[9px] mr-1.5">
+            {t("insights.regressions.prompt", "prompt")}
+          </span>
+          {tr.prompt_summary}
+        </div>
+      )}
+      {tr.error && (
+        <div className="mt-1.5 rounded border border-cs-danger/40 bg-cs-danger/10 px-2 py-1 text-[11px] text-cs-danger break-words">
+          <span className="uppercase tracking-wide text-[9px] mr-1.5">
+            {t("insights.regressions.error", "error")}
+          </span>
+          {tr.error}
+        </div>
+      )}
+      <div className="mt-1 text-[10px] text-cs-muted">
+        {new Date(tr.started_at).toLocaleString()}
+      </div>
+    </li>
   );
 }

@@ -316,13 +316,21 @@ export const MOCK_REGRESSIONS: RegressionRow[] = [
     before_ok_rate: 1.0,
     before_p95_ms: 3600,
     before_cost_per_run: 0.0115,
+    before_eval_score: 0.91,
+    before_eval_count: 2,
     after_runs: 2,
     after_ok_rate: 0.5,
     after_p95_ms: 5800,
     after_cost_per_run: 0.0185,
+    after_eval_score: 0.74,
+    after_eval_count: 2,
     ok_delta_pp: -50,
     p95_delta_pct: 61.1,
     cost_delta_pct: 60.9,
+    eval_delta_pp: -17,
+    failing_trace_ids: MOCK_TRACES.filter((t) => t.agent_slug === "code-writer" && !t.ok)
+      .slice(0, 10)
+      .map((t) => t.id),
     severity: "regression",
   },
 ];
