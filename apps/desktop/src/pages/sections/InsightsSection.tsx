@@ -1,12 +1,13 @@
 import { lazy } from "react";
 import { useTranslation } from "react-i18next";
-import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit } from "lucide-react";
+import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
 const AgentObservability = lazy(() => import("@/components/AgentObservability/Dashboard"));
 const ExternalAgentsInsights = lazy(() => import("@/components/ExternalAgentsInsights"));
 const LiveRuns = lazy(() => import("@/components/LiveRuns"));
 const RegressionsPanel = lazy(() => import("@/components/RegressionsPanel"));
+const CostBenchmarksPanel = lazy(() => import("@/components/CostBenchmarksPanel"));
 const HealthDashboard = lazy(() =>
   import("@/components/HealthDashboard").then((m) => ({ default: m.HealthDashboard }))
 );
@@ -48,6 +49,14 @@ export default function InsightsSection() {
       label: t("subnav.insightsRegressions", "Regressions"),
       icon: GitCommit,
       Component: RegressionsPanel,
+    },
+    {
+      // v2.1.0 Phase 8 — Cost benchmarks. Per-(agent, runtime)
+      // cost-per-success ranking with outlier flagging.
+      id: "cost",
+      label: t("subnav.insightsCost", "Cost"),
+      icon: DollarSign,
+      Component: CostBenchmarksPanel,
     },
     {
       id: "health",

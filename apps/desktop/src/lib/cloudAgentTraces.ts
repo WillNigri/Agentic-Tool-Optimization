@@ -122,6 +122,43 @@ export async function getTracesByFile(
   );
 }
 
+/** v2.1.0 Phase 8 — Cost optimization data.
+ *
+ *  Per-(agent_slug, runtime) cost stats over a window. Outlier flag
+ *  fires when a row's cost-per-success is ≥2× the user's median (and
+ *  has at least 2× the minimum sample size, so noise doesn't trip
+ *  it). Frontend renders sorted by cost descending. */
+export interface CostBenchmarkRow {
+  agent_slug: string;
+  runtime: string;
+  runs: number;
+  ok_runs: number;
+  cost_per_ok: number;
+  cost_per_run: number;
+  total_cost_usd: number;
+  p50_ms: number;
+  is_outlier: boolean;
+}
+export async function getCostBenchmarks(opts?: {
+  days?: number;
+  minRuns?: number;
+}): Promise<{
+  rows: CostBenchmarkRow[];
+  medianCostPerOk: number;
+  days: number;
+  minRuns: number;
+} | null> {
+  const params = new URLSearchParams();
+  if (opts?.days) params.set("days", String(opts.days));
+  if (opts?.minRuns) params.set("minRuns", String(opts.minRuns));
+  return cloudGet<{
+    rows: CostBenchmarkRow[];
+    medianCostPerOk: number;
+    days: number;
+    minRuns: number;
+  }>(`/api/agent-traces/cost-benchmarks?${params.toString()}`);
+}
+
 /** v2.1.0 Phase 7 — Pipeline visualizer fetch. Returns every stage of
  *  a multi-stage dispatch (sequential pipeline / routed group) by
  *  parent_run_id, ordered started_at ascending so the UI can render
