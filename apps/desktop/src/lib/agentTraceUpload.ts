@@ -81,6 +81,30 @@ export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
         agentSlug: trace.agentSlug,
         parentRunId: trace.parentRunId,
       });
+      return;
+    }
+    // v2.1.0 Replay link. Cloud returns the inserted trace IDs; we
+    // attach the first one to the most-recent matching local
+    // execution_logs row by (runtime, ±10s window) so future replay
+    // lookups can find the full prompt by trace ID. Best-effort —
+    // missing the link only means this trace can't be replayed, not
+    // that anything else broke.
+    try {
+      const body = (await response.json()) as {
+        success: boolean;
+        data?: { ids?: string[] };
+      };
+      const insertedId = body?.data?.ids?.[0];
+      if (insertedId) {
+        const { linkExecutionLogToCloudTrace } = await import("@/lib/tauri-api");
+        await linkExecutionLogToCloudTrace(
+          insertedId,
+          trace.runtime,
+          trace.startedAt,
+        );
+      }
+    } catch (linkErr) {
+      console.warn("[agent-trace] cloud-trace link failed (replay won't be available for this trace)", linkErr);
     }
   } catch (err) {
     // Local log already has it. Surface to console so we can diagnose

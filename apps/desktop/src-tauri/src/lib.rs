@@ -501,8 +501,32 @@ pub fn init_database(conn: &Connection) {
             status       TEXT NOT NULL,
             error_message TEXT,
             skill_name   TEXT,
+            cloud_trace_id TEXT,
             created_at   TEXT NOT NULL
         );
+        -- v2.1.0 Replay infra. One row per replay dispatch the user
+        -- triggered. source_execution_log_id references the original
+        -- prompt; status drives the polling UI. Response capped at
+        -- 64KB for the same reason execution_logs.response is.
+        CREATE TABLE IF NOT EXISTS replay_jobs (
+            id                       TEXT PRIMARY KEY,
+            source_execution_log_id  TEXT NOT NULL,
+            source_cloud_trace_id    TEXT,
+            source_runtime           TEXT NOT NULL,
+            source_model             TEXT,
+            target_runtime           TEXT NOT NULL,
+            target_model             TEXT,
+            status                   TEXT NOT NULL,
+            response                 TEXT,
+            duration_ms              INTEGER,
+            error_message            TEXT,
+            started_at               TEXT NOT NULL,
+            finished_at              TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_replay_jobs_source
+            ON replay_jobs(source_execution_log_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_replay_jobs_cloud_trace
+            ON replay_jobs(source_cloud_trace_id, started_at DESC);
         CREATE TABLE IF NOT EXISTS health_checks (
             id           TEXT PRIMARY KEY,
             runtime      TEXT NOT NULL,
@@ -678,6 +702,12 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE agents ADD COLUMN kind TEXT NOT NULL DEFAULT 'internal'",
         [],
     );
+    // v2.1.0 — execution_logs links to its corresponding cloud
+    // agent_traces row when the dispatch was uploaded. Powers replay
+    // ("look up the local prompt for this cloud trace ID"). Existing
+    // rows stay NULL and won't be replayable, which is honest — they
+    // predate the link plumbing.
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN cloud_trace_id TEXT", []);
     // v2.0.0 Wave 2 — Local knowledge for external agents. Each row is one
     // chunk of text + its OpenAI text-embedding-3-small vector. Embedding
     // stored as a BLOB of f32 bytes (1536 floats = 6144 bytes per chunk).
@@ -904,6 +934,11 @@ pub fn run() {
             // Execution Logs
             get_execution_logs,
             add_execution_log,
+            // v2.1.0 Replay infra
+            link_execution_log_to_cloud_trace,
+            start_replay,
+            get_replay_job,
+            list_replays_for_trace,
             // Health Checks
             get_health_status,
             record_health_check,

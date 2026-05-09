@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -10,12 +10,19 @@ import {
   Clock,
   DollarSign,
   ArrowLeftRight,
+  RotateCw,
+  Send,
 } from "lucide-react";
 import {
   getAgentTraces,
   getTraceById,
   type CloudAgentTrace,
 } from "@/lib/cloudAgentTraces";
+import {
+  startReplay,
+  getReplayJob,
+  type ReplayJob,
+} from "@/lib/tauri-api";
 import { cn } from "@/lib/utils";
 
 // v2.1.0 Phase 9 — Eval workbench (compare).
@@ -46,6 +53,12 @@ interface Props {
 export default function TraceCompareModal({ baselineTraceId, agentSlug, onClose }: Props) {
   const { t } = useTranslation();
   const [comparisonId, setComparisonId] = useState<string | null>(null);
+  // v2.1.0 Replay infra. Open the picker submodal when user clicks
+  // "Replay this prompt"; null otherwise.
+  const [replayPickerOpen, setReplayPickerOpen] = useState(false);
+  // Currently-running or just-finished replay. The result panel
+  // renders in-place once we have a job id to track.
+  const [activeReplayId, setActiveReplayId] = useState<string | null>(null);
 
   const baselineQuery = useQuery({
     queryKey: ["trace-by-id", baselineTraceId],
@@ -90,13 +103,31 @@ export default function TraceCompareModal({ baselineTraceId, agentSlug, onClose 
               )}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="shrink-0 rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
-          >
-            {t("common.close", "Close")}
-          </button>
+          <div className="shrink-0 flex items-center gap-2">
+            {/* v2.1.0 Replay infra. Opens the picker submodal for
+                target runtime + model. The actual dispatch goes
+                through prompt_agent_inner so it's killable + shows
+                up in Live runs. */}
+            <button
+              type="button"
+              onClick={() => setReplayPickerOpen(true)}
+              className="inline-flex items-center gap-1 rounded-md border border-cs-accent/40 bg-cs-accent/10 px-2 py-1 text-[11px] font-medium text-cs-accent hover:bg-cs-accent/20"
+              title={t(
+                "insights.compare.replayHint",
+                "Re-run the baseline prompt against a different runtime",
+              )}
+            >
+              <RotateCw size={11} />
+              {t("insights.compare.replay", "Replay")}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+            >
+              {t("common.close", "Close")}
+            </button>
+          </div>
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
@@ -139,8 +170,31 @@ export default function TraceCompareModal({ baselineTraceId, agentSlug, onClose 
               ← {t("insights.compare.changeComparison", "Pick a different comparison")}
             </button>
           )}
+
+          {/* v2.1.0 Replay result panel. Rendered when a replay is in
+              flight or just completed. Side-by-side with baseline. */}
+          {activeReplayId && (
+            <ReplayResultPanel
+              jobId={activeReplayId}
+              baselineTrace={baselineQuery.data ?? null}
+              onClear={() => setActiveReplayId(null)}
+            />
+          )}
         </div>
       </div>
+
+      {/* v2.1.0 Replay picker submodal. */}
+      {replayPickerOpen && (
+        <ReplayPicker
+          baselineTrace={baselineQuery.data ?? null}
+          baselineTraceId={baselineTraceId}
+          onClose={() => setReplayPickerOpen(false)}
+          onStarted={(jobId) => {
+            setReplayPickerOpen(false);
+            setActiveReplayId(jobId);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -432,5 +486,328 @@ function DiffStat({
         {delta}
       </div>
     </div>
+  );
+}
+
+// v2.1.0 — Replay picker submodal. User picks target runtime + optional
+// model override; on confirm we call start_replay and hand the job id
+// back to the parent so it can render the result panel inline.
+const REPLAY_RUNTIME_OPTIONS = ["claude", "codex", "gemini", "openclaw", "hermes"] as const;
+
+function ReplayPicker({
+  baselineTrace,
+  baselineTraceId,
+  onClose,
+  onStarted,
+}: {
+  baselineTrace: CloudAgentTrace | null;
+  baselineTraceId: string;
+  onClose: () => void;
+  onStarted: (jobId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const sourceRuntime = baselineTrace?.runtime ?? "claude";
+  // Default target: anything that's NOT the source so the diff is
+  // immediately meaningful. User can change.
+  const defaultTarget =
+    REPLAY_RUNTIME_OPTIONS.find((r) => r !== sourceRuntime) ?? "claude";
+  const [targetRuntime, setTargetRuntime] = useState<string>(defaultTarget);
+  const [targetModel, setTargetModel] = useState<string>("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const jobId = await startReplay(
+        baselineTraceId,
+        targetRuntime,
+        targetModel.trim() || undefined,
+      );
+      onStarted(jobId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // The Rust side returns "prompt-not-local" when the trace
+      // wasn't dispatched on this machine. Surface a friendlier
+      // message — this is a v1 limitation, not a bug.
+      if (msg.includes("prompt-not-local")) {
+        setError(
+          t(
+            "insights.replay.errPromptNotLocal",
+            "Source prompt not available locally — replay requires the original dispatch machine. Multi-device replay is on the roadmap.",
+          ),
+        );
+      } else {
+        setError(msg);
+      }
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-lg border border-cs-border bg-cs-bg-raised shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-center justify-between gap-2 border-b border-cs-border p-3">
+          <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
+            <RotateCw size={13} className="text-cs-accent" />
+            {t("insights.replay.pickerTitle", "Replay this prompt")}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-muted hover:text-cs-text"
+          >
+            {t("common.cancel", "Cancel")}
+          </button>
+        </header>
+        <div className="p-3 space-y-3">
+          <div>
+            <label className="text-[10px] uppercase tracking-wide text-cs-muted">
+              {t("insights.replay.targetRuntime", "Target runtime")}
+            </label>
+            <select
+              value={targetRuntime}
+              onChange={(e) => setTargetRuntime(e.target.value)}
+              className="mt-1 w-full rounded-md border border-cs-border bg-cs-bg px-2 py-1.5 text-[12px] text-cs-text"
+            >
+              {REPLAY_RUNTIME_OPTIONS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                  {r === sourceRuntime ? ` (${t("insights.replay.sameAsSource", "same as source")})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-wide text-cs-muted">
+              {t("insights.replay.targetModel", "Model override (optional)")}
+            </label>
+            <input
+              type="text"
+              value={targetModel}
+              onChange={(e) => setTargetModel(e.target.value)}
+              placeholder={t(
+                "insights.replay.targetModelPlaceholder",
+                "Leave blank for runtime default",
+              )}
+              className="mt-1 w-full rounded-md border border-cs-border bg-cs-bg px-2 py-1.5 font-mono text-[12px] text-cs-text"
+            />
+          </div>
+          {/* Pre-dispatch disclosure — explicit consent through the
+              click. Replays send prompt content to a different
+              provider's API; we surface that plainly. */}
+          <div className="rounded border border-cs-warn/30 bg-cs-warn/5 p-2 text-[11px] text-cs-text">
+            {t(
+              "insights.replay.dataResidencyDisclosure",
+              "This will send the original prompt content to {{runtime}}'s API. Continue only if your data policy allows it.",
+              { runtime: targetRuntime },
+            )}
+          </div>
+          {error && (
+            <div className="rounded border border-cs-danger/40 bg-cs-danger/10 p-2 text-[11px] text-cs-danger">
+              {error}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            className="inline-flex items-center justify-center gap-1.5 w-full rounded-md bg-cs-accent px-3 py-2 text-[12px] font-medium text-cs-bg hover:bg-cs-accent-hover disabled:opacity-60"
+          >
+            {submitting ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+            {t("insights.replay.run", "Run replay")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// v2.1.0 — Replay result panel. Polls get_replay_job until status is
+// terminal, then renders side-by-side with the baseline. Cost shown as
+// "—" because v1 doesn't capture token usage on UI dispatches; it'll
+// earn a real number in a follow-up that adds the PRICING_PER_M_TOKENS
+// path to the desktop dispatch flow.
+function ReplayResultPanel({
+  jobId,
+  baselineTrace,
+  onClear,
+}: {
+  jobId: string;
+  baselineTrace: CloudAgentTrace | null;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation();
+  const [job, setJob] = useState<ReplayJob | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+    const tick = async () => {
+      try {
+        const next = await getReplayJob(jobId);
+        if (cancelled) return;
+        setJob(next);
+        if (next.status === "pending" || next.status === "running") {
+          // 800ms cadence — fast enough that the spinner feels live,
+          // slow enough not to spam the DB.
+          timer = window.setTimeout(tick, 800);
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setPollError(e instanceof Error ? e.message : String(e));
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [jobId]);
+
+  if (pollError) {
+    return (
+      <div className="rounded border border-cs-danger/40 bg-cs-danger/5 p-3 text-[11px] text-cs-danger">
+        <AlertCircle size={11} className="inline mr-1" />
+        {t("insights.replay.pollError", "Couldn't fetch replay status")}: {pollError}
+      </div>
+    );
+  }
+  if (!job) {
+    return (
+      <div className="rounded border border-cs-border bg-cs-bg-raised/40 p-3 text-[11px] text-cs-muted">
+        <Loader2 size={12} className="inline animate-spin mr-1" />
+        {t("insights.replay.queuing", "Queuing replay…")}
+      </div>
+    );
+  }
+
+  const running = job.status === "pending" || job.status === "running";
+  const sourceDuration = baselineTrace?.duration_ms ?? null;
+  const replayDuration = job.duration_ms ?? null;
+  const durationDeltaMs =
+    sourceDuration !== null && replayDuration !== null
+      ? replayDuration - sourceDuration
+      : null;
+
+  return (
+    <section className="rounded-lg border border-cs-accent/30 bg-cs-accent/5 p-3 space-y-2">
+      <header className="flex items-center gap-2 flex-wrap">
+        <RotateCw size={12} className={cn("text-cs-accent", running && "animate-spin")} />
+        <h4 className="text-[12px] font-medium text-cs-text">
+          {t("insights.replay.resultTitle", "Replay")}
+        </h4>
+        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-cs-muted">
+          <span className="text-cs-text">{job.source_runtime}</span>
+          <span>→</span>
+          <span className="text-cs-accent">{job.target_runtime}</span>
+          {job.target_model && <span className="text-cs-muted">/ {job.target_model}</span>}
+        </span>
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
+            job.status === "done" && "border-cs-accent/40 bg-cs-accent/10 text-cs-accent",
+            job.status === "failed" && "border-cs-danger/40 bg-cs-danger/10 text-cs-danger",
+            running && "border-cs-border bg-cs-bg text-cs-muted",
+          )}
+        >
+          {job.status === "running" && <Loader2 size={9} className="animate-spin" />}
+          {job.status === "done" && <CheckCircle2 size={9} />}
+          {job.status === "failed" && <XCircle size={9} />}
+          {job.status}
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          className="ml-auto text-[10px] text-cs-muted hover:text-cs-text underline-offset-2 hover:underline"
+        >
+          {t("insights.replay.clear", "Clear")}
+        </button>
+      </header>
+
+      {running && (
+        <p className="text-[11px] text-cs-muted">
+          {t(
+            "insights.replay.runningHint",
+            "Dispatching to {{runtime}}. Watch this run live in Insights → Live; you can kill it from there.",
+            { runtime: job.target_runtime },
+          )}
+        </p>
+      )}
+
+      {job.status === "failed" && job.error_message && (
+        <div className="rounded border border-cs-danger/40 bg-cs-danger/10 p-2 text-[11px] text-cs-danger break-words">
+          <strong className="font-medium">
+            {t("insights.replay.error", "Replay failed")}:
+          </strong>{" "}
+          {job.error_message}
+        </div>
+      )}
+
+      {job.status === "done" && (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="rounded border border-cs-border bg-cs-bg p-2">
+              <div className="text-[9px] uppercase tracking-wide text-cs-muted mb-1">
+                {t("insights.replay.sourceLabel", "Source ({{runtime}})", {
+                  runtime: job.source_runtime,
+                })}
+              </div>
+              <pre className="whitespace-pre-wrap break-words font-sans text-[11px] text-cs-text max-h-[300px] overflow-y-auto">
+                {baselineTrace?.response ?? t("insights.replay.sourceMissing", "Source response unavailable")}
+              </pre>
+            </div>
+            <div className="rounded border border-cs-accent/30 bg-cs-bg p-2">
+              <div className="text-[9px] uppercase tracking-wide text-cs-accent mb-1">
+                {t("insights.replay.replayLabel", "Replay ({{runtime}})", {
+                  runtime: job.target_runtime,
+                })}
+              </div>
+              <pre className="whitespace-pre-wrap break-words font-sans text-[11px] text-cs-text max-h-[300px] overflow-y-auto">
+                {job.response ?? ""}
+              </pre>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-[11px]">
+            <DiffStat
+              icon={<Clock size={10} />}
+              label={t("insights.replay.duration", "Duration")}
+              delta={
+                durationDeltaMs !== null
+                  ? `${durationDeltaMs >= 0 ? "+" : ""}${durationDeltaMs}ms`
+                  : "—"
+              }
+              good={durationDeltaMs !== null ? durationDeltaMs <= 0 : true}
+            />
+            <DiffStat
+              icon={<DollarSign size={10} />}
+              label={t("insights.replay.cost", "Cost")}
+              delta="—"
+              good
+            />
+            <DiffStat
+              icon={<Cpu size={10} />}
+              label={t("insights.replay.runtimePair", "Runtime")}
+              delta={`${job.source_runtime} → ${job.target_runtime}`}
+              good
+            />
+          </div>
+          <p className="text-[10px] text-cs-muted">
+            {t(
+              "insights.replay.costPunt",
+              "Cost capture for replay results lands in a follow-up — desktop dispatches don't track tokens yet, only deployed bundles do.",
+            )}
+          </p>
+        </>
+      )}
+    </section>
   );
 }

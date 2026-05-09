@@ -1651,6 +1651,67 @@ export async function addExecutionLog(
 }
 
 // ============================================================================
+// v2.1.0 — Replay infra
+// ============================================================================
+
+export interface ReplayJob {
+  id: string;
+  source_execution_log_id: string;
+  source_cloud_trace_id: string | null;
+  source_runtime: string;
+  source_model: string | null;
+  target_runtime: string;
+  target_model: string | null;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+  response: string | null;
+  duration_ms: number | null;
+  error_message: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+/** Best-effort link of a freshly-uploaded cloud trace back to its local
+ *  execution_logs row. Temporal correlation by runtime + ±10s window.
+ *  Returns true when a row was matched, false otherwise — the caller
+ *  doesn't need to react, this is observability glue for replay lookup. */
+export async function linkExecutionLogToCloudTrace(
+  cloudTraceId: string,
+  runtime: string,
+  startedAt: string,
+): Promise<boolean> {
+  return invoke<boolean>('link_execution_log_to_cloud_trace', {
+    cloudTraceId,
+    runtime,
+    startedAt,
+  });
+}
+
+/** Queue a replay of the given cloud trace's prompt against a target
+ *  runtime + (optional) model override. Returns the new job id; poll
+ *  getReplayJob to watch it progress. Throws "prompt-not-local" when
+ *  the source trace was dispatched from a different machine and the
+ *  full prompt isn't in this device's execution_logs. */
+export async function startReplay(
+  cloudTraceId: string,
+  targetRuntime: string,
+  targetModel?: string,
+): Promise<string> {
+  return invoke<string>('start_replay', {
+    cloudTraceId,
+    targetRuntime,
+    targetModel,
+  });
+}
+
+export async function getReplayJob(id: string): Promise<ReplayJob> {
+  return invoke<ReplayJob>('get_replay_job', { id });
+}
+
+export async function listReplaysForTrace(cloudTraceId: string): Promise<ReplayJob[]> {
+  return invoke<ReplayJob[]>('list_replays_for_trace', { cloudTraceId });
+}
+
+// ============================================================================
 // Health Checks
 // ============================================================================
 

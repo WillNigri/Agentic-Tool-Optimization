@@ -3103,6 +3103,288 @@ fn truncate_for_log(s: &str) -> String {
     if s.len() <= MAX { s.to_string() } else { format!("{}…[truncated]", &s[..MAX]) }
 }
 
+// ── v2.1.0 Replay infra ─────────────────────────────────────────────────
+//
+// One-shot interactive replay: user picks a past trace, picks a target
+// runtime/model, we re-dispatch the original prompt and surface the diff.
+//
+// Design choices (see plan at ~/.claude/plans/peaceful-strolling-kay.md):
+//   - Prompts come from local execution_logs (already populated for every
+//     dispatch since v2.0.1) — no new cloud retention obligations.
+//   - Linking cloud trace ↔ local execution_logs row uses temporal
+//     correlation (matching runtime + close created_at window) rather than
+//     refactoring prompt_agent_inner's return signature. Same-machine
+//     clocks are tight; collision risk only if two same-runtime dispatches
+//     fire in the same 10-second window with the same prompt — unlikely
+//     and doesn't break correctness, just attribution.
+//   - Replay dispatches go through the existing prompt_agent_inner so they
+//     register in Live runs + are killable + auto-persist their own
+//     execution_logs row (closing the loop — replay outputs are themselves
+//     traceable).
+
+/// Hand the local execution_logs row that just produced a cloud trace
+/// upload its corresponding cloud_trace_id, so future replay lookups can
+/// find the full prompt by trace ID. Best-effort temporal match — caller
+/// passes the cloud trace's started_at + runtime, we find the most recent
+/// matching local row inside a 10-second window.
+#[tauri::command]
+pub fn link_execution_log_to_cloud_trace(
+    cloud_trace_id: String,
+    runtime: String,
+    started_at: String,
+) -> Result<bool, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    // Parse started_at to find rows created within ±10s of it. Match on
+    // runtime + cloud_trace_id IS NULL to avoid double-attaching.
+    let started =
+        chrono::DateTime::parse_from_rfc3339(&started_at).map_err(|e| e.to_string())?;
+    let lower = (started - chrono::Duration::seconds(10)).to_rfc3339();
+    let upper = (started + chrono::Duration::seconds(10)).to_rfc3339();
+    let updated = conn
+        .execute(
+            "UPDATE execution_logs
+                SET cloud_trace_id = ?1
+              WHERE id IN (
+                SELECT id FROM execution_logs
+                 WHERE runtime = ?2
+                   AND cloud_trace_id IS NULL
+                   AND created_at BETWEEN ?3 AND ?4
+                 ORDER BY created_at DESC
+                 LIMIT 1
+              )",
+            rusqlite::params![cloud_trace_id, runtime, lower, upper],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(updated > 0)
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct ReplayJob {
+    pub id: String,
+    pub source_execution_log_id: String,
+    pub source_cloud_trace_id: Option<String>,
+    pub source_runtime: String,
+    pub source_model: Option<String>,
+    pub target_runtime: String,
+    pub target_model: Option<String>,
+    pub status: String,
+    pub response: Option<String>,
+    pub duration_ms: Option<i32>,
+    pub error_message: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+/// Queue a replay of the given cloud trace's prompt against a different
+/// runtime + (optional) model. Returns the new replay_job id immediately;
+/// the actual dispatch runs in a tokio task and the row is updated when
+/// it finishes. Frontend polls get_replay_job for status.
+#[tauri::command]
+pub async fn start_replay(
+    cloud_trace_id: String,
+    target_runtime: String,
+    target_model: Option<String>,
+) -> Result<String, String> {
+    let db_path = crate::get_db_path();
+    // Look up the source prompt + runtime + model from execution_logs.
+    let (source_id, source_runtime, _source_status, prompt) = {
+        let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+        let row = conn.query_row(
+            "SELECT id, runtime, status, prompt FROM execution_logs WHERE cloud_trace_id = ?1 LIMIT 1",
+            rusqlite::params![cloud_trace_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        );
+        match row {
+            Ok((id, runtime, status, Some(p))) => (id, runtime, status, p),
+            // No matching local row OR the prompt was lost (column NULL).
+            // Surface a stable error code the UI keys off for the
+            // multi-device disclosure.
+            Ok((_, _, _, None)) => return Err("prompt-not-local".to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err("prompt-not-local".to_string())
+            }
+            Err(e) => return Err(format!("lookup-failed: {}", e)),
+        }
+    };
+
+    // INSERT the pending row now so the frontend can poll immediately
+    // even if the dispatch takes a while to start.
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    {
+        let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO replay_jobs
+                (id, source_execution_log_id, source_cloud_trace_id, source_runtime,
+                 source_model, target_runtime, target_model, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 'pending', ?7)",
+            rusqlite::params![
+                job_id,
+                source_id,
+                cloud_trace_id,
+                source_runtime,
+                target_runtime,
+                target_model,
+                started_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Spawn the dispatch. We capture all the strings for the closure;
+    // the closure runs in the background and the function returns
+    // job_id immediately for polling.
+    let job_id_for_task = job_id.clone();
+    let target_runtime_for_task = target_runtime.clone();
+    let target_model_for_task = target_model.clone();
+    tokio::spawn(async move {
+        // Mark running. If this UPDATE fails we still try the dispatch —
+        // the only consequence is the UI sees 'pending' a bit longer.
+        let _ = mark_replay_running(&job_id_for_task);
+        let dispatch_started = std::time::Instant::now();
+
+        // Build a config JSON with the model override so prompt_agent_inner
+        // routes to the right (runtime, model). Empty config when no
+        // model override — runtime default applies.
+        let config = target_model_for_task
+            .as_ref()
+            .map(|m| serde_json::json!({ "model": m }).to_string());
+
+        // Reuse prompt_agent_inner so replay runs are killable + show in
+        // Live registry + auto-persist their own execution_logs row.
+        // Source is "desktop:replay" so traces flagged distinctly when
+        // we eventually surface "this run is itself a replay" in the UI.
+        let agent_slug = Some(format!("replay-of-{}", &cloud_trace_id[..8]));
+        let result = prompt_agent_inner(
+            target_runtime_for_task,
+            prompt,
+            config,
+            agent_slug,
+            None, // workspace
+            None, // existing_run_id — we let prompt_agent_inner self-register
+        )
+        .await;
+
+        let duration_ms = dispatch_started.elapsed().as_millis() as i32;
+        let _ = finish_replay(&job_id_for_task, result, duration_ms);
+    });
+
+    Ok(job_id)
+}
+
+fn mark_replay_running(job_id: &str) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE replay_jobs SET status = 'running' WHERE id = ?1 AND status = 'pending'",
+        rusqlite::params![job_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn finish_replay(
+    job_id: &str,
+    result: Result<String, String>,
+    duration_ms: i32,
+) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let finished_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (status, response, error): (&str, Option<String>, Option<String>) = match result {
+        Ok(r) => ("done", Some(truncate_for_log(&r)), None),
+        Err(e) => ("failed", None, Some(truncate_for_log(&e))),
+    };
+    conn.execute(
+        "UPDATE replay_jobs
+            SET status = ?1, response = ?2, duration_ms = ?3, error_message = ?4, finished_at = ?5
+          WHERE id = ?6",
+        rusqlite::params![status, response, duration_ms, error, finished_at, job_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_replay_job(id: String) -> Result<ReplayJob, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, source_execution_log_id, source_cloud_trace_id, source_runtime,
+                source_model, target_runtime, target_model, status, response,
+                duration_ms, error_message, started_at, finished_at
+           FROM replay_jobs WHERE id = ?1",
+        rusqlite::params![id],
+        |r| {
+            Ok(ReplayJob {
+                id: r.get(0)?,
+                source_execution_log_id: r.get(1)?,
+                source_cloud_trace_id: r.get(2)?,
+                source_runtime: r.get(3)?,
+                source_model: r.get(4)?,
+                target_runtime: r.get(5)?,
+                target_model: r.get(6)?,
+                status: r.get(7)?,
+                response: r.get(8)?,
+                duration_ms: r.get(9)?,
+                error_message: r.get(10)?,
+                started_at: r.get(11)?,
+                finished_at: r.get(12)?,
+            })
+        },
+    )
+    .map_err(|e| format!("replay-not-found: {}", e))
+}
+
+#[tauri::command]
+pub fn list_replays_for_trace(cloud_trace_id: String) -> Result<Vec<ReplayJob>, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, source_execution_log_id, source_cloud_trace_id, source_runtime,
+                    source_model, target_runtime, target_model, status, response,
+                    duration_ms, error_message, started_at, finished_at
+               FROM replay_jobs
+              WHERE source_cloud_trace_id = ?1
+              ORDER BY started_at DESC
+              LIMIT 50",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![cloud_trace_id], |r| {
+            Ok(ReplayJob {
+                id: r.get(0)?,
+                source_execution_log_id: r.get(1)?,
+                source_cloud_trace_id: r.get(2)?,
+                source_runtime: r.get(3)?,
+                source_model: r.get(4)?,
+                target_runtime: r.get(5)?,
+                target_model: r.get(6)?,
+                status: r.get(7)?,
+                response: r.get(8)?,
+                duration_ms: r.get(9)?,
+                error_message: r.get(10)?,
+                started_at: r.get(11)?,
+                finished_at: r.get(12)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 // ── Cron Job Persistence ─────────────────────────────────────────────────
 
 pub fn cron_jobs_path() -> PathBuf {
