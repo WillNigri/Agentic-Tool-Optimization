@@ -114,6 +114,54 @@ export async function getTracesByFile(
   );
 }
 
+/** v2.1.0 Phase 5 — Cross-runtime regression detection.
+ *
+ *  For every model / role_models / system_prompt / runtime change in
+ *  the window, returns before/after aggregate stats so the dashboard
+ *  can flag "switching @reviewer from sonnet-4-6 → 4-7 dropped success
+ *  rate from 91% → 74% across 412 conversations." */
+export interface RegressionRow {
+  change_id: string;
+  agent_slug: string;
+  field: string;
+  old_value: unknown;
+  new_value: unknown;
+  changed_at: string;
+  before_runs: number;
+  before_ok_rate: number;
+  before_p95_ms: number;
+  before_cost_per_run: number;
+  after_runs: number;
+  after_ok_rate: number;
+  after_p95_ms: number;
+  after_cost_per_run: number;
+  ok_delta_pp: number;
+  p95_delta_pct: number;
+  cost_delta_pct: number;
+  severity: "regression" | "improvement" | "neutral";
+}
+export async function getRegressions(opts?: {
+  days?: number;
+  windowHours?: number;
+  minSamples?: number;
+}): Promise<{
+  regressions: RegressionRow[];
+  windowHours: number;
+  minSamples: number;
+  days: number;
+} | null> {
+  const params = new URLSearchParams();
+  if (opts?.days) params.set("days", String(opts.days));
+  if (opts?.windowHours) params.set("windowHours", String(opts.windowHours));
+  if (opts?.minSamples) params.set("minSamples", String(opts.minSamples));
+  return cloudGet<{
+    regressions: RegressionRow[];
+    windowHours: number;
+    minSamples: number;
+    days: number;
+  }>(`/api/agent-traces/regressions?${params.toString()}`);
+}
+
 /** Returns true when the cloud features are usable from this client. */
 export function canQueryCloudTraces(): boolean {
   const { isCloudUser, accessToken } = useAuthStore.getState();

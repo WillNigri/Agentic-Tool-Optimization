@@ -1,11 +1,12 @@
 import { lazy } from "react";
 import { useTranslation } from "react-i18next";
-import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap } from "lucide-react";
+import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
 const AgentObservability = lazy(() => import("@/components/AgentObservability/Dashboard"));
 const ExternalAgentsInsights = lazy(() => import("@/components/ExternalAgentsInsights"));
 const LiveRuns = lazy(() => import("@/components/LiveRuns"));
+const RegressionsPanel = lazy(() => import("@/components/RegressionsPanel"));
 const HealthDashboard = lazy(() =>
   import("@/components/HealthDashboard").then((m) => ({ default: m.HealthDashboard }))
 );
@@ -38,6 +39,15 @@ export default function InsightsSection() {
       label: t("subnav.insightsExternal", "External"),
       icon: Globe,
       Component: ExternalAgentsInsights,
+    },
+    {
+      // v2.1.0 Phase 5 — Cross-runtime regression detection.
+      // Joins the config-change ledger with trace windows to flag
+      // "this model swap dropped success rate by 17pp."
+      id: "regressions",
+      label: t("subnav.insightsRegressions", "Regressions"),
+      icon: GitCommit,
+      Component: RegressionsPanel,
     },
     {
       id: "health",
