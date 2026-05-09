@@ -6,6 +6,7 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  COMPUTE_COST_HELPER,
   RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
   serializeInlineChunks,
@@ -51,6 +52,8 @@ const TEMPLATE_VARS = ${jsonString(templateVars)};
 const KNOWLEDGE_CHUNKS: { s: string; c: string; e: number[] }[] = ${chunksLiteral};
 
 ${RESOLVE_PROMPT_HELPER}
+
+${COMPUTE_COST_HELPER}
 
 ${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
@@ -100,7 +103,8 @@ export async function POST(request: Request): Promise<Response> {
     userMessage = ctx + userMessage;
   }
 
-  let response: string;
+  // v2.1 Phase 8+ — token / cost vars populated by renderProviderCall.
+  let response: string, promptTokens = 0, responseTokens = 0, costUsd = 0;
   try {
 ${callBlock}
   } catch (err) {
@@ -188,6 +192,9 @@ function renderVercelTraceForward(agent: Agent): string {
           durationMs: Date.now() - startedAt,
           ok: true,
           source: "embed-vercel",
+          promptTokens: promptTokens || undefined,
+          responseTokens: responseTokens || undefined,
+          costUsd: costUsd || undefined,
           metadata: __es ? { origin, embedSession: __es } : { origin },
         }],
       }),

@@ -51,10 +51,12 @@ export default function InsightsSection() {
       Component: RegressionsPanel,
     },
     {
-      // v2.1.0 Phase 8 — Cost benchmarks. Per-(agent, runtime)
-      // cost-per-success ranking with outlier flagging.
+      // v2.1.0 Phase 8 — Usage benchmarks. Always-shown calls + p50 +
+      // OK rate, plus per-(agent, runtime) cost when API dispatches
+      // reported it. Subscription runs get a "subscription" badge —
+      // we don't fake costs we don't have. Beatriz feedback 2026-05-09.
       id: "cost",
-      label: t("subnav.insightsCost", "Cost"),
+      label: t("subnav.insightsCost", "Usage"),
       icon: DollarSign,
       Component: CostBenchmarksPanel,
     },

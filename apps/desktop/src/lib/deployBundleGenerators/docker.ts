@@ -6,6 +6,7 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  COMPUTE_COST_HELPER,
   RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
   serializeInlineChunks,
@@ -50,6 +51,8 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 
 ${RESOLVE_PROMPT_HELPER}
 
+${COMPUTE_COST_HELPER}
+
 ${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
 ${THIRD_PARTY_TRACE_FORWARDS}
@@ -92,7 +95,8 @@ app.post("/agent", async (req, res) => {
     userMessage = ctx + userMessage;
   }
 
-  let response;
+  // v2.1 Phase 8+ — token / cost vars populated by renderProviderCall.
+  let response, promptTokens = 0, responseTokens = 0, costUsd = 0;
   try {
 ${callBlock}
   } catch (err) {
@@ -209,6 +213,9 @@ function renderNodeTraceForward(agent: Agent): string {
             durationMs: Date.now() - startedAt,
             ok: true,
             source: "embed-docker",
+            promptTokens: promptTokens || undefined,
+            responseTokens: responseTokens || undefined,
+            costUsd: costUsd || undefined,
             metadata: __es ? { origin, embedSession: __es } : { origin },
           }],
         }),

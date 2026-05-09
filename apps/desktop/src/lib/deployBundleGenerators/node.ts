@@ -6,6 +6,7 @@ import {
   extractTemplateVars,
   jsonString,
   RESOLVE_PROMPT_HELPER,
+  COMPUTE_COST_HELPER,
   RETRIEVE_KNOWLEDGE_HELPER,
   renderProviderCall,
   serializeInlineChunks,
@@ -48,6 +49,8 @@ const KNOWLEDGE_CHUNKS = ${chunksLiteral};
 const PORT = parseInt(process.env.PORT || "8080", 10);
 
 ${RESOLVE_PROMPT_HELPER}
+
+${COMPUTE_COST_HELPER}
 
 ${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
 
@@ -97,7 +100,8 @@ async function handleAgent(req, res) {
     userMessage = ctx + userMessage;
   }
 
-  let response;
+  // v2.1 Phase 8+ — token / cost vars populated by renderProviderCall.
+  let response, promptTokens = 0, responseTokens = 0, costUsd = 0;
   try {
 ${callBlock}
   } catch (err) {
@@ -210,6 +214,9 @@ function renderTraceForward(agent: Agent): string {
             durationMs: Date.now() - startedAt,
             ok: true,
             source: "embed-node",
+            promptTokens: promptTokens || undefined,
+            responseTokens: responseTokens || undefined,
+            costUsd: costUsd || undefined,
             metadata: __es ? { origin, embedSession: __es } : { origin },
           }],
         }),

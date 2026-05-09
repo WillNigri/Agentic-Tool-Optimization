@@ -15,9 +15,10 @@ import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 
-// v2.1.0 Phase 8 — Cost benchmarks (descriptive, not prescriptive).
+// v2.1.0 Phase 8 — Usage benchmarks (descriptive, not prescriptive).
 //
-// Pitch: "@triage costs $0.014/run. Your median is $0.003. Look at it."
+// Pitch: "@triage runs cost $0.014/call when you dispatch via API key.
+// Your CLI subscription runs don't report cost — only call counts."
 //
 // Why descriptive:
 //   - Real cross-runtime "switching @triage from GPT-4 to Haiku saves
@@ -25,10 +26,16 @@ import { cn } from "@/lib/utils";
 //     runtimes, which is a v2.2 feature.
 //   - Outlier flagging is purely statistical (cost vs your own
 //     median), so it's honest at any data volume.
+//   - Subscription dispatches (Claude Code, Codex CLI, Gemini CLI)
+//     don't surface per-request cost, so we DON'T fake it. Beatriz
+//     feedback 2026-05-09: "we can have X tokens used, Y number of
+//     calls — that is different from something it does not make
+//     sense like actual cost since it's a subscription."
 //
 // Anti-pattern avoided: claiming we know which model "should" be used
 // based on prompt similarity scores or other ML magic. We don't have
 // the data to back that up; calling it out wrong destroys trust.
+// Same for fake cost numbers on subscription rows.
 
 export default function CostBenchmarksPanel() {
   const { t } = useTranslation();
@@ -95,6 +102,13 @@ export default function CostBenchmarksPanel() {
   const median = query.data?.medianCostPerOk ?? 0;
   const outliers = rows.filter((r) => r.is_outlier);
   const totalSpend = rows.reduce((acc, r) => acc + r.total_cost_usd, 0);
+  // v2.1 — split rows by whether their dispatches actually reported
+  // cost. Subscription runs (CLI: claude code, codex, gemini-cli)
+  // come back with cost_usd = 0; we hide cost columns for those and
+  // show a "subscription" badge instead.
+  const totalCalls = rows.reduce((acc, r) => acc + r.runs, 0);
+  const apiRows = rows.filter((r) => r.cost_per_run > 0);
+  const subscriptionRows = rows.filter((r) => r.cost_per_run === 0);
 
   return (
     <div className="space-y-4">
@@ -102,12 +116,12 @@ export default function CostBenchmarksPanel() {
         <div>
           <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
             <DollarSign size={14} className="text-cs-accent" />
-            {t("insights.cost.title", "Cost benchmarks")}
+            {t("insights.cost.title", "Usage benchmarks")}
           </h3>
           <p className="mt-0.5 text-[11px] text-cs-muted">
             {t(
               "insights.cost.subtitle",
-              "Per-(agent, runtime) cost-per-success over the window. Outliers flagged at 2× your median, sorted descending. Doesn't claim what's optimal — surfaces the spread so you can decide.",
+              "Per-(agent, runtime) usage over the window. Calls + latency + success rate are always shown. Cost only when traces report it (API-key dispatches); CLI subscription runs don't surface per-request cost — we don't pretend to know.",
             )}
           </p>
         </div>
@@ -128,30 +142,44 @@ export default function CostBenchmarksPanel() {
         </div>
       </header>
 
-      {/* Summary bar — total spend + median + outlier count. */}
-      <div className="grid grid-cols-3 gap-2 text-[11px]">
+      {/* Summary bar. Show total calls always; cost stats only when
+          some row actually reported cost. */}
+      <div
+        className={cn(
+          "grid gap-2 text-[11px]",
+          apiRows.length > 0 ? "grid-cols-4" : "grid-cols-2",
+        )}
+      >
         <SummaryStat
-          label={t("insights.cost.totalSpend", "Total spend")}
-          value={`$${totalSpend.toFixed(2)}`}
+          label={t("insights.cost.totalCalls", "Total calls")}
+          value={totalCalls.toLocaleString()}
         />
         <SummaryStat
-          label={t("insights.cost.medianPerOk", "Median $/success")}
-          value={median > 0 ? `$${median.toFixed(4)}` : "—"}
+          label={t("insights.cost.apiVsSub", "API / subscription rows")}
+          value={`${apiRows.length} / ${subscriptionRows.length}`}
         />
-        <SummaryStat
-          label={t("insights.cost.outliers", "Outliers (≥2× median)")}
-          value={String(outliers.length)}
-          accent={outliers.length > 0}
-        />
+        {apiRows.length > 0 && (
+          <>
+            <SummaryStat
+              label={t("insights.cost.totalSpend", "API spend (window)")}
+              value={`$${totalSpend.toFixed(2)}`}
+            />
+            <SummaryStat
+              label={t("insights.cost.outliers", "Outliers (≥2× median)")}
+              value={String(outliers.length)}
+              accent={outliers.length > 0}
+            />
+          </>
+        )}
       </div>
 
       {rows.length === 0 ? (
         <Empty
           icon={<DollarSign size={20} />}
-          title={t("insights.cost.empty", "No cost data yet")}
+          title={t("insights.cost.empty", "No usage data yet")}
           body={t(
             "insights.cost.emptyBody",
-            "Either traces in this window don't carry cost_usd (most CLI runtimes don't auto-report cost — needs API-key dispatch with cost telemetry) or there's not enough sample size yet.",
+            "Either no traces in this window, or below the minimum sample size for the rollup.",
           )}
         />
       ) : (
@@ -171,6 +199,11 @@ function BenchmarkRow({ row, median }: { row: CostBenchmarkRow; median: number }
   // How many multiples of median is this row's cost-per-success.
   // Anchors the outlier badge to a real number, not just a binary flag.
   const multiple = median > 0 ? row.cost_per_ok / median : 0;
+  // v2.1 — split rendering by whether we have real cost data. API
+  // dispatches surface cost via provider response → cost_per_run > 0.
+  // Subscription dispatches don't surface cost; we show calls + p50
+  // + ok rate + a "subscription" badge instead of fake $0.0000 cells.
+  const hasCostData = row.cost_per_run > 0;
   return (
     <li
       className={cn(
@@ -184,6 +217,17 @@ function BenchmarkRow({ row, median }: { row: CostBenchmarkRow; median: number }
         <Cpu size={11} className="text-cs-muted shrink-0" />
         <code className="font-mono text-sm text-cs-text font-medium">@{row.agent_slug}</code>
         <span className="text-[10px] uppercase tracking-wide text-cs-muted">{row.runtime}</span>
+        {!hasCostData && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-cs-border bg-cs-bg-raised px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-cs-muted"
+            title={t(
+              "insights.cost.subscriptionTitle",
+              "These dispatches went via a CLI subscription (Claude Code, Codex, Gemini CLI) which doesn't surface per-request cost. Calls + latency are real.",
+            )}
+          >
+            {t("insights.cost.subscriptionBadge", "subscription")}
+          </span>
+        )}
         {row.is_outlier && (
           <span
             className="inline-flex items-center gap-1 rounded-full border border-cs-danger/40 bg-cs-danger/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-cs-danger"
@@ -198,28 +242,51 @@ function BenchmarkRow({ row, median }: { row: CostBenchmarkRow; median: number }
           </span>
         )}
         <span className="ml-auto font-mono text-cs-muted text-[10px]">
-          {row.runs} {t("insights.cost.runsShort", "runs")}
+          {row.runs} {t("insights.cost.runsShort", "calls")}
         </span>
       </div>
       <div className="mt-2 grid grid-cols-4 gap-2 text-[11px]">
+        {/* Always real, always shown. */}
         <Stat
-          label={t("insights.cost.costPerOk", "$/success")}
-          value={`$${row.cost_per_ok.toFixed(4)}`}
-          accent={row.is_outlier ? "danger" : "neutral"}
+          label={t("insights.cost.calls", "Calls")}
+          value={row.runs.toLocaleString()}
         />
         <Stat
-          label={t("insights.cost.costPerRun", "$/run")}
-          value={`$${row.cost_per_run.toFixed(4)}`}
+          label={t("insights.cost.p50", "p50 latency")}
+          value={`${row.p50_ms}ms`}
         />
         <Stat
           label={t("insights.cost.successRate", "OK rate")}
           value={`${(okRate * 100).toFixed(0)}%`}
         />
-        <Stat
-          label={t("insights.cost.totalSpendShort", "Spend")}
-          value={`$${row.total_cost_usd.toFixed(2)}`}
-        />
+        {hasCostData ? (
+          <Stat
+            label={t("insights.cost.costPerOk", "$/success")}
+            value={`$${row.cost_per_ok.toFixed(4)}`}
+            accent={row.is_outlier ? "danger" : "neutral"}
+          />
+        ) : (
+          <Stat
+            label={t("insights.cost.costPerOk", "$/success")}
+            value="—"
+          />
+        )}
       </div>
+      {/* Second row of cost-only stats for API rows that have real
+          data. Hidden entirely for subscription rows so the layout
+          stays honest about what we know. */}
+      {hasCostData && (
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
+          <Stat
+            label={t("insights.cost.costPerRun", "$/call")}
+            value={`$${row.cost_per_run.toFixed(4)}`}
+          />
+          <Stat
+            label={t("insights.cost.totalSpendShort", "Total spend")}
+            value={`$${row.total_cost_usd.toFixed(2)}`}
+          />
+        </div>
+      )}
     </li>
   );
 }

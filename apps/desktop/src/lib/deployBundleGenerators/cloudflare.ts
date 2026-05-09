@@ -8,6 +8,7 @@ import {
   RESOLVE_PROMPT_HELPER,
   RETRIEVE_KNOWLEDGE_HELPER,
   THIRD_PARTY_TRACE_FORWARDS,
+  COMPUTE_COST_HELPER,
   renderProviderCall,
   serializeInlineChunks,
   type DeployBundleConfig,
@@ -44,6 +45,8 @@ const KNOWLEDGE_CHUNKS = ${chunksLiteral};
 ${RESOLVE_PROMPT_HELPER}
 
 ${useKnowledge ? RETRIEVE_KNOWLEDGE_HELPER + "\n" : ""}
+
+${COMPUTE_COST_HELPER}
 
 ${THIRD_PARTY_TRACE_FORWARDS}
 
@@ -99,7 +102,10 @@ export default {
       userMessage = ctx + userMessage;
     }
 
-    let response;
+    // v2.1 Phase 8+ — declared so renderProviderCall's snippet can
+    // assign token counts + cost from the API response. Forwarded to
+    // the trace upload below.
+    let response, promptTokens = 0, responseTokens = 0, costUsd = 0;
     try {
 ${callBlock}
     } catch (err) {
@@ -173,6 +179,9 @@ function renderTraceForward(agent: Agent): string {
               durationMs: Date.now() - startedAt,
               ok: true,
               source: "embed-cloudflare",
+              promptTokens: promptTokens || undefined,
+              responseTokens: responseTokens || undefined,
+              costUsd: costUsd || undefined,
               metadata: __embedSession ? { origin: origin, embedSession: __embedSession } : { origin: origin },
             }],
           }),

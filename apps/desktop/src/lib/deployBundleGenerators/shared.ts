@@ -210,8 +210,59 @@ export function serializeInlineChunks(chunks: InlineKnowledgeChunk[]): string {
   return "[\n  " + rows.join(",\n  ") + "\n]";
 }
 
+/** v2.1 Phase 8 follow-up — per-(provider, model) per-million-token
+ *  USD pricing. Used by the bundle handlers to compute real cost from
+ *  the token usage that ALL these APIs return in their responses.
+ *
+ *  Coverage: only the headline models per provider. Unknown
+ *  combinations fall back to 0 → cost reported as 0 → trace shows
+ *  the row as "subscription" in the dashboard, which is the right
+ *  UX for an unknown.
+ *
+ *  These prices need to drift with the real ones; bake-in is fine
+ *  for now (Anthropic + OpenAI publish stable list prices), the
+ *  shared.ts file is regenerated on each release. */
+const PRICING_PER_M_TOKENS: Record<string, { in: number; out: number }> = {
+  // Anthropic
+  "claude-opus-4-7": { in: 15, out: 75 },
+  "claude-opus-4-6": { in: 15, out: 75 },
+  "claude-sonnet-4-6": { in: 3, out: 15 },
+  "claude-sonnet-4-5": { in: 3, out: 15 },
+  "claude-haiku-4-5-20251001": { in: 1, out: 5 },
+  // OpenAI
+  "gpt-4.1": { in: 2.5, out: 10 },
+  "gpt-4o": { in: 2.5, out: 10 },
+  "gpt-4o-mini": { in: 0.15, out: 0.6 },
+  // Google
+  "gemini-2.0-flash": { in: 0.1, out: 0.4 },
+  "gemini-1.5-pro": { in: 1.25, out: 5 },
+  "gemini-1.5-flash": { in: 0.075, out: 0.3 },
+  // Other OpenAI-compat providers — leave 0 by default; user can
+  // override at deploy time via env var if they want costs.
+};
+
+/** JS literal of the price table for embedding in generated bundles. */
+const PRICING_LITERAL = JSON.stringify(PRICING_PER_M_TOKENS);
+
+/** Shared helper emitted into every bundle: given a model + prompt /
+ *  response token counts, return the USD cost. Returns 0 for
+ *  unknown models — the trace upload then carries cost_usd=0 and the
+ *  dashboard treats it as subscription/unknown. */
+const COMPUTE_COST_HELPER = `
+function computeCostUsd(model, promptTokens, responseTokens) {
+  var prices = ${PRICING_LITERAL};
+  var p = prices[model];
+  if (!p) return 0;
+  var input  = (Number(promptTokens)   || 0) * p.in  / 1e6;
+  var output = (Number(responseTokens) || 0) * p.out / 1e6;
+  return input + output;
+}
+`;
+
 /** Build the per-provider fetch snippet. Returns JS source that assigns the
- *  assistant text to a variable named `response` after awaiting the call. */
+ *  assistant text to a variable named `response` after awaiting the call.
+ *  v2.1 Phase 8+: also assigns `promptTokens`, `responseTokens`, and
+ *  `costUsd` so the bundle handler can include them in the trace upload. */
 export function renderProviderCall(provider: DeployProvider, model: string, apiKeyExpr: string): string {
   if (provider === "anthropic") {
     return `      const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -230,7 +281,11 @@ export function renderProviderCall(provider: DeployProvider, model: string, apiK
       });
       if (!r.ok) throw new Error("anthropic " + r.status + ": " + await r.text());
       const data = await r.json();
-      response = data?.content?.[0]?.text ?? "";`;
+      response = data?.content?.[0]?.text ?? "";
+      // v2.1 Phase 8+: extract token usage for trace cost telemetry.
+      promptTokens = data?.usage?.input_tokens ?? 0;
+      responseTokens = data?.usage?.output_tokens ?? 0;
+      costUsd = computeCostUsd(${JSON.stringify(model)}, promptTokens, responseTokens);`;
   }
   if (provider === "gemini") {
     return `      const r = await fetch(
@@ -249,7 +304,10 @@ export function renderProviderCall(provider: DeployProvider, model: string, apiK
       );
       if (!r.ok) throw new Error("gemini " + r.status + ": " + await r.text());
       const data = await r.json();
-      response = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";`;
+      response = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      promptTokens = data?.usageMetadata?.promptTokenCount ?? 0;
+      responseTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
+      costUsd = computeCostUsd(${JSON.stringify(model)}, promptTokens, responseTokens);`;
   }
   const url = OPENAI_COMPAT_URLS[provider];
   if (!url) throw new Error(`unsupported provider: ${provider}`);
@@ -271,8 +329,14 @@ export function renderProviderCall(provider: DeployProvider, model: string, apiK
       });
       if (!r.ok) throw new Error("provider " + r.status + ": " + await r.text());
       const data = await r.json();
-      response = data?.choices?.[0]?.message?.content ?? "";`;
+      response = data?.choices?.[0]?.message?.content ?? "";
+      // OpenAI-compat: usage.prompt_tokens / usage.completion_tokens
+      promptTokens = data?.usage?.prompt_tokens ?? 0;
+      responseTokens = data?.usage?.completion_tokens ?? 0;
+      costUsd = computeCostUsd(${JSON.stringify(model)}, promptTokens, responseTokens);`;
 }
+
+export { COMPUTE_COST_HELPER };
 
 /** Standard banner block we emit at the top of each generated entrypoint. */
 export function bannerComment(target: string, agent: Agent, config: DeployBundleConfig, templateVars: string[]): string {
