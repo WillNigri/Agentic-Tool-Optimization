@@ -730,17 +730,12 @@ export const SHORT_SCRIPT: DemoScript = {
 export const LIVE_RUNS_SCRIPT: DemoScript = {
   id: "v21-live-runs",
   label: "v2.1 — Live runs panel",
-  shortDescription: "Fire a dispatch, watch it appear in Insights → Live with kill button",
+  shortDescription: "Fire a slow dispatch, watch it appear in Insights → Live with kill button",
   steps: [
     { kind: "subtitle", text: "v2.1 ops layer — Live runs panel.", durationMs: 2000 },
-    { kind: "navigate", section: "insights" },
-    { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "live" },
-    { kind: "wait", ms: 800 },
-    {
-      kind: "subtitle",
-      text: "Empty when nothing's running. Let's fire something.",
-      durationMs: 2400,
-    },
+    // Open chat first + type the prompt so we have it ready. THEN
+    // navigate to Live BEFORE sending — otherwise the dispatch
+    // completes before the demo gets there and the row clears.
     { kind: "navigate", section: "home" },
     { kind: "setChatPaneOpen", open: true },
     { kind: "newThread" },
@@ -748,19 +743,42 @@ export const LIVE_RUNS_SCRIPT: DemoScript = {
     { kind: "wait", ms: 400 },
     {
       kind: "type",
-      text: "Take a moment, then write a haiku about morning coffee.",
+      // Long enough that claude --print takes ~15-30s to finish so
+      // there's time to navigate + read the live row before the
+      // registry clears.
+      text:
+        "Write a detailed 250-word essay on coffee culture in Brazil. " +
+        "Cover the history, regional differences, and the role of cafés " +
+        "in social life. Be thorough.",
     },
-    { kind: "wait", ms: 300 },
-    { kind: "send" },
-    { kind: "wait", ms: 1500 },
+    { kind: "wait", ms: 400 },
+    // Navigate to Live FIRST so we're already watching the panel
+    // when send fires. The chat pane sits at the bottom across views
+    // so the prompt stays visible.
     { kind: "navigate", section: "insights" },
     { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "live" },
+    { kind: "wait", ms: 600 },
     {
       kind: "subtitle",
-      text: "There — runtime, workspace, elapsed. Kill button per row, no terminal-buffer hunting.",
-      durationMs: 4500,
+      text: "Empty until something fires. Watch this panel — sending the prompt now.",
+      durationMs: 3200,
+    },
+    // Now send. The demo runner awaits completion, but the panel is
+    // already on screen and the live row populates within ~500ms of
+    // the spawn. The 15s+ Claude duration gives plenty of time to
+    // read it.
+    { kind: "send" },
+    {
+      kind: "subtitle",
+      text: "There — agent slug, runtime, workspace, elapsed. Kill button per row, no terminal-buffer hunting.",
+      durationMs: 5500,
     },
     { kind: "wait", ms: 1500 },
+    {
+      kind: "subtitle",
+      text: "Row clears when the dispatch returns. Try it again with a stuck process — Kill works.",
+      durationMs: 4000,
+    },
   ],
 };
 
