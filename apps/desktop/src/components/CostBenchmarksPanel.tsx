@@ -9,8 +9,15 @@ import {
   Cpu,
   Cloud,
   Zap,
+  Lightbulb,
+  ArrowRight,
 } from "lucide-react";
-import { getCostBenchmarks, type CostBenchmarkRow } from "@/lib/cloudAgentTraces";
+import {
+  getCostBenchmarks,
+  getCostRecommendations,
+  type CostBenchmarkRow,
+  type CostRecommendation,
+} from "@/lib/cloudAgentTraces";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
@@ -51,6 +58,16 @@ export default function CostBenchmarksPanel() {
   const query = useQuery({
     queryKey: ["cost-benchmarks", days],
     queryFn: () => getCostBenchmarks({ days }),
+    enabled: !!canQuery && isPro,
+    staleTime: 60_000,
+  });
+
+  // Cost recommendations — prescriptive companion. Renders only when
+  // the user has historical data on multiple runtimes for the same
+  // agent AND the alt is meaningfully cheaper at preserved quality.
+  const recsQuery = useQuery({
+    queryKey: ["cost-recommendations", days],
+    queryFn: () => getCostRecommendations({ days }),
     enabled: !!canQuery && isPro,
     staleTime: 60_000,
   });
@@ -141,6 +158,14 @@ export default function CostBenchmarksPanel() {
           ))}
         </div>
       </header>
+
+      {/* v2.1 Phase 5 — Cost recommendations. Surface above the
+          benchmarks because they're the actionable bit. Render-nothing
+          when no recs in the window so the panel stays clean. */}
+      <RecommendationsSection
+        recs={recsQuery.data?.recommendations ?? []}
+        windowDays={days}
+      />
 
       {/* Summary bar. Show total calls always; cost stats only when
           some row actually reported cost. */}
@@ -362,6 +387,98 @@ function Empty({
       </div>
       <p className="text-cs-text font-medium mb-1">{title}</p>
       <p className="text-[12px] text-cs-muted">{body}</p>
+    </div>
+  );
+}
+
+// v2.1 Phase 5 — Cost recommendations section. Prescriptive: surfaces
+// concrete swaps based on the user's own historical data (not synthetic
+// benchmarks, not predictions). Render-nothing when empty so the
+// underlying benchmarks panel stays as the single source of cost truth.
+function RecommendationsSection({
+  recs,
+  windowDays,
+}: {
+  recs: CostRecommendation[];
+  windowDays: number;
+}) {
+  const { t } = useTranslation();
+  if (recs.length === 0) return null;
+  return (
+    <section className="rounded-lg border border-cs-accent/30 bg-cs-accent/5 p-3 space-y-2">
+      <header className="flex items-center gap-2">
+        <Lightbulb size={13} className="text-cs-accent shrink-0" />
+        <h4 className="text-[12px] font-medium text-cs-text">
+          {t("insights.cost.recsTitle", "Cost recommendations")}
+        </h4>
+        <span className="text-[10px] text-cs-muted">
+          {t(
+            "insights.cost.recsSubtitle",
+            "Same-agent swaps where you already have data on both sides — quality preserved.",
+          )}
+        </span>
+      </header>
+      <ul className="space-y-1.5">
+        {recs.map((r, i) => (
+          <RecRow key={`${r.agent_slug}-${r.suggested_runtime}-${i}`} rec={r} windowDays={windowDays} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function RecRow({ rec, windowDays }: { rec: CostRecommendation; windowDays: number }) {
+  const { t } = useTranslation();
+  const evalShown = rec.current_eval_score !== null && rec.suggested_eval_score !== null;
+  return (
+    <li className="rounded-md border border-cs-border bg-cs-bg p-2.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <code className="font-mono text-sm text-cs-text font-medium">@{rec.agent_slug}</code>
+        <span className="inline-flex items-center gap-1 text-[11px] text-cs-muted">
+          <span className="font-mono text-cs-text">{rec.current_runtime}</span>
+          <ArrowRight size={11} className="text-cs-accent shrink-0" />
+          <span className="font-mono text-cs-accent">{rec.suggested_runtime}</span>
+        </span>
+        <span className="ml-auto inline-flex items-baseline gap-1 font-mono text-[11px]">
+          <span className="text-cs-accent font-medium">
+            -{rec.savings_pct.toFixed(0)}%
+          </span>
+          <span className="text-cs-muted">
+            {t("insights.cost.recsPerCall", "/ call")}
+          </span>
+        </span>
+      </div>
+      <div className="mt-1 grid grid-cols-3 gap-2 text-[10px] text-cs-muted">
+        <Stat
+          label={t("insights.cost.recsCurrent", "Current")}
+          value={`$${rec.current_cost_per_run.toFixed(4)}`}
+          sub={`${rec.current_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(rec.current_ok_rate * 100).toFixed(0)}%${evalShown ? ` · eval ${(rec.current_eval_score ?? 0).toFixed(2)}` : ""}`}
+        />
+        <Stat
+          label={t("insights.cost.recsAlternative", "Alternative")}
+          value={`$${rec.suggested_cost_per_run.toFixed(4)}`}
+          sub={`${rec.suggested_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(rec.suggested_ok_rate * 100).toFixed(0)}%${evalShown ? ` · eval ${(rec.suggested_eval_score ?? 0).toFixed(2)}` : ""}`}
+        />
+        <Stat
+          label={t("insights.cost.recsProjMonthly", "Projected /mo")}
+          value={`$${rec.projected_monthly_usd.toFixed(2)}`}
+          sub={t(
+            "insights.cost.recsProjAtVolume",
+            "at this {{n}}d volume",
+            { n: windowDays },
+          )}
+        />
+      </div>
+    </li>
+  );
+}
+
+function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <div className="rounded border border-cs-border bg-cs-bg-raised/30 p-1.5">
+      <div className="text-[9px] uppercase tracking-wide text-cs-muted">{label}</div>
+      <div className="mt-0.5 font-mono text-cs-text">{value}</div>
+      <div className="text-[9px] text-cs-muted">{sub}</div>
     </div>
   );
 }

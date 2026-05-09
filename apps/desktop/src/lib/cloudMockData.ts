@@ -335,6 +335,29 @@ export const MOCK_REGRESSIONS: RegressionRow[] = [
   },
 ];
 
+// v2.1 Phase 5 — Cost recommendations fixture. Modeled on a realistic
+// scenario: @triage runs on Claude (expensive) and Codex (cheaper)
+// with similar quality, so we'd surface a swap.
+export const MOCK_COST_RECOMMENDATIONS = [
+  {
+    agent_slug: "code-writer",
+    current_runtime: "claude",
+    current_runs: 120,
+    current_cost_per_run: 0.0142,
+    current_ok_rate: 0.93,
+    current_eval_score: 0.88,
+    suggested_runtime: "codex",
+    suggested_runs: 45,
+    suggested_cost_per_run: 0.0058,
+    suggested_ok_rate: 0.91,
+    suggested_eval_score: 0.86,
+    savings_per_run_usd: 0.0084,
+    savings_window_usd: 1.008, // 0.0084 × 120
+    savings_pct: 59.2,
+    projected_monthly_usd: 1.008, // assuming a 30-day window
+  },
+];
+
 export const MOCK_COST_BENCHMARKS: CostBenchmarkRow[] = [
   {
     agent_slug: "doc-summarizer",

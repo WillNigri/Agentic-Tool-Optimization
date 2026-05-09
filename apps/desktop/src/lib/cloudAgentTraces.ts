@@ -20,6 +20,7 @@ import {
   MOCK_METRICS,
   MOCK_REGRESSIONS,
   MOCK_COST_BENCHMARKS,
+  MOCK_COST_RECOMMENDATIONS,
   MOCK_PIPELINE_PARENT_ID,
 } from "@/lib/cloudMockData";
 
@@ -292,6 +293,54 @@ export async function getRegressions(opts?: {
     minSamples: number;
     days: number;
   }>(`/api/agent-traces/regressions?${params.toString()}`);
+}
+
+/** v2.1 Phase 5 — Cost recommendations.
+ *
+ *  Prescriptive companion to cost-benchmarks. Returns same-agent swaps
+ *  where the user already has historical data on both runtimes and the
+ *  alternative is meaningfully cheaper without quality loss. */
+export interface CostRecommendation {
+  agent_slug: string;
+  current_runtime: string;
+  current_runs: number;
+  current_cost_per_run: number;
+  current_ok_rate: number;
+  current_eval_score: number | null;
+  suggested_runtime: string;
+  suggested_runs: number;
+  suggested_cost_per_run: number;
+  suggested_ok_rate: number;
+  suggested_eval_score: number | null;
+  savings_per_run_usd: number;
+  savings_window_usd: number;
+  savings_pct: number;
+  projected_monthly_usd: number;
+}
+
+export async function getCostRecommendations(opts?: {
+  days?: number;
+  minRuns?: number;
+}): Promise<{
+  recommendations: CostRecommendation[];
+  days: number;
+  minRuns: number;
+} | null> {
+  if (isMockMode()) {
+    return {
+      recommendations: MOCK_COST_RECOMMENDATIONS,
+      days: opts?.days ?? 30,
+      minRuns: opts?.minRuns ?? 10,
+    };
+  }
+  const params = new URLSearchParams();
+  if (opts?.days) params.set("days", String(opts.days));
+  if (opts?.minRuns) params.set("minRuns", String(opts.minRuns));
+  return cloudGet<{
+    recommendations: CostRecommendation[];
+    days: number;
+    minRuns: number;
+  }>(`/api/agent-traces/cost-recommendations?${params.toString()}`);
 }
 
 /** Returns true when the cloud features are usable from this client.
