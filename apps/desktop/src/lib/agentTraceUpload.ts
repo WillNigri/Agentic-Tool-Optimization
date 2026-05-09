@@ -30,6 +30,11 @@ export interface AgentTraceInput {
    *  Populated by the desktop's pre/post mtime snapshot; absent for
    *  group-level rollup traces and embed-bundle traces. */
   filesTouched?: string[];
+  /** v2.1.0+ — first ~200 chars of the dispatch prompt. Captured at
+   *  upload time so the file-history modal can show "what was that run
+   *  trying to do?" alongside the agent slug. Truncate with care —
+   *  long prompts come pre-trimmed by `summarizePrompt`. */
+  promptSummary?: string;
 }
 
 const CLOUD_API_URL =
@@ -53,6 +58,25 @@ export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
     // Local log already has it. Silent failure is the right call here —
     // never let observability upload break the dispatch path.
   }
+}
+
+/** v2.1.0+ — Compress a raw prompt into the ~200-char summary the
+ *  file-history modal displays. Strips a leading <context> block (we
+ *  re-inject context every turn — the noise dwarfs the actual ask),
+ *  collapses whitespace, then truncates with an ellipsis. Caller
+ *  passes the result as `promptSummary` on `uploadAgentTrace`. */
+export function summarizePrompt(prompt: string, max = 200): string {
+  // Drop a leading <context>...</context> block if present — the
+  // pre-call hooks pipeline injects this on every dispatch and it
+  // would otherwise dominate the summary.
+  let stripped = prompt;
+  const ctxMatch = stripped.match(/^<context>[\s\S]*?<\/context>\s*/);
+  if (ctxMatch) {
+    stripped = stripped.slice(ctxMatch[0].length);
+  }
+  const collapsed = stripped.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max - 1) + "…";
 }
 
 /** Batch upload helper. The cloud endpoint accepts up to 100 per request. */

@@ -1,5 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { uploadAgentTrace } from "@/lib/agentTraceUpload";
+import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 
 // v2.1.0 — pre/post mtime snapshots so traces carry "files touched"
 // attribution. Gated on activeProjectPath; cheap (<200ms typical) and
@@ -137,6 +137,7 @@ export async function promptAgentWithContext(input: {
       ok: true,
       source: input.source ?? "desktop:quick_test",
       filesTouched,
+      promptSummary: summarizePrompt(input.prompt),
     });
     return result;
   } catch (err) {
@@ -148,6 +149,7 @@ export async function promptAgentWithContext(input: {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
       source: input.source ?? "desktop:quick_test",
+      promptSummary: summarizePrompt(input.prompt),
     });
     throw err;
   }
@@ -207,6 +209,7 @@ export async function promptAgentWithHistoryStream(input: {
             source: input.source ?? "desktop:promptbar:stream",
             metadata: { historyLength: input.history.length, streamed: true },
             filesTouched,
+            promptSummary: summarizePrompt(input.newPrompt),
           });
         })();
         resolve(msg.full);
@@ -220,6 +223,7 @@ export async function promptAgentWithHistoryStream(input: {
           ok: false,
           error: msg.message,
           source: input.source ?? "desktop:promptbar:stream",
+          promptSummary: summarizePrompt(input.newPrompt),
         });
         reject(new Error(msg.message));
       }

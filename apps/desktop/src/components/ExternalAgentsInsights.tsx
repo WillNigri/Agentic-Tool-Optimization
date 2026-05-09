@@ -647,6 +647,17 @@ function FileHistoryModal({
                   {tr.error && (
                     <div className="mt-1 text-cs-danger break-words">{tr.error}</div>
                   )}
+                  {/* v2.1.0+ — "why" answer. Brief prompt summary lets
+                       the reviewer see what the dispatch was trying to
+                       do, not just that it touched the file. */}
+                  {tr.prompt_summary && (
+                    <div className="mt-1.5 rounded border border-cs-border bg-cs-bg-raised/60 px-2 py-1 text-[10px] text-cs-text">
+                      <span className="text-cs-muted uppercase tracking-wide text-[9px] mr-1.5">
+                        {t("insights.fileHistory.promptLabel", "prompt")}
+                      </span>
+                      {tr.prompt_summary}
+                    </div>
+                  )}
                   {/* Other files this same dispatch touched — gives
                        context for "what was that run actually doing?"
                        without making the user open another modal. */}

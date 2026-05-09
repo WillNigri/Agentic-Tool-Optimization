@@ -50,6 +50,10 @@ export interface CloudAgentTrace {
   // Captured by mtime diff in the desktop layer; null for traces from
   // bundles (the customer-facing deploy doesn't have a "project root").
   files_touched: string[] | null;
+  // v2.1.0+ — first ~200 chars of the dispatch prompt. Surfaced in the
+  // file-history modal so reviewers can answer "why was this file
+  // changed?" not just who/when.
+  prompt_summary: string | null;
 }
 
 /** Read auth headers from the local store. Returns null if the user
