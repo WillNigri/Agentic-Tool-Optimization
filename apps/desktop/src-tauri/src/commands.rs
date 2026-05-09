@@ -13788,7 +13788,7 @@ async fn spawn_streaming_dispatch(
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::process::Command as TokioCommand;
-    use tokio::sync::Mutex as AsyncMutex;
+    // (was tokio::sync::Mutex; replaced by oneshot channel for kill.)
 
     let user_path = get_user_path();
     let cfg_json: Option<serde_json::Value> = config.and_then(|c| serde_json::from_str(c).ok());
@@ -13899,7 +13899,7 @@ async fn spawn_streaming_dispatch(
     }
     let _finish_guard = FinishOnDrop(run_id.clone());
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let _ = on_event.send(StreamEvent::Error {
@@ -13909,48 +13909,33 @@ async fn spawn_streaming_dispatch(
         }
     };
 
-    // Wrap in Arc<AsyncMutex<Option<Child>>> so the kill closure can
-    // take() the child and call .kill().await without fighting the
-    // dispatch path for ownership. Option<Child> means the kill path
-    // can't accidentally try to kill twice.
-    let child_arc = Arc::new(AsyncMutex::new(Some(child)));
-    let child_for_kill = child_arc.clone();
-    // CAPTURE the tokio runtime handle at registration time. The kill
-    // closure is invoked from `kill_active_run`, which is a sync
-    // Tauri command running OUTSIDE a tokio runtime context. Calling
-    // bare `tokio::spawn(...)` inside that closure panics → the
-    // panic unwinds into the Tauri command bridge → the entire app
-    // process crashes (Beatriz hit "ato-desktop encerrou
-    // inesperadamente" 2026-05-09 from clicking the Live → Kill
-    // button). Capturing the handle from the async dispatch context
-    // and using `handle.spawn` makes the closure independent of
-    // wherever it's later invoked from.
-    let runtime_handle = tokio::runtime::Handle::current();
+    // Kill plumbing via oneshot channel. Earlier design wrapped the
+    // child in a mutex and tried to lock + kill from the closure —
+    // but the dispatch path takes the child out of the mutex to own
+    // its stdout, so by the time a user clicks Kill the mutex holds
+    // None and the closure no-ops silently (Beatriz: "stayed
+    // spinning but still ended responding", 2026-05-09). The
+    // oneshot pattern decouples them: the closure signals intent;
+    // the dispatch loop's select! reacts by killing the child
+    // inline (where it actually owns the handle).
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let kill_tx_holder: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+        Arc::new(std::sync::Mutex::new(Some(kill_tx)));
+    let kill_tx_for_handler = kill_tx_holder.clone();
     crate::active_runs::attach_kill_handler(&run_id, move || {
-        runtime_handle.spawn(async move {
-            let mut guard = child_for_kill.lock().await;
-            if let Some(child) = guard.as_mut() {
-                let _ = child.kill().await;
-            }
-        });
-    });
-
-    // Take the child out of the mutex for the duration of the wait —
-    // we hold ownership locally so wait/read calls don't fight the
-    // kill closure for the lock. The kill closure's Option<Child> is
-    // None during this window, which is the right behavior: if a kill
-    // request races our completion, the kill is a no-op and finish_run
-    // tidies up.
-    let mut child = match child_arc.lock().await.take() {
-        Some(c) => c,
-        None => {
-            // Should be unreachable — we just inserted Some above.
-            let _ = on_event.send(StreamEvent::Error {
-                message: "child-handle-missing".into(),
-            });
-            return Ok(());
+        // Pure sync: lock, take, send. No tokio runtime needed inside
+        // the closure — fixes the panic that crashed the app earlier.
+        let mut guard = match kill_tx_for_handler.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if let Some(tx) = guard.take() {
+            // Send may fail if the receiver dropped (dispatch already
+            // finished); fine — kill becomes a no-op.
+            let _ = tx.send(());
         }
-    };
+    });
+    let mut kill_rx = kill_rx;
 
     let stdout = match child.stdout.take() {
         Some(s) => s,
@@ -13965,24 +13950,43 @@ async fn spawn_streaming_dispatch(
     // Read stdout in chunks, emitting each as a Chunk event. The buffer is
     // small enough that the user sees tokens flowing within a few hundred
     // ms, even if the runtime writes line-buffered.
+    //
+    // The select! gives the kill_rx receiver a chance to fire between
+    // reads. When the user clicks Kill, the closure sends on the
+    // oneshot, this branch wins, we kill the child + emit an error,
+    // and return. Without this, the read loop would happily drain the
+    // child's already-buffered stdout to completion even after the
+    // kill request.
     let mut reader = stdout;
     let mut buf = [0u8; 1024];
     let mut full = String::new();
     loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                full.push_str(&chunk);
-                let _ = on_event.send(StreamEvent::Chunk { text: chunk });
-            }
-            Err(e) => {
-                let _ = on_event.send(StreamEvent::Error {
-                    message: format!("read-failed: {}", e),
-                });
+        tokio::select! {
+            biased;
+            _ = &mut kill_rx => {
+                // User clicked Kill. SIGKILL the child, surface a
+                // clean "killed by user" error to the UI, and stop.
                 let _ = child.kill().await;
+                let _ = on_event.send(StreamEvent::Error {
+                    message: "killed by user".into(),
+                });
                 return Ok(());
             }
+            read_result = reader.read(&mut buf) => match read_result {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    full.push_str(&chunk);
+                    let _ = on_event.send(StreamEvent::Chunk { text: chunk });
+                }
+                Err(e) => {
+                    let _ = on_event.send(StreamEvent::Error {
+                        message: format!("read-failed: {}", e),
+                    });
+                    let _ = child.kill().await;
+                    return Ok(());
+                }
+            },
         }
     }
 
