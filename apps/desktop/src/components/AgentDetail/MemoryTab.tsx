@@ -11,6 +11,7 @@ import {
 } from "@/lib/agents";
 import { useFeatureFlag } from "@/lib/tier";
 import TierGate from "@/components/Tier/TierGate";
+import { useUiStore } from "@/stores/useUiStore";
 
 // v1.4.0 F3 — Memory / summarizer policy tab.
 //
@@ -38,6 +39,7 @@ function MemoryEditor({ agent }: { agent: Agent }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const tunable = useFeatureFlag("summarizer.tunable");
+  const openCreateAgent = useUiStore((s) => s.openCreateAgent);
 
   const [policy, setPolicy] = useState<MemoryPolicy>(parseMemoryPolicy(agent));
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +80,20 @@ function MemoryEditor({ agent }: { agent: Agent }) {
             "Long sessions accumulate noise — quality drops. Summarize once you cross a threshold; keep the most recent turns verbatim. Free uses fixed defaults; Pro lets you tune."
           )}
         </p>
+        {/* v1.5.5 — Discoverability hint. Memory tab is configured-by-
+            default so it never goes truly empty; nudge users at the
+            Production-grade template instead of leaving them to figure
+            out what "good" looks like from scratch. */}
+        <button
+          type="button"
+          onClick={() => openCreateAgent("templates", "production-grade")}
+          className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-cs-muted hover:text-cs-accent"
+        >
+          {t(
+            "agentDetail.memory.tryTemplate",
+            "See a sensible memory policy in the Production template →",
+          )}
+        </button>
       </header>
 
       <Field

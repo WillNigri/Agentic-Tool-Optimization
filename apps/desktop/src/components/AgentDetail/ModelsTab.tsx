@@ -11,6 +11,7 @@ import {
 import { useFeatureFlag } from "@/lib/tier";
 import UpgradePrompt from "@/components/Tier/UpgradePrompt";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/useUiStore";
 
 // v1.4.0 F5 — Per-task model selection.
 //
@@ -45,6 +46,7 @@ export default function ModelsTab({ agent }: Props) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const advancedAllowed = useFeatureFlag("role-models");
+  const openCreateAgent = useUiStore((s) => s.openCreateAgent);
 
   const initial = parseRoleModels(agent);
   const [models, setModels] = useState<RoleModels>({
@@ -97,6 +99,20 @@ export default function ModelsTab({ agent }: Props) {
             "Use cheap fast models for routing/summarization; advanced models for the final response. Free agents use one model for everything."
           )}
         </p>
+        {/* v1.5.5 — Discoverability hint. Per-task model selection
+            is one of the easiest cost wins but invisible if you don't
+            know it exists. Production template uses it; nudge the user
+            to see it wired up before they start guessing values. */}
+        <button
+          type="button"
+          onClick={() => openCreateAgent("templates", "production-grade")}
+          className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-cs-muted hover:text-cs-accent"
+        >
+          {t(
+            "agentDetail.models.tryTemplate",
+            "See per-task model selection in the Production template →",
+          )}
+        </button>
       </header>
 
       <ModelRow

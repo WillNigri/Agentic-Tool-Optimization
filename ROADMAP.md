@@ -155,6 +155,13 @@
 - **Per-thread sticky agent** — picking an agent persists it to the thread's `agent_id`; switching threads restores the agent
 - **Runtime mid-thread for no-agent path** — frontend stitches thread history into a single framed prompt so cross-runtime swaps without an agent still carry context
 
+### v1.5.5 — Production-Ready Agents (Discoverability) (Released May 2026)
+The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers, evaluators, per-task models) are powerful but **invisible to most users** — Felipe spent weeks building agents and didn't realize they exist. v1.5.5 closes the gap between "we have it" and "users know we have it":
+- **Production-grade agent template** — a 6th template (`production-grade`) wired up with 4 example variables (env / project-path / computed for `{user_name}`, `{project_name}`, `{project_root}`, `{today}`), one pre-call context hook reading `CHANGELOG.md`, and a memory policy. The wizard honors `dynamicScaffold` so creating from this template lands the variables, hooks, and policy in the DB — not just the system prompt.
+- **First-run welcome tour** — `WelcomeTour` 3-slide modal gated on `localStorage["ato.welcome-tour.shown"]`. Plants the "agents adapt at fire time" mental model, ends by sending the user straight to the Production template via `openCreateAgent("templates", "production-grade")`.
+- **Empty-state CTAs** on Variables / Context / Memory / Models tabs that point at the Production template — Memory and Models use a header-line hint since those tabs are configured-by-default and never go truly empty.
+- **Settings → API Keys** — Grok added in v1.5.4; wizard hint lists all 15 providers.
+
 ### v1.6.0 — Intelligence Layer (Planned)
 - **Automations tab repurpose — group pipelines as flow nodes** ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
   - Today the Runs → Automations tab visualizes skill-derived flow charts (parsed from `## Step N` / `## Phase N` headers in SKILL.md files). Useful but narrow — and v1.5 groups now own the word "automation."
@@ -169,26 +176,6 @@
 - Cost optimization alerts from SDK traces
 - Agent performance benchmarking across runtimes
 - **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine (MIT, on PyPI), surface harness-improvement reports as one-click inline diffs
-
-### v1.5.5 — Production-Ready Agents (Discoverability) (Planned)
-The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers, evaluators, per-task models) are powerful but **invisible to most users** — Felipe has been building agents for weeks and didn't realize they exist. v1.5.5 closes the gap between "we have it" and "users know we have it":
-- **Production agent template** — a 5th template (alongside the existing 4) wired up with example variables (file resolver pulling from a local `policies.md`, env-var resolver, computed JS expression), one pre-call context hook (file or db query), and a memory policy. New users see the production pattern on day one.
-- **Onboarding tour** — first-run highlight passes over the Variables / Context / Memory / Models tabs explaining what each does in 1 sentence + a "show me an example" link.
-- **Empty-state CTAs** on each tab pointing to the Production template.
-- **Settings → API Keys**: Grok already added in v1.5.4; the hint text in the Guided wizard now lists all 15 providers so users with API keys see we support them.
-
-### v1.6.0 — Intelligence Layer (Planned)
-- **Automations tab repurpose — group pipelines as flow nodes** ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
-  - Today the Runs → Automations tab visualizes skill-derived flow charts (parsed from `## Step N` / `## Phase N` headers in SKILL.md files). Useful but narrow — and v1.5 groups now own the word "automation."
-  - v1.6 turns it into the canonical visualization for **everything that runs without a human in the loop**: routed groups, sequential pipelines, scheduled cron jobs, hooks, and skill flows — all on the same canvas. Each node is a real agent / runtime / tool with live status (idle / running / errored).
-- Real-time collaborative workspace (WebSocket via ato-cloud)
-- Team cursors (Figma-style)
-- Cross-runtime policy enforcement templates
-- Hosted terminal sessions for Team tier (cloud)
-- Proactive suggestions ("Your project is missing X")
-- Cost optimization alerts from SDK traces
-- Agent performance benchmarking across runtimes
-- **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine
 
 ### v2.0.0 — External Agents / Hosted Deployment (Released May 2026)
 The strategic v2 release: ATO becomes the place where companies build customer-facing chatbots, deploy them to their own infrastructure (any LLM provider), and track their behavior — without us competing with hosting providers. ([detailed plan](docs/V2.0.0-EXTERNAL-AGENTS.md))
@@ -229,12 +216,24 @@ Phase 4 — Live runs registry (shipped):
 - **Insights → Live sub-tab** — polled every 2s; shows what's running with workspace/runtime/elapsed time + a one-click Kill button per row. Default tab so the live state is the first thing users see.
 - **The "missing ops layer"** answer (Twitter feedback): no more reading every terminal buffer to find the stuck dispatch.
 
-Phase 5 — Still planned:
-- **Cross-runtime regression detection** — "Switching @reviewer from Sonnet 4.6 → 4.7 dropped evaluator score from 0.91 → 0.74 across 412 conversations. Here are the 14 newly-failing examples."
+Phase 5 — Partially shipped (continues):
+- **Pipeline trace visualizer** *(shipped v2.0.1)* — multi-stage dispatches grouped by `parent_run_id` get their own Insights → Pipelines sub-tab with handoff arrows + per-stage timing/files. Honest scope: kind-agnostic, mirrors the External tab's strict-by-design filter philosophy.
+- **Eval workbench (compare traces)** *(shipped v2.0.1)* — Insights → Compare sub-tab. Lists agents with ≥2 cloud traces; click → existing `TraceCompareModal` opens with diff view (duration/cost/files/ok-status). Replaces the v1 pattern of routing the comparison surface through the External-only drill-down.
+- **Cross-runtime regression detection** *(v1 shipped, depth pending)* — `/agent-traces/regressions` joins config changes × traces, computes before/after stats, classifies severity. Still missing: evaluator-score deltas (`agent_evaluations` join), drill-down into post-change failing traces, AgentDetail banner when a regression is active. ([v2.1 Phase 5b scope memory](.))
 - **Cost optimization recommendations** — shadow-evaluate alternative runtimes, surface "switching @triage from GPT-4 → Haiku saves $312/mo with no measurable quality drop."
-- **Pipeline trace visualizer** — sequential groups (Claude → Codex → Gemini) rendered as a single conversation flow with handoff inspection.
-- **Eval workbench** — replay last week's failures against tweaked configs in batch; compare per runtime.
 - **Embed-side analytics** — page where the chat lives, time-to-first-message, drop-off rate per message turn, escalation keyword clusters.
+
+### v2.0.1 — Honest Surfaces + Plumbing Fixes (Released May 2026)
+Patch on `2.0.0`. All fixes for things broken-as-shipped, plus two Phase 5 bullets pulled forward because they're also discoverability gaps.
+
+- **Insights → Pipelines sub-tab** — multi-stage dispatches grouped by `parent_run_id`; click any row → existing `PipelineModal` opens directly. Internal pipe-writer/reviewer chains and external-bundle pipelines both land here regardless of agent kind.
+- **Insights → Compare sub-tab** — `CompareTracesPanel` lists agents with ≥2 cloud traces, opens `TraceCompareModal`. Removed the previous dishonest pattern of dressing internal agents as `kind=external` to satisfy the External-tab filter; demos are now scope-honest.
+- **External tab kept strict** to `kind=external` only. Empty state points users at the Pipelines tab if they're chasing internal multi-agent runs.
+- **Pipeline trace upload** — desktop now emits RFC3339 with `Z` suffix (`to_rfc3339_opts(_, true)`). Cloud schema also accepts `{offset: true}`. Was 400-ing every pipeline stage with `VALIDATION_ERROR / "Invalid datetime"`.
+- **Auth-store mirror** — `useAuthStore.setAuth` now writes the localStorage slot that `lib/cloud-api.ts` reads (`storeTokens()`); `logout` calls `clearTokens`; `refreshAccessToken` mirrors rotated tokens; `isCloudUser` added to `partialize`; `onRehydrateStorage` re-hydrates the localStorage mirror on app boot. Fixes the "Not authenticated" error on Deploy tab embed key + every other `cloud-api.ts` caller despite a visible Pro badge.
+- **Runs → History persistence** — `prompt_agent_inner` now inserts an `execution_logs` row after every dispatch (UI, group stages, MCP `run_agent`, headless cron). The table was permanently empty before because `add_execution_log` had no JS callers.
+- **CI fix** — extracted `queryClient` from `main.tsx` to `lib/queryClient.ts` so non-React callers (the demo store) don't drag in `ReactDOM.createRoot(...)` at module load. Vitest's jsdom env was crashing on every CI run since v2.0.0-alpha.x.
+- **Diagnostic on Pipelines empty state** + console-logged trace upload failures, so the next "panel says empty" mystery is a 30-second diagnosis instead of a 30-minute one.
 
 ### v3.0.0+ — Multi-Tenant + Compliance (Planned, exploratory)
 - **Team workspaces** — shared agents, shared knowledge, shared trace history with per-member ACLs.
