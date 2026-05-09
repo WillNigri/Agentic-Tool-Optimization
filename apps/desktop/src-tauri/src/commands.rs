@@ -13082,6 +13082,22 @@ async fn run_sequential_dispatch(
         };
         let stage_start = std::time::Instant::now();
         let stage_started_at = chrono::Utc::now().to_rfc3339();
+        // v2.1.0+ — register each group stage in the Live runs panel
+        // with the right slug + runtime so the user can see what's
+        // running. Beatriz observed pipe-demo running invisibly
+        // 2026-05-09. The bare prompt_agent path doesn't register
+        // (avoids double-registration with prompt_agent_with_context);
+        // the group dispatch loop knows the agent slug, so this is
+        // the right scope. Kill is best-effort: the sync
+        // std::process::Command::output() path can't be killed
+        // mid-flight (no child handle to attach to), so the row
+        // appears but the Kill button no-ops for these.
+        let stage_run_id = crate::active_runs::begin_run(
+            &child_runtime,
+            Some(&child.agent_slug),
+            None,
+            Some("desktop:group-stage"),
+        );
         let (stage_response, ok, stage_error) = match prompt_agent(
             child_runtime.clone(),
             stage_prompt,
@@ -13096,6 +13112,7 @@ async fn run_sequential_dispatch(
                 Some(e),
             ),
         };
+        crate::active_runs::finish_run(&stage_run_id);
         let stage_duration_ms = stage_start.elapsed().as_millis() as u64;
 
         if !transcript.is_empty() {
