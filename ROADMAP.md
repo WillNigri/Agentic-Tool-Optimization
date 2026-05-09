@@ -206,7 +206,7 @@ Deferred to a v2.0.x patch:
 - **Bundle → cloud trace forwarding auth** — bundles POST `Bearer ATO_TRACE_KEY`, cloud expects JWT. External-bundle traces silently 401 today; internal-agent traces flow correctly.
 - **External API + DB connections as scoped tools** — pushed to v2.1+ alongside the eval workbench.
 
-### v2.1.0 — Multi-Runtime Differentiated Observability (In Progress, May 2026)
+### v2.1.0 — Multi-Runtime Differentiated Observability (Released May 2026)
 The unique-value layer on top of v2.0's deployment surface — what existing observability tools cannot do because they don't have our multi-runtime + agent-design context.
 
 Phase 1 — Trace pipeline (shipped):
