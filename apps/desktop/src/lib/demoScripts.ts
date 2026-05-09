@@ -812,6 +812,11 @@ export const CONFIG_HISTORY_SCRIPT: DemoScript = {
       text: "Open the agent we just created.",
       durationMs: 1800,
     },
+    // Configure button is inside the expanded row body, so we have to
+    // click the row to expand it first. Otherwise clickByDemoId
+    // silently no-ops because the configure button isn't in the DOM.
+    { kind: "clickByDemoId", id: "agent-row-history-demo" },
+    { kind: "wait", ms: 600 },
     { kind: "highlight", id: "agent-configure-history-demo", durationMs: 1200 },
     { kind: "clickByDemoId", id: "agent-configure-history-demo" },
     { kind: "wait", ms: 1200 },
@@ -962,6 +967,10 @@ export const EMBED_KEY_SCRIPT: DemoScript = {
     { kind: "subtitle", text: "v2.1 — Deploy tab + embed key.", durationMs: 2000 },
     { kind: "navigate", section: "agents" },
     { kind: "setSubTab", storageKey: "ato.subtab.agents", tabId: "mine" },
+    { kind: "wait", ms: 600 },
+    // Configure button is inside the expanded row, so click the row
+    // first to open it. Otherwise the configure click is a no-op.
+    { kind: "clickByDemoId", id: "agent-row-embed-demo" },
     { kind: "wait", ms: 600 },
     { kind: "highlight", id: "agent-configure-embed-demo", durationMs: 1200 },
     { kind: "clickByDemoId", id: "agent-configure-embed-demo" },
