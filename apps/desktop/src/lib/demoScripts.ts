@@ -718,13 +718,21 @@ export const SHORT_SCRIPT: DemoScript = {
 //
 // Each script demos ONE feature so you can verify it works without
 // running the FULL_TOUR. They aren't shown in marketing video — these
-// are for product QA. Pattern: cleanup leftover state, navigate to
-// the feature, narrate via subtitle, perform a minimal action that
-// triggers the feature, dwell so the operator can read the result.
+// are for product QA.
 //
-// Most v2.1 features need cloud trace data to populate richly; the
-// scripts gracefully fall through to empty-state copy when there's
-// nothing to show, so they still run cleanly on a fresh install.
+// Pattern (REAL OPS — Beatriz feedback 2026-05-09):
+//   1. Cleanup any leftover state from a previous run.
+//   2. Create the agents / groups the demo needs (REAL writes).
+//   3. Fire the actual dispatch / open the actual UI (REAL reads).
+//   4. Narrate via subtitle so the operator knows what to watch for.
+//   5. Cleanup at the END so the next run is also clean and the
+//      operator's account doesn't accumulate demo cruft.
+//
+// Cloud trace data: requires cloud sign-in (Settings → Cloud).
+// Local-only API key fallbacks: a fake [DEMO] Anthropic key is seeded
+// for the embed-key demo because the user may not have a real
+// Anthropic API key configured locally; that's the only mock these
+// scripts use. Everything else is real.
 // ─────────────────────────────────────────────────────────────────────
 
 export const LIVE_RUNS_SCRIPT: DemoScript = {
@@ -779,6 +787,9 @@ export const LIVE_RUNS_SCRIPT: DemoScript = {
       text: "Row clears when the dispatch returns. Try it again with a stuck process — Kill works.",
       durationMs: 4000,
     },
+    // Live runs script doesn't create persistent state — the dispatch
+    // is the only side effect and that's a real one-shot we want to
+    // see. Nothing to clean up.
   ],
 };
 
@@ -834,6 +845,13 @@ export const CONFIG_HISTORY_SCRIPT: DemoScript = {
       durationMs: 5000,
     },
     { kind: "wait", ms: 1500 },
+    // Cleanup so reruns start fresh + your real agent list isn't
+    // polluted with demo cruft.
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["history-demo"],
+    },
   ],
 };
 
@@ -942,6 +960,13 @@ export const PIPELINE_VIEWER_SCRIPT: DemoScript = {
       durationMs: 4500,
     },
     { kind: "wait", ms: 1500 },
+    // Cleanup the agents + group so reruns start fresh.
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["pipe-writer", "pipe-reviewer"],
+      groupSlugs: ["pipe-demo"],
+    },
   ],
 };
 
@@ -1018,15 +1043,67 @@ export const EMBED_KEY_SCRIPT: DemoScript = {
       durationMs: 2800,
     },
     { kind: "wait", ms: 1200 },
+    // Cleanup the agent + the [DEMO] Anthropic key so reruns start
+    // fresh and your real keystore isn't polluted with demo data.
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["embed-demo"],
+      apiKeyNames: ["[DEMO] Anthropic"],
+    },
   ],
 };
 
 export const COMPARE_TRACES_SCRIPT: DemoScript = {
   id: "v21-compare-traces",
   label: "v2.1 — Compare traces (eval workbench)",
-  shortDescription: "Insights → External → click ↔ compare on the first trace",
+  shortDescription: "Fire 2 real dispatches on the same agent, compare them",
   steps: [
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["compare-demo"],
+    },
+    {
+      kind: "createAgent",
+      spec: {
+        displayName: "compare-demo",
+        runtime: "claude",
+        model: "claude-sonnet-4-6",
+        description: "Throwaway agent for the trace-compare demo.",
+        systemPrompt: "Reply with one short paragraph on the topic given.",
+        goal: "compare-demo",
+      },
+    },
     { kind: "subtitle", text: "v2.1 — Eval workbench (compare).", durationMs: 2000 },
+    {
+      kind: "subtitle",
+      text: "Need 2 traces of the same agent to compare. Firing both now.",
+      durationMs: 2800,
+    },
+    // Two real dispatches via the chat pane against the same agent
+    // → two real traces upload to cloud → drill-down has 2 rows to
+    // compare. This takes ~10s per dispatch with claude --print.
+    { kind: "navigate", section: "home" },
+    { kind: "setChatPaneOpen", open: true },
+    { kind: "newThread" },
+    { kind: "selectAgent", slug: "compare-demo" },
+    { kind: "wait", ms: 800 },
+    { kind: "type", text: "Topic: morning routines for software engineers." },
+    { kind: "wait", ms: 300 },
+    { kind: "send" },
+    { kind: "wait", ms: 1500 },
+    { kind: "newThread" },
+    { kind: "selectAgent", slug: "compare-demo" },
+    { kind: "wait", ms: 600 },
+    { kind: "type", text: "Topic: evening routines for software engineers." },
+    { kind: "wait", ms: 300 },
+    { kind: "send" },
+    // Wait for both trace uploads to land in cloud (Pro+ users with
+    // sign-in only — the trace-upload pipe is best-effort silent for
+    // signed-out users; in that case Compare modal will show the
+    // baseline trace but no candidates).
+    { kind: "wait", ms: 4000 },
     { kind: "navigate", section: "insights" },
     { kind: "setSubTab", storageKey: "ato.subtab.insights", tabId: "external" },
     { kind: "wait", ms: 1500 },
@@ -1060,6 +1137,12 @@ export const COMPARE_TRACES_SCRIPT: DemoScript = {
       durationMs: 5000,
     },
     { kind: "wait", ms: 1500 },
+    // Cleanup so reruns start fresh.
+    {
+      kind: "cleanup",
+      runtime: "claude",
+      agentSlugs: ["compare-demo"],
+    },
   ],
 };
 
