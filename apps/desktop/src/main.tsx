@@ -28,7 +28,11 @@ const PERSISTED_QUERY_PREFIXES = [
 ];
 const PERSIST_KEY = "ato.query-cache.v1";
 
-const queryClient = new QueryClient({
+// Exported so non-React code (the demo store) can invalidate cached
+// queries after Tauri-side mutations land. Without this, demos that
+// createAgent/createGroup then immediately try to use the new entity
+// hit the 30s staleTime and components don't re-render until then.
+export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 30_000,

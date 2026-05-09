@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useUiStore } from "@/stores/useUiStore";
 import {
   Plus,
   Trash2,
@@ -166,6 +167,10 @@ export default function VariablesTab({ agent }: Props) {
 
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   const { t } = useTranslation();
+  // v1.5.5 — Discoverability. The Production-grade template ships
+  // pre-wired with example variables; pointing users there is faster
+  // than asking them to figure it out from scratch.
+  const openCreateAgent = useUiStore((s) => s.openCreateAgent);
   return (
     <div className="rounded-lg border border-dashed border-cs-border bg-cs-bg-raised/40 p-6 flex items-start gap-3">
       <VariableIcon size={20} className="text-cs-muted shrink-0" />
@@ -185,14 +190,26 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
             "Resolvers available: static · env var · project path · file · database query · MCP call · computed JS."
           )}
         </p>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
-        >
-          <Plus size={12} />
-          {t("agentDetail.variables.add", "Add variable")}
-        </button>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onAdd}
+            className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
+          >
+            <Plus size={12} />
+            {t("agentDetail.variables.add", "Add variable")}
+          </button>
+          <button
+            type="button"
+            onClick={() => openCreateAgent("templates", "production-grade")}
+            className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-bg-raised px-3 py-1.5 text-xs font-medium text-cs-muted hover:text-cs-accent hover:border-cs-accent/40"
+          >
+            {t(
+              "agentDetail.variables.tryTemplate",
+              "Or start from the Production template →",
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

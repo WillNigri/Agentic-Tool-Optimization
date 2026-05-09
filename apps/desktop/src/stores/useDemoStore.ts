@@ -5,6 +5,7 @@ import type { AgentRuntime } from "@/lib/agents";
 import type { Section } from "@/components/Sidebar";
 import { useUiStore, type WizardPath } from "@/stores/useUiStore";
 import type { QuickDraft } from "@/lib/agentDraft";
+import { queryClient } from "@/main";
 
 interface CreateAgentSpec {
   displayName: string;
@@ -392,6 +393,14 @@ export const useDemoStore = create<DemoState>((set, get) => ({
               writeFile: step.spec.kind !== "external", // external skips the on-disk file
               kind: step.spec.kind ?? "internal",
             });
+            // Same cache-refresh dance as createGroup: agents list is
+            // cached for 30s in PromptBar / MyAgentsList. Without
+            // invalidation, downstream demo steps that look up the
+            // newly-created agent (selectAgent, agent-row clicks)
+            // race against React Query's staleTime.
+            await queryClient.invalidateQueries({ queryKey: ["agents"] });
+            await queryClient.invalidateQueries({ queryKey: ["my-agents"] });
+            await queryClient.invalidateQueries({ queryKey: ["promptbar-agents"] });
           } catch {
             // Agent may already exist from a prior demo run — that's fine.
           }
@@ -420,6 +429,11 @@ export const useDemoStore = create<DemoState>((set, get) => ({
               members,
               dispatchKind: step.spec.dispatchKind ?? null,
             });
+            // PromptBar caches the group list for 30s. Without this
+            // invalidate, selectChatGroup downstream picks an empty
+            // dropdown and the dispatch falls through to bare runtime.
+            await queryClient.invalidateQueries({ queryKey: ["promptbar-groups"] });
+            await queryClient.invalidateQueries({ queryKey: ["agent-groups"] });
           } catch {
             // Group may already exist — fine.
           }

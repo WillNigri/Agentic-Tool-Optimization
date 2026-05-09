@@ -196,6 +196,8 @@ function renderNodeTraceForward(agent: Agent): string {
     // webhook all run in parallel, each gated on its own env var.
     if (process.env.ATO_TRACE_KEY) {
       // v2.1.0 — /embed sub-path with canonical batched payload.
+      // v2.1 Phase 10 — forward embedSession when the widget supplied it.
+      const __es = (payload && typeof payload === "object" && payload.embedSession && typeof payload.embedSession === "object") ? payload.embedSession : null;
       fetch("https://api.agentictool.ai/api/agent-traces/embed", {
         method: "POST",
         headers: { "Authorization": "Bearer " + process.env.ATO_TRACE_KEY, "content-type": "application/json" },
@@ -207,7 +209,7 @@ function renderNodeTraceForward(agent: Agent): string {
             durationMs: Date.now() - startedAt,
             ok: true,
             source: "embed-docker",
-            metadata: { origin },
+            metadata: __es ? { origin, embedSession: __es } : { origin },
           }],
         }),
       }).catch(() => {});

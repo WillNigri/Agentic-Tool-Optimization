@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useUiStore } from "@/stores/useUiStore";
 import {
   Plus,
   Trash2,
@@ -190,14 +191,29 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
             "Hook kinds: file · MCP call · database query · webhook · computed."
           )}
         </p>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
-        >
-          <Plus size={12} />
-          {t("agentDetail.context.add", "Add hook")}
-        </button>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onAdd}
+            className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent-hover"
+          >
+            <Plus size={12} />
+            {t("agentDetail.context.add", "Add hook")}
+          </button>
+          {/* v1.5.5 — Discoverability. The Production-grade template
+              ships with a pre-call hook example, so pointing here is
+              faster than figuring it out from scratch. */}
+          <button
+            type="button"
+            onClick={() => useUiStore.getState().openCreateAgent("templates", "production-grade")}
+            className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-bg-raised px-3 py-1.5 text-xs font-medium text-cs-muted hover:text-cs-accent hover:border-cs-accent/40"
+          >
+            {t(
+              "agentDetail.context.tryTemplate",
+              "Or start from the Production template →",
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

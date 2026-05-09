@@ -468,6 +468,23 @@ function TraceRow({
       : null;
   const files = tr.files_touched ?? [];
   const fileCount = files.length;
+  // v2.1 Phase 10 — embed-side analytics. When the deployed bundle
+  // forwarded an embedSession (widget tracked TTFM, turn count, page
+  // URL) it lives at metadata.embedSession. Surface as a small badge
+  // so the operator can see customer-facing engagement signals
+  // alongside the technical trace data.
+  const embedSession =
+    tr.metadata && typeof (tr.metadata as { embedSession?: unknown }).embedSession === "object"
+      ? ((tr.metadata as { embedSession: Record<string, unknown> }).embedSession ?? null)
+      : null;
+  const ttfmMs =
+    embedSession && typeof embedSession.msToFirstMessage === "number"
+      ? (embedSession.msToFirstMessage as number)
+      : null;
+  const turn =
+    embedSession && typeof embedSession.turn === "number"
+      ? (embedSession.turn as number)
+      : null;
   // v2.1.0+ Concurrent attribution — when this run overlapped with
   // another in the same workspace, mtime-based file attribution is
   // ambiguous. The capture layer (active_runs.rs) records the peers;
@@ -501,6 +518,28 @@ function TraceRow({
             so badges/buttons inside don't fight each other for the
             right edge. */}
         <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {embedSession && (
+            <span
+              className="inline-flex items-center gap-1 rounded-sm border border-cs-accent/30 bg-cs-accent/5 px-1.5 py-0.5 font-mono text-[10px] text-cs-accent"
+              title={t(
+                "insights.external.embedSessionTitle",
+                "Embed session: turn {{turn}}{{ttfm}}{{url}}",
+                {
+                  turn: turn ?? "?",
+                  ttfm: ttfmMs !== null ? `, TTFM ${(ttfmMs / 1000).toFixed(1)}s` : "",
+                  url:
+                    embedSession.url && typeof embedSession.url === "string"
+                      ? `, on ${embedSession.url}`
+                      : "",
+                },
+              )}
+            >
+              💬 {turn !== null ? `turn ${turn}` : "embed"}
+              {ttfmMs !== null && ttfmMs < 60000
+                ? ` · ${(ttfmMs / 1000).toFixed(1)}s`
+                : ""}
+            </span>
+          )}
           {tr.parent_run_id && onPipelineClick && (
             <button
               type="button"

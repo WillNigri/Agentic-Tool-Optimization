@@ -160,6 +160,7 @@ function renderTraceForward(agent: Agent): string {
   // ATO Insights + Langfuse + generic webhook all run in parallel via
   // ctx.waitUntil so none of them block the user-facing response.
   return `    // Best-effort trace forwards — none of these block the user response.
+    var __embedSession = (payload && typeof payload === "object" && payload.embedSession && typeof payload.embedSession === "object") ? payload.embedSession : null;
     var atoTracePromise = env.ATO_TRACE_KEY
       ? fetch("https://api.agentictool.ai/api/agent-traces/embed", {
           method: "POST",
@@ -172,7 +173,7 @@ function renderTraceForward(agent: Agent): string {
               durationMs: Date.now() - startedAt,
               ok: true,
               source: "embed-cloudflare",
-              metadata: { origin: origin },
+              metadata: __embedSession ? { origin: origin, embedSession: __embedSession } : { origin: origin },
             }],
           }),
         }).catch(function () {})

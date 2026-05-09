@@ -71,6 +71,11 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 
 // ---- Auth (cloud only) ----
 
+/** Cloud /auth/login + /auth/register response.
+ *  The cloud nests tokens under `tokens` — used to be flat in the
+ *  desktop's mistaken type, which broke pages/Login.tsx (it read
+ *  result.accessToken which was undefined). LoginModal.tsx had the
+ *  right shape; pages/Login was the broken surface. */
 export interface AuthResponse {
   user: {
     id: string;
@@ -79,8 +84,10 @@ export interface AuthResponse {
     /** Optional — older backends may not include it; treat as 'free'. */
     subscription_tier?: 'free' | 'pro' | 'team' | 'enterprise';
   };
-  accessToken: string;
-  refreshToken: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+  };
 }
 
 export async function login(data: { email: string; password: string }) {

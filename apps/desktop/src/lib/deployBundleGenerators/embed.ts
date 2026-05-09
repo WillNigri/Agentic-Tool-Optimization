@@ -111,6 +111,23 @@ function renderEmbedScript(agent: Agent): string {
   var STORAGE_KEY = "ato-embed:" + SLUG;
   var MAX_HISTORY = 20;
 
+  // v2.1.0 Phase 10 — Embed-side analytics. Each session tracks the
+  // page where the chat lives, when it loaded, when the user first
+  // sent a message (time-to-first-message), and how many turns
+  // happened. The bundle handler forwards this into the trace's
+  // metadata.embedSession so the External Insights dashboard can
+  // surface aggregate stats (TTFM, turn distribution, top pages).
+  var SESSION_LOADED_AT = Date.now();
+  var session = {
+    url: typeof window !== "undefined" && window.location ? String(window.location.href).slice(0, 256) : null,
+    pageTitle: typeof document !== "undefined" ? String(document.title || "").slice(0, 128) : null,
+    referrer: typeof document !== "undefined" ? String(document.referrer || "").slice(0, 256) : null,
+    loadedAt: new Date(SESSION_LOADED_AT).toISOString(),
+    msToFirstMessage: null,
+    bubbleClicks: 0,
+    turn: 0,
+  };
+
   // ── State ───────────────────────────────────────────────────────────
   var state = {
     open: false,
@@ -144,7 +161,7 @@ function renderEmbedScript(agent: Agent): string {
   bubble.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>';
   bubble.addEventListener("mouseenter", function () { bubble.style.transform = "scale(1.05)"; });
   bubble.addEventListener("mouseleave", function () { bubble.style.transform = "scale(1)"; });
-  bubble.addEventListener("click", function () { setOpen(true); });
+  bubble.addEventListener("click", function () { session.bubbleClicks += 1; setOpen(true); });
 
   // The panel (open state)
   var panel = document.createElement("div");
@@ -240,13 +257,26 @@ function renderEmbedScript(agent: Agent): string {
     state.sending = true;
     send.disabled = true;
     input.disabled = true;
+    // v2.1.0 Phase 10 — track time-to-first-message + turn count.
+    session.turn += 1;
+    if (session.msToFirstMessage === null) {
+      session.msToFirstMessage = Date.now() - SESSION_LOADED_AT;
+    }
     appendMessage("user", text);
     var thinking = appendThinking();
     var history = state.messages.slice(0, -1).slice(-MAX_HISTORY);
     fetch(ENDPOINT, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: text, history: history }),
+      body: JSON.stringify({
+        message: text,
+        history: history,
+        // Bundle handlers forward this into trace metadata.embedSession
+        // so the dashboard can compute aggregate engagement (TTFM,
+        // turn distribution, top pages). No PII beyond the page URL,
+        // which the operator already controls.
+        embedSession: session,
+      }),
     })
       .then(function (r) {
         if (!r.ok) return r.text().then(function (t) { throw new Error("HTTP " + r.status + ": " + t); });

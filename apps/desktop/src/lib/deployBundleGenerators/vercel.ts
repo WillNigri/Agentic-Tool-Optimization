@@ -175,6 +175,8 @@ function renderVercelTraceForward(agent: Agent): string {
   if (process.env.ATO_TRACE_KEY) {
     // v2.1.0 — /embed sub-path accepts Bearer ATO_TRACE_KEY (no JWT
     // needed); canonical batched payload, metadata-only (no PII).
+    // v2.1 Phase 10 — forward embedSession when the widget supplied it.
+    const __es = (payload && typeof payload === "object" && payload.embedSession && typeof payload.embedSession === "object") ? payload.embedSession : null;
     fetch("https://api.agentictool.ai/api/agent-traces/embed", {
       method: "POST",
       headers: { "Authorization": "Bearer " + process.env.ATO_TRACE_KEY, "content-type": "application/json" },
@@ -186,7 +188,7 @@ function renderVercelTraceForward(agent: Agent): string {
           durationMs: Date.now() - startedAt,
           ok: true,
           source: "embed-vercel",
-          metadata: { origin },
+          metadata: __es ? { origin, embedSession: __es } : { origin },
         }],
       }),
     }).catch(() => {});

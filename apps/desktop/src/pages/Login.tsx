@@ -20,10 +20,16 @@ export default function Login() {
 
     try {
       const result = await login({ email, password });
+      // The cloud returns { user, tokens: { accessToken, refreshToken } }
+      // (nested), not { user, accessToken, refreshToken } (flat). The
+      // flat shape was the OSS desktop's wrong assumption — caused
+      // local sign-in to "succeed" but store undefined tokens, which
+      // is why Beatriz's local Pro UIs always showed sign-in prompts
+      // even after submitting credentials.
       setAuth(
         result.user,
-        result.accessToken,
-        result.refreshToken,
+        result.tokens.accessToken,
+        result.tokens.refreshToken,
         result.user.subscription_tier ?? "pro",
       );
       navigate("/");
