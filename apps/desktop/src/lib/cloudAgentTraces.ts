@@ -13,6 +13,15 @@
 // Returns null when neither holds — caller renders an upgrade prompt.
 
 import { useAuthStore } from "@/hooks/useAuth";
+import {
+  isMockMode,
+  mockTraces,
+  mockTraceById,
+  MOCK_METRICS,
+  MOCK_REGRESSIONS,
+  MOCK_COST_BENCHMARKS,
+  MOCK_PIPELINE_PARENT_ID,
+} from "@/lib/cloudMockData";
 
 const CLOUD_API_URL =
   import.meta.env.VITE_CLOUD_API_URL || "https://api.agentictool.ai";
@@ -88,6 +97,7 @@ async function cloudGet<T>(path: string): Promise<T | null> {
 export async function getAgentTraceMetrics(
   days = 30,
 ): Promise<{ metrics: CloudAgentTraceMetric[]; days: number } | null> {
+  if (isMockMode()) return { metrics: MOCK_METRICS, days };
   return cloudGet<{ metrics: CloudAgentTraceMetric[]; days: number }>(
     `/api/agent-traces/metrics?days=${days}`,
   );
@@ -98,6 +108,9 @@ export async function getAgentTraces(
   agentSlug?: string,
   limit = 50,
 ): Promise<{ traces: CloudAgentTrace[] } | null> {
+  if (isMockMode()) {
+    return { traces: mockTraces({ agentSlug, limit }) };
+  }
   const params = new URLSearchParams();
   if (agentSlug) params.set("agentSlug", agentSlug);
   params.set("limit", String(limit));
@@ -114,6 +127,9 @@ export async function getTracesByFile(
   filePath: string,
   limit = 200,
 ): Promise<{ traces: CloudAgentTrace[] } | null> {
+  if (isMockMode()) {
+    return { traces: mockTraces({ file: filePath, limit }) };
+  }
   const params = new URLSearchParams();
   params.set("file", filePath);
   params.set("limit", String(limit));
@@ -148,6 +164,16 @@ export async function getCostBenchmarks(opts?: {
   days: number;
   minRuns: number;
 } | null> {
+  if (isMockMode()) {
+    // Median of fixture cost_per_ok = code-writer's 0.0142 (middle of
+    // sorted [0.0052, 0.0142, 0.0313]).
+    return {
+      rows: MOCK_COST_BENCHMARKS,
+      medianCostPerOk: 0.0142,
+      days: opts?.days ?? 30,
+      minRuns: opts?.minRuns ?? 10,
+    };
+  }
   const params = new URLSearchParams();
   if (opts?.days) params.set("days", String(opts.days));
   if (opts?.minRuns) params.set("minRuns", String(opts.minRuns));
@@ -166,6 +192,7 @@ export async function getCostBenchmarks(opts?: {
  *
  *  Returns null when not signed in / blocked. */
 export async function getTraceById(id: string): Promise<CloudAgentTrace | null> {
+  if (isMockMode()) return mockTraceById(id);
   // No dedicated /traces/:id endpoint today — query the list endpoint
   // with a high limit and filter client-side. The list is already
   // user-scoped and limit-bounded; fine until we hit a workload that
@@ -183,6 +210,16 @@ export async function getTraceById(id: string): Promise<CloudAgentTrace | null> 
 export async function getPipelineTraces(
   parentRunId: string,
 ): Promise<{ stages: CloudAgentTrace[]; parentRunId: string } | null> {
+  if (isMockMode()) {
+    // Mock pipeline only exists for the canonical fixture parent_id.
+    // Anything else returns empty so the modal renders the empty state.
+    const stages =
+      parentRunId === MOCK_PIPELINE_PARENT_ID
+        ? mockTraces().filter((t) => t.parent_run_id === MOCK_PIPELINE_PARENT_ID)
+        : [];
+    stages.sort((a, b) => a.started_at.localeCompare(b.started_at));
+    return { stages, parentRunId };
+  }
   return cloudGet<{ stages: CloudAgentTrace[]; parentRunId: string }>(
     `/api/agent-traces/pipeline/${encodeURIComponent(parentRunId)}`,
   );
@@ -224,6 +261,14 @@ export async function getRegressions(opts?: {
   minSamples: number;
   days: number;
 } | null> {
+  if (isMockMode()) {
+    return {
+      regressions: MOCK_REGRESSIONS,
+      windowHours: opts?.windowHours ?? 168,
+      minSamples: opts?.minSamples ?? 20,
+      days: opts?.days ?? 30,
+    };
+  }
   const params = new URLSearchParams();
   if (opts?.days) params.set("days", String(opts.days));
   if (opts?.windowHours) params.set("windowHours", String(opts.windowHours));
@@ -236,8 +281,11 @@ export async function getRegressions(opts?: {
   }>(`/api/agent-traces/regressions?${params.toString()}`);
 }
 
-/** Returns true when the cloud features are usable from this client. */
+/** Returns true when the cloud features are usable from this client.
+ *  In mock mode (`VITE_USE_MOCK_CLOUD=true`) returns true without
+ *  any auth state — lets local dev verify Pro UIs without sign-in. */
 export function canQueryCloudTraces(): boolean {
+  if (isMockMode()) return true;
   const { isCloudUser, accessToken } = useAuthStore.getState();
   return Boolean(isCloudUser && accessToken);
 }

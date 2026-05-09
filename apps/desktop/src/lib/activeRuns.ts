@@ -67,3 +67,7 @@ export async function getOverlapEvidence(runId: string): Promise<OverlapEvidence
     return { overlapped_with: [] };
   }
 }
+
+// Note: there's no isMockMode override here — overlap evidence is
+// computed locally by the Rust active_runs registry, not fetched
+// from cloud. Real Tauri call always works regardless of cloud auth.

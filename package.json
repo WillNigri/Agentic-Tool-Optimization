@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "dev:desktop": "npm run tauri:dev -w apps/desktop",
+    "dev:desktop:mock": "VITE_USE_MOCK_CLOUD=true npm run tauri:dev -w apps/desktop",
     "build:desktop": "npm run tauri:build -w apps/desktop",
     "dev:mcp": "npm run dev -w services/mcp-server",
     "build": "npm run build --workspaces --if-present",

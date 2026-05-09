@@ -9,6 +9,7 @@
 // silent .catch() at the call site.
 
 import { useAuthStore } from "@/hooks/useAuth";
+import { isMockMode, MOCK_CONFIG_CHANGES } from "@/lib/cloudMockData";
 
 const CLOUD_API_URL =
   import.meta.env.VITE_CLOUD_API_URL || "https://api.agentictool.ai";
@@ -75,6 +76,13 @@ function defaultActor(): string {
  *  diagnostic flows can observe success.
  */
 export async function recordConfigChange(payload: RecordPayload): Promise<void> {
+  // In mock mode, log to console and no-op the network call. Lets
+  // the agent-edit paths run without sign-in and without mutating
+  // real cloud state.
+  if (isMockMode()) {
+    console.log("[mock-cloud] recordConfigChange", payload);
+    return;
+  }
   const headers = authHeaders();
   if (!headers) return;
 
@@ -114,6 +122,14 @@ export async function listConfigChanges(opts?: {
   days?: number;
   limit?: number;
 }): Promise<{ changes: ConfigChange[]; days: number } | null> {
+  if (isMockMode()) {
+    let changes = [...MOCK_CONFIG_CHANGES];
+    if (opts?.agentSlug) changes = changes.filter((c) => c.agent_slug === opts.agentSlug);
+    if (opts?.field) changes = changes.filter((c) => c.field === opts.field);
+    changes.sort((a, b) => b.changed_at.localeCompare(a.changed_at));
+    if (opts?.limit) changes = changes.slice(0, opts.limit);
+    return { changes, days: opts?.days ?? 30 };
+  }
   const headers = authHeaders();
   if (!headers) return null;
 

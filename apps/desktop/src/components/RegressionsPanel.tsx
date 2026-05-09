@@ -50,7 +50,8 @@ export default function RegressionsPanel() {
   const isPro = useFeatureFlag("cloud-traces");
   const isCloudUser = useAuthStore((s) => s.isCloudUser);
   const accessToken = useAuthStore((s) => s.accessToken);
-  const canQuery = isCloudUser && accessToken;
+  const mock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
+  const canQuery = mock || (isCloudUser && accessToken);
   const [days, setDays] = useState<7 | 30 | 90>(30);
   const [showAll, setShowAll] = useState(false);
 

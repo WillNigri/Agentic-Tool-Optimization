@@ -35,7 +35,10 @@ export default function CostBenchmarksPanel() {
   const isPro = useFeatureFlag("cloud-traces");
   const isCloudUser = useAuthStore((s) => s.isCloudUser);
   const accessToken = useAuthStore((s) => s.accessToken);
-  const canQuery = isCloudUser && accessToken;
+  // Mock mode: short-circuit auth so local dev can verify the UI
+  // without sign-in. Real prod still needs cloud login.
+  const mock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
+  const canQuery = mock || (isCloudUser && accessToken);
   const [days, setDays] = useState<7 | 30 | 90>(30);
 
   const query = useQuery({

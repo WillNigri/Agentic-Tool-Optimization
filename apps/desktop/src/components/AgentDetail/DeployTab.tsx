@@ -492,6 +492,8 @@ function EmbedKeyPanel() {
   const { t } = useTranslation();
   const isCloudUser = useAuthStore((s) => s.isCloudUser);
   const accessToken = useAuthStore((s) => s.accessToken);
+  const mock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
+  const canFetch = mock || (!!isCloudUser && !!accessToken);
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -499,9 +501,9 @@ function EmbedKeyPanel() {
   // Pro+ check happens server-side; free returns 403 / TIER_REQUIRED
   // which we surface as the upgrade hint.
   const keyQuery = useQuery({
-    queryKey: ["embed-key", accessToken],
+    queryKey: ["embed-key", accessToken, mock],
     queryFn: getEmbedKey,
-    enabled: !!isCloudUser && !!accessToken,
+    enabled: canFetch,
     staleTime: Infinity,
     retry: false,
   });
@@ -518,7 +520,7 @@ function EmbedKeyPanel() {
     },
   });
 
-  if (!isCloudUser || !accessToken) {
+  if (!canFetch) {
     return (
       <div className="ml-7 mt-2 rounded-md border border-cs-border bg-cs-bg-raised/40 p-3 text-[11px] text-cs-muted">
         {t(
