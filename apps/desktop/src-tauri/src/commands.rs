@@ -3159,6 +3159,11 @@ pub async fn trigger_cron_job(
         };
         match agent_id_runtime {
             Some((agent_id, agent_runtime)) => {
+                // v2.1.0+ — prompt_agent_with_context now returns
+                // DispatchResult{response, run_id}. Internal Rust callers
+                // (cron, group dispatch) only need the response. The
+                // run_id is consumed by frontend wrappers; here we just
+                // unwrap and discard it.
                 return prompt_agent_with_context(
                     db,
                     agent_id,
@@ -3167,7 +3172,8 @@ pub async fn trigger_cron_job(
                     config,
                     None,
                 )
-                .await;
+                .await
+                .map(|r| r.response);
             }
             None => {
                 return Err(format!(
@@ -11509,7 +11515,22 @@ async fn execute_hook(hook: &AgentHook) -> Result<String, String> {
 
 /// Tauri command that wraps prompt_agent: resolves the agent's variables and
 /// substitutes them in the prompt before dispatching. Used by Quick Test and
-/// (future) cron jobs. Returns the runtime's response.
+/// (future) cron jobs.
+///
+/// v2.1.0+ — returns a structured result so the frontend can pick up
+/// the run_id (used for overlap-evidence lookup) without a second
+/// registry round-trip. Only one direct invoke caller
+/// (agentVariables.ts), so the shape change is contained.
+#[derive(serde::Serialize)]
+pub struct DispatchResult {
+    pub response: String,
+    /// Active-runs registry id assigned at dispatch start. The
+    /// frontend uses it to fetch overlap evidence + compose the
+    /// trace upload metadata.
+    #[serde(rename = "runId")]
+    pub run_id: String,
+}
+
 #[tauri::command]
 pub async fn prompt_agent_with_context(
     db: State<'_, DbState>,
@@ -11518,7 +11539,7 @@ pub async fn prompt_agent_with_context(
     prompt: String,
     config: Option<String>,
     active_project_path: Option<String>,
-) -> Result<String, String> {
+) -> Result<DispatchResult, String> {
     // Step 1: resolve variables + load hooks + read role-model preferences
     // (single short-lived lock). Also pull the agent slug for the
     // active-runs registry (Phase 4) — Beatriz: showing slugs in the
@@ -11566,8 +11587,26 @@ pub async fn prompt_agent_with_context(
         Some("desktop:context-dispatch"),
     );
     let result = prompt_agent(runtime, final_prompt, merged_config).await;
-    crate::active_runs::finish_run(&run_id);
-    result
+    // Note: do NOT finish_run yet. Frontend needs to call
+    // get_overlap_evidence(run_id) before the slot is removed; it
+    // will then call list_active_runs again at its leisure (registry
+    // self-heals after a stale entry timeout, but the explicit
+    // contract is: caller is responsible for finish).
+    //
+    // Rationale: keeping finish_run on the Rust side would race the
+    // frontend's overlap fetch. Instead we return run_id and let the
+    // wrapper finish_run after upload. Worst case (frontend crashes):
+    // entry stays until next call to begin_run with same workspace.
+    match result {
+        Ok(response) => Ok(DispatchResult { response, run_id }),
+        Err(e) => {
+            // On error we still tidy up — no overlap upload happens
+            // for failed dispatches today, so the slot has no further
+            // use.
+            crate::active_runs::finish_run(&run_id);
+            Err(e)
+        }
+    }
 }
 
 // ── Conversation summarization (F3) ──────────────────────────────────────
@@ -12948,7 +12987,9 @@ pub async fn dispatch_to_group(
         .map_err(|e| format!("Child agent '{}' not found: {}", child_slug, e))?
     };
 
-    // Resolve variables + run hooks for the child + dispatch.
+    // Resolve variables + run hooks for the child + dispatch. Group
+    // dispatch only needs the response string — the run_id from the
+    // DispatchResult is consumed by the FRONTEND wrappers, not here.
     let response = prompt_agent_with_context(
         db.clone(),
         child_agent_id,
@@ -12957,7 +12998,8 @@ pub async fn dispatch_to_group(
         config,
         active_project_path,
     )
-    .await?;
+    .await?
+    .response;
 
     // Bump last_used_at.
     {

@@ -403,6 +403,16 @@ function TraceRow({
       : null;
   const files = tr.files_touched ?? [];
   const fileCount = files.length;
+  // v2.1.0+ Concurrent attribution — when this run overlapped with
+  // another in the same workspace, mtime-based file attribution is
+  // ambiguous. The capture layer (active_runs.rs) records the peers;
+  // here we surface it as a warning badge so the user doesn't trust
+  // the file list as authoritative.
+  const concurrentRuns =
+    (tr.metadata && Array.isArray((tr.metadata as { concurrentRuns?: unknown }).concurrentRuns)
+      ? (tr.metadata as { concurrentRuns: Array<{ agent_slug?: string | null }> }).concurrentRuns
+      : []) ?? [];
+  const overlapCount = concurrentRuns.length;
   return (
     <li className="rounded border border-cs-border bg-cs-bg text-[11px]">
       <div className="flex items-center gap-2 px-2 py-1">
@@ -422,11 +432,28 @@ function TraceRow({
         {!tr.error && origin && (
           <span className="text-cs-muted truncate flex-1">{origin}</span>
         )}
+        {overlapCount > 0 && (
+          <span
+            className="ml-auto inline-flex items-center gap-1 rounded-sm border border-cs-warn/40 bg-cs-warn/10 px-1.5 py-0.5 font-mono text-[10px] text-cs-warn shrink-0"
+            title={t(
+              "insights.external.overlapTitle",
+              "Overlapped with {{n}} other run{{p}} in the same workspace — file attribution ambiguous.",
+              { n: overlapCount, p: overlapCount === 1 ? "" : "s" },
+            )}
+          >
+            ⚠ {t("insights.external.overlapBadge", "ambiguous ×{{n}}", { n: overlapCount })}
+          </span>
+        )}
         {fileCount > 0 && (
           <button
             type="button"
             onClick={() => setShowFiles((v) => !v)}
-            className="ml-auto inline-flex items-center gap-1 rounded-sm border border-cs-border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] text-cs-muted hover:text-cs-accent shrink-0"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-sm border bg-cs-bg-raised px-1.5 py-0.5 font-mono text-[10px] hover:text-cs-accent shrink-0",
+              overlapCount > 0
+                ? "border-cs-warn/40 text-cs-warn"
+                : "ml-auto border-cs-border text-cs-muted",
+            )}
             title="Files touched during this dispatch"
           >
             📁 {fileCount} {fileCount === 1 ? "file" : "files"}
@@ -435,6 +462,19 @@ function TraceRow({
       </div>
       {showFiles && fileCount > 0 && (
         <ul className="border-t border-cs-border bg-cs-bg-raised/40 px-3 py-1.5 space-y-0.5">
+          {overlapCount > 0 && (
+            <li className="text-[10px] text-cs-warn pb-1 border-b border-cs-border/40 mb-1">
+              {t(
+                "insights.external.overlapDetail",
+                "⚠ This run overlapped with: {{peers}}. Any of those agents may have written some of these files; mtime-based attribution can't disambiguate concurrent dispatches.",
+                {
+                  peers: concurrentRuns
+                    .map((p) => `@${p.agent_slug ?? "ad-hoc"}`)
+                    .join(", "),
+                },
+              )}
+            </li>
+          )}
           {files.map((f) => (
             <li key={f} className="flex items-center gap-1.5 font-mono text-[10px]">
               <span className="text-cs-text truncate flex-1">{f}</span>

@@ -39,3 +39,31 @@ export async function killActiveRun(runId: string): Promise<boolean> {
     return false;
   }
 }
+
+// v2.1.0+ Concurrent attribution refinement.
+//
+// When two agents dispatch into the same workspace, neither can be
+// individually disambiguated as the writer of any specific file (the
+// OS gives us mtimes, not PIDs). Instead of pretending we can, we
+// record honest "this run overlapped with @other" evidence that
+// surfaces in the dashboard as an "ambiguous" badge.
+export interface OverlapPeer {
+  run_id: string;
+  agent_slug: string | null;
+  runtime: string;
+  started_at_unix: number;
+}
+export interface OverlapEvidence {
+  overlapped_with: OverlapPeer[];
+}
+
+/** Snapshot the overlap evidence for a finished run. Call BEFORE
+ *  finish_run on the same run_id (registry holds the data until then).
+ *  Returns an empty list when the run was alone in its workspace. */
+export async function getOverlapEvidence(runId: string): Promise<OverlapEvidence> {
+  try {
+    return await invoke<OverlapEvidence>("get_overlap_evidence", { runId });
+  } catch {
+    return { overlapped_with: [] };
+  }
+}

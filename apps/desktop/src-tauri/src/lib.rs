@@ -1015,6 +1015,8 @@ pub fn run() {
             // the dashboard, no terminal-buffer hunting required.
             active_runs::list_active_runs,
             active_runs::kill_active_run,
+            active_runs::get_overlap_evidence,
+            active_runs::finish_active_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

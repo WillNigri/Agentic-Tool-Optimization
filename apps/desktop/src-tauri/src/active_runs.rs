@@ -42,6 +42,27 @@ pub struct ActiveRun {
     pub source: Option<String>,
 }
 
+/// v2.1.0+ Concurrent attribution refinement — minimal evidence the
+/// dispatch path can attach to a finished trace so the dashboard can
+/// show "this run overlapped with another." Tells the truth instead
+/// of pretending concurrent dispatches don't exist.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OverlapEvidence {
+    /// Other runs in the same workspace that were active at any point
+    /// during this run's window. Each has slug + start time so the UI
+    /// can render `@reviewer (started 14:32:08)` next to ambiguous
+    /// file attributions.
+    pub overlapped_with: Vec<OverlapPeer>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OverlapPeer {
+    pub run_id: String,
+    pub agent_slug: Option<String>,
+    pub runtime: String,
+    pub started_at_unix: u64,
+}
+
 /// Generic kill closure. Different dispatch paths supply different
 /// kill mechanisms — std::process::Child::kill for blocking commands,
 /// a tokio::spawn that awaits Child::kill for async tokio Child,
@@ -52,6 +73,11 @@ type KillFn = Box<dyn FnOnce() + Send + 'static>;
 struct Slot {
     info: ActiveRun,
     kill_fn: Option<KillFn>,
+    /// v2.1.0+ Concurrent attribution — peers seen overlapping at any
+    /// point. Populated by begin_run when a new run starts in the
+    /// same workspace as an existing one (mutual write so neither
+    /// has to walk the history later). Reset by finish_run.
+    overlapped: Vec<OverlapPeer>,
 }
 
 struct Registry {
@@ -96,9 +122,71 @@ pub fn begin_run(
         source: source.map(|s| s.to_string()),
     };
     if let Ok(mut map) = registry().inner.lock() {
-        map.insert(run_id.clone(), Slot { info, kill_fn: None });
+        // v2.1.0+ concurrent attribution — when this run shares a
+        // workspace with any other in-flight run, record the overlap
+        // mutually. Each side's trace will end up tagged with the
+        // other so the dashboard can flag attribution ambiguity.
+        let mut my_overlaps: Vec<OverlapPeer> = Vec::new();
+        if let Some(my_ws) = info.workspace.as_deref() {
+            // Two-pass to satisfy the borrow checker: first collect
+            // matching peer IDs, then mutate each in turn.
+            let peer_ids: Vec<String> = map
+                .iter()
+                .filter(|(_, s)| s.info.workspace.as_deref() == Some(my_ws))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for peer_id in &peer_ids {
+                if let Some(other) = map.get_mut(peer_id) {
+                    other.overlapped.push(OverlapPeer {
+                        run_id: run_id.clone(),
+                        agent_slug: info.agent_slug.clone(),
+                        runtime: info.runtime.clone(),
+                        started_at_unix: info.started_at_unix,
+                    });
+                    my_overlaps.push(OverlapPeer {
+                        run_id: peer_id.clone(),
+                        agent_slug: other.info.agent_slug.clone(),
+                        runtime: other.info.runtime.clone(),
+                        started_at_unix: other.info.started_at_unix,
+                    });
+                }
+            }
+        }
+        map.insert(
+            run_id.clone(),
+            Slot { info, kill_fn: None, overlapped: my_overlaps },
+        );
     }
     run_id
+}
+
+/// v2.1.0+ — Drain the overlap evidence for a run before / instead
+/// of `finish_run`. Returns who overlapped this run's window so the
+/// trace upload can tag attribution-ambiguous files. Does NOT remove
+/// the slot — caller must still call finish_run for cleanup.
+pub fn take_overlap_evidence(run_id: &str) -> OverlapEvidence {
+    let mut overlapped_with: Vec<OverlapPeer> = Vec::new();
+    if let Ok(map) = registry().inner.lock() {
+        if let Some(slot) = map.get(run_id) {
+            overlapped_with = slot.overlapped.clone();
+        }
+    }
+    OverlapEvidence { overlapped_with }
+}
+
+#[tauri::command]
+pub fn get_overlap_evidence(run_id: String) -> OverlapEvidence {
+    take_overlap_evidence(&run_id)
+}
+
+/// v2.1.0+ — Frontend finalizer for runs whose Rust-side dispatch
+/// returns a run_id (e.g. prompt_agent_with_context). The frontend
+/// calls this after fetching overlap evidence + uploading the trace,
+/// to release the registry slot. Idempotent — calling on an unknown
+/// run_id is a no-op.
+#[tauri::command]
+pub fn finish_active_run(run_id: String) {
+    finish_run(&run_id);
 }
 
 /// Attach a kill closure so this run becomes terminable. The closure
@@ -204,6 +292,46 @@ mod tests {
         let found = runs.iter().find(|r| r.run_id == id).unwrap();
         assert_eq!(found.status, "killing");
         finish_run(&id);
+    }
+
+    #[test]
+    fn overlap_recorded_mutually_for_same_workspace() {
+        let a = begin_run("claude", Some("writer"), Some("/tmp/repo-x"), None);
+        let b = begin_run("codex", Some("reviewer"), Some("/tmp/repo-x"), None);
+        let a_evidence = take_overlap_evidence(&a);
+        let b_evidence = take_overlap_evidence(&b);
+        // A started first, B starts and sees A. B's overlap should
+        // contain A; A's overlap should contain B (mutual write).
+        assert!(b_evidence.overlapped_with.iter().any(|p| p.run_id == a));
+        assert!(a_evidence.overlapped_with.iter().any(|p| p.run_id == b));
+        finish_run(&a);
+        finish_run(&b);
+    }
+
+    #[test]
+    fn no_overlap_for_different_workspaces() {
+        let a = begin_run("claude", Some("writer"), Some("/tmp/repo-a"), None);
+        let b = begin_run("claude", Some("writer"), Some("/tmp/repo-b"), None);
+        let a_evidence = take_overlap_evidence(&a);
+        let b_evidence = take_overlap_evidence(&b);
+        assert!(a_evidence.overlapped_with.is_empty());
+        assert!(b_evidence.overlapped_with.is_empty());
+        finish_run(&a);
+        finish_run(&b);
+    }
+
+    #[test]
+    fn no_overlap_when_workspace_unknown() {
+        // Runs without a workspace shouldn't false-positive against
+        // other workspace-less runs (different agents in different
+        // ad-hoc dispatches).
+        let a = begin_run("claude", None, None, None);
+        let b = begin_run("codex", None, None, None);
+        let a_evidence = take_overlap_evidence(&a);
+        assert!(a_evidence.overlapped_with.is_empty());
+        let _ = b;
+        finish_run(&a);
+        finish_run(&b);
     }
 
     #[test]

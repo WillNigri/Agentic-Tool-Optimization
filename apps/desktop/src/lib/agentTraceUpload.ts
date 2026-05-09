@@ -25,6 +25,15 @@ export interface AgentTraceInput {
   costUsd?: number;
   error?: string;
   source?: string;
+  /** Free-form context. Conventional keys (server-side never reads
+   *  these; the dashboard does):
+   *    - `historyLength: number` — chat-pane streaming context size
+   *    - `streamed: boolean` — was this a streaming dispatch
+   *    - `origin: string` — for embed traces, the calling page
+   *    - `concurrentRuns: OverlapPeer[]` — v2.1.0+ — peers that
+   *      overlapped this run's window in the same workspace, marking
+   *      file attribution as ambiguous in the dashboard.
+   */
   metadata?: Record<string, unknown>;
   /** v2.1.0 — relative file paths touched during this dispatch.
    *  Populated by the desktop's pre/post mtime snapshot; absent for

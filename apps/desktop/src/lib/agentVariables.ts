@@ -1,5 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
+import { getOverlapEvidence } from "@/lib/activeRuns";
 
 // v2.1.0 — pre/post mtime snapshots so traces carry "files touched"
 // attribution. Gated on activeProjectPath; cheap (<200ms typical) and
@@ -121,14 +122,31 @@ export async function promptAgentWithContext(input: {
   const t0 = Date.now();
   const before = await snapshotBefore(input.activeProjectPath);
   try {
-    const result = await invoke<string>("prompt_agent_with_context", {
-      agentId: input.agentId,
-      runtime: input.runtime,
-      prompt: input.prompt,
-      config: input.config ?? null,
-      activeProjectPath: input.activeProjectPath ?? null,
-    });
+    // v2.1.0+ — Rust returns { response, runId } so the frontend can
+    // grab overlap evidence and finalize the registry slot itself.
+    // Internal Rust callers (cron, group dispatch) extract .response
+    // directly; we surface both up the stack.
+    const dispatch = await invoke<{ response: string; runId: string }>(
+      "prompt_agent_with_context",
+      {
+        agentId: input.agentId,
+        runtime: input.runtime,
+        prompt: input.prompt,
+        config: input.config ?? null,
+        activeProjectPath: input.activeProjectPath ?? null,
+      },
+    );
     const filesTouched = await diffAfter(before, input.activeProjectPath);
+    // v2.1.0+ Concurrent attribution refinement: query the registry
+    // for any other dispatch that overlapped this run's window in the
+    // same workspace. When non-empty, the dashboard shows an
+    // "ambiguous" badge alongside the file list — honest about the
+    // limitation that mtime-based attribution can't disambiguate
+    // concurrent dispatches.
+    const overlap = await getOverlapEvidence(dispatch.runId);
+    // Always finalize the slot, even on success path — Rust skipped
+    // finish_run for ok results so we can collect overlap first.
+    invoke("finish_active_run", { runId: dispatch.runId }).catch(() => {});
     void uploadAgentTrace({
       agentSlug: input.agentSlug ?? input.agentId,
       runtime: input.runtime,
@@ -138,8 +156,12 @@ export async function promptAgentWithContext(input: {
       source: input.source ?? "desktop:quick_test",
       filesTouched,
       promptSummary: summarizePrompt(input.prompt),
+      metadata:
+        overlap.overlapped_with.length > 0
+          ? { concurrentRuns: overlap.overlapped_with }
+          : undefined,
     });
-    return result;
+    return dispatch.response;
   } catch (err) {
     void uploadAgentTrace({
       agentSlug: input.agentSlug ?? input.agentId,
@@ -200,6 +222,12 @@ export async function promptAgentWithHistoryStream(input: {
         settled = true;
         void (async () => {
           const filesTouched = await diffAfter(await beforePromise, input.activeProjectPath);
+          // v2.1.0+ — streaming dispatch's run_id is registered
+          // inside the Rust spawn_streaming_dispatch path. We don't
+          // have it on the JS side today, so concurrent-attribution
+          // tagging is limited to non-streaming for now. Marked TODO
+          // so the next iteration can plumb the run_id back through
+          // the on_event channel.
           void uploadAgentTrace({
             agentSlug: input.agentSlug ?? input.agentId,
             runtime: input.runtime,
