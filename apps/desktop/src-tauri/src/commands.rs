@@ -2793,9 +2793,161 @@ pub fn detect_agent_runtimes() -> Result<Vec<DetectedRuntime>, String> {
         .collect())
 }
 
+/// Internal helper. Takes a fully-built tokio Command + the runtime
+/// label + optional Live-runs registry context. Spawns, registers,
+/// supports kill via oneshot, returns stdout-as-string on success or
+/// stderr-derived message on failure.
+///
+/// v2.1.0+ Phase 4 follow-through. Previously prompt_agent used the
+/// sync `std::process::Command::output()` path which (a) blocked the
+/// async runtime thread for the full dispatch and (b) consumed the
+/// child entirely, leaving no handle to attach a kill closure to.
+/// This helper replaces that pattern with the same kill-via-oneshot
+/// design `spawn_streaming_dispatch` uses for the chat pane, so
+/// every prompt_agent caller (group stages, Quick Test, MCP
+/// run_agent, cron) gets:
+///   - a labelled row in the Live runs panel for the duration
+///   - a working Kill button (sends SIGKILL, returns "killed by user")
+///   - finish_run on every exit including panics (FinishGuard)
+async fn dispatch_command_killable(
+    mut cmd: tokio::process::Command,
+    runtime: &str,
+    runtime_label: &str,
+    agent_slug: Option<&str>,
+    workspace: Option<&str>,
+    source: &str,
+    // When `existing_run_id` is Some, we skip our own begin_run/
+    // finish_run and just attach a kill handler to the caller's
+    // run_id. Used by prompt_agent_with_context which has to keep
+    // ownership of registration so it can return the run_id to the
+    // frontend (for overlap evidence + explicit finish).
+    existing_run_id: Option<&str>,
+) -> Result<String, String> {
+    use std::process::Stdio;
+    use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    // Register with the Live runs registry so the user can see + kill.
+    // Skip when the caller already registered; finish guard only
+    // applies in the self-registered branch.
+    let owned_run_id: Option<String> = if existing_run_id.is_none() {
+        Some(crate::active_runs::begin_run(runtime, agent_slug, workspace, Some(source)))
+    } else {
+        None
+    };
+    struct FinishGuard(Option<String>);
+    impl Drop for FinishGuard {
+        fn drop(&mut self) {
+            if let Some(id) = &self.0 {
+                crate::active_runs::finish_run(id);
+            }
+        }
+    }
+    let _finish_guard = FinishGuard(owned_run_id.clone());
+    let active_run_id: &str = existing_run_id
+        .or_else(|| owned_run_id.as_deref())
+        .expect("either caller or self provides a run_id");
+
+    // Same kill-via-oneshot pattern as spawn_streaming_dispatch — pure
+    // sync closure (no tokio runtime context needed) that signals
+    // intent on a channel; the read loop reacts via select!.
+    let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let kill_tx_holder: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+        Arc::new(std::sync::Mutex::new(Some(kill_tx)));
+    let kill_tx_for_handler = kill_tx_holder.clone();
+    crate::active_runs::attach_kill_handler(active_run_id, move || {
+        let mut g = match kill_tx_for_handler.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if let Some(tx) = g.take() {
+            let _ = tx.send(());
+        }
+    });
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", runtime_label, e))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "stdout-pipe-missing".to_string())?;
+
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut kill_rx => {
+                let _ = child.kill().await;
+                return Err("killed by user".to_string());
+            }
+            r = stdout.read(&mut chunk) => match r {
+                Ok(0) => break,
+                Ok(n) => stdout_buf.extend_from_slice(&chunk[..n]),
+                Err(e) => {
+                    let _ = child.kill().await;
+                    return Err(format!("read-failed: {}", e));
+                }
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("wait-failed: {}", e))?;
+
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout_buf).to_string())
+    } else {
+        // Drain stderr for the failure message — best-effort.
+        let mut stderr_text = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut stderr_text).await;
+        }
+        Err(if stderr_text.is_empty() {
+            format!("{} exited with status {}", runtime_label, status)
+        } else {
+            format!("{}: {}", runtime_label, stderr_text)
+        })
+    }
+}
+
 #[tauri::command]
-pub async fn prompt_agent(runtime: String, prompt: String, config: Option<String>) -> Result<String, String> {
-    use std::process::Command;
+pub async fn prompt_agent(
+    runtime: String,
+    prompt: String,
+    config: Option<String>,
+    // v2.1.0+ — optional context for the Live runs registry. JS
+    // callers can omit; internal Rust callers (group dispatch,
+    // prompt_agent_with_context) pass the slug + workspace so the
+    // Live panel renders meaningful labels instead of "ad-hoc".
+    agent_slug: Option<String>,
+    workspace: Option<String>,
+) -> Result<String, String> {
+    prompt_agent_inner(runtime, prompt, config, agent_slug, workspace, None).await
+}
+
+/// Same as `prompt_agent` but also accepts an `existing_run_id` —
+/// when set, the dispatch attaches its kill handler to that run_id
+/// instead of begin_run-ing a new one. Used by `prompt_agent_with_context`
+/// which has to keep ownership of the registration so it can return
+/// the run_id to the frontend (for overlap evidence + finish).
+async fn prompt_agent_inner(
+    runtime: String,
+    prompt: String,
+    config: Option<String>,
+    agent_slug: Option<String>,
+    workspace: Option<String>,
+    existing_run_id: Option<String>,
+) -> Result<String, String> {
+    use tokio::process::Command;
 
     // Use the user's full shell PATH so CLIs can find node, npm, etc.
     let user_path = get_user_path();
@@ -2812,120 +2964,93 @@ pub async fn prompt_agent(runtime: String, prompt: String, config: Option<String
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
-    match runtime.as_str() {
+    let mut cmd = match runtime.as_str() {
         "claude" => {
-            let claude_path = which_claude().ok_or_else(|| {
-                "Claude Code CLI not found".to_string()
-            })?;
-            let mut args: Vec<String> = vec!["--print".into(), prompt.clone()];
+            let claude_path =
+                which_claude().ok_or_else(|| "Claude Code CLI not found".to_string())?;
+            let mut c = Command::new(claude_path);
+            c.arg("--print").arg(&prompt);
             if let Some(m) = &model_override {
-                args.push("--model".into());
-                args.push(m.clone());
+                c.arg("--model").arg(m);
             }
-            let output = Command::new(&claude_path)
-                .args(&args)
-                .env("PATH", &user_path)
-                .output()
-                .map_err(|e| format!("Failed to run claude: {}", e))?;
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(format!("Claude error: {}", String::from_utf8_lossy(&output.stderr)))
-            }
+            c
         }
         "codex" => {
             let codex_path = which_cli("codex").ok_or_else(|| {
-                "Codex CLI not found. Install it with: npm install -g @openai/codex".to_string()
+                "Codex CLI not found. Install it with: npm install -g @openai/codex"
+                    .to_string()
             })?;
-            // Codex's CLI shape is `codex [OPTIONS] [PROMPT]` with `exec` as
-            // the non-interactive subcommand. It does NOT accept `--print`.
-            // Always pass `--skip-git-repo-check` because ATO can dispatch
-            // from any cwd (including non-repo dirs); without it Codex bails
-            // with "Not inside a trusted directory" — Felipe's bug.
-            let mut args: Vec<String> = vec!["exec".into(), "--skip-git-repo-check".into()];
+            // exec subcommand; --skip-git-repo-check needed because ATO
+            // can dispatch from any cwd (Felipe's "Not inside a trusted
+            // directory" regression).
+            let mut c = Command::new(codex_path);
+            c.arg("exec").arg("--skip-git-repo-check");
             if let Some(m) = &model_override {
-                args.push("--model".into());
-                args.push(m.clone());
+                c.arg("--model").arg(m);
             }
-            args.push(prompt.clone());
-            let output = Command::new(&codex_path)
-                .args(&args)
-                .env("PATH", &user_path)
-                .output()
-                .map_err(|e| format!("Failed to run codex: {}", e))?;
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(format!("Codex error: {}", String::from_utf8_lossy(&output.stderr)))
-            }
+            c.arg(&prompt);
+            c
         }
         "openclaw" => {
             let ssh_config: serde_json::Value = config
                 .as_deref()
                 .and_then(|c| serde_json::from_str(c).ok())
                 .unwrap_or_default();
-            let host = ssh_config.get("sshHost").and_then(|v| v.as_str()).unwrap_or("localhost");
+            let host = ssh_config
+                .get("sshHost")
+                .and_then(|v| v.as_str())
+                .unwrap_or("localhost");
             let port = ssh_config.get("sshPort").and_then(|v| v.as_u64()).unwrap_or(22);
-            let user = ssh_config.get("sshUser").and_then(|v| v.as_str()).unwrap_or("root");
+            let user = ssh_config
+                .get("sshUser")
+                .and_then(|v| v.as_str())
+                .unwrap_or("root");
             let key_path = ssh_config.get("sshKeyPath").and_then(|v| v.as_str());
 
-            let mut cmd = Command::new("ssh");
-            cmd.env("PATH", &user_path);
+            let mut c = Command::new("ssh");
             if let Some(key) = key_path {
-                cmd.args(["-i", key]);
+                c.args(["-i", key]);
             }
-            cmd.args([
-                "-p", &port.to_string(),
+            c.args([
+                "-p",
+                &port.to_string(),
                 &format!("{}@{}", user, host),
-                &format!("openclaw exec '{}'", prompt.replace('\'', "'\\''"))
+                &format!("openclaw exec '{}'", prompt.replace('\'', "'\\''")),
             ]);
-
-            let output = cmd.output()
-                .map_err(|e| format!("Failed to SSH to OpenClaw host: {}", e))?;
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(format!("OpenClaw error: {}", String::from_utf8_lossy(&output.stderr)))
-            }
+            c
         }
         "hermes" => {
-            let hermes_path = which_cli("hermes").ok_or_else(|| {
-                "Hermes CLI not found".to_string()
-            })?;
-            let output = Command::new(&hermes_path)
-                .args(["--execute", &prompt])
-                .env("PATH", &user_path)
-                .output()
-                .map_err(|e| format!("Failed to run hermes: {}", e))?;
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(format!("Hermes error: {}", String::from_utf8_lossy(&output.stderr)))
-            }
+            let hermes_path =
+                which_cli("hermes").ok_or_else(|| "Hermes CLI not found".to_string())?;
+            let mut c = Command::new(hermes_path);
+            c.arg("--execute").arg(&prompt);
+            c
         }
         "gemini" => {
             let gemini_path = which_cli("gemini").ok_or_else(|| {
                 "Gemini CLI not found. Install: npm install -g @google/gemini-cli".to_string()
             })?;
-            // gemini CLI: `gemini -p "<prompt>" [-m <model>]`
-            let mut args: Vec<String> = vec!["-p".into(), prompt.clone()];
+            let mut c = Command::new(gemini_path);
+            c.arg("-p").arg(&prompt);
             if let Some(m) = &model_override {
-                args.push("-m".into());
-                args.push(m.clone());
+                c.arg("-m").arg(m);
             }
-            let output = Command::new(&gemini_path)
-                .args(&args)
-                .env("PATH", &user_path)
-                .output()
-                .map_err(|e| format!("Failed to run gemini: {}", e))?;
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(format!("Gemini error: {}", String::from_utf8_lossy(&output.stderr)))
-            }
+            c
         }
-        _ => Err(format!("Unknown runtime: {}", runtime)),
-    }
+        other => return Err(format!("Unknown runtime: {}", other)),
+    };
+    cmd.env("PATH", &user_path);
+
+    dispatch_command_killable(
+        cmd,
+        &runtime,
+        &runtime,
+        agent_slug.as_deref(),
+        workspace.as_deref(),
+        "desktop:prompt_agent",
+        existing_run_id.as_deref(),
+    )
+    .await
 }
 
 // ── Cron Job Persistence ─────────────────────────────────────────────────
@@ -3184,8 +3309,9 @@ pub async fn trigger_cron_job(
         }
     }
 
-    // Fallback: raw dispatch (legacy / advanced).
-    prompt_agent(runtime, prompt, config).await
+    // Fallback: raw dispatch (legacy / advanced). No agent context;
+    // registers anonymously in the Live runs panel.
+    prompt_agent(runtime, prompt, config, None, None).await
 }
 
 // ── Agent Status & Logging ────────────────────────────────────────────────
@@ -11586,7 +11712,16 @@ pub async fn prompt_agent_with_context(
         active_project_path.as_deref(),
         Some("desktop:context-dispatch"),
     );
-    let result = prompt_agent(runtime, final_prompt, merged_config).await;
+    // Pass our run_id into prompt_agent so it attaches the kill
+    // handler to OUR registration instead of double-registering.
+    let result = prompt_agent_inner(
+        runtime,
+        final_prompt,
+        merged_config,
+        agent_slug.clone(),
+        active_project_path.clone(),
+        Some(run_id.clone()),
+    ).await;
     // Note: do NOT finish_run yet. Frontend needs to call
     // get_overlap_evidence(run_id) before the slot is removed; it
     // will then call list_active_runs again at its leisure (registry
@@ -11752,7 +11887,7 @@ pub async fn prompt_agent_with_history(
         let summ_cfg = chosen_summarizer.map(|m| {
             serde_json::json!({ "model": m }).to_string()
         });
-        match prompt_agent(runtime.clone(), summarizer_prompt, summ_cfg).await {
+        match prompt_agent(runtime.clone(), summarizer_prompt, summ_cfg, None, None).await {
             Ok(s) => Some(s),
             // Summarization failure shouldn't block dispatch — fall back to
             // dropping the older history entirely. The agent loses memory
@@ -11780,7 +11915,7 @@ pub async fn prompt_agent_with_history(
     };
 
     let merged_config = merge_model_into_config(config, response_model, fallback_model);
-    prompt_agent(runtime, final_prompt, merged_config).await
+    prompt_agent(runtime, final_prompt, merged_config, None, None).await
 }
 
 /// Returns (role_models.response, agents.model). Either may be None.
@@ -12885,7 +13020,7 @@ async fn route_prompt_to_child(
             prompt
         );
         // Reuse prompt_agent on the group's runtime.
-        match prompt_agent(group.runtime.clone(), classifier_prompt, None).await {
+        match prompt_agent(group.runtime.clone(), classifier_prompt, None, None, None).await {
             Ok(reply) => {
                 let pick = reply.trim().lines().next().unwrap_or("").trim().to_string();
                 if let Some(matched) =
@@ -13082,26 +13217,18 @@ async fn run_sequential_dispatch(
         };
         let stage_start = std::time::Instant::now();
         let stage_started_at = chrono::Utc::now().to_rfc3339();
-        // v2.1.0+ — register each group stage in the Live runs panel
-        // with the right slug + runtime so the user can see what's
-        // running. Beatriz observed pipe-demo running invisibly
-        // 2026-05-09. The bare prompt_agent path doesn't register
-        // (avoids double-registration with prompt_agent_with_context);
-        // the group dispatch loop knows the agent slug, so this is
-        // the right scope. Kill is best-effort: the sync
-        // std::process::Command::output() path can't be killed
-        // mid-flight (no child handle to attach to), so the row
-        // appears but the Kill button no-ops for these.
-        let stage_run_id = crate::active_runs::begin_run(
-            &child_runtime,
-            Some(&child.agent_slug),
-            None,
-            Some("desktop:group-stage"),
-        );
+        // v2.1.0+ — pass agent_slug to prompt_agent so each stage's
+        // Live runs row labels with @<slug> instead of "ad-hoc".
+        // prompt_agent registers itself, so we don't begin_run here.
+        // Kill is now real (prompt_agent uses tokio::process +
+        // oneshot channel + select! since the kill-plumbing
+        // refactor).
         let (stage_response, ok, stage_error) = match prompt_agent(
             child_runtime.clone(),
             stage_prompt,
             config.map(|s| s.to_string()),
+            Some(child.agent_slug.clone()),
+            None,
         )
         .await
         {
@@ -13112,7 +13239,6 @@ async fn run_sequential_dispatch(
                 Some(e),
             ),
         };
-        crate::active_runs::finish_run(&stage_run_id);
         let stage_duration_ms = stage_start.elapsed().as_millis() as u64;
 
         if !transcript.is_empty() {
@@ -13763,7 +13889,7 @@ pub async fn prompt_agent_with_history_stream(
             summarizer_model
         };
         let summ_cfg = chosen_summarizer.map(|m| serde_json::json!({ "model": m }).to_string());
-        prompt_agent(runtime.clone(), summarizer_prompt, summ_cfg).await.ok()
+        prompt_agent(runtime.clone(), summarizer_prompt, summ_cfg, None, None).await.ok()
     } else {
         None
     };
@@ -14134,7 +14260,7 @@ async fn dispatch_cron_headless(job_id: &str) -> Result<String, String> {
         }
     }
 
-    prompt_agent(runtime, prompt, config).await
+    prompt_agent(runtime, prompt, config, None, None).await
 }
 
 async fn headless_dispatch_agent(
@@ -14162,7 +14288,15 @@ async fn headless_dispatch_agent(
         response_model,
         fallback_model,
     );
-    prompt_agent(runtime.to_string(), final_prompt, merged_config).await
+    // Headless cron dispatch — look up the slug for Live panel labelling.
+    let agent_slug: Option<String> = conn
+        .query_row(
+            "SELECT slug FROM agents WHERE id = ?1",
+            params![agent_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    prompt_agent(runtime.to_string(), final_prompt, merged_config, agent_slug, None).await
 }
 
 async fn headless_dispatch_group(
