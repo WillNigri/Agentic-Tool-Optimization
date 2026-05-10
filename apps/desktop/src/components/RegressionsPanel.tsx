@@ -25,6 +25,7 @@ import {
 } from "@/lib/cloudAgentTraces";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
+import { asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 
 // v2.1.0 Phase 5 — Cross-runtime regression detection.
@@ -250,35 +251,38 @@ function RegressionCard({
               hasEval ? "grid-cols-4" : "grid-cols-3",
             )}
           >
+            {/* v2.1.9 — coerce every PG-string-numeric column with
+                asNumber before .toFixed/comparison so "0.014200"
+                doesn't crash and "0.91" > 0 doesn't string-compare. */}
             <DeltaStat
               label={t("insights.regressions.successRate", "Success rate")}
-              before={`${(row.before_ok_rate * 100).toFixed(0)}%`}
-              after={`${(row.after_ok_rate * 100).toFixed(0)}%`}
-              delta={`${row.ok_delta_pp >= 0 ? "+" : ""}${row.ok_delta_pp.toFixed(1)}pp`}
-              good={row.ok_delta_pp >= 0}
+              before={`${(asNumber(row.before_ok_rate) * 100).toFixed(0)}%`}
+              after={`${(asNumber(row.after_ok_rate) * 100).toFixed(0)}%`}
+              delta={`${asNumber(row.ok_delta_pp) >= 0 ? "+" : ""}${asNumber(row.ok_delta_pp).toFixed(1)}pp`}
+              good={asNumber(row.ok_delta_pp) >= 0}
             />
             {hasEval && (
               <DeltaStat
                 label={t("insights.regressions.evalScore", "Eval score")}
-                before={(row.before_eval_score ?? 0).toFixed(2)}
-                after={(row.after_eval_score ?? 0).toFixed(2)}
-                delta={`${(row.eval_delta_pp ?? 0) >= 0 ? "+" : ""}${(row.eval_delta_pp ?? 0).toFixed(1)}pp`}
-                good={(row.eval_delta_pp ?? 0) >= 0}
+                before={asNumber(row.before_eval_score).toFixed(2)}
+                after={asNumber(row.after_eval_score).toFixed(2)}
+                delta={`${asNumber(row.eval_delta_pp) >= 0 ? "+" : ""}${asNumber(row.eval_delta_pp).toFixed(1)}pp`}
+                good={asNumber(row.eval_delta_pp) >= 0}
               />
             )}
             <DeltaStat
               label={t("insights.regressions.p95Latency", "p95 latency")}
               before={`${row.before_p95_ms}ms`}
               after={`${row.after_p95_ms}ms`}
-              delta={`${row.p95_delta_pct >= 0 ? "+" : ""}${row.p95_delta_pct.toFixed(0)}%`}
-              good={row.p95_delta_pct <= 0}
+              delta={`${asNumber(row.p95_delta_pct) >= 0 ? "+" : ""}${asNumber(row.p95_delta_pct).toFixed(0)}%`}
+              good={asNumber(row.p95_delta_pct) <= 0}
             />
             <DeltaStat
               label={t("insights.regressions.costPerRun", "Cost / run")}
-              before={`$${row.before_cost_per_run.toFixed(4)}`}
-              after={`$${row.after_cost_per_run.toFixed(4)}`}
-              delta={`${row.cost_delta_pct >= 0 ? "+" : ""}${row.cost_delta_pct.toFixed(0)}%`}
-              good={row.cost_delta_pct <= 0}
+              before={`$${asNumber(row.before_cost_per_run).toFixed(4)}`}
+              after={`$${asNumber(row.after_cost_per_run).toFixed(4)}`}
+              delta={`${asNumber(row.cost_delta_pct) >= 0 ? "+" : ""}${asNumber(row.cost_delta_pct).toFixed(0)}%`}
+              good={asNumber(row.cost_delta_pct) <= 0}
             />
           </div>
           <div className="mt-1.5 flex items-center gap-2 text-[10px] text-cs-muted">

@@ -20,6 +20,7 @@ import {
 } from "@/lib/cloudAgentTraces";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
+import { asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 
 // v2.1.0 Phase 8 — Usage benchmarks (descriptive, not prescriptive).
@@ -118,14 +119,17 @@ export default function CostBenchmarksPanel() {
   const rows = query.data?.rows ?? [];
   const median = query.data?.medianCostPerOk ?? 0;
   const outliers = rows.filter((r) => r.is_outlier);
-  const totalSpend = rows.reduce((acc, r) => acc + r.total_cost_usd, 0);
+  // v2.1.9 — PG DECIMAL columns serialize as strings. Coerce on every
+  // arithmetic/.toFixed read so the panel doesn't crash when real
+  // cloud cost values land (was latent before v2.1.4 wired uploads).
+  const totalSpend = rows.reduce((acc, r) => acc + asNumber(r.total_cost_usd), 0);
   // v2.1 — split rows by whether their dispatches actually reported
   // cost. Subscription runs (CLI: claude code, codex, gemini-cli)
   // come back with cost_usd = 0; we hide cost columns for those and
   // show a "subscription" badge instead.
   const totalCalls = rows.reduce((acc, r) => acc + r.runs, 0);
-  const apiRows = rows.filter((r) => r.cost_per_run > 0);
-  const subscriptionRows = rows.filter((r) => r.cost_per_run === 0);
+  const apiRows = rows.filter((r) => asNumber(r.cost_per_run) > 0);
+  const subscriptionRows = rows.filter((r) => asNumber(r.cost_per_run) === 0);
 
   return (
     <div className="space-y-4">
@@ -228,7 +232,7 @@ function BenchmarkRow({ row, median }: { row: CostBenchmarkRow; median: number }
   // dispatches surface cost via provider response → cost_per_run > 0.
   // Subscription dispatches don't surface cost; we show calls + p50
   // + ok rate + a "subscription" badge instead of fake $0.0000 cells.
-  const hasCostData = row.cost_per_run > 0;
+  const hasCostData = asNumber(row.cost_per_run) > 0;
   return (
     <li
       className={cn(
@@ -287,7 +291,7 @@ function BenchmarkRow({ row, median }: { row: CostBenchmarkRow; median: number }
         {hasCostData ? (
           <Stat
             label={t("insights.cost.costPerOk", "$/success")}
-            value={`$${row.cost_per_ok.toFixed(4)}`}
+            value={`$${asNumber(row.cost_per_ok).toFixed(4)}`}
             accent={row.is_outlier ? "danger" : "neutral"}
           />
         ) : (
@@ -304,11 +308,11 @@ function BenchmarkRow({ row, median }: { row: CostBenchmarkRow; median: number }
         <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
           <Stat
             label={t("insights.cost.costPerRun", "$/call")}
-            value={`$${row.cost_per_run.toFixed(4)}`}
+            value={`$${asNumber(row.cost_per_run).toFixed(4)}`}
           />
           <Stat
             label={t("insights.cost.totalSpendShort", "Total spend")}
-            value={`$${row.total_cost_usd.toFixed(2)}`}
+            value={`$${asNumber(row.total_cost_usd).toFixed(2)}`}
           />
         </div>
       )}
@@ -441,7 +445,7 @@ function RecRow({ rec, windowDays }: { rec: CostRecommendation; windowDays: numb
         </span>
         <span className="ml-auto inline-flex items-baseline gap-1 font-mono text-[11px]">
           <span className="text-cs-accent font-medium">
-            -{rec.savings_pct.toFixed(0)}%
+            -{asNumber(rec.savings_pct).toFixed(0)}%
           </span>
           <span className="text-cs-muted">
             {t("insights.cost.recsPerCall", "/ call")}
@@ -451,17 +455,17 @@ function RecRow({ rec, windowDays }: { rec: CostRecommendation; windowDays: numb
       <div className="mt-1 grid grid-cols-3 gap-2 text-[10px] text-cs-muted">
         <RecStat
           label={t("insights.cost.recsCurrent", "Current")}
-          value={`$${rec.current_cost_per_run.toFixed(4)}`}
-          sub={`${rec.current_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(rec.current_ok_rate * 100).toFixed(0)}%${evalShown ? ` · eval ${(rec.current_eval_score ?? 0).toFixed(2)}` : ""}`}
+          value={`$${asNumber(rec.current_cost_per_run).toFixed(4)}`}
+          sub={`${rec.current_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(asNumber(rec.current_ok_rate) * 100).toFixed(0)}%${evalShown ? ` · eval ${asNumber(rec.current_eval_score).toFixed(2)}` : ""}`}
         />
         <RecStat
           label={t("insights.cost.recsAlternative", "Alternative")}
-          value={`$${rec.suggested_cost_per_run.toFixed(4)}`}
-          sub={`${rec.suggested_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(rec.suggested_ok_rate * 100).toFixed(0)}%${evalShown ? ` · eval ${(rec.suggested_eval_score ?? 0).toFixed(2)}` : ""}`}
+          value={`$${asNumber(rec.suggested_cost_per_run).toFixed(4)}`}
+          sub={`${rec.suggested_runs} ${t("insights.cost.recsRuns", "runs")} · ok ${(asNumber(rec.suggested_ok_rate) * 100).toFixed(0)}%${evalShown ? ` · eval ${asNumber(rec.suggested_eval_score).toFixed(2)}` : ""}`}
         />
         <RecStat
           label={t("insights.cost.recsProjMonthly", "Projected /mo")}
-          value={`$${rec.projected_monthly_usd.toFixed(2)}`}
+          value={`$${asNumber(rec.projected_monthly_usd).toFixed(2)}`}
           sub={t(
             "insights.cost.recsProjAtVolume",
             "at this {{n}}d volume",

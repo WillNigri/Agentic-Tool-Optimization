@@ -27,6 +27,7 @@ import { listAgents, type Agent } from "@/lib/agents";
 import TraceCompareModal from "@/components/TraceCompareModal";
 import { listConfigChanges, type ConfigChange } from "@/lib/cloudConfigChanges";
 import { useFeatureFlag } from "@/lib/tier";
+import { asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 
 // v2.0.0 Wave 5 — External Agents dashboard.
@@ -347,7 +348,7 @@ function MetricCard({
           <Stat
             icon={<DollarSign size={10} />}
             label={t("insights.external.cost", "Cost")}
-            value={`$${metric.cost_usd.toFixed(2)}`}
+            value={`$${asNumber(metric.cost_usd).toFixed(2)}`}
           />
         </div>
       </button>
@@ -804,10 +805,10 @@ function FileHistoryModal({
                         <code className="font-mono text-cs-text">@{tr.routed_to}</code>
                       </span>
                     )}
-                    {tr.cost_usd !== null && tr.cost_usd > 0 && (
+                    {asNumber(tr.cost_usd) > 0 && (
                       <span>
                         <DollarSign size={9} className="inline" />
-                        {tr.cost_usd.toFixed(4)}
+                        {asNumber(tr.cost_usd).toFixed(4)}
                       </span>
                     )}
                     {tr.source && (

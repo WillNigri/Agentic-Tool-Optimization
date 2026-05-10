@@ -5,6 +5,7 @@ import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, B
 import { getRegressions, type RegressionRow } from "@/lib/cloudAgentTraces";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
+import { asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
 import { updateAgentKind } from "@/lib/agents";
@@ -216,28 +217,33 @@ function RegressionBanner({ agentSlug }: { agentSlug: string }) {
     .sort((a, b) => b.changed_at.localeCompare(a.changed_at))[0];
   if (!mine) return null;
 
+  // v2.1.9 — coerce delta values; PG numeric → string at the wire.
+  const okPp = asNumber(mine.ok_delta_pp);
+  const evalPp = mine.eval_delta_pp != null ? asNumber(mine.eval_delta_pp) : null;
+  const p95Pct = asNumber(mine.p95_delta_pct);
+  const costPct = asNumber(mine.cost_delta_pct);
   const okLine =
-    mine.ok_delta_pp <= -10
+    okPp <= -10
       ? t("agentDetail.regressionBanner.okDrop", "ok rate {{n}}pp", {
-          n: mine.ok_delta_pp.toFixed(1),
+          n: okPp.toFixed(1),
         })
       : null;
   const evalLine =
-    mine.eval_delta_pp !== null && mine.eval_delta_pp <= -15
+    evalPp !== null && evalPp <= -15
       ? t("agentDetail.regressionBanner.evalDrop", "eval score {{n}}pp", {
-          n: mine.eval_delta_pp.toFixed(1),
+          n: evalPp.toFixed(1),
         })
       : null;
   const p95Line =
-    mine.p95_delta_pct >= 50
+    p95Pct >= 50
       ? t("agentDetail.regressionBanner.p95Up", "p95 latency +{{n}}%", {
-          n: mine.p95_delta_pct.toFixed(0),
+          n: p95Pct.toFixed(0),
         })
       : null;
   const costLine =
-    mine.cost_delta_pct >= 25
+    costPct >= 25
       ? t("agentDetail.regressionBanner.costUp", "cost +{{n}}%", {
-          n: mine.cost_delta_pct.toFixed(0),
+          n: costPct.toFixed(0),
         })
       : null;
   const reasons = [okLine, evalLine, p95Line, costLine].filter(Boolean).join(" · ");

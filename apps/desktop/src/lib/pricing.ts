@@ -68,6 +68,21 @@ export function estimateCostUsd(
   return Math.round(cost * 1_000_000) / 1_000_000;
 }
 
+/** v2.1.9 — Defensive number coercion for cloud values that come back
+ *  as strings. PostgreSQL `DECIMAL(N,M)` columns serialize as strings
+ *  through node-postgres ("0.014200" not 0.0142), but our TS types
+ *  say `number`. Calling `.toFixed()` on the string crashes the panel.
+ *  This helper makes the boundary safe — pass anything that should be
+ *  a number, get a number back. */
+export function asNumber(v: unknown, fallback = 0): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
 /** Convenience: estimate token + cost in one call. */
 export function estimateUsage(
   runtime: string,

@@ -24,7 +24,7 @@ import {
   getExecutionLogIoByCloudTraceId,
   type ReplayJob,
 } from "@/lib/tauri-api";
-import { estimateCostUsd, DEFAULT_MODEL_PER_RUNTIME } from "@/lib/pricing";
+import { estimateCostUsd, DEFAULT_MODEL_PER_RUNTIME, asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 
 // v2.1.0 Phase 9 — Eval workbench (compare).
@@ -263,7 +263,7 @@ function TracePane({
         <PaneStat label={t("insights.compare.duration", "Duration")} value={`${tr.duration_ms}ms`} />
         <PaneStat
           label={t("insights.compare.cost", "Cost")}
-          value={tr.cost_usd != null ? `$${tr.cost_usd.toFixed(4)}` : "—"}
+          value={tr.cost_usd != null ? `$${asNumber(tr.cost_usd).toFixed(4)}` : "—"}
         />
         <PaneStat
           label={t("insights.compare.tokens", "Tokens")}
@@ -389,7 +389,10 @@ function DiffSummary({ a, b }: { a: CloudAgentTrace; b: CloudAgentTrace }) {
   const { t } = useTranslation();
   const durationDelta = b.duration_ms - a.duration_ms;
   const durationPct = a.duration_ms > 0 ? (durationDelta / a.duration_ms) * 100 : 0;
-  const costDelta = (b.cost_usd ?? 0) - (a.cost_usd ?? 0);
+  // v2.1.9 — cost_usd comes back as a string from PG DECIMAL; coerce
+  // before subtraction to avoid the silent string-concat behavior + the
+  // .toFixed crash downstream.
+  const costDelta = asNumber(b.cost_usd) - asNumber(a.cost_usd);
   const okChanged = a.ok !== b.ok;
   const filesA = new Set(a.files_touched ?? []);
   const filesB = new Set(b.files_touched ?? []);
@@ -737,9 +740,10 @@ function ReplayResultPanel({
   // local fallback.
   const sourceResponseForCost = baselineTrace?.response ?? localSourceResponse;
   const sourceModel = job.source_model || DEFAULT_MODEL_PER_RUNTIME[job.source_runtime] || null;
+  const baselineCostNum = asNumber(baselineTrace?.cost_usd);
   const sourceCost =
-    baselineTrace?.cost_usd != null && baselineTrace.cost_usd > 0
-      ? baselineTrace.cost_usd
+    baselineCostNum > 0
+      ? baselineCostNum
       : estimateCostUsd(sourceModel, localSourcePrompt, sourceResponseForCost) || null;
   const targetModel = job.target_model || DEFAULT_MODEL_PER_RUNTIME[job.target_runtime] || null;
   const replayCost = estimateCostUsd(targetModel, localSourcePrompt, job.response) || null;
