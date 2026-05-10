@@ -818,6 +818,7 @@ pub fn run() {
             export_configuration,
             import_configuration,
             list_chat_threads,
+            search_chat_threads,
             create_chat_thread,
             rename_chat_thread,
             delete_chat_thread,

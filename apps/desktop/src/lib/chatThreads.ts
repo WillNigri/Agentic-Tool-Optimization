@@ -38,6 +38,20 @@ export async function listChatThreads(input?: {
   });
 }
 
+/** v2.1.7 — Free-text search across thread titles + message content.
+ *  Powers ⌘K's Conversations corpus. Returns up to `limit` hits, with
+ *  title-matches first and content-matches second (deduped by thread).
+ *  Empty query returns []. */
+export interface ChatThreadSearchHit {
+  thread: ChatThread;
+  matchKind: "title" | "content";
+  snippet: string | null;
+}
+export async function searchChatThreads(query: string, limit = 20): Promise<ChatThreadSearchHit[]> {
+  if (!query.trim()) return [];
+  return invoke<ChatThreadSearchHit[]>("search_chat_threads", { query, limit });
+}
+
 export async function createChatThread(input: {
   title: string;
   projectId?: string | null;

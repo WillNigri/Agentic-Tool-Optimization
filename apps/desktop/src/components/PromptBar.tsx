@@ -128,9 +128,49 @@ export default function PromptBar() {
     if (!isTauri) return;
     if (currentThreadId) return;
     if (threadsQuery.isLoading) return;
+    // v2.1.7+ — honor a ⌘K palette handoff if the user clicked a
+    // thread search hit. Take the hint once, then wipe it.
+    try {
+      const hinted = localStorage.getItem("ato.activeChatThreadId");
+      if (hinted) {
+        localStorage.removeItem("ato.activeChatThreadId");
+        const exists = threadsQuery.data?.some((t) => t.id === hinted);
+        if (exists) {
+          setCurrentThreadId(hinted);
+          return;
+        }
+      }
+    } catch {
+      // localStorage unavailable — fall through to default behavior.
+    }
     const first = threadsQuery.data?.[0];
     if (first) setCurrentThreadId(first.id);
   }, [currentThreadId, threadsQuery.data, threadsQuery.isLoading]);
+
+  // v2.1.7+ — also re-check the palette handoff hint while the chat
+  // pane is already mounted. The first-load hook only runs once;
+  // without this, a ⌘K thread click while already on Home wouldn't
+  // switch threads.
+  useEffect(() => {
+    if (!isTauri) return;
+    const onStorage = () => {
+      try {
+        const hinted = localStorage.getItem("ato.activeChatThreadId");
+        if (!hinted) return;
+        localStorage.removeItem("ato.activeChatThreadId");
+        if (threadsQuery.data?.some((t) => t.id === hinted)) {
+          setCurrentThreadId(hinted);
+        }
+      } catch {
+        // best-effort
+      }
+    };
+    // Same-window writes don't fire `storage` events, so we also poll
+    // briefly after CommandPalette closes. Cheap: short interval, only
+    // looking up one localStorage key.
+    const id = window.setInterval(onStorage, 250);
+    return () => window.clearInterval(id);
+  }, [threadsQuery.data]);
 
   // Drop current thread if it's not in the active project's filtered list.
   // (Switching projects shouldn't strand you on a foreign thread.)

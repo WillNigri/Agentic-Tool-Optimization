@@ -28,7 +28,9 @@ import { listAgents } from "@/lib/agents";
 import { getSkills, getMcpServers, listProjects } from "@/lib/api";
 import { listAgentGroups } from "@/lib/agentGroups";
 import { listCronJobs, listSecrets } from "@/lib/tauri-api";
+import { searchChatThreads, type ChatThreadSearchHit } from "@/lib/chatThreads";
 import { useUiStore } from "@/stores/useUiStore";
+import { MessageSquare } from "lucide-react";
 
 // T8 — Command palette (⌘K / Ctrl+K).
 // v1.4.0 Polish-T3 — Global search: when the user types, we also surface
@@ -126,6 +128,23 @@ export default function CommandPalette({ onNavigate }: Props) {
     queryFn: listSecrets,
     enabled: open,
     staleTime: 60_000,
+  });
+  // v2.1.7 — chat thread search. Unlike the other corpora (which the
+  // user filters against client-side), this one fires a SQL LIKE on
+  // every typed query so message-content matches are honest, not
+  // fuzzy-on-titles-only. Debounced query: only re-fetch after 200ms
+  // of typing pause to avoid spamming the DB on every keystroke.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 200);
+    return () => window.clearTimeout(timer);
+  }, [query, open]);
+  const { data: threadHits = [] } = useQuery({
+    queryKey: ["cmdk", "threads", debouncedQuery],
+    queryFn: () => searchChatThreads(debouncedQuery, 12),
+    enabled: open && debouncedQuery.trim().length >= 2,
+    staleTime: 30_000,
   });
 
   const commands: Command[] = useMemo(() => {
@@ -232,6 +251,37 @@ export default function CommandPalette({ onNavigate }: Props) {
       };
     });
 
+    // Conversations — chat thread search results. Group at the top
+    // when user is actively typing because content-search hits are
+    // the most contextual answer to "find the thread where I asked
+    // about X." Click-through navigates to home (chat pane) and
+    // sets the active thread via useUiStore.
+    const threadCommands: Command[] = threadHits.map((h: ChatThreadSearchHit) => ({
+      id: `thread.${h.thread.id}`,
+      label: h.thread.title || t("cmdk.threadUntitled", "Untitled conversation"),
+      hint: h.matchKind === "content" && h.snippet
+        ? `${t("cmdk.threadContent", "match in message")}: ${h.snippet}`
+        : `${h.thread.messageCount} ${t("cmdk.threadMessages", "messages")} · ${
+            h.thread.lastMessageAt
+              ? new Date(h.thread.lastMessageAt).toLocaleDateString()
+              : t("cmdk.threadEmpty", "empty")
+          }`,
+      icon: MessageSquare,
+      group: t("cmdk.groupThreads", "Conversations"),
+      run: () => {
+        // Hand the thread id off via useUiStore; PromptBar reads it
+        // on mount and switches to that thread. Section also flips
+        // to home so the chat pane is visible.
+        useUiStore.getState().setSection("home");
+        try {
+          localStorage.setItem("ato.activeChatThreadId", h.thread.id);
+        } catch {
+          // Best-effort. PromptBar falls back to default thread otherwise.
+        }
+        setOpen(false);
+      },
+    }));
+
     const secretCommands: Command[] = secrets.map((s) => ({
       id: `secret.${s.id}`,
       label: s.name,
@@ -335,6 +385,7 @@ export default function CommandPalette({ onNavigate }: Props) {
     return [
       ...navCommands,
       ...actionCommands,
+      ...threadCommands,
       ...agentCommands,
       ...groupCommands,
       ...skillCommands,
@@ -343,7 +394,7 @@ export default function CommandPalette({ onNavigate }: Props) {
       ...secretCommands,
       ...projectCommands,
     ];
-  }, [t, onNavigate, agents, agentGroups, skills, mcps, crons, secrets, projects]);
+  }, [t, onNavigate, agents, agentGroups, skills, mcps, crons, secrets, projects, threadHits]);
 
   const filtered = useMemo(() => {
     // No query → only navigation commands. Showing every agent/skill on

@@ -2293,6 +2293,131 @@ pub fn set_chat_thread_agent(
     Ok(())
 }
 
+/// v2.1.7+ — Search across persistent chat threads.
+///
+/// Powers ⌘K's new "Conversations" corpus. Two LIKE passes:
+/// (1) match the query against thread titles (cheap), (2) match against
+/// chat_messages.content (more expensive but bounded by limit). Results
+/// are deduped by thread_id with title-match preferred over content-match.
+///
+/// Caller passes a free-text query; we wrap it with `%` and case-fold via
+/// LOWER() so a search for "binary" matches a thread titled "Binary
+/// Search Explained" or any message body containing "binary". Limit is
+/// clamped to a reasonable ceiling so an empty query doesn't dump the
+/// whole table.
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadSearchHit {
+    pub thread: ChatThread,
+    /// "title" or "content" — lets the UI distinguish how the match landed.
+    pub match_kind: String,
+    /// First ~120 chars of the matching message content when match_kind=content.
+    /// None when match_kind=title.
+    pub snippet: Option<String>,
+}
+
+#[tauri::command]
+pub fn search_chat_threads(
+    db: State<'_, DbState>,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<ChatThreadSearchHit>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let cap = limit.unwrap_or(20).clamp(1, 100);
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = format!("%{}%", trimmed.to_lowercase());
+
+    let mut hits: Vec<ChatThreadSearchHit> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Pass 1: title matches. Cheap, runs against the indexed title col.
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, project_id, agent_id, created_at, last_message_at, message_count, archived
+                 FROM chat_threads
+                 WHERE archived = 0 AND LOWER(title) LIKE ?1
+                 ORDER BY COALESCE(last_message_at, created_at) DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pattern, cap], |row| {
+                Ok(ChatThread {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    project_id: row.get(2)?,
+                    agent_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                    last_message_at: row.get(5)?,
+                    message_count: row.get(6)?,
+                    archived: row.get::<_, i64>(7)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let t = r.map_err(|e| e.to_string())?;
+            if seen.insert(t.id.clone()) {
+                hits.push(ChatThreadSearchHit { thread: t, match_kind: "title".into(), snippet: None });
+            }
+        }
+    }
+
+    // Pass 2: content matches, capped to the remaining slots so a busy
+    // user with 1000 messages doesn't timeout the palette. We DISTINCT
+    // on thread_id and pick a single representative snippet via the
+    // most recent matching message.
+    let remaining = cap.saturating_sub(hits.len() as i64);
+    if remaining > 0 {
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id, t.title, t.project_id, t.agent_id, t.created_at, t.last_message_at,
+                        t.message_count, t.archived, m.content
+                   FROM chat_messages m
+                   JOIN chat_threads t ON t.id = m.thread_id
+                  WHERE t.archived = 0 AND LOWER(m.content) LIKE ?1
+                  ORDER BY m.created_at DESC
+                  LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        // Pull more rows than needed because dedup will drop already-seen
+        // threads. 4× the remaining slots is generous without runaway.
+        let probe_limit = remaining.saturating_mul(4).min(400);
+        let rows = stmt
+            .query_map(params![pattern, probe_limit], |row| {
+                let id: String = row.get(0)?;
+                let content: String = row.get(8)?;
+                let snippet = {
+                    let chars: Vec<char> = content.chars().collect();
+                    if chars.len() > 120 { format!("{}…", chars.into_iter().take(120).collect::<String>()) } else { content }
+                };
+                Ok((id, ChatThread {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    project_id: row.get(2)?,
+                    agent_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                    last_message_at: row.get(5)?,
+                    message_count: row.get(6)?,
+                    archived: row.get::<_, i64>(7)? != 0,
+                }, snippet))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let (id, thread, snippet) = r.map_err(|e| e.to_string())?;
+            if hits.len() as i64 >= cap { break; }
+            if seen.insert(id) {
+                hits.push(ChatThreadSearchHit { thread, match_kind: "content".into(), snippet: Some(snippet) });
+            }
+        }
+    }
+
+    Ok(hits)
+}
+
 #[tauri::command]
 pub fn get_chat_messages(
     db: State<'_, DbState>,
