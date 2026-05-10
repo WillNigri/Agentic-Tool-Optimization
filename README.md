@@ -27,6 +27,15 @@ Supported: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**,
 
 Bring your own auth: ATO rides your existing logged-in CLI subscriptions (Claude Code, Codex, Gemini CLI) the way VS Code rides your GitHub login — *or* you can use stored API keys. Your choice, per runtime.
 
+### Relationship to other tools
+
+**ATO is the developer-workflow operations layer for multi-runtime AI agents.** It is *complementary* to production-observability tools like [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), and [Braintrust](https://www.braintrust.dev) — not a competitor.
+
+- **Those tools** instrument *deployed production stacks* via SDKs and log *end-user conversations* in real time.
+- **ATO** covers the *developer side* of the same agent — what you dispatched while building, what you replayed across runtimes, what regressed after a config change, what each dispatch cost, which agent touched which files.
+
+Most production teams use one from each camp: a Langfuse / Helicone for production user-conversation logging, plus ATO for the developer/multi-runtime side. The two views fit together: production tools catch regressions in real user traffic; ATO catches regressions before you ship, and lets you replay any failing example against an alternative runtime in one click.
+
 **[Website](https://agentictool.ai)** | **[Web Dashboard](https://app.agentictool.ai)** | **[SDK Docs](docs/SDK.md)** | **[npm](https://www.npmjs.com/package/@ato-sdk/js)**
 
 **MIT Licensed** | **Local-first** | **macOS, Windows, Linux**
@@ -48,29 +57,17 @@ brew install --cask ato
 
 **[Download latest release](https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest)**
 
-### SDK (auto-trace LLM costs)
+### SDK — narrow scope
 
 ```bash
 npm install @ato-sdk/js
 ```
 
-```typescript
-import { init } from '@ato-sdk/js';
-import { wrapAnthropic } from '@ato-sdk/js/anthropic';
-import Anthropic from '@anthropic-ai/sdk';
+`@ato-sdk/js` is a **trace forwarder for ATO-authored agents deployed outside the desktop app** (Cloudflare Worker / Vercel / Docker / Node bundles). It is **not** a general-purpose LLM observability SDK.
 
-init({ apiKey: 'your-ato-key' });
-const client = wrapAnthropic(new Anthropic());
+If you have an existing production stack and want general LLM observability, use [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), or [Braintrust](https://www.braintrust.dev). They're built for that job. ATO is **complementary** to them — see [Relationship to other tools](#relationship-to-other-tools) below.
 
-// Every call is now auto-traced with costs
-const msg = await client.messages.create({
-  model: 'claude-sonnet-4-6',
-  max_tokens: 1024,
-  messages: [{ role: 'user', content: 'Hello' }],
-});
-```
-
-Works with **Anthropic**, **OpenAI**, and **Claude Agent SDK**. Built-in pricing for **60+ models** across 7 providers. [Full SDK docs](docs/SDK.md).
+[Full SDK docs](docs/SDK.md).
 
 ### MCP Server
 
@@ -157,18 +154,18 @@ All paths write through the same safety pipeline (hash check, auto-backup, audit
 - **Tier gating** — Pro features are visible to Free users with a crown lock badge + upgrade tooltip. Discovery sells; hiding doesn't.
 - **i18n** — EN, PT, ES (react-i18next).
 
-### SDK
+### SDK (trace forwarder)
 
-Auto-capture LLM traces with zero code changes:
+`@ato-sdk/js` is narrow-scoped: it forwards traces from agents you authored in ATO and deployed externally (Cloudflare Worker / Vercel / Docker / Node bundles) back to your ATO Insights dashboard. It is not a drop-in observability SDK for arbitrary production stacks.
 
 | Provider | Wrapper | Import |
 |----------|---------|--------|
 | Anthropic | `wrapAnthropic(client)` | `@ato-sdk/js/anthropic` |
 | OpenAI | `wrapOpenAI(client)` | `@ato-sdk/js/openai` |
 | Claude Agent SDK | `wrapAgent(agent)` | `@ato-sdk/js/agent` |
-| Any provider | `capture(trace)` | `@ato-sdk/js` |
+| Custom provider in a bundle | `capture(trace)` | `@ato-sdk/js` |
 
-Each call records: model, tokens (input/output/cached), cost (USD), duration, status, errors, metadata. Built-in pricing for 60+ models. [Full SDK documentation](docs/SDK.md).
+Each forwarded trace records: model, tokens (input/output/cached), cost (USD), duration, status, errors, metadata. Built-in pricing for 60+ models. [Full SDK documentation](docs/SDK.md).
 
 ---
 
@@ -280,12 +277,16 @@ Requires [Rust](https://rustup.rs/) and [Tauri 2 prerequisites](https://v2.tauri
 
 | Version | Highlights |
 |---------|-----------|
-| **v1.5.0** | **Daily workspace** — persistent threads (SQLite), streaming responses, syntax-highlighted markdown rendering, file attachments, multi-runtime mid-thread (history travels with or without an agent), per-thread sticky agent, project scoping, in-thread runtime swap |
+| **v2.2.1** | **Regression → Replay** — failing examples in the regression drill modal now have a one-click "Replay on…" button that re-dispatches the prompt against an alternative runtime + diffs side-by-side. Closes the loop the strategy alignment audit flagged as highest-leverage. |
+| **v2.2.0** | **Real cost capture on the dispatch path** — Rust dispatch path computes tokens + cost at finish and persists them on `execution_logs` + `replay_jobs`. Compare / Cost Recs / Replay panels read the captured value instead of recomputing per render. |
+| **v2.1.x** | **Replay infrastructure + deep regression detection + cost recommendations** — replay any cloud trace against a different runtime / model; configuration ledger joined with trace stats surfaces regressions with failing-example drill-down; cost-rec layer surfaces same-agent model swaps when historical data justifies them |
+| **v2.0.0** | **External agents + hosted deployment** — Internal-vs-External agent toggle; deploy bundles for Cloudflare Worker / Vercel / Docker / Node across 9 chat-LLM providers; knowledge ingestion + RAG; embed widget; trace sink forwarding to Langfuse + OTLP webhook (complementary boundary baked into v2.0); Apple Developer signing + notarization |
+| **v1.5.0–1.5.5** | **Daily workspace** — persistent chat threads (SQLite), streaming responses, syntax-highlighted markdown, file attachments, multi-runtime mid-thread, per-thread sticky agent, production-grade agent template with welcome tour, dynamic-prompt empty-state CTAs |
 | **v1.4.0** | **Production-grade agent authoring** — Variables (F1), Context Hooks (F2), Summarizers (F3), Multi-agent Groups + Router + Graph Editor (F4), Per-task Models (F5), Observability + Trace Explorer (F6), Evaluators (F7), Tool Description Rewrite (F8); Pro tier gating; agent templates (5 starters); skill version history; bulk skill ops; runtime comparison tab; configuration export/import |
 | **v1.3.0** | **The GUI Pivot** — IA collapse (24 → 6 sections), Home page, Create Agent (Guided + Quick), MCP install UI, embedded terminal (xterm + portable-pty), command palette (⌘K), subscriptions-or-keys auth model |
 | **v1.2.0** | Visual workspace canvas, live execution visualization, skill palette, multi-select batch ops |
 | **v1.1.0** | Projects dashboard, 6 runtimes (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor with conflict detection + inline lint, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES) |
-| **v1.0.0** | SDK (`@ato-sdk/js`), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, Homebrew tap |
+| **v1.0.0** | SDK (`@ato-sdk/js` — narrow-scoped trace forwarder for ATO-authored agents deployed externally; not general-purpose LLM observability), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, Homebrew tap |
 
 ---
 
