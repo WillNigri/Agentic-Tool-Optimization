@@ -12,12 +12,23 @@ import {
   CornerDownLeft,
   Plug,
   FolderGit2,
+  Network,
+  Clock,
+  KeyRound,
+  Zap,
+  ArrowLeftRight,
+  Globe,
+  GitCommit,
+  DollarSign,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Section } from "@/components/Sidebar";
 import { listAgents } from "@/lib/agents";
 import { getSkills, getMcpServers, listProjects } from "@/lib/api";
+import { listAgentGroups } from "@/lib/agentGroups";
+import { listCronJobs, listSecrets } from "@/lib/tauri-api";
+import { useUiStore } from "@/stores/useUiStore";
 
 // T8 — Command palette (⌘K / Ctrl+K).
 // v1.4.0 Polish-T3 — Global search: when the user types, we also surface
@@ -95,6 +106,27 @@ export default function CommandPalette({ onNavigate }: Props) {
     enabled: open,
     staleTime: 60_000,
   });
+  // v1.7+ — broader corpus: groups, cron jobs, secrets so ⌘K stops
+  // being the agents-only palette and becomes the daily quick-jump
+  // for everything in the workspace.
+  const { data: agentGroups = [] } = useQuery({
+    queryKey: ["cmdk", "groups"],
+    queryFn: () => listAgentGroups(),
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const { data: crons = [] } = useQuery({
+    queryKey: ["cmdk", "crons"],
+    queryFn: listCronJobs,
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const { data: secrets = [] } = useQuery({
+    queryKey: ["cmdk", "secrets"],
+    queryFn: listSecrets,
+    enabled: open,
+    staleTime: 60_000,
+  });
 
   const commands: Command[] = useMemo(() => {
     const navGroup = t("cmdk.groupNavigate", "Navigate");
@@ -166,14 +198,152 @@ export default function CommandPalette({ onNavigate }: Props) {
       },
     }));
 
+    const groupCommands: Command[] = agentGroups.map((g) => ({
+      id: `group.${g.id}`,
+      label: `@${g.slug}`,
+      hint: `${g.dispatch_kind} · ${g.runtime}${g.description ? ` · ${g.description.slice(0, 60)}` : ""}`,
+      icon: Network,
+      group: t("cmdk.groupGroups", "Agent Groups"),
+      run: () => {
+        onNavigate("agents");
+        setOpen(false);
+      },
+    }));
+
+    // Cron jobs: render label as the human schedule + the dispatch
+    // target. Hint shows enabled/disabled state.
+    const cronCommands: Command[] = crons.map((c) => {
+      const cronAny = c as Record<string, unknown>;
+      const id = String(cronAny.id ?? "");
+      const name = (cronAny.name as string) || (cronAny.agentSlug as string) || id;
+      const schedule = (cronAny.schedule as string) || (cronAny.cron as string) || "";
+      const enabled = cronAny.enabled !== false;
+      return {
+        id: `cron.${id}`,
+        label: name,
+        hint: `${schedule}${enabled ? "" : " · disabled"}`,
+        icon: Clock,
+        group: t("cmdk.groupCrons", "Schedules"),
+        run: () => {
+          onNavigate("runs");
+          useUiStore.getState().setSubTab("ato.subtab.runs", "schedules");
+          setOpen(false);
+        },
+      };
+    });
+
+    const secretCommands: Command[] = secrets.map((s) => ({
+      id: `secret.${s.id}`,
+      label: s.name,
+      hint: s.scope || t("cmdk.secretGlobal", "global"),
+      icon: KeyRound,
+      group: t("cmdk.groupSecrets", "Secrets"),
+      run: () => {
+        onNavigate("settings");
+        useUiStore.getState().setSubTab("ato.subtab.settings", "secrets");
+        setOpen(false);
+      },
+    }));
+
+    // Quick actions — direct jumps to specific Insights sub-tabs +
+    // common workflows. These are fixed (no fetch) so they always
+    // appear at the top of their group when typed. The v2.0/2.1
+    // sub-tabs are the highest-leverage targets we shipped recently
+    // and were buried two clicks deep.
+    const actionGroup = t("cmdk.groupActions", "Quick actions");
+    const actionItems: Array<{
+      id: string;
+      label: string;
+      icon: LucideIcon;
+      go: () => void;
+    }> = [
+      {
+        id: "act.insights.live",
+        label: t("cmdk.actInsightsLive", "Insights — Live runs"),
+        icon: Zap,
+        go: () => {
+          onNavigate("insights");
+          useUiStore.getState().setSubTab("ato.subtab.insights", "live");
+        },
+      },
+      {
+        id: "act.insights.pipelines",
+        label: t("cmdk.actInsightsPipelines", "Insights — Pipelines"),
+        icon: Sparkles,
+        go: () => {
+          onNavigate("insights");
+          useUiStore.getState().setSubTab("ato.subtab.insights", "pipelines");
+        },
+      },
+      {
+        id: "act.insights.compare",
+        label: t("cmdk.actInsightsCompare", "Insights — Compare traces"),
+        icon: ArrowLeftRight,
+        go: () => {
+          onNavigate("insights");
+          useUiStore.getState().setSubTab("ato.subtab.insights", "compare");
+        },
+      },
+      {
+        id: "act.insights.external",
+        label: t("cmdk.actInsightsExternal", "Insights — External"),
+        icon: Globe,
+        go: () => {
+          onNavigate("insights");
+          useUiStore.getState().setSubTab("ato.subtab.insights", "external");
+        },
+      },
+      {
+        id: "act.insights.regressions",
+        label: t("cmdk.actInsightsRegressions", "Insights — Regressions"),
+        icon: GitCommit,
+        go: () => {
+          onNavigate("insights");
+          useUiStore.getState().setSubTab("ato.subtab.insights", "regressions");
+        },
+      },
+      {
+        id: "act.insights.cost",
+        label: t("cmdk.actInsightsCost", "Insights — Usage / cost"),
+        icon: DollarSign,
+        go: () => {
+          onNavigate("insights");
+          useUiStore.getState().setSubTab("ato.subtab.insights", "cost");
+        },
+      },
+      {
+        id: "act.runs.automations",
+        label: t("cmdk.actRunsAutomations", "Runs — Automations canvas"),
+        icon: Activity,
+        go: () => {
+          onNavigate("runs");
+          useUiStore.getState().setSubTab("ato.subtab.runs", "automations");
+        },
+      },
+    ];
+    const actionCommands: Command[] = actionItems.map((a) => ({
+      id: a.id,
+      label: a.label,
+      icon: a.icon,
+      group: actionGroup,
+      run: () => {
+        a.go();
+        setOpen(false);
+      },
+    }));
+
     return [
       ...navCommands,
+      ...actionCommands,
       ...agentCommands,
+      ...groupCommands,
       ...skillCommands,
       ...mcpCommands,
+      ...cronCommands,
+      ...secretCommands,
       ...projectCommands,
     ];
-  }, [t, onNavigate, agents, skills, mcps, projects]);
+  }, [t, onNavigate, agents, agentGroups, skills, mcps, crons, secrets, projects]);
 
   const filtered = useMemo(() => {
     // No query → only navigation commands. Showing every agent/skill on
