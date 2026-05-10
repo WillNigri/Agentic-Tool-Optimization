@@ -3344,6 +3344,29 @@ pub fn get_replay_job(id: String) -> Result<ReplayJob, String> {
     .map_err(|e| format!("replay-not-found: {}", e))
 }
 
+/// Fetch the locally-stored response for a cloud trace, by walking the
+/// link from cloud_trace_id → execution_logs.response. Powers the
+/// "source response" side of the replay result panel; cloud trace
+/// uploads only carry prompt_summary, never the full response text,
+/// so without this fallback the source pane reads "unavailable" and
+/// the diff is half-blind.
+#[tauri::command]
+pub fn get_execution_log_response_by_cloud_trace_id(
+    cloud_trace_id: String,
+) -> Result<Option<String>, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    match conn.query_row(
+        "SELECT response FROM execution_logs WHERE cloud_trace_id = ?1 LIMIT 1",
+        rusqlite::params![cloud_trace_id],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        Ok(maybe_response) => Ok(maybe_response),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("lookup-failed: {}", e)),
+    }
+}
+
 #[tauri::command]
 pub fn list_replays_for_trace(cloud_trace_id: String) -> Result<Vec<ReplayJob>, String> {
     let db_path = crate::get_db_path();

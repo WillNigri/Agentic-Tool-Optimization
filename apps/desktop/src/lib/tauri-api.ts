@@ -1711,6 +1711,19 @@ export async function listReplaysForTrace(cloudTraceId: string): Promise<ReplayJ
   return invoke<ReplayJob[]>('list_replays_for_trace', { cloudTraceId });
 }
 
+/** v2.1.3 — Local-only fallback for the replay panel's source pane.
+ *  Cloud trace uploads carry prompt_summary only; the full response
+ *  text lives in execution_logs (since v2.0.1) and never leaves the
+ *  device. Returns null when the trace was dispatched from a different
+ *  machine OR the link wasn't established (legacy trace). */
+export async function getExecutionLogResponseByCloudTraceId(
+  cloudTraceId: string,
+): Promise<string | null> {
+  return invoke<string | null>('get_execution_log_response_by_cloud_trace_id', {
+    cloudTraceId,
+  });
+}
+
 // ============================================================================
 // Health Checks
 // ============================================================================

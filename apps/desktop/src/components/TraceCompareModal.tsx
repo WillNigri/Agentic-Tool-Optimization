@@ -21,6 +21,7 @@ import {
 import {
   startReplay,
   getReplayJob,
+  getExecutionLogResponseByCloudTraceId,
   type ReplayJob,
 } from "@/lib/tauri-api";
 import { cn } from "@/lib/utils";
@@ -647,6 +648,31 @@ function ReplayResultPanel({
   const { t } = useTranslation();
   const [job, setJob] = useState<ReplayJob | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
+  // v2.1.3 — local fallback for the source response. Cloud uploads
+  // don't carry the response text (only prompt_summary), so without
+  // this the source pane reads "unavailable" and the side-by-side
+  // is half-blind. We try local execution_logs by cloud_trace_id;
+  // null when the trace originated from a different machine.
+  const [localSourceResponse, setLocalSourceResponse] = useState<string | null>(null);
+  useEffect(() => {
+    if (!baselineTrace?.id) return;
+    if (baselineTrace.response) {
+      setLocalSourceResponse(null); // cloud already has it; no fallback needed
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await getExecutionLogResponseByCloudTraceId(baselineTrace.id);
+        if (!cancelled) setLocalSourceResponse(r ?? null);
+      } catch {
+        if (!cancelled) setLocalSourceResponse(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [baselineTrace?.id, baselineTrace?.response]);
 
   useEffect(() => {
     let cancelled = false;
@@ -762,7 +788,9 @@ function ReplayResultPanel({
                 })}
               </div>
               <pre className="whitespace-pre-wrap break-words font-sans text-[11px] text-cs-text max-h-[300px] overflow-y-auto">
-                {baselineTrace?.response ?? t("insights.replay.sourceMissing", "Source response unavailable")}
+                {baselineTrace?.response
+                  ?? localSourceResponse
+                  ?? t("insights.replay.sourceMissing", "Source response unavailable (dispatched from a different machine)")}
               </pre>
             </div>
             <div className="rounded border border-cs-accent/30 bg-cs-bg p-2">
