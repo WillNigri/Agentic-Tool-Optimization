@@ -2,8 +2,9 @@ import { useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
-import { X, Globe, Activity, Workflow } from "lucide-react";
+import { X, Globe, Activity, Workflow, BarChart3 } from "lucide-react";
 import { TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./automation/constants";
+import { useUiStore } from "@/stores/useUiStore";
 import { serializeWorkflowToPrompt } from "./automation/helpers";
 import { useAutomationStore } from "@/stores/useAutomationStore";
 import WorkflowToolbar from "./automation/WorkflowToolbar";
@@ -525,13 +526,47 @@ export default function AutomationFlow() {
               </div>
             </div>
 
-            <button
-              onClick={() => selectNode(null)}
-              className="flex items-center justify-center w-7 h-7 rounded-md border border-[#2a2a3a] hover:border-[#FF4466] transition-colors flex-shrink-0"
-              style={{ background: "#0e0e16" }}
-            >
-              <X size={14} className="text-[#8888a0]" />
-            </button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {/* v1.6.0 — click-through to Insights → Agents pre-
+                  filtered for this node's agent, so users can jump
+                  from "this routed group's @reviewer step" straight
+                  into its trace explorer without re-navigating. */}
+              {selectedNode.agentName && (
+                <button
+                  onClick={() => {
+                    const ui = useUiStore.getState();
+                    ui.setSection("insights");
+                    try {
+                      localStorage.setItem("ato.subtab.insights", "agents");
+                      // Soft hint for AgentObservability to preselect
+                      // this slug; component reads + clears it on mount.
+                      localStorage.setItem(
+                        "ato.insights.preselectAgentSlug",
+                        selectedNode.agentName,
+                      );
+                    } catch {
+                      // localStorage failure is non-fatal — user lands
+                      // on the Insights tab without preselection.
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 rounded-md border border-[#2a2a3a] bg-[#0e0e16] px-2 py-1 text-[11px] text-[#8888a0] hover:text-[#00FFB2] hover:border-[#00FFB2]/40 transition-colors"
+                  title={t(
+                    "automation.openInInsights",
+                    "Open this agent's trace history in Insights",
+                  )}
+                >
+                  <BarChart3 size={11} />
+                  {t("automation.viewRuns", "View runs")}
+                </button>
+              )}
+              <button
+                onClick={() => selectNode(null)}
+                className="flex items-center justify-center w-7 h-7 rounded-md border border-[#2a2a3a] hover:border-[#FF4466] transition-colors"
+                style={{ background: "#0e0e16" }}
+              >
+                <X size={14} className="text-[#8888a0]" />
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -41,6 +41,22 @@ export default function Dashboard() {
   const [search, setSearch] = useState("");
   const [exploringTrace, setExploringTrace] = useState<AgentTraceLine | null>(null);
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+
+  // v1.6.0 — soft-handoff from Automations canvas. When the user
+  // clicks "View runs" on a flow node, AutomationFlow drops the
+  // agent slug here; we pick it up on mount, expand that row, and
+  // clear the hint so refresh-without-handoff doesn't re-trigger.
+  useEffect(() => {
+    try {
+      const slug = localStorage.getItem("ato.insights.preselectAgentSlug");
+      if (slug) {
+        setExpandedAgent(slug);
+        localStorage.removeItem("ato.insights.preselectAgentSlug");
+      }
+    } catch {
+      // localStorage unavailable — non-fatal.
+    }
+  }, []);
 
   const { data: metrics, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["agent-metrics", filter],

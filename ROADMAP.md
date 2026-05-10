@@ -162,20 +162,22 @@ The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers
 - **Empty-state CTAs** on Variables / Context / Memory / Models tabs that point at the Production template — Memory and Models use a header-line hint since those tabs are configured-by-default and never go truly empty.
 - **Settings → API Keys** — Grok added in v1.5.4; wizard hint lists all 15 providers.
 
-### v1.6.0 — Intelligence Layer (Planned)
-- **Automations tab repurpose — group pipelines as flow nodes** ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
-  - Today the Runs → Automations tab visualizes skill-derived flow charts (parsed from `## Step N` / `## Phase N` headers in SKILL.md files). Useful but narrow — and v1.5 groups now own the word "automation."
-  - v1.6 turns it into the canonical visualization for **everything that runs without a human in the loop**: routed groups, sequential pipelines, scheduled cron jobs, hooks, and skill flows — all on the same canvas. Each node is a real agent / runtime / tool with live status (idle / running / errored).
-  - Sequential group "Claude → Codex" becomes a left-to-right flow with arrows showing data flow; routed group becomes a fan-out from the router node; cron jobs anchor at the left edge with a clock icon.
-  - Click a node → Insights opens that agent's trace explorer for the last N runs.
-- Real-time collaborative workspace (WebSocket via ato-cloud)
-- Team cursors (Figma-style)
-- Cross-runtime policy enforcement templates
-- Hosted terminal sessions for Team tier (cloud)
-- Proactive suggestions ("Your project is missing X")
-- Cost optimization alerts from SDK traces
-- Agent performance benchmarking across runtimes
-- **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine (MIT, on PyPI), surface harness-improvement reports as one-click inline diffs
+### v1.6.0 — Intelligence Layer (Automations canvas shipped May 2026)
+- **Automations tab repurpose — group pipelines as flow nodes** *(shipped — multi-source aggregator + click-through to Insights)* ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
+  - Runs → Automations now visualizes **everything that runs without a human in the loop**: routed groups, sequential pipelines, scheduled cron jobs, agent hooks, and skill flows — all on the same canvas. `automationsAggregator.ts` pulls from each source; `groupsToWorkflows`, `cronsToWorkflows`, `hooksToWorkflows` plus the original `skill-to-workflow` converter normalize them into a common shape.
+  - Sequential groups render left-to-right with stage pills; routed groups fan out from the router; cron jobs anchor at the left edge with a clock icon; hooks attach as input nodes.
+  - Live status decorated from `getAgentMetrics` so each node carries idle / running / succeeded / errored + last-run timestamp.
+  - WorkflowToolbar dropdown filters by source ("Skills · Schedules · Pipelines · Routed Groups · Hooks · Manual") + by runtime.
+  - **Click "View runs"** on any node → soft-handoff via localStorage to Insights → Agents, which expands that agent's row on mount.
+  - Empty-state copy enumerates the four entry points (group / cron / hook / skill) instead of pointing only at Edit mode.
+- Real-time collaborative workspace (WebSocket via ato-cloud) *(planned)*
+- Team cursors (Figma-style) *(planned)*
+- Cross-runtime policy enforcement templates *(planned)*
+- Hosted terminal sessions for Team tier (cloud) *(planned)*
+- Proactive suggestions ("Your project is missing X") *(planned)*
+- Cost optimization alerts from SDK traces *(planned)*
+- Agent performance benchmarking across runtimes *(planned)*
+- **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine (MIT, on PyPI), surface harness-improvement reports as one-click inline diffs *(planned)*
 
 ### v2.0.0 — External Agents / Hosted Deployment (Released May 2026)
 The strategic v2 release: ATO becomes the place where companies build customer-facing chatbots, deploy them to their own infrastructure (any LLM provider), and track their behavior — without us competing with hosting providers. ([detailed plan](docs/V2.0.0-EXTERNAL-AGENTS.md))

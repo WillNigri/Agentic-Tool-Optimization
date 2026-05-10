@@ -222,15 +222,21 @@ export default function FlowCanvas() {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
       >
-        {/* Empty state */}
+        {/* Empty state — v1.6.0 copy: Automations is now the canvas
+            for everything that runs unattended (groups + crons + hooks +
+            skills), so the empty hint enumerates all four entry points
+            instead of pointing only at Edit mode. */}
         {nodes.length === 0 && mode === "view" && (
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <p className="text-sm text-[#8888a0] mb-2">
-                {t("automation.builder.emptyState", "No workflows yet")}
+            <div className="text-center max-w-md px-6">
+              <p className="text-sm text-[#e8e8f0] mb-3 font-medium">
+                {t("automation.builder.emptyState", "Nothing automated yet")}
               </p>
-              <p className="text-xs text-[#8888a0]/60">
-                {t("automation.builder.emptyStateHint", "Switch to Edit mode to create your first workflow")}
+              <p className="text-xs text-[#8888a0] leading-relaxed">
+                {t(
+                  "automation.builder.emptyStateHintV16",
+                  "Anything you set to run without you appears here. Create a sequential or routed group (Agents → Groups), schedule an agent dispatch (Runs → Schedules), wire a pre-call context hook on an agent, or write a skill with ## Step / ## Phase headers — each becomes a flow on this canvas.",
+                )}
               </p>
             </div>
           </div>
