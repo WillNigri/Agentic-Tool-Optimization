@@ -399,6 +399,15 @@ export default function PromptBar() {
       // humans can follow the pipeline (and so each stage acts as a real
       // turn in the thread, which is how LLM-to-LLM relay works best).
       let pipelineStages: { agentSlug: string; runtime: string; response: string }[] = [];
+      // v2.1.0+ — capture dispatch start time for the trace upload that
+      // fires after every dispatch path. Without this, the no-agent and
+      // agent-without-variables paths never uploaded to cloud, which
+      // meant Compare/Pipelines panels stayed empty + replay had no
+      // source data. Variables/hooks-attributed dispatches go through
+      // agentVariables.ts which has its own upload; group dispatches
+      // upload below; this captures the remaining two paths.
+      const dispatchStartedAtIso = new Date().toISOString();
+      const dispatchStartedAtMs = Date.now();
       setStreamingText("");
       try {
         if (selectedGroup) {
@@ -471,6 +480,19 @@ export default function PromptBar() {
             source: "desktop:promptbar:stream",
             onChunk: (text) => setStreamingText((prev) => prev + text),
           });
+          // v2.1.0+ — agents with NO variables/hooks bypass the
+          // agentVariables.ts upload path. Cover them here so every
+          // single-agent dispatch lands a cloud trace.
+          void uploadAgentTrace({
+            agentSlug: selectedAgent.slug,
+            runtime,
+            startedAt: dispatchStartedAtIso,
+            durationMs: Date.now() - dispatchStartedAtMs,
+            ok: true,
+            source: "desktop:promptbar:agent-stream",
+            promptSummary: summarizePrompt(prompt),
+            metadata: { historyLength: history.length, streamed: true },
+          });
         } else {
           // No agent selected — but the thread is still a conversation.
           // Stitch the history into the prompt so cross-runtime swaps
@@ -484,7 +506,39 @@ export default function PromptBar() {
             prompt: stitched,
             onChunk: (text) => setStreamingText((prev) => prev + text),
           });
+          // v2.1.0+ — no-agent path now uploads too. agent_slug uses
+          // the runtime as a stable bucket so multiple no-agent
+          // dispatches against the same runtime accumulate under one
+          // entry in Compare/Pipelines instead of scattering across
+          // different empty buckets.
+          void uploadAgentTrace({
+            agentSlug: runtime,
+            runtime,
+            startedAt: dispatchStartedAtIso,
+            durationMs: Date.now() - dispatchStartedAtMs,
+            ok: true,
+            source: "desktop:promptbar:no-agent-stream",
+            promptSummary: summarizePrompt(prompt),
+            metadata: { historyLength: history.length, streamed: true, noAgent: true },
+          });
         }
+      } catch (dispatchErr) {
+        // Upload a failure trace so the panels show ok_rate drops too,
+        // not just successes. Re-throw so the outer catch handles UI.
+        void uploadAgentTrace({
+          agentSlug: selectedAgent?.slug ?? runtime,
+          runtime,
+          startedAt: dispatchStartedAtIso,
+          durationMs: Date.now() - dispatchStartedAtMs,
+          ok: false,
+          error: dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr),
+          source: selectedAgent
+            ? "desktop:promptbar:agent-stream"
+            : "desktop:promptbar:no-agent-stream",
+          promptSummary: summarizePrompt(prompt),
+          metadata: { streamed: true, noAgent: !selectedAgent },
+        });
+        throw dispatchErr;
       } finally {
         // Clear regardless of success/error so the placeholder doesn't
         // outlive the dispatch.
