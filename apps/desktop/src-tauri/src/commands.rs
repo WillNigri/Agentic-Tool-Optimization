@@ -3367,6 +3367,36 @@ pub fn get_execution_log_response_by_cloud_trace_id(
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct LocalPromptResponse {
+    pub prompt: Option<String>,
+    pub response: Option<String>,
+}
+
+/// v2.1.4 — Returns both prompt and response for a cloud trace by
+/// looking them up locally. Powers cost estimation in the replay
+/// panel: cost = pricing × tokens(prompt+response). Without the
+/// prompt, replay cost was "—" even when we had everything else.
+/// Returns null prompt/response when the trace originated elsewhere.
+#[tauri::command]
+pub fn get_execution_log_io_by_cloud_trace_id(
+    cloud_trace_id: String,
+) -> Result<LocalPromptResponse, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    match conn.query_row(
+        "SELECT prompt, response FROM execution_logs WHERE cloud_trace_id = ?1 LIMIT 1",
+        rusqlite::params![cloud_trace_id],
+        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+    ) {
+        Ok((prompt, response)) => Ok(LocalPromptResponse { prompt, response }),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Ok(LocalPromptResponse { prompt: None, response: None })
+        }
+        Err(e) => Err(format!("lookup-failed: {}", e)),
+    }
+}
+
 #[tauri::command]
 pub fn list_replays_for_trace(cloud_trace_id: String) -> Result<Vec<ReplayJob>, String> {
     let db_path = crate::get_db_path();

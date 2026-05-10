@@ -46,6 +46,7 @@ import { useProjectStore } from "@/stores/useProjectStore";
 import { useDemoStore } from "@/stores/useDemoStore";
 import { listAgentGroups, dispatchToGroup, type AgentGroup } from "@/lib/agentGroups";
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
+import { estimateUsage } from "@/lib/pricing";
 import type { AgentRuntime } from "@/components/cron/types";
 import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
 import MarkdownContent from "./MarkdownContent";
@@ -483,16 +484,31 @@ export default function PromptBar() {
           // v2.1.0+ — agents with NO variables/hooks bypass the
           // agentVariables.ts upload path. Cover them here so every
           // single-agent dispatch lands a cloud trace.
-          void uploadAgentTrace({
-            agentSlug: selectedAgent.slug,
-            runtime,
-            startedAt: dispatchStartedAtIso,
-            durationMs: Date.now() - dispatchStartedAtMs,
-            ok: true,
-            source: "desktop:promptbar:agent-stream",
-            promptSummary: summarizePrompt(prompt),
-            metadata: { historyLength: history.length, streamed: true },
-          });
+          // v2.1.4+ — also estimate token usage + cost so Compare/
+          // Cost recs/Replay panels show real numbers instead of "—".
+          // Marked `costEstimated:true` in metadata so the UI can
+          // render an "est." badge.
+          {
+            const usage = estimateUsage(runtime, selectedAgent.model ?? null, prompt, response);
+            void uploadAgentTrace({
+              agentSlug: selectedAgent.slug,
+              runtime,
+              startedAt: dispatchStartedAtIso,
+              durationMs: Date.now() - dispatchStartedAtMs,
+              ok: true,
+              source: "desktop:promptbar:agent-stream",
+              promptSummary: summarizePrompt(prompt),
+              promptTokens: usage.promptTokens,
+              responseTokens: usage.responseTokens,
+              costUsd: usage.costUsd,
+              metadata: {
+                historyLength: history.length,
+                streamed: true,
+                costEstimated: true,
+                modelUsed: usage.model,
+              },
+            });
+          }
         } else {
           // No agent selected — but the thread is still a conversation.
           // Stitch the history into the prompt so cross-runtime swaps
@@ -511,16 +527,28 @@ export default function PromptBar() {
           // dispatches against the same runtime accumulate under one
           // entry in Compare/Pipelines instead of scattering across
           // different empty buckets.
-          void uploadAgentTrace({
-            agentSlug: runtime,
-            runtime,
-            startedAt: dispatchStartedAtIso,
-            durationMs: Date.now() - dispatchStartedAtMs,
-            ok: true,
-            source: "desktop:promptbar:no-agent-stream",
-            promptSummary: summarizePrompt(prompt),
-            metadata: { historyLength: history.length, streamed: true, noAgent: true },
-          });
+          {
+            const usage = estimateUsage(runtime, null, prompt, response);
+            void uploadAgentTrace({
+              agentSlug: runtime,
+              runtime,
+              startedAt: dispatchStartedAtIso,
+              durationMs: Date.now() - dispatchStartedAtMs,
+              ok: true,
+              source: "desktop:promptbar:no-agent-stream",
+              promptSummary: summarizePrompt(prompt),
+              promptTokens: usage.promptTokens,
+              responseTokens: usage.responseTokens,
+              costUsd: usage.costUsd,
+              metadata: {
+                historyLength: history.length,
+                streamed: true,
+                noAgent: true,
+                costEstimated: true,
+                modelUsed: usage.model,
+              },
+            });
+          }
         }
       } catch (dispatchErr) {
         // Upload a failure trace so the panels show ok_rate drops too,

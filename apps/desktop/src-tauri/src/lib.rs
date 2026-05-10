@@ -940,6 +940,7 @@ pub fn run() {
             get_replay_job,
             list_replays_for_trace,
             get_execution_log_response_by_cloud_trace_id,
+            get_execution_log_io_by_cloud_trace_id,
             // Health Checks
             get_health_status,
             record_health_check,

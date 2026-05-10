@@ -21,9 +21,10 @@ import {
 import {
   startReplay,
   getReplayJob,
-  getExecutionLogResponseByCloudTraceId,
+  getExecutionLogIoByCloudTraceId,
   type ReplayJob,
 } from "@/lib/tauri-api";
+import { estimateCostUsd, DEFAULT_MODEL_PER_RUNTIME } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 
 // v2.1.0 Phase 9 — Eval workbench (compare).
@@ -648,25 +649,29 @@ function ReplayResultPanel({
   const { t } = useTranslation();
   const [job, setJob] = useState<ReplayJob | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
-  // v2.1.3 — local fallback for the source response. Cloud uploads
-  // don't carry the response text (only prompt_summary), so without
-  // this the source pane reads "unavailable" and the side-by-side
-  // is half-blind. We try local execution_logs by cloud_trace_id;
-  // null when the trace originated from a different machine.
+  // v2.1.3 + v2.1.4 — fetch local prompt + response for the source
+  // trace. Response feeds the source pane; prompt feeds replay-cost
+  // estimation (cost = (prompt + response) × pricing). Both null when
+  // trace originated from a different machine.
+  const [localSourcePrompt, setLocalSourcePrompt] = useState<string | null>(null);
   const [localSourceResponse, setLocalSourceResponse] = useState<string | null>(null);
   useEffect(() => {
     if (!baselineTrace?.id) return;
-    if (baselineTrace.response) {
-      setLocalSourceResponse(null); // cloud already has it; no fallback needed
-      return;
-    }
     let cancelled = false;
     void (async () => {
       try {
-        const r = await getExecutionLogResponseByCloudTraceId(baselineTrace.id);
-        if (!cancelled) setLocalSourceResponse(r ?? null);
+        const io = await getExecutionLogIoByCloudTraceId(baselineTrace.id);
+        if (!cancelled) {
+          setLocalSourcePrompt(io.prompt);
+          // Don't override cloud-provided response (it'd be redundant);
+          // only fill the fallback when cloud didn't carry one.
+          if (!baselineTrace.response) setLocalSourceResponse(io.response);
+        }
       } catch {
-        if (!cancelled) setLocalSourceResponse(null);
+        if (!cancelled) {
+          setLocalSourcePrompt(null);
+          if (!baselineTrace.response) setLocalSourceResponse(null);
+        }
       }
     })();
     return () => {
@@ -723,6 +728,23 @@ function ReplayResultPanel({
     sourceDuration !== null && replayDuration !== null
       ? replayDuration - sourceDuration
       : null;
+  // v2.1.4 — estimated cost diff. Source cost: prefer cloud-recorded
+  // cost_usd if uploaded with one; otherwise estimate from local
+  // prompt+response. Replay cost: estimate from local prompt + replay
+  // response. Returns null when we can't estimate (unknown model in
+  // PRICING table, OR prompt is missing for source-not-on-this-device
+  // case). Source response for cost = cloud one if present, else
+  // local fallback.
+  const sourceResponseForCost = baselineTrace?.response ?? localSourceResponse;
+  const sourceModel = job.source_model || DEFAULT_MODEL_PER_RUNTIME[job.source_runtime] || null;
+  const sourceCost =
+    baselineTrace?.cost_usd != null && baselineTrace.cost_usd > 0
+      ? baselineTrace.cost_usd
+      : estimateCostUsd(sourceModel, localSourcePrompt, sourceResponseForCost) || null;
+  const targetModel = job.target_model || DEFAULT_MODEL_PER_RUNTIME[job.target_runtime] || null;
+  const replayCost = estimateCostUsd(targetModel, localSourcePrompt, job.response) || null;
+  const costDeltaUsd =
+    sourceCost !== null && replayCost !== null ? replayCost - sourceCost : null;
 
   return (
     <section className="rounded-lg border border-cs-accent/30 bg-cs-accent/5 p-3 space-y-2">
@@ -817,9 +839,13 @@ function ReplayResultPanel({
             />
             <DiffStat
               icon={<DollarSign size={10} />}
-              label={t("insights.replay.cost", "Cost")}
-              delta="—"
-              good
+              label={t("insights.replay.cost", "Cost (est.)")}
+              delta={
+                costDeltaUsd !== null
+                  ? `${costDeltaUsd >= 0 ? "+" : "-"}$${Math.abs(costDeltaUsd).toFixed(4)}`
+                  : "—"
+              }
+              good={costDeltaUsd !== null ? costDeltaUsd <= 0 : true}
             />
             <DiffStat
               icon={<Cpu size={10} />}
@@ -830,8 +856,8 @@ function ReplayResultPanel({
           </div>
           <p className="text-[10px] text-cs-muted">
             {t(
-              "insights.replay.costPunt",
-              "Cost capture for replay results lands in a follow-up — desktop dispatches don't track tokens yet, only deployed bundles do.",
+              "insights.replay.costEstimateNote",
+              "Cost is estimated from token counts × published per-million pricing. Real numbers when models are in our pricing table; \"—\" when unknown or when the source prompt isn't local.",
             )}
           </p>
         </>

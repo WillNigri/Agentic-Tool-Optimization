@@ -1724,6 +1724,23 @@ export async function getExecutionLogResponseByCloudTraceId(
   });
 }
 
+export interface LocalPromptResponse {
+  prompt: string | null;
+  response: string | null;
+}
+
+/** v2.1.4 — Returns both prompt and response for a cloud trace from
+ *  local execution_logs. Powers replay cost estimation (need prompt
+ *  AND response to multiply tokens × pricing). Both fields null when
+ *  the trace originated from a different machine. */
+export async function getExecutionLogIoByCloudTraceId(
+  cloudTraceId: string,
+): Promise<LocalPromptResponse> {
+  return invoke<LocalPromptResponse>('get_execution_log_io_by_cloud_trace_id', {
+    cloudTraceId,
+  });
+}
+
 // ============================================================================
 // Health Checks
 // ============================================================================
