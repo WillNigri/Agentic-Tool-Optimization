@@ -70,7 +70,8 @@
 ---
 
 ### v1.0.0 — Production Ready (Released April 2026)
-- SDK (`@ato-sdk/js`), web dashboard, cost tracking
+- SDK (`@ato-sdk/js`) — narrow-scoped trace forwarder for ATO-authored agents deployed outside the desktop app (Cloudflare Worker / Vercel / Docker / Node bundles). **Not** a general-purpose LLM observability SDK; that's Langfuse / Helicone / LangSmith territory and we stay out of that lane (see `STRATEGY.md` in `ato-cloud`).
+- Web dashboard, cost tracking
 - LLM API key management, audit logging, agent monitor
 - SSO, rate limiting, Homebrew tap
 

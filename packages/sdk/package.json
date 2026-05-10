@@ -1,7 +1,7 @@
 {
   "name": "@ato-sdk/js",
-  "version": "0.2.0",
-  "description": "Auto-capture LLM traces for ATO — works with Anthropic, OpenAI, and any LLM provider",
+  "version": "0.3.0",
+  "description": "Trace forwarder for ATO-authored agents deployed outside the desktop app. Not a general-purpose LLM observability SDK — for that, use Langfuse, Helicone, or LangSmith.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -36,16 +36,10 @@
   },
   "keywords": [
     "ato",
-    "llm",
-    "observability",
-    "tracing",
-    "anthropic",
-    "openai",
-    "claude",
-    "gpt",
-    "ai",
-    "monitoring",
-    "cost-tracking"
+    "agentictool",
+    "ai-agents",
+    "agent-deployment",
+    "trace-forwarder"
   ],
   "license": "MIT",
   "repository": {
