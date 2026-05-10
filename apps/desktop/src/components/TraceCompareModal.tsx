@@ -499,7 +499,10 @@ function DiffStat({
 // back to the parent so it can render the result panel inline.
 const REPLAY_RUNTIME_OPTIONS = ["claude", "codex", "gemini", "openclaw", "hermes"] as const;
 
-function ReplayPicker({
+// v2.2.0 — exported so the regression drill-down modal can reuse them
+// to wire "failing example → replay on alternative runtime" end-to-end
+// without re-implementing the picker + polling UI.
+export function ReplayPicker({
   baselineTrace,
   baselineTraceId,
   onClose,
@@ -640,7 +643,7 @@ function ReplayPicker({
 // "—" because v1 doesn't capture token usage on UI dispatches; it'll
 // earn a real number in a follow-up that adds the PRICING_PER_M_TOKENS
 // path to the desktop dispatch flow.
-function ReplayResultPanel({
+export function ReplayResultPanel({
   jobId,
   baselineTrace,
   onClear,

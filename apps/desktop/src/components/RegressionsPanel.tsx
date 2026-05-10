@@ -16,6 +16,7 @@ import {
   Zap,
   XCircle,
   Clock,
+  RotateCw,
 } from "lucide-react";
 import {
   getRegressions,
@@ -27,6 +28,10 @@ import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
+// v2.2.0 — failing-example → replay-on-alt-runtime wiring. Reuses the
+// ReplayPicker + ReplayResultPanel components originally built for
+// TraceCompareModal so the UX is identical wherever replay surfaces.
+import { ReplayPicker, ReplayResultPanel } from "./TraceCompareModal";
 
 // v2.1.0 Phase 5 — Cross-runtime regression detection.
 //
@@ -421,6 +426,12 @@ function Empty({
 // traces. The aggregate delta tells you something dropped; this tells you
 // WHICH conversations failed so you can read the prompts + errors and
 // decide whether to roll back or just patch the prompt.
+//
+// v2.2.0 — each failing example gains a "Replay on alt runtime" button.
+// Closes the loop the strategy audit flagged as the highest-leverage
+// connection: regression detector tells you what broke, replay tells
+// you whether the alternative would have been right. Picker + result
+// panel reuse the components from TraceCompareModal.
 function RegressionDrillModal({
   row,
   onClose,
@@ -429,6 +440,13 @@ function RegressionDrillModal({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  // Picker state: which trace's "Replay on…" picker is open.
+  const [pickerTrace, setPickerTrace] = useState<CloudAgentTrace | null>(null);
+  // Active replay state: which job is running + the trace it replays.
+  const [activeReplay, setActiveReplay] = useState<{
+    jobId: string;
+    trace: CloudAgentTrace;
+  } | null>(null);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -460,19 +478,51 @@ function RegressionDrillModal({
             {t("common.close", "Close")}
           </button>
         </header>
-        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+          {/* Active replay surfaces at the top so the side-by-side is
+              the first thing the user sees after triggering one. */}
+          {activeReplay && (
+            <ReplayResultPanel
+              jobId={activeReplay.jobId}
+              baselineTrace={activeReplay.trace}
+              onClear={() => setActiveReplay(null)}
+            />
+          )}
           <ul className="space-y-2">
             {row.failing_trace_ids.map((traceId) => (
-              <FailingTraceRow key={traceId} traceId={traceId} />
+              <FailingTraceRow
+                key={traceId}
+                traceId={traceId}
+                onReplay={(trace) => setPickerTrace(trace)}
+              />
             ))}
           </ul>
         </div>
       </div>
+      {/* Replay picker submodal — opens above the drill modal with a
+          higher z-index so the click-outside-to-close behaviour works. */}
+      {pickerTrace && (
+        <ReplayPicker
+          baselineTrace={pickerTrace}
+          baselineTraceId={pickerTrace.id}
+          onClose={() => setPickerTrace(null)}
+          onStarted={(jobId) => {
+            setActiveReplay({ jobId, trace: pickerTrace });
+            setPickerTrace(null);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function FailingTraceRow({ traceId }: { traceId: string }) {
+function FailingTraceRow({
+  traceId,
+  onReplay,
+}: {
+  traceId: string;
+  onReplay: (trace: CloudAgentTrace) => void;
+}) {
   const { t } = useTranslation();
   const traceQuery = useQuery({
     queryKey: ["trace-by-id", traceId],
@@ -506,6 +556,22 @@ function FailingTraceRow({ traceId }: { traceId: string }) {
           <Clock size={9} />
           {tr.duration_ms}ms
         </span>
+        {/* v2.2.0 — Replay this failing example on a different runtime.
+            Closes the regression → replay loop without leaving the
+            modal: dispatch goes through prompt_agent_inner, the result
+            panel surfaces at the top of this drill view. */}
+        <button
+          type="button"
+          onClick={() => onReplay(tr)}
+          className="inline-flex items-center gap-1 rounded-md border border-cs-accent/40 bg-cs-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-cs-accent hover:bg-cs-accent/20"
+          title={t(
+            "insights.regressions.replayHint",
+            "Re-run this prompt against a different runtime to check if it would have passed",
+          )}
+        >
+          <RotateCw size={9} />
+          {t("insights.regressions.replay", "Replay on…")}
+        </button>
       </div>
       {tr.prompt_summary && (
         <div className="mt-1.5 rounded border border-cs-border bg-cs-bg px-2 py-1 text-[11px] text-cs-text">
