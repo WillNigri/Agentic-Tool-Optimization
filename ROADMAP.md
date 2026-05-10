@@ -240,21 +240,9 @@ Patch on `2.0.0`. All fixes for things broken-as-shipped, plus two Phase 5 bulle
 - **CI fix** — extracted `queryClient` from `main.tsx` to `lib/queryClient.ts` so non-React callers (the demo store) don't drag in `ReactDOM.createRoot(...)` at module load. Vitest's jsdom env was crashing on every CI run since v2.0.0-alpha.x.
 - **Diagnostic on Pipelines empty state** + console-logged trace upload failures, so the next "panel says empty" mystery is a 30-second diagnosis instead of a 30-minute one.
 
-### v3.0.0+ — Multi-Tenant + Compliance (Planned, exploratory)
-- **Team workspaces** — shared agents, shared knowledge, shared trace history with per-member ACLs.
-- **PII / safety scanning** — auto-flag conversations with sensitive data; redact-on-export.
-- **Compliance bundles** — SOC2-ready audit log, retention controls, export-on-request, BYOK encryption.
-- **Marketplace for agent templates** — community-submitted agent recipes; revenue share if the OSS marketplace earns from sponsored placements.
-- **Agent versioning + rollback** — `git`-style history per agent, A/B routing, canary deploys.
+### v3.0.0+ / v4.0.0+ / v5.0.0+ — Blue-sky
 
-### v4.0.0+ — Federated Agent Network (Speculative)
-- **Agent-to-agent discovery protocol** — agents on different ATO installations can call each other via a registered handle (`acme/triage` → `acme/legal-review`). MCP-based, optional.
-- **Cross-tenant audit / abuse defense** — when external agents call each other, who pays / who's responsible / how is provenance preserved.
-- **Agent reputation system** — an agent's track record (success rate, eval scores, conversations served) becomes a portable signal across deployments.
-
-### v5.0.0+ — Open Standards / Spin-out Layer (Speculative)
-- **ATO becomes the reference implementation** for an open agent-deployment standard, similar to how `kubectl` is the reference for Kubernetes' API. Anyone can build a competing GUI / hosting provider that speaks the same agent spec.
-- **Plugin SDK** — third parties (Cursor, Windsurf, Aider, etc.) implement the protocol so the same agent runs unchanged across runtimes.
+Items that previously sat in this section (federated agent network, kubectl-for-agents, compliance bundles, marketplace for agent templates, etc.) have been moved to [`BLUE-SKY.md`](BLUE-SKY.md). They don't currently fit the north star (`ato-cloud/docs/STRATEGY.md`: *the developer-workflow operations layer for multi-runtime AI agents*). They live in the blue-sky doc so engineering decisions don't drift into them by accident; reconsider only when a north-star invalidation trigger fires.
 
 ### v1.7.0–1.8.0 — Polish (Planned, fits between v1.6 and v2.0)
 - Cron-driven evaluator scheduling
