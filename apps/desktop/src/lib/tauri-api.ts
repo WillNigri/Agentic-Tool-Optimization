@@ -1668,6 +1668,11 @@ export interface ReplayJob {
   error_message: string | null;
   started_at: string;
   finished_at: string | null;
+  // v2.2.0 — persisted cost estimate. Null when job is pending/running
+  // or when the target model isn't in the pricing table.
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd_estimated: number | null;
 }
 
 /** Best-effort link of a freshly-uploaded cloud trace back to its local

@@ -3185,7 +3185,7 @@ async fn prompt_agent_inner(
     // MCP run_agent, headless cron) since they all funnel through
     // prompt_agent_inner.
     let duration_ms = started.elapsed().as_millis() as i32;
-    persist_execution_log(&runtime, &prompt, &result, duration_ms);
+    persist_execution_log(&runtime, &prompt, &result, duration_ms, model_override.as_deref());
     result
 }
 
@@ -3193,7 +3193,20 @@ async fn prompt_agent_inner(
 /// connection because callers may be outside the Tauri State context
 /// (group stages, headless cron). Errors are swallowed — observability
 /// must never break the dispatch path.
-fn persist_execution_log(runtime: &str, prompt: &str, result: &Result<String, String>, duration_ms: i32) {
+///
+/// v2.2.0 — captures estimated tokens (4 chars/token rule) and USD cost
+/// (per-M pricing lookup) for every dispatch where the model is known.
+/// Cost is an estimate, surfaced as "est." in the UI. Real captured
+/// token counts from runtime SDK responses are a follow-up; estimation
+/// is honest enough that Compare/Cost Recs/Replay show real numbers
+/// instead of "—" for every model in the pricing table.
+fn persist_execution_log(
+    runtime: &str,
+    prompt: &str,
+    result: &Result<String, String>,
+    duration_ms: i32,
+    model_override: Option<&str>,
+) {
     let db_path = crate::get_db_path();
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
@@ -3205,19 +3218,106 @@ fn persist_execution_log(runtime: &str, prompt: &str, result: &Result<String, St
         Ok(r) => (Some(truncate_for_log(r)), "success", None),
         Err(e) => (None, "error", Some(truncate_for_log(e))),
     };
+    // Resolve effective model (override → runtime default). Token/cost
+    // estimates only compute when we have a model we can price.
+    let effective_model = model_override
+        .filter(|s| !s.is_empty())
+        .or_else(|| default_model_for_runtime(runtime));
+    let response_text = response.as_deref().unwrap_or("");
+    let (tokens_in, tokens_out, cost_usd): (Option<i64>, Option<i64>, Option<f64>) =
+        match effective_model {
+            Some(model) if pricing_for_model(model).is_some() => {
+                let ti = estimate_text_tokens(prompt);
+                let to = estimate_text_tokens(response_text);
+                let cost = estimate_cost_usd(model, prompt, response_text);
+                (Some(ti), Some(to), cost)
+            }
+            _ => (None, None, None),
+        };
     let _ = conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, NULL, ?8)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11)",
         rusqlite::params![
             id,
             runtime,
             truncate_for_log(prompt),
             response,
+            tokens_in,
+            tokens_out,
             duration_ms,
             status,
             error_message,
             now,
+            cost_usd,
         ],
     );
+}
+
+// ── v2.2.0 cost estimation helpers ────────────────────────────────────
+//
+// Mirrors apps/desktop/src/lib/pricing.ts. Keep the two tables in sync:
+// the JS table is the source of truth for UI/Compare/Replay rendering,
+// this one is what the dispatch path writes into execution_logs so that
+// History/Insights queries don't have to recompute on every read.
+
+/// 4-chars-per-token heuristic — same as estimateTokens() in pricing.ts.
+/// Within ~15% of real tokenizer counts for English prose, more off for
+/// code (which is denser). Acceptable for cost-comparison; not billing.
+/// Named distinctly from the byte-count `estimate_tokens` at line 115
+/// (used by the context-usage code path) to avoid the name collision.
+fn estimate_text_tokens(text: &str) -> i64 {
+    if text.is_empty() {
+        return 0;
+    }
+    (text.len() as i64 + 3) / 4
+}
+
+/// Per-million-token (input, output) USD pricing for known models.
+/// Mirror of PRICING_PER_M_TOKENS in pricing.ts; update both together.
+fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
+    match model {
+        // Anthropic
+        "claude-opus-4-7" => Some((15.0, 75.0)),
+        "claude-opus-4-6" => Some((15.0, 75.0)),
+        "claude-sonnet-4-6" => Some((3.0, 15.0)),
+        "claude-sonnet-4-5" => Some((3.0, 15.0)),
+        "claude-haiku-4-5-20251001" => Some((1.0, 5.0)),
+        // OpenAI
+        "gpt-4.1" => Some((2.5, 10.0)),
+        "gpt-4o" => Some((2.5, 10.0)),
+        "gpt-4o-mini" => Some((0.15, 0.6)),
+        // Google
+        "gemini-2.0-flash" => Some((0.1, 0.4)),
+        "gemini-1.5-pro" => Some((1.25, 5.0)),
+        "gemini-1.5-flash" => Some((0.075, 0.3)),
+        _ => None,
+    }
+}
+
+/// Mirror of DEFAULT_MODEL_PER_RUNTIME in pricing.ts — what the runtime
+/// CLI defaults to when no explicit `--model` is passed. Letting the
+/// dispatch path estimate cost even when the caller didn't specify a
+/// model is the difference between "every dispatch has a cost number"
+/// and "only configured agents do."
+fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
+    match runtime {
+        "claude" => Some("claude-sonnet-4-6"),
+        "codex" => Some("gpt-4.1"),
+        "gemini" => Some("gemini-2.0-flash"),
+        _ => None,
+    }
+}
+
+/// Estimate USD cost for (model, prompt, response). Returns None when
+/// the model isn't in the pricing table — caller should treat None as
+/// "unknown" rather than zero so the UI can render "—" for honesty.
+fn estimate_cost_usd(model: &str, prompt: &str, response: &str) -> Option<f64> {
+    let (in_per_m, out_per_m) = pricing_for_model(model)?;
+    let in_tokens = estimate_text_tokens(prompt) as f64;
+    let out_tokens = estimate_text_tokens(response) as f64;
+    let cost = (in_tokens / 1_000_000.0) * in_per_m + (out_tokens / 1_000_000.0) * out_per_m;
+    // Round to 6 decimals — fractional cents matter at scale; truncating
+    // earlier loses precision for cheap models.
+    Some((cost * 1_000_000.0).round() / 1_000_000.0)
 }
 
 /// 64 KB cap on prompt/response/error text persisted into SQLite. A
@@ -3309,6 +3409,11 @@ pub struct ReplayJob {
     pub error_message: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+    // v2.2.0 — captured cost estimate for the replay output. Stays None
+    // for pending/running jobs and for models we don't have pricing for.
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost_usd_estimated: Option<f64>,
 }
 
 /// Queue a replay of the given cloud trace's prompt against a different
@@ -3398,8 +3503,9 @@ pub async fn start_replay(
         // Source is "desktop:replay" so traces flagged distinctly when
         // we eventually surface "this run is itself a replay" in the UI.
         let agent_slug = Some(format!("replay-of-{}", &cloud_trace_id[..8]));
+        let prompt_for_cost = prompt.clone();
         let result = prompt_agent_inner(
-            target_runtime_for_task,
+            target_runtime_for_task.clone(),
             prompt,
             config,
             agent_slug,
@@ -3409,7 +3515,14 @@ pub async fn start_replay(
         .await;
 
         let duration_ms = dispatch_started.elapsed().as_millis() as i32;
-        let _ = finish_replay(&job_id_for_task, result, duration_ms);
+        let _ = finish_replay(
+            &job_id_for_task,
+            result,
+            duration_ms,
+            &prompt_for_cost,
+            &target_runtime_for_task,
+            target_model_for_task.as_deref(),
+        );
     });
 
     Ok(job_id)
@@ -3430,6 +3543,13 @@ fn finish_replay(
     job_id: &str,
     result: Result<String, String>,
     duration_ms: i32,
+    // v2.2.0 — capture estimated tokens + cost for the replay output
+    // so the replay panel reads a persisted value instead of recomputing
+    // on every render. prompt is the source prompt that was replayed;
+    // target_runtime + target_model identify which pricing row applies.
+    prompt: &str,
+    target_runtime: &str,
+    target_model: Option<&str>,
 ) -> Result<(), String> {
     let db_path = crate::get_db_path();
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
@@ -3438,11 +3558,36 @@ fn finish_replay(
         Ok(r) => ("done", Some(truncate_for_log(&r)), None),
         Err(e) => ("failed", None, Some(truncate_for_log(&e))),
     };
+    let effective_model = target_model
+        .filter(|s| !s.is_empty())
+        .or_else(|| default_model_for_runtime(target_runtime));
+    let response_text = response.as_deref().unwrap_or("");
+    let (tokens_in, tokens_out, cost_usd): (Option<i64>, Option<i64>, Option<f64>) =
+        match effective_model {
+            Some(model) if pricing_for_model(model).is_some() => {
+                let ti = estimate_text_tokens(prompt);
+                let to = estimate_text_tokens(response_text);
+                let cost = estimate_cost_usd(model, prompt, response_text);
+                (Some(ti), Some(to), cost)
+            }
+            _ => (None, None, None),
+        };
     conn.execute(
         "UPDATE replay_jobs
-            SET status = ?1, response = ?2, duration_ms = ?3, error_message = ?4, finished_at = ?5
-          WHERE id = ?6",
-        rusqlite::params![status, response, duration_ms, error, finished_at, job_id],
+            SET status = ?1, response = ?2, duration_ms = ?3, error_message = ?4,
+                finished_at = ?5, input_tokens = ?6, output_tokens = ?7, cost_usd_estimated = ?8
+          WHERE id = ?9",
+        rusqlite::params![
+            status,
+            response,
+            duration_ms,
+            error,
+            finished_at,
+            tokens_in,
+            tokens_out,
+            cost_usd,
+            job_id
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -3455,7 +3600,8 @@ pub fn get_replay_job(id: String) -> Result<ReplayJob, String> {
     conn.query_row(
         "SELECT id, source_execution_log_id, source_cloud_trace_id, source_runtime,
                 source_model, target_runtime, target_model, status, response,
-                duration_ms, error_message, started_at, finished_at
+                duration_ms, error_message, started_at, finished_at,
+                input_tokens, output_tokens, cost_usd_estimated
            FROM replay_jobs WHERE id = ?1",
         rusqlite::params![id],
         |r| {
@@ -3473,6 +3619,9 @@ pub fn get_replay_job(id: String) -> Result<ReplayJob, String> {
                 error_message: r.get(10)?,
                 started_at: r.get(11)?,
                 finished_at: r.get(12)?,
+                input_tokens: r.get(13)?,
+                output_tokens: r.get(14)?,
+                cost_usd_estimated: r.get(15)?,
             })
         },
     )
@@ -3540,7 +3689,8 @@ pub fn list_replays_for_trace(cloud_trace_id: String) -> Result<Vec<ReplayJob>, 
         .prepare(
             "SELECT id, source_execution_log_id, source_cloud_trace_id, source_runtime,
                     source_model, target_runtime, target_model, status, response,
-                    duration_ms, error_message, started_at, finished_at
+                    duration_ms, error_message, started_at, finished_at,
+                    input_tokens, output_tokens, cost_usd_estimated
                FROM replay_jobs
               WHERE source_cloud_trace_id = ?1
               ORDER BY started_at DESC
@@ -3563,6 +3713,9 @@ pub fn list_replays_for_trace(cloud_trace_id: String) -> Result<Vec<ReplayJob>, 
                 error_message: r.get(10)?,
                 started_at: r.get(11)?,
                 finished_at: r.get(12)?,
+                input_tokens: r.get(13)?,
+                output_tokens: r.get(14)?,
+                cost_usd_estimated: r.get(15)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -14681,7 +14834,7 @@ async fn spawn_streaming_dispatch(
         // if execution_logs is empty when the link command runs, the
         // ±10s temporal match has nothing to attach the cloud trace
         // ID to, and replay fails with prompt-not-local.
-        persist_execution_log(runtime, prompt, &Ok(full.clone()), duration_ms);
+        persist_execution_log(runtime, prompt, &Ok(full.clone()), duration_ms, model_override.as_deref());
         let _ = on_event.send(StreamEvent::Done { full });
     } else {
         // Drain stderr for the error message — best-effort.
@@ -14694,7 +14847,7 @@ async fn spawn_streaming_dispatch(
         } else {
             err_text
         };
-        persist_execution_log(runtime, prompt, &Err(final_msg.clone()), duration_ms);
+        persist_execution_log(runtime, prompt, &Err(final_msg.clone()), duration_ms, model_override.as_deref());
         let _ = on_event.send(StreamEvent::Error { message: final_msg });
     }
 

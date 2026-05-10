@@ -742,6 +742,15 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE agent_hooks ADD COLUMN fire_mode TEXT NOT NULL DEFAULT 'always'",
         [],
     );
+    // v2.2.0 — captured cost per dispatch. execution_logs already has
+    // tokens_in / tokens_out; we add the computed USD value alongside so
+    // panels can read a single column instead of recomputing on every
+    // render. replay_jobs gets token + cost columns from scratch (the
+    // table is v2.1.0 and was shipped without them).
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN cost_usd_estimated REAL", []);
+    let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN input_tokens INTEGER", []);
+    let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN output_tokens INTEGER", []);
+    let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN cost_usd_estimated REAL", []);
 }
 
 

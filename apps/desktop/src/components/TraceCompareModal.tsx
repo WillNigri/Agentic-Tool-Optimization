@@ -733,8 +733,10 @@ function ReplayResultPanel({
       : null;
   // v2.1.4 — estimated cost diff. Source cost: prefer cloud-recorded
   // cost_usd if uploaded with one; otherwise estimate from local
-  // prompt+response. Replay cost: estimate from local prompt + replay
-  // response. Returns null when we can't estimate (unknown model in
+  // prompt+response. Replay cost: v2.2.0 — read the persisted estimate
+  // from replay_jobs.cost_usd_estimated (computed Rust-side at dispatch
+  // finish); fall back to JS estimation for older rows that pre-date
+  // the column. Returns null when we can't estimate (unknown model in
   // PRICING table, OR prompt is missing for source-not-on-this-device
   // case). Source response for cost = cloud one if present, else
   // local fallback.
@@ -746,7 +748,11 @@ function ReplayResultPanel({
       ? baselineCostNum
       : estimateCostUsd(sourceModel, localSourcePrompt, sourceResponseForCost) || null;
   const targetModel = job.target_model || DEFAULT_MODEL_PER_RUNTIME[job.target_runtime] || null;
-  const replayCost = estimateCostUsd(targetModel, localSourcePrompt, job.response) || null;
+  const persistedReplayCost = asNumber(job.cost_usd_estimated);
+  const replayCost =
+    persistedReplayCost > 0
+      ? persistedReplayCost
+      : estimateCostUsd(targetModel, localSourcePrompt, job.response) || null;
   const costDeltaUsd =
     sourceCost !== null && replayCost !== null ? replayCost - sourceCost : null;
 
