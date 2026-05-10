@@ -10,6 +10,7 @@ import {
   Cpu,
   Clock,
   Sparkles,
+  StopCircle,
 } from "lucide-react";
 import { listActiveRuns, killActiveRun, type ActiveRun } from "@/lib/activeRuns";
 import { cn } from "@/lib/utils";
@@ -53,6 +54,30 @@ export default function LiveRuns() {
     }
   };
 
+  // v2.1.8+ — bulk kill. Confirm before firing N kills since this is
+  // destructive (each run gets SIGKILL'd, in-flight responses lost).
+  // Fires sequentially with Promise.allSettled so a single hang
+  // doesn't block the rest.
+  const onKillAll = async () => {
+    const runs = query.data ?? [];
+    if (runs.length === 0) return;
+    const confirmed = window.confirm(
+      t(
+        "insights.live.confirmKillAll",
+        "Kill all {{n}} running dispatches? In-flight responses will be lost.",
+        { n: runs.length },
+      ),
+    );
+    if (!confirmed) return;
+    setKilling(new Set(runs.map((r) => r.run_id)));
+    try {
+      await Promise.allSettled(runs.map((r) => killActiveRun(r.run_id)));
+      await queryClient.invalidateQueries({ queryKey: ["active-runs"] });
+    } finally {
+      setKilling(new Set());
+    }
+  };
+
   if (query.isLoading) {
     return (
       <div className="flex items-center justify-center h-32 text-cs-muted">
@@ -77,20 +102,36 @@ export default function LiveRuns() {
 
   return (
     <div className="space-y-3">
-      <header>
-        <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
-          <Activity size={14} className="text-cs-accent" />
-          {t("insights.live.title", "Live runs")}
-          {runs.length > 0 && (
-            <span className="ml-1 inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-cs-accent" />
-          )}
-        </h3>
-        <p className="mt-0.5 text-[11px] text-cs-muted">
-          {t(
-            "insights.live.subtitle",
-            "Every dispatch in flight right now. Kill stuck runs without reading the terminal buffer.",
-          )}
-        </p>
+      <header className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
+            <Activity size={14} className="text-cs-accent" />
+            {t("insights.live.title", "Live runs")}
+            {runs.length > 0 && (
+              <span className="ml-1 inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-cs-accent" />
+            )}
+          </h3>
+          <p className="mt-0.5 text-[11px] text-cs-muted">
+            {t(
+              "insights.live.subtitle",
+              "Every dispatch in flight right now. Kill stuck runs without reading the terminal buffer.",
+            )}
+          </p>
+        </div>
+        {/* v2.1.8 — bulk kill. Only renders when ≥2 runs (single-row
+            kill is one click already). Confirmation dialog avoids
+            accidental nuke during demos. */}
+        {runs.length >= 2 && (
+          <button
+            type="button"
+            onClick={onKillAll}
+            disabled={killing.size > 0}
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-cs-warn/40 bg-cs-warn/10 px-2 py-1 text-[11px] font-medium text-cs-warn hover:bg-cs-warn/20 disabled:opacity-60"
+          >
+            <StopCircle size={11} />
+            {t("insights.live.killAll", "Kill all ({{n}})", { n: runs.length })}
+          </button>
+        )}
       </header>
 
       {runs.length === 0 ? (
