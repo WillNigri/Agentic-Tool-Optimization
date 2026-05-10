@@ -14271,6 +14271,11 @@ async fn spawn_streaming_dispatch(
     use tokio::process::Command as TokioCommand;
     // (was tokio::sync::Mutex; replaced by oneshot channel for kill.)
 
+    // v2.1.1+ — dispatch start clock for execution_logs persistence.
+    // Streaming dispatches were skipping the persist call entirely
+    // (only prompt_agent_inner had it), so chat-pane runs never landed
+    // in History or got a `cloud_trace_id` link, breaking replay.
+    let dispatch_start = std::time::Instant::now();
     let user_path = get_user_path();
     let cfg_json: Option<serde_json::Value> = config.and_then(|c| serde_json::from_str(c).ok());
     let model_override: Option<String> = cfg_json
@@ -14481,7 +14486,14 @@ async fn spawn_streaming_dispatch(
         }
     };
 
+    let duration_ms = dispatch_start.elapsed().as_millis() as i32;
     if status.success() {
+        // v2.1.1+ — persist BEFORE emitting Done. Frontend's upload-
+        // and-link kicks in immediately after the Done event lands;
+        // if execution_logs is empty when the link command runs, the
+        // ±10s temporal match has nothing to attach the cloud trace
+        // ID to, and replay fails with prompt-not-local.
+        persist_execution_log(runtime, prompt, &Ok(full.clone()), duration_ms);
         let _ = on_event.send(StreamEvent::Done { full });
     } else {
         // Drain stderr for the error message — best-effort.
@@ -14489,13 +14501,13 @@ async fn spawn_streaming_dispatch(
         if let Some(mut stderr) = child.stderr.take() {
             let _ = stderr.read_to_string(&mut err_text).await;
         }
-        let _ = on_event.send(StreamEvent::Error {
-            message: if err_text.is_empty() {
-                format!("{} exited with status {}", runtime, status)
-            } else {
-                err_text
-            },
-        });
+        let final_msg = if err_text.is_empty() {
+            format!("{} exited with status {}", runtime, status)
+        } else {
+            err_text
+        };
+        persist_execution_log(runtime, prompt, &Err(final_msg.clone()), duration_ms);
+        let _ = on_event.send(StreamEvent::Error { message: final_msg });
     }
 
     Ok(())
