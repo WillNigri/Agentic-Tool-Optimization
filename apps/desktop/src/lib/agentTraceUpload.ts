@@ -81,6 +81,14 @@ export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
         agentSlug: trace.agentSlug,
         parentRunId: trace.parentRunId,
       });
+      // v2.1.10 — when the cloud rejects with 401, the session is dead.
+      // Clear tokens + flip isCloudUser=false so the UI surfaces a real
+      // "Sign in for Pro" prompt instead of every Pro panel sitting in
+      // a silent-empty-state limbo. Without this users hit unbounded
+      // 401 spam in DevTools and no visible signal in the app.
+      if (response.status === 401 || response.status === 403) {
+        useAuthStore.getState().logout();
+      }
       return;
     }
     // v2.1.0 Replay link. Cloud returns the inserted trace IDs; we

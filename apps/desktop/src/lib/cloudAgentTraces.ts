@@ -86,7 +86,17 @@ async function cloudGet<T>(path: string): Promise<T | null> {
   if (!headers) return null;
   const r = await fetch(`${CLOUD_API_URL}${path}`, { headers });
   if (!r.ok) {
-    if (r.status === 401 || r.status === 403) return null;
+    if (r.status === 401 || r.status === 403) {
+      // v2.1.10 — Same recovery path as agentTraceUpload. Without this
+      // every Pro GET (Compare, Pipelines, Regressions, Cost) would
+      // silent-fail and the user would have no clue why panels are
+      // empty. logout() preserves local mode (isAuthenticated stays
+      // true with the localUser) but flips isCloudUser=false so
+      // bottom-left flips back to "Sign in for Pro".
+      console.warn(`[cloud] ${path}: ${r.status} — session expired, logging out`);
+      useAuthStore.getState().logout();
+      return null;
+    }
     throw new Error(`cloud GET ${path}: ${r.status}`);
   }
   const body = await r.json();
