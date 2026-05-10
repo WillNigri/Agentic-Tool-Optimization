@@ -3250,8 +3250,17 @@ fn truncate_for_log(s: &str) -> String {
 /// Hand the local execution_logs row that just produced a cloud trace
 /// upload its corresponding cloud_trace_id, so future replay lookups can
 /// find the full prompt by trace ID. Best-effort temporal match — caller
-/// passes the cloud trace's started_at + runtime, we find the most recent
-/// matching local row inside a 10-second window.
+/// passes the cloud trace's started_at + runtime, we find the matching
+/// local row by walking forward from started_at.
+///
+/// v2.1.11 — Window widened from ±10s to [-30s, +5min]. The original
+/// ±10s window broke for slow stages (Codex pipelines >10s) because
+/// execution_logs.created_at is set when the dispatch FINISHES while
+/// the trace's started_at is when it STARTED. A 10.8s stage put the
+/// local row past the upper bound. Forward-skewed window aligns with
+/// the actual data: created_at is always ≥ started_at (modulo clock
+/// skew); 5min ceiling keeps the lookup specific enough that
+/// same-runtime collisions in a busy session don't mis-attribute.
 #[tauri::command]
 pub fn link_execution_log_to_cloud_trace(
     cloud_trace_id: String,
@@ -3260,12 +3269,13 @@ pub fn link_execution_log_to_cloud_trace(
 ) -> Result<bool, String> {
     let db_path = crate::get_db_path();
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-    // Parse started_at to find rows created within ±10s of it. Match on
-    // runtime + cloud_trace_id IS NULL to avoid double-attaching.
     let started =
         chrono::DateTime::parse_from_rfc3339(&started_at).map_err(|e| e.to_string())?;
-    let lower = (started - chrono::Duration::seconds(10)).to_rfc3339();
-    let upper = (started + chrono::Duration::seconds(10)).to_rfc3339();
+    // 30s back-tolerance covers minor clock skew between JS Date.now()
+    // and chrono::Utc::now(); 5min forward covers the slowest realistic
+    // dispatch + any post-dispatch processing latency.
+    let lower = (started - chrono::Duration::seconds(30)).to_rfc3339();
+    let upper = (started + chrono::Duration::minutes(5)).to_rfc3339();
     let updated = conn
         .execute(
             "UPDATE execution_logs
@@ -3275,7 +3285,7 @@ pub fn link_execution_log_to_cloud_trace(
                  WHERE runtime = ?2
                    AND cloud_trace_id IS NULL
                    AND created_at BETWEEN ?3 AND ?4
-                 ORDER BY created_at DESC
+                 ORDER BY created_at ASC
                  LIMIT 1
               )",
             rusqlite::params![cloud_trace_id, runtime, lower, upper],
