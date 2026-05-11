@@ -109,16 +109,18 @@ pub fn run(
         .filter(|s| !s.is_empty())
         .or_else(|| runtime::default_model_for_runtime(runtime_name).map(String::from));
 
+    // v2.3.6 — Token estimates only. CLI dispatches always go through
+    // the runtime CLI (claude --print, codex exec, gemini -p), which
+    // means subscription billing. We don't pretend to know the dollar
+    // cost; let the cost panels treat NULL as "subscription" cleanly.
+    // See persist_execution_log in the desktop crate for the matching
+    // rationale. Tokens are char-count based — populated regardless of
+    // whether we have an effective_model, so runtimes without a default
+    // model (openclaw, hermes) still get token rows.
     let response_for_cost = response_persisted.as_deref().unwrap_or("");
-    let (tokens_in, tokens_out, cost_usd): (Option<i64>, Option<i64>, Option<f64>) =
-        match effective_model.as_deref() {
-            Some(m) if runtime::pricing_for_model(m).is_some() => {
-                let ti = runtime::estimate_text_tokens(prompt);
-                let to = runtime::estimate_text_tokens(response_for_cost);
-                (Some(ti), Some(to), runtime::estimate_cost_usd(m, prompt, response_for_cost))
-            }
-            _ => (None, None, None),
-        };
+    let tokens_in = Some(runtime::estimate_text_tokens(prompt));
+    let tokens_out = Some(runtime::estimate_text_tokens(response_for_cost));
+    let cost_usd: Option<f64> = None;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();

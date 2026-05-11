@@ -116,6 +116,16 @@ ato regressions list [--days 30] [--window-hours 168] [--min-samples 20]
 # Cost recommendations (when historical multi-runtime data justifies a swap)
 ato cost recommendations [--days 30] [--min-runs 10]
 # [v2.3.2] — also local-mode. Same schema dependency as regressions.
+#
+# v2.3.6 caveat: cost-recommendations surface only when the relevant
+# dispatches were API-billed (cost_usd_estimated IS NOT NULL).
+# Dispatches via runtime-CLI subscriptions (claude --print, codex exec,
+# gemini -p) deliberately persist NULL cost — they don't bill per
+# token, so an "API-equivalent" dollar value would have been misleading.
+# As a result, users who exclusively use subscriptions will see empty
+# recommendations; that's correct (there's no cost to optimize). The
+# feature regains traction once a direct-API dispatch path lands and
+# subscription vs API rows can be distinguished by billing_source.
 
 # File attribution for a specific dispatch
 ato files-touched <run-id>

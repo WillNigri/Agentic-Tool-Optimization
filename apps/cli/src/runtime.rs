@@ -35,6 +35,12 @@ pub fn resolve_runtime_cli(runtime: &str) -> Result<PathBuf> {
 
 /// Per-million-token (input, output) pricing. Mirror of pricing.ts +
 /// commands.rs's pricing_for_model. Keep in sync when adding models.
+///
+/// v2.3.6 — unused inside the CLI's dispatch / replay paths since the
+/// switch to NULL cost for subscription runs. Kept for the future
+/// direct-API path (`ato dispatch --api-key`) and for ad-hoc usage
+/// like cost-of-equivalent comparisons.
+#[allow(dead_code)]
 pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
         // Anthropic
@@ -73,6 +79,10 @@ pub fn estimate_text_tokens(text: &str) -> i64 {
 }
 
 /// Estimate cost. Returns None when the model isn't in our pricing table.
+///
+/// v2.3.6 — unused inside the CLI's dispatch / replay paths (those use
+/// runtime-CLI subscriptions). Kept for the future direct-API path.
+#[allow(dead_code)]
 pub fn estimate_cost_usd(model: &str, prompt: &str, response: &str) -> Option<f64> {
     let (in_per_m, out_per_m) = pricing_for_model(model)?;
     let in_tokens = estimate_text_tokens(prompt) as f64;

@@ -3232,22 +3232,31 @@ fn persist_execution_log(
         Ok(r) => (Some(truncate_for_log(r)), "success", None),
         Err(e) => (None, "error", Some(truncate_for_log(e))),
     };
-    // Resolve effective model (override → runtime default). Token/cost
-    // estimates only compute when we have a model we can price.
+    // v2.3.6 — Token estimates only. Cost stays NULL for every dispatch
+    // through this path because runtime-CLI dispatches (claude --print,
+    // codex exec, gemini -p, etc.) use the user's *subscription* —
+    // they don't bill per token. Surfacing an "API-equivalent" dollar
+    // value here misled the cost panels into treating subscription rows
+    // as billed ones. Token counts are still useful for usage tracking,
+    // so they stay populated regardless of whether we have a pricing
+    // row — they're a pure char-count heuristic that works for any
+    // runtime including ones without a default model (openclaw, hermes).
+    //
+    // Direct-API dispatches (deploy bundles, future ato-cli --api-key
+    // path) will compute cost via a separate path that knows the
+    // dispatch was billed.
+    //
+    // TODO(v2.4): add a `billing_source` column on execution_logs so
+    // cost_usd_estimated NULL stops conflating four distinct states
+    // (subscription / unknown-model / pre-migration / pricing-failure).
     let effective_model = model_override
         .filter(|s| !s.is_empty())
         .or_else(|| default_model_for_runtime(runtime));
     let response_text = response.as_deref().unwrap_or("");
-    let (tokens_in, tokens_out, cost_usd): (Option<i64>, Option<i64>, Option<f64>) =
-        match effective_model {
-            Some(model) if pricing_for_model(model).is_some() => {
-                let ti = estimate_text_tokens(prompt);
-                let to = estimate_text_tokens(response_text);
-                let cost = estimate_cost_usd(model, prompt, response_text);
-                (Some(ti), Some(to), cost)
-            }
-            _ => (None, None, None),
-        };
+    // Token estimation is char-count based — independent of pricing.
+    let tokens_in = Some(estimate_text_tokens(prompt));
+    let tokens_out = Some(estimate_text_tokens(response_text));
+    let cost_usd: Option<f64> = None;
     // v2.3.2 — agent_slug + model columns make local-mode regressions
     // and cost recommendations possible (they need to join + group by
     // these). NULL stays valid for no-agent dispatches + ad-hoc runs
@@ -3293,6 +3302,12 @@ fn estimate_text_tokens(text: &str) -> i64 {
 
 /// Per-million-token (input, output) USD pricing for known models.
 /// Mirror of PRICING_PER_M_TOKENS in pricing.ts; update both together.
+///
+/// v2.3.6 — unused inside the runtime-CLI dispatch paths since the
+/// switch to NULL cost for subscription runs. Kept available for the
+/// future direct-API dispatch path + for ad-hoc callers (compare /
+/// replay panels that compute "if this were API, it would cost X").
+#[allow(dead_code)]
 fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
         // Anthropic
@@ -3330,6 +3345,10 @@ fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
 /// Estimate USD cost for (model, prompt, response). Returns None when
 /// the model isn't in the pricing table — caller should treat None as
 /// "unknown" rather than zero so the UI can render "—" for honesty.
+///
+/// v2.3.6 — unused inside runtime-CLI dispatch paths (subscription).
+/// Kept for the future direct-API path.
+#[allow(dead_code)]
 fn estimate_cost_usd(model: &str, prompt: &str, response: &str) -> Option<f64> {
     let (in_per_m, out_per_m) = pricing_for_model(model)?;
     let in_tokens = estimate_text_tokens(prompt) as f64;
@@ -3641,10 +3660,12 @@ fn finish_replay(
     job_id: &str,
     result: Result<String, String>,
     duration_ms: i32,
-    // v2.2.0 — capture estimated tokens + cost for the replay output
-    // so the replay panel reads a persisted value instead of recomputing
-    // on every render. prompt is the source prompt that was replayed;
-    // target_runtime + target_model identify which pricing row applies.
+    // v2.3.6 — capture estimated tokens for the replay output. Cost
+    // is NOT persisted here: the replay dispatch went through a
+    // runtime-CLI subscription, not direct-API. target_runtime +
+    // target_model are kept on the function signature for forward-
+    // compat with the future direct-API replay path but are unused
+    // inside finish_replay today.
     prompt: &str,
     target_runtime: &str,
     target_model: Option<&str>,
@@ -3656,20 +3677,18 @@ fn finish_replay(
         Ok(r) => ("done", Some(truncate_for_log(&r)), None),
         Err(e) => ("failed", None, Some(truncate_for_log(&e))),
     };
-    let effective_model = target_model
+    // v2.3.6 — Token estimates only; cost stays NULL. See the
+    // matching rationale in persist_execution_log: replays go through
+    // the same runtime-CLI subscription path, so an API-equivalent
+    // dollar value here would mislead the cost panels. Tokens decoupled
+    // from model availability — they're a pure char-count heuristic.
+    let _effective_model = target_model
         .filter(|s| !s.is_empty())
         .or_else(|| default_model_for_runtime(target_runtime));
     let response_text = response.as_deref().unwrap_or("");
-    let (tokens_in, tokens_out, cost_usd): (Option<i64>, Option<i64>, Option<f64>) =
-        match effective_model {
-            Some(model) if pricing_for_model(model).is_some() => {
-                let ti = estimate_text_tokens(prompt);
-                let to = estimate_text_tokens(response_text);
-                let cost = estimate_cost_usd(model, prompt, response_text);
-                (Some(ti), Some(to), cost)
-            }
-            _ => (None, None, None),
-        };
+    let tokens_in = Some(estimate_text_tokens(prompt));
+    let tokens_out = Some(estimate_text_tokens(response_text));
+    let cost_usd: Option<f64> = None;
     conn.execute(
         "UPDATE replay_jobs
             SET status = ?1, response = ?2, duration_ms = ?3, error_message = ?4,

@@ -284,16 +284,15 @@ fn run_replay_dispatch(
         .filter(|s| !s.is_empty())
         .or_else(|| runtime::default_model_for_runtime(runtime_name).map(String::from));
 
+    // v2.3.6 — Token estimates only. Same reasoning as dispatch::run
+    // and persist_execution_log: the runtime CLI uses the user's
+    // subscription, so an "API-equivalent" cost would mislead the
+    // cost panels into treating subscription rows as billed. Tokens
+    // decoupled from model availability.
     let response_for_cost = response_persisted.as_deref().unwrap_or("");
-    let (tokens_in, tokens_out, cost_usd): (Option<i64>, Option<i64>, Option<f64>) =
-        match effective_model.as_deref() {
-            Some(m) if runtime::pricing_for_model(m).is_some() => {
-                let ti = runtime::estimate_text_tokens(prompt);
-                let to = runtime::estimate_text_tokens(response_for_cost);
-                (Some(ti), Some(to), runtime::estimate_cost_usd(m, prompt, response_for_cost))
-            }
-            _ => (None, None, None),
-        };
+    let tokens_in = Some(runtime::estimate_text_tokens(prompt));
+    let tokens_out = Some(runtime::estimate_text_tokens(response_for_cost));
+    let cost_usd: Option<f64> = None;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
