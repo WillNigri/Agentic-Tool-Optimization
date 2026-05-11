@@ -859,6 +859,15 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_events_log_type_time ON events_log(event_type, occurred_at DESC)",
         [],
     );
+    // v2.3.15 Phase 4.9 — composite index for `ato events watch
+    // --type X` (codex 4.8 nit). The "type, occurred_at DESC" index
+    // doesn't support the watch query shape (WHERE event_type = ? AND
+    // event_seq > ? ORDER BY event_seq ASC) without an extra sort
+    // step on large ledgers. (event_type, event_seq) does.
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_log_type_seq ON events_log(event_type, event_seq)",
+        [],
+    );
 
     // v2.3.8 Phase 4.2 — Recipe execution audit. Every action the
     // engine runs leaves a row here so users can see "what did my

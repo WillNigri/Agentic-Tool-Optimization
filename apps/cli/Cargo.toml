@@ -1,6 +1,6 @@
 [package]
 name = "ato"
-version = "2.3.14"
+version = "2.3.15"
 edition = "2021"
 description = "ATO CLI — local-first developer-workflow operations platform for multi-runtime AI agents"
 license = "MIT"
@@ -25,3 +25,4 @@ uuid = { version = "1", features = ["v4"] }
 which = "6"
 # Color-aware output for --human mode
 colored = "2.1"
+ato-recipes = { path = "../../packages/ato-recipes" }

@@ -1,188 +1,25 @@
 // `ato recipes ...` — manage ops recipes.
 //
 // Talks to the same `ops_recipes` SQLite table the desktop manages.
-// Recipe type definitions are kept in sync between this file and
-// apps/desktop/src-tauri/src/recipes.rs. (Future refactor: extract
-// to a shared ato-core crate. For Phase 4 v1, duplication has a smaller
-// blast radius than the workspace restructure.)
+// Recipe types live in the `ato-recipes` shared crate (v2.3.15+) —
+// no more drift between this file and the desktop's recipes.rs.
 
 use crate::db;
 use crate::output::{emit_human, emit_json, Opts};
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-// ─── Types (mirror of recipes.rs in the desktop crate) ────────────────
+pub use ato_recipes::{
+    builtin_templates, validate_slug as shared_validate_slug, OpsRecipe, RecipeAction,
+    RecipeTrigger,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum RecipeTrigger {
-    #[serde(rename = "on_regression_detected")]
-    OnRegressionDetected {
-        severity: Option<String>,
-        agent_slug: Option<String>,
-    },
-    #[serde(rename = "on_dispatch_failed")]
-    OnDispatchFailed {
-        runtime: Option<String>,
-        agent_slug: Option<String>,
-    },
-    #[serde(rename = "on_replay_done")]
-    OnReplayDone {
-        status: Option<String>,
-        target_runtime: Option<String>,
-    },
-    #[serde(rename = "on_cost_threshold_exceeded")]
-    OnCostThresholdExceeded {
-        window: Option<String>,
-        agent_slug: Option<String>,
-    },
-    #[serde(rename = "on_schedule")]
-    OnSchedule {
-        cron: Option<String>,
-        agent_slug: Option<String>,
-    },
-    /// v2.3.13 Phase 4.7 — fires when an active dispatch has been
-    /// running for at least threshold_secs. Engine emits one event per
-    /// (run_id, threshold) crossing.
-    #[serde(rename = "on_dispatch_long_running")]
-    OnDispatchLongRunning {
-        runtime: Option<String>,
-        agent_slug: Option<String>,
-        threshold_secs: u32,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum RecipeAction {
-    #[serde(rename = "draft_skill_from_replay")]
-    DraftSkillFromReplay { out: Option<String> },
-    #[serde(rename = "replay_on_alt")]
-    ReplayOnAlt {
-        target_runtime: String,
-        target_model: Option<String>,
-    },
-    #[serde(rename = "kill_run")]
-    KillRun,
-    #[serde(rename = "dispatch_agent")]
-    DispatchAgent {
-        runtime: String,
-        agent_slug: Option<String>,
-        prompt_template: String,
-    },
-    #[serde(rename = "post_webhook")]
-    PostWebhook {
-        url: String,
-        body_template: Option<String>,
-    },
-    #[serde(rename = "notify_human")]
-    NotifyHuman { text_template: String },
-    #[serde(rename = "run_script")]
-    RunScript {
-        path: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpsRecipe {
-    pub id: String,
-    pub slug: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub trigger: RecipeTrigger,
-    pub action: RecipeAction,
-    pub enabled: bool,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-// ─── Templates ────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RecipeTemplate {
-    pub slug: String,
-    pub name: String,
-    pub description: String,
-    pub trigger: RecipeTrigger,
-    pub action: RecipeAction,
-}
-
-// TODO(v2.3.8): extract recipe types + templates to a shared crate
-// (e.g. crates/ato-recipes-core) so the CLI and desktop don't drift.
-// codex-reviewer caught wording drift in this initial commit. Until
-// the shared crate lands, keep these strings BYTE-IDENTICAL with
-// apps/desktop/src-tauri/src/recipes.rs::builtin_templates.
-fn builtin_templates() -> Vec<RecipeTemplate> {
-    vec![
-        // v2.3.9 — reinstated; RegressionDetected now carries
-        // old_value/new_value. Kept BYTE-IDENTICAL with the desktop
-        // crate's version. TODO(v2.3.8): extract to shared crate.
-        RecipeTemplate {
-            slug: "auto-replay-regression-failures".to_string(),
-            name: "Auto-replay regression failing examples".to_string(),
-            description:
-                "When a regression fires, replay each failing example on the previous runtime. \
-                The replay's own `replay_done` event can chain into the skillify-replays template \
-                below to draft skills automatically."
-                    .to_string(),
-            trigger: RecipeTrigger::OnRegressionDetected {
-                severity: Some("regression".to_string()),
-                agent_slug: None,
-            },
-            action: RecipeAction::ReplayOnAlt {
-                target_runtime: "{{previous_runtime}}".to_string(),
-                target_model: None,
-            },
-        },
-        RecipeTemplate {
-            slug: "skillify-successful-replays".to_string(),
-            name: "Skillify successful cross-runtime replays".to_string(),
-            description:
-                "When a replay succeeds on a different runtime than the original, draft a SKILL.md \
-                routing future similar prompts to the working runtime. Reviews are still up to the \
-                human — this only creates the draft."
-                    .to_string(),
-            trigger: RecipeTrigger::OnReplayDone {
-                status: Some("done".to_string()),
-                target_runtime: None,
-            },
-            action: RecipeAction::DraftSkillFromReplay { out: None },
-        },
-    ]
-}
-
-// ─── Slug validation (mirrors desktop recipes::validate_slug) ─────────
-//
-// Required because slug → filename in ~/.ato/recipes/<slug>.json.
-// Without sanitization, `--as ../escape` would write outside the
-// recipes dir. Caught by codex-reviewer in the v2.3.7 review.
-
+/// CLI wrapper preserving the anyhow::Error return shape. Forwards to
+/// ato_recipes::validate_slug.
 fn validate_slug(slug: &str) -> Result<()> {
-    if slug.is_empty() || slug.len() > 64 {
-        return Err(anyhow!("slug must be 1-64 characters"));
-    }
-    let bytes = slug.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() {
-        return Err(anyhow!("slug must start with a letter or digit"));
-    }
-    for &b in bytes {
-        let ok = b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
-        if !ok {
-            return Err(anyhow!(
-                "slug may only contain lowercase letters, digits, and hyphens; got '{}'",
-                slug
-            ));
-        }
-    }
-    if slug.contains("..") || slug.contains('/') || slug.contains('\\') {
-        return Err(anyhow!("slug contains illegal path characters"));
-    }
-    Ok(())
+    shared_validate_slug(slug).map_err(|e| anyhow!(e))
 }
 
 // ─── Schema check + paths ─────────────────────────────────────────────
@@ -368,8 +205,8 @@ pub fn install_template(
     }
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let trigger_type = trigger_type_name(&t.trigger);
-    let action_type = action_type_name(&t.action);
+    let trigger_type = ato_recipes::trigger_type_name(&t.trigger);
+    let action_type = ato_recipes::action_type_name(&t.action);
     let trigger_config = serde_json::to_string(&t.trigger)?;
     let action_config = serde_json::to_string(&t.action)?;
     conn.execute(
@@ -530,27 +367,6 @@ pub fn delete(conn: &Connection, slug: &str, opts: &Opts) -> Result<()> {
     Ok(())
 }
 
-// ─── Type-name helpers (duplicated from desktop) ──────────────────────
+// trigger_type_name + action_type_name live in the ato-recipes shared
+// crate. Use ato_recipes::trigger_type_name(...) directly where needed.
 
-fn trigger_type_name(t: &RecipeTrigger) -> &'static str {
-    match t {
-        RecipeTrigger::OnRegressionDetected { .. } => "on_regression_detected",
-        RecipeTrigger::OnDispatchFailed { .. } => "on_dispatch_failed",
-        RecipeTrigger::OnReplayDone { .. } => "on_replay_done",
-        RecipeTrigger::OnCostThresholdExceeded { .. } => "on_cost_threshold_exceeded",
-        RecipeTrigger::OnSchedule { .. } => "on_schedule",
-        RecipeTrigger::OnDispatchLongRunning { .. } => "on_dispatch_long_running",
-    }
-}
-
-fn action_type_name(a: &RecipeAction) -> &'static str {
-    match a {
-        RecipeAction::DraftSkillFromReplay { .. } => "draft_skill_from_replay",
-        RecipeAction::ReplayOnAlt { .. } => "replay_on_alt",
-        RecipeAction::KillRun => "kill_run",
-        RecipeAction::DispatchAgent { .. } => "dispatch_agent",
-        RecipeAction::PostWebhook { .. } => "post_webhook",
-        RecipeAction::NotifyHuman { .. } => "notify_human",
-        RecipeAction::RunScript { .. } => "run_script",
-    }
-}

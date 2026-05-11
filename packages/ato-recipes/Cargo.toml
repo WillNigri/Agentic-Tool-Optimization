@@ -1,0 +1,9 @@
+[package]
+name = "ato-recipes"
+version = "0.1.0"
+edition = "2021"
+description = "Shared ops-recipe types for ATO desktop + CLI. Pure type defs + slug validation + built-in template list. No I/O, no DB, no tokio."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

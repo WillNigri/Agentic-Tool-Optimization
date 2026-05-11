@@ -1760,15 +1760,10 @@ async fn replay_on_alt(
             )),
         };
     }
-    // KNOWN GAP (codex-reviewer v2.3.8): the desktop's `start_replay`
-    // only resolves source rows by `execution_logs.cloud_trace_id`,
-    // but DispatchFailed carries `run_id` which is `execution_logs.id`
-    // (no cloud trace yet). Until start_replay accepts execution_logs.id
-    // directly, the dispatch_failed → replay_on_alt chain will fail
-    // with "prompt-not-local". RegressionDetected's failing_trace_ids
-    // ARE cloud trace IDs, so that path works. v1 ships with only the
-    // ReplayDone → DraftSkillFromReplay loop fully wired; this path
-    // is documented but not yet usable end-to-end.
+    // start_replay accepts either cloud_trace_id OR execution_logs.id
+    // since v2.3.9 — the dispatch_failed → replay_on_alt chain now
+    // works for both RegressionDetected (failing_trace_ids are cloud
+    // trace IDs) and DispatchFailed (run_id is execution_logs.id).
     let source_trace_id = match event {
         AtoEvent::RegressionDetected {
             failing_trace_ids, ..

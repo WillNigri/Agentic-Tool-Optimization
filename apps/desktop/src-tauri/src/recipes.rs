@@ -1,4 +1,7 @@
 // v2.3.7 Phase 4 — Ops recipes storage + types.
+// v2.3.15 Phase 4.9 — Types extracted to the `ato-recipes` shared crate
+//                     to stop desktop/CLI drift. This file now only
+//                     handles desktop-side storage (SQLite + JSON mirror).
 //
 // Recipes are user-authored trigger→action workflows.
 //
@@ -8,18 +11,19 @@
 //   exists. It is NOT a hand-editable surface in this phase — edits
 //   to the JSON files are not reconciled back to SQLite. If the JSON
 //   write fails, the DB write is NOT rolled back; the recipe still
-//   works, the JSON is just stale. (Reconciliation + hand-editable
-//   import lands with the execution engine.)
-//
-// Phase 4.1 (this commit) ships storage + CRUD. The execution engine
-// (subscribes to events::bus, runs actions when triggers match) is a
-// separate follow-up — keeping storage decoupled from execution means
-// we can sanity-check the data model without entangling tokio tasks.
+//   works, the JSON is just stale.
 
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+// Re-export shared types so existing call sites (`crate::recipes::*`)
+// keep working without churn. The shared crate is the source of truth.
+pub use ato_recipes::{
+    action_type_name, builtin_templates, template_by_slug, trigger_type_name,
+    validate_slug as shared_validate_slug, CreateRecipeInput, OpsRecipe, RecipeAction,
+    RecipeTemplate, RecipeTrigger,
+};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -27,187 +31,10 @@ fn to_string_err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
-/// Validate a recipe slug. Required because the slug is used as a
-/// filename in ~/.ato/recipes/<slug>.json — without sanitization
-/// values like "../escape" or "/etc/passwd" would write outside the
-/// recipes directory. Caught by codex-reviewer in v2.3.7 review.
-///
-/// Shape: lowercase alphanumerics + hyphens, 1-64 chars, must start
-/// with alphanumeric. Mirrors how skills, agents, and runtimes name
-/// their disk-backed records.
+/// Local wrapper preserving the desktop crate's existing call shape.
+/// Forwards to ato_recipes::validate_slug — the source of truth.
 pub fn validate_slug(slug: &str) -> Result<()> {
-    if slug.is_empty() || slug.len() > 64 {
-        return Err("slug must be 1-64 characters".to_string());
-    }
-    let bytes = slug.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() {
-        return Err("slug must start with a letter or digit".to_string());
-    }
-    for &b in bytes {
-        let ok = b.is_ascii_lowercase()
-            || b.is_ascii_digit()
-            || b == b'-';
-        if !ok {
-            return Err(format!(
-                "slug may only contain lowercase letters, digits, and hyphens; got '{}'",
-                slug
-            ));
-        }
-    }
-    // Defensive: re-reject any path component shape, even though the
-    // character class already rules them out. Belt + suspenders.
-    if slug.contains("..") || slug.contains('/') || slug.contains('\\') {
-        return Err("slug contains illegal path characters".to_string());
-    }
-    Ok(())
-}
-
-// ─── Types ────────────────────────────────────────────────────────────
-
-/// Trigger types. Each variant matches one AtoEvent variant from
-/// events.rs, plus optional filter config so a single trigger can be
-/// scoped (e.g. "only severity=regression", "only target_runtime=codex").
-///
-/// The filter shape is intentionally loose JSON — recipes grow new
-/// filters over time without schema churn. Unknown filter keys are
-/// ignored at evaluation time (forward-compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum RecipeTrigger {
-    #[serde(rename = "on_regression_detected")]
-    OnRegressionDetected {
-        /// Optional: "regression" | "improvement". None = either.
-        severity: Option<String>,
-        /// Optional: only fire when this agent slug regressed.
-        agent_slug: Option<String>,
-    },
-    #[serde(rename = "on_dispatch_failed")]
-    OnDispatchFailed {
-        runtime: Option<String>,
-        agent_slug: Option<String>,
-    },
-    #[serde(rename = "on_replay_done")]
-    OnReplayDone {
-        /// "done" | "failed". None = either.
-        status: Option<String>,
-        /// Only fire when target_runtime matches.
-        target_runtime: Option<String>,
-    },
-    #[serde(rename = "on_cost_threshold_exceeded")]
-    OnCostThresholdExceeded {
-        /// "1d" | "7d" | "30d". None = any window.
-        window: Option<String>,
-        agent_slug: Option<String>,
-    },
-    #[serde(rename = "on_schedule")]
-    OnSchedule {
-        /// Cron expression. None = matches any scheduled tick.
-        cron: Option<String>,
-        agent_slug: Option<String>,
-    },
-
-    /// v2.3.13 Phase 4.7 — fires when an active dispatch has been
-    /// running for at least `threshold_secs`. The engine's watcher
-    /// task scans active_runs every 30s and emits one event per
-    /// (run_id, threshold) crossing, so a 10-min run with thresholds
-    /// 60s and 300s sees TWO events (one for each tier).
-    #[serde(rename = "on_dispatch_long_running")]
-    OnDispatchLongRunning {
-        /// Filter to a specific runtime ("claude" / "codex" / ...).
-        /// None matches any runtime.
-        runtime: Option<String>,
-        /// Filter to a specific agent slug. None matches any.
-        agent_slug: Option<String>,
-        /// REQUIRED threshold (seconds). The watcher only emits an
-        /// event when elapsed first crosses each subscribed threshold,
-        /// so missing this would fire on every 30s tick — noisy. The
-        /// recipe must declare its own tier.
-        threshold_secs: u32,
-    },
-}
-
-/// Action types — what to do when a trigger fires. Like triggers, each
-/// variant carries the minimum config it needs to execute.
-///
-/// Destructive actions (run_script, kill_run) get a runtime guard in
-/// the execution engine: a recipe can spend at most N tokens / kill at
-/// most N runs per day per recipe. Per-recipe caps land with the
-/// execution engine in a follow-up commit; the storage layer carries
-/// the action shape only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum RecipeAction {
-    /// Draft a SKILL.md from a successful replay. Equivalent to
-    /// `ato skills draft --from-replay <job-id>`. The replay job id
-    /// comes from the trigger payload at execution time.
-    #[serde(rename = "draft_skill_from_replay")]
-    DraftSkillFromReplay {
-        /// Optional output path template. Defaults to
-        /// `~/.<runtime>/skills/<slug>/SKILL.md`.
-        out: Option<String>,
-    },
-
-    /// Replay the trigger's source trace against an alternative runtime.
-    /// Equivalent to `ato replay start <trace-id> --runtime X`.
-    #[serde(rename = "replay_on_alt")]
-    ReplayOnAlt {
-        target_runtime: String,
-        target_model: Option<String>,
-    },
-
-    /// Kill the run referenced by the trigger payload. Used by stuck-
-    /// dispatch recovery recipes (e.g. "if a run hasn't finished in
-    /// 5 minutes, kill it").
-    #[serde(rename = "kill_run")]
-    KillRun,
-
-    /// Dispatch a new prompt to an agent. The prompt is a template
-    /// string with `{{trigger_field}}` placeholders that get filled
-    /// from the event payload at execution time.
-    #[serde(rename = "dispatch_agent")]
-    DispatchAgent {
-        runtime: String,
-        agent_slug: Option<String>,
-        prompt_template: String,
-    },
-
-    /// POST the event payload (plus optional template-derived body) to
-    /// a webhook URL. Useful for piping events out to Slack / Discord /
-    /// custom dashboards.
-    #[serde(rename = "post_webhook")]
-    PostWebhook {
-        url: String,
-        /// Optional JSON template; placeholders are filled from the
-        /// event payload. Defaults to the raw event as JSON.
-        body_template: Option<String>,
-    },
-
-    /// Post a message to the activity feed (Phase 5). Until the feed
-    /// lands, this action no-ops with a warning — so recipes that use
-    /// it can be authored today without breaking.
-    #[serde(rename = "notify_human")]
-    NotifyHuman { text_template: String },
-
-    /// Run a local shell script with the event payload as JSON on stdin.
-    #[serde(rename = "run_script")]
-    RunScript {
-        path: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpsRecipe {
-    pub id: String,
-    pub slug: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub trigger: RecipeTrigger,
-    pub action: RecipeAction,
-    pub enabled: bool,
-    pub created_at: String,
-    pub updated_at: String,
+    shared_validate_slug(slug)
 }
 
 // ─── Storage paths ────────────────────────────────────────────────────
@@ -287,21 +114,6 @@ pub fn create(conn: &Connection, input: CreateRecipeInput) -> Result<OpsRecipe> 
         eprintln!("warning: ops_recipes json mirror write failed for '{}': {}", recipe.slug, e);
     }
     Ok(recipe)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateRecipeInput {
-    pub slug: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub trigger: RecipeTrigger,
-    pub action: RecipeAction,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<OpsRecipe>> {
@@ -435,85 +247,5 @@ fn write_json_mirror(recipe: &OpsRecipe) -> Result<()> {
     Ok(())
 }
 
-// ─── Type-name helpers ────────────────────────────────────────────────
-
-fn trigger_type_name(t: &RecipeTrigger) -> &'static str {
-    match t {
-        RecipeTrigger::OnRegressionDetected { .. } => "on_regression_detected",
-        RecipeTrigger::OnDispatchFailed { .. } => "on_dispatch_failed",
-        RecipeTrigger::OnReplayDone { .. } => "on_replay_done",
-        RecipeTrigger::OnCostThresholdExceeded { .. } => "on_cost_threshold_exceeded",
-        RecipeTrigger::OnSchedule { .. } => "on_schedule",
-        RecipeTrigger::OnDispatchLongRunning { .. } => "on_dispatch_long_running",
-    }
-}
-
-fn action_type_name(a: &RecipeAction) -> &'static str {
-    match a {
-        RecipeAction::DraftSkillFromReplay { .. } => "draft_skill_from_replay",
-        RecipeAction::ReplayOnAlt { .. } => "replay_on_alt",
-        RecipeAction::KillRun => "kill_run",
-        RecipeAction::DispatchAgent { .. } => "dispatch_agent",
-        RecipeAction::PostWebhook { .. } => "post_webhook",
-        RecipeAction::NotifyHuman { .. } => "notify_human",
-        RecipeAction::RunScript { .. } => "run_script",
-    }
-}
-
-// ─── Templates ────────────────────────────────────────────────────────
-
-/// Pre-built recipe templates. Users `ato recipes install <slug>` to
-/// drop one into their workspace. Templates are the canonical example
-/// for each common workflow pattern — Skillify gets two so users see
-/// how a chain of recipes composes.
-#[derive(Debug, Clone, Serialize)]
-pub struct RecipeTemplate {
-    pub slug: String,
-    pub name: String,
-    pub description: String,
-    pub trigger: RecipeTrigger,
-    pub action: RecipeAction,
-}
-
-pub fn builtin_templates() -> Vec<RecipeTemplate> {
-    vec![
-        // v2.3.9 — reinstated. RegressionDetected now carries
-        // old_value/new_value so {{previous_runtime}} resolves
-        // correctly when the regression is on the "runtime" field.
-        RecipeTemplate {
-            slug: "auto-replay-regression-failures".to_string(),
-            name: "Auto-replay regression failing examples".to_string(),
-            description:
-                "When a regression fires, replay each failing example on the previous runtime. \
-                The replay's own `replay_done` event can chain into the skillify-replays template \
-                below to draft skills automatically."
-                    .to_string(),
-            trigger: RecipeTrigger::OnRegressionDetected {
-                severity: Some("regression".to_string()),
-                agent_slug: None,
-            },
-            action: RecipeAction::ReplayOnAlt {
-                target_runtime: "{{previous_runtime}}".to_string(),
-                target_model: None,
-            },
-        },
-        RecipeTemplate {
-            slug: "skillify-successful-replays".to_string(),
-            name: "Skillify successful cross-runtime replays".to_string(),
-            description:
-                "When a replay succeeds on a different runtime than the original, draft a SKILL.md \
-                routing future similar prompts to the working runtime. Reviews are still up to the \
-                human — this only creates the draft."
-                    .to_string(),
-            trigger: RecipeTrigger::OnReplayDone {
-                status: Some("done".to_string()),
-                target_runtime: None,
-            },
-            action: RecipeAction::DraftSkillFromReplay { out: None },
-        },
-    ]
-}
-
-pub fn template_by_slug(slug: &str) -> Option<RecipeTemplate> {
-    builtin_templates().into_iter().find(|t| t.slug == slug)
-}
+// Type-name helpers, RecipeTemplate, builtin_templates, template_by_slug
+// all live in the ato-recipes shared crate (re-exported above).
