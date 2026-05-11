@@ -49,6 +49,9 @@ pub fn for_trace(conn: &Connection, trace_id: &str, opts: &Opts) -> Result<()> {
         return Ok(());
     }
 
+    // v2.3.5 bug fix: also match on source_execution_log_id so replays
+    // of CLI-fired dispatches (which lack a cloud_trace_id) are
+    // queryable. Found via end-to-end test in the May 11 session.
     let mut stmt = conn.prepare(
         "SELECT id, source_execution_log_id, source_cloud_trace_id, source_runtime,
                 source_model, target_runtime, target_model, status, response,
@@ -56,6 +59,7 @@ pub fn for_trace(conn: &Connection, trace_id: &str, opts: &Opts) -> Result<()> {
                 cost_usd_estimated, started_at, finished_at
            FROM replay_jobs
           WHERE source_cloud_trace_id = ?1
+             OR source_execution_log_id = ?1
           ORDER BY started_at DESC
           LIMIT 50",
     ).context("Failed to prepare replays query")?;

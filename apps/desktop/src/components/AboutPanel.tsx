@@ -141,9 +141,29 @@ export default function AboutPanel() {
                 {t("about.uptodate", "You're on the latest version.")}
               </div>
             ) : check.kind === "error" ? (
-              <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 px-3 py-2 text-xs text-cs-text">
-                {t("about.checkFailed", "Update check failed:")}{" "}
-                <code className="font-mono">{check.message}</code>
+              <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 px-3 py-2 space-y-2 text-xs text-cs-text">
+                <div>
+                  {t("about.checkFailed", "Update check failed:")}{" "}
+                  <code className="font-mono">{check.message}</code>
+                </div>
+                {/* v2.3.5 — when auto-update can't reach the manifest
+                    (transient network, signed-off VPN, CDN edge issue),
+                    give the user an out: link straight to the releases
+                    page so they can download the latest manually. */}
+                <div className="text-cs-muted">
+                  {t(
+                    "about.checkFailedFallback",
+                    "If this keeps happening, you can download the latest release manually:",
+                  )}{" "}
+                  <a
+                    href="https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-cs-accent underline-offset-2 hover:underline"
+                  >
+                    github.com/WillNigri/Agentic-Tool-Optimization/releases/latest
+                  </a>
+                </div>
               </div>
             ) : null}
 

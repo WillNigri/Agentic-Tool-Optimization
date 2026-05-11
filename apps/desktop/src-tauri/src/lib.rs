@@ -6,6 +6,7 @@ mod file_attribution;
 mod active_runs;
 pub mod pty;
 pub mod local_insights;
+pub mod events;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
