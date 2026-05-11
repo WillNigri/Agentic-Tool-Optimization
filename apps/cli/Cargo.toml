@@ -1,0 +1,25 @@
+[package]
+name = "ato"
+version = "2.3.0-dev"
+edition = "2021"
+description = "ATO CLI — local-first developer-workflow operations platform for multi-runtime AI agents"
+license = "MIT"
+repository = "https://github.com/WillNigri/Agentic-Tool-Optimization"
+
+[[bin]]
+name = "ato"
+path = "src/main.rs"
+
+[dependencies]
+# Minimal deps — no Tauri, no React, no GUI. The CLI is a thin shell
+# around the same SQLite database the desktop reads/writes. Anything
+# beyond that (events, dispatch, etc.) shells out to ato-desktop via
+# IPC when the GUI is running, or talks to the DB directly when not.
+clap = { version = "4.5", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+# Color-aware output for --human mode
+colored = "2.1"

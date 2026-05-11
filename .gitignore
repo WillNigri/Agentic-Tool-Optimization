@@ -17,3 +17,6 @@ apps/desktop/src-tauri/gen/
 # Nested separate repos (do not commit as part of OSS)
 /homebrew-ato/
 
+
+# CLI build artifacts (apps/cli has its own target/ dir)
+apps/cli/target/
