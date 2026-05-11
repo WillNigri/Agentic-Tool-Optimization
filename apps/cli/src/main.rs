@@ -155,6 +155,22 @@ enum EventsSub {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Tail new events as they land. Emits one JSONL row per event.
+    Watch {
+        /// Only emit events of this type.
+        #[arg(long = "type")]
+        event_type: Option<String>,
+        /// Start streaming from this event_seq + 1. Default: skip
+        /// everything that exists now and only show new events.
+        #[arg(long = "since")]
+        since_seq: Option<i64>,
+        /// Stop after emitting N events (default: no cap).
+        #[arg(long = "max-rows")]
+        max_rows: Option<usize>,
+        /// Poll interval in milliseconds (default 500, min 100, max 5000).
+        #[arg(long = "poll-ms", default_value_t = 500)]
+        poll_ms: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -464,6 +480,19 @@ fn main() -> Result<()> {
             EventsSub::Recent { event_type, limit } => {
                 commands::events::recent(&ro_conn()?, event_type, limit, &opts)
             }
+            EventsSub::Watch {
+                event_type,
+                since_seq,
+                max_rows,
+                poll_ms,
+            } => commands::events::watch(
+                &db_path,
+                event_type,
+                since_seq,
+                max_rows,
+                poll_ms,
+                &opts,
+            ),
         },
         Commands::Agents { sub } => {
             let conn = db::open_readwrite(&db_path)?;
