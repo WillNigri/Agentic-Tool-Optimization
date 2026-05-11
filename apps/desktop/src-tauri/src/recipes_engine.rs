@@ -18,7 +18,26 @@
 use crate::events::{bus, AtoEvent, RegressionSeverity, ReplayStatus};
 use crate::recipes::{OpsRecipe, RecipeAction, RecipeTrigger};
 use rusqlite::Connection;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+/// v2.3.10 — per-recipe rate-limit mutexes. Codex flagged the
+/// previous check-then-insert as non-atomic: two concurrent
+/// handle_event invocations could both observe count=9 and both fire.
+/// Mutex<()> here serializes the "count + decide + insert" sequence
+/// per recipe slug. Different recipes lock independently.
+fn rate_limit_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_for_slug(slug: &str) -> Arc<Mutex<()>> {
+    let mut map = rate_limit_locks().lock().expect("rate-limit map poisoned");
+    map.entry(slug.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// Start the engine. Spawns TWO tokio tasks:
 ///   1. Live bus subscriber — fast path for in-process events
@@ -153,7 +172,51 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
         if !trigger_filters_match(&recipe.trigger, &event) {
             continue;
         }
-        // Audit row in 'running' state.
+
+        // v2.3.10 Phase 4.4 — per-recipe rate limit. Catches infinite
+        // recursion (action→event→same recipe) and general runaway
+        // recipes. 10 successful/failed runs in any 60s window per
+        // recipe. Rate-limited rows are NOT counted toward the next
+        // window's quota (codex #3 from the 4.4 review).
+        //
+        // Atomicity: the check-then-insert is serialized per recipe
+        // via a slug-keyed Mutex (codex #2). Different recipes lock
+        // independently so unrelated triggers stay parallel.
+        let slug_lock = lock_for_slug(&recipe.slug);
+        let _serialize = slug_lock.lock().expect("recipe rate-limit lock poisoned");
+        if let Some(count) = runs_in_window_executed_only(&recipe.slug, 60) {
+            if count >= 10 {
+                let run_id = uuid::Uuid::new_v4().to_string();
+                let started_at = chrono::Utc::now().to_rfc3339();
+                insert_run_row(
+                    &run_id,
+                    &recipe,
+                    event.event_seq() as i64,
+                    event_type,
+                    &event_payload,
+                    &started_at,
+                );
+                finalize_run_row(
+                    &run_id,
+                    ActionOutcome {
+                        status: "rate_limited",
+                        result: None,
+                        error: Some(format!(
+                            "recipe @{} hit the rate limit ({} executed runs in the last 60s)",
+                            recipe.slug, count
+                        )),
+                    },
+                    &started_at,
+                );
+                // Drop the lock before continuing.
+                drop(_serialize);
+                continue;
+            }
+        }
+
+        // Insert the audit row in 'running' state BEFORE releasing the
+        // lock — that way concurrent invocations see this run in
+        // runs_in_window_executed_only and back off correctly.
         let run_id = uuid::Uuid::new_v4().to_string();
         let started_at = chrono::Utc::now().to_rfc3339();
         insert_run_row(
@@ -164,6 +227,7 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
             &event_payload,
             &started_at,
         );
+        drop(_serialize);
 
         // Execute the action.
         let outcome = execute_action(&recipe.action, &event).await;
@@ -172,6 +236,24 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Count ops_recipe_runs rows for `slug` in the last `window_secs`
+/// seconds, EXCLUDING rate_limited rows (so blocked attempts don't
+/// extend the block window — codex #3 from the 4.4 review).
+fn runs_in_window_executed_only(slug: &str, window_secs: i64) -> Option<i64> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).ok()?;
+    let _ = conn.busy_timeout(Duration::from_millis(500));
+    let cutoff =
+        (chrono::Utc::now() - chrono::Duration::seconds(window_secs)).to_rfc3339();
+    conn.query_row(
+        "SELECT COUNT(*) FROM ops_recipe_runs WHERE recipe_slug = ?1 AND started_at > ?2 AND status != 'rate_limited'",
+        rusqlite::params![slug, cutoff],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
+}
+
 
 fn find_candidates(event_type: &str) -> Result<Vec<OpsRecipe>, String> {
     let db_path = crate::get_db_path();
@@ -365,18 +447,103 @@ async fn execute_action(action: &RecipeAction, event: &AtoEvent) -> ActionOutcom
             let resolved = substitute_simple_placeholders(target_runtime, event);
             replay_on_alt(event, &resolved, target_model.as_deref()).await
         }
-        // Stubs — Phase 4.3+
-        RecipeAction::KillRun
-        | RecipeAction::DispatchAgent { .. }
-        | RecipeAction::PostWebhook { .. }
+        // v2.3.10 Phase 4.4 — KillRun + DispatchAgent now implemented.
+        RecipeAction::KillRun => kill_run(event),
+        RecipeAction::DispatchAgent {
+            runtime,
+            agent_slug,
+            prompt_template,
+        } => {
+            let resolved_runtime = substitute_simple_placeholders(runtime, event);
+            let resolved_prompt = substitute_simple_placeholders(prompt_template, event);
+            dispatch_agent(&resolved_runtime, agent_slug.as_deref(), &resolved_prompt).await
+        }
+        // Phase 4.4 v1 stubs — PostWebhook needs reqwest dep
+        // decisions, RunScript needs explicit security review,
+        // NotifyHuman waits for Phase 5 activity feed.
+        RecipeAction::PostWebhook { .. }
         | RecipeAction::NotifyHuman { .. }
         | RecipeAction::RunScript { .. } => ActionOutcome {
             status: "not_implemented",
             result: None,
             error: Some(format!(
-                "Action '{:?}' is not yet implemented (Phase 4.3 lands the remaining executors).",
+                "Action '{}' is not yet implemented.",
                 action_name(action)
             )),
+        },
+    }
+}
+
+/// Executor: kill a run referenced by the trigger event's payload.
+///
+/// Honest scope (caught by codex in v2.3.10 review): in v1, the events
+/// that carry an ID DON'T carry a live active_runs registry key — they
+/// carry execution_logs.id (DispatchFailed fires AFTER the run has
+/// already finished, so there's nothing live to kill). So this executor
+/// will essentially always be a no-op until a future event type
+/// (e.g. DispatchTimedOut, or a periodic "long-running" tick) carries
+/// the live registry ID.
+///
+/// We return status="not_implemented_yet" rather than fake "done" to
+/// surface the limitation visibly. Reinstate full behavior when an
+/// event variant ships with an actionable live-registry key.
+fn kill_run(event: &AtoEvent) -> ActionOutcome {
+    ActionOutcome {
+        status: "not_implemented_yet",
+        result: None,
+        error: Some(format!(
+            "kill_run can't act on '{}' — the event carries execution_logs.id, not the live active_runs registry key. The action will work once an event variant ships with a live run handle (planned for a future 'on_dispatch_long_running' trigger).",
+            event.type_name()
+        )),
+    }
+}
+
+/// Executor: dispatch a prompt to an agent on a runtime. Useful for
+/// reactive workflows — "when a regression fires, ask @triage to
+/// investigate." Uses prompt_agent_inner (same path the GUI uses),
+/// not the CLI dispatch — so the new run shows up in Live Runs
+/// immediately.
+async fn dispatch_agent(
+    runtime: &str,
+    agent_slug: Option<&str>,
+    prompt: &str,
+) -> ActionOutcome {
+    if runtime.is_empty() {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some("dispatch_agent: empty runtime after substitution".to_string()),
+        };
+    }
+    if prompt.is_empty() {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some("dispatch_agent: empty prompt after substitution".to_string()),
+        };
+    }
+    match crate::prompt_agent(
+        runtime.to_string(),
+        prompt.to_string(),
+        None,                                  // config / model override unused for v1
+        agent_slug.map(|s| s.to_string()),
+        None,                                  // workspace unused
+    )
+    .await
+    {
+        Ok(response) => ActionOutcome {
+            status: "done",
+            result: Some(format!(
+                "Dispatched to {}: {} chars response",
+                runtime,
+                response.len()
+            )),
+            error: None,
+        },
+        Err(e) => ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(e),
         },
     }
 }
