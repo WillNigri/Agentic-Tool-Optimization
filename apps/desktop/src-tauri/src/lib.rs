@@ -5,6 +5,7 @@ mod telemetry;
 mod file_attribution;
 mod active_runs;
 pub mod pty;
+pub mod local_insights;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -751,6 +752,40 @@ pub fn init_database(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN input_tokens INTEGER", []);
     let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN output_tokens INTEGER", []);
     let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN cost_usd_estimated REAL", []);
+    // v2.3.2 — Phase 2: local-mode regressions + cost recommendations.
+    // The cloud computes both over agent_traces × agent_config_changes;
+    // for the offline-first surface we mirror enough locally to run
+    // the same algorithm without a sign-in. Two additions to
+    // execution_logs (agent_slug + model) make per-agent + per-model
+    // aggregation possible; a new agent_config_changes table holds
+    // the ledger.
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN agent_slug TEXT", []);
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN model TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_agent_slug ON execution_logs(agent_slug, created_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_config_changes (
+            id          TEXT PRIMARY KEY,
+            agent_slug  TEXT NOT NULL,
+            field       TEXT NOT NULL,
+            old_value   TEXT,
+            new_value   TEXT,
+            actor       TEXT,
+            changed_at  TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_config_changes_slug_time ON agent_config_changes(agent_slug, changed_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_config_changes_field ON agent_config_changes(field, changed_at DESC)",
+        [],
+    );
+
     // v2.3.0 — live_runs SQLite mirror of the in-memory active_runs
     // registry. The registry stays authoritative; this mirror exists
     // so the `ato` CLI (a separate process) can read what's currently
@@ -976,6 +1011,9 @@ pub fn run() {
             list_replays_for_trace,
             get_execution_log_response_by_cloud_trace_id,
             get_execution_log_io_by_cloud_trace_id,
+            // v2.3.2 Phase 2 — local-mode insights
+            compute_regressions_local,
+            compute_cost_recommendations_local,
             // Health Checks
             get_health_status,
             record_health_check,

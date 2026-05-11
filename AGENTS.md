@@ -103,17 +103,19 @@ ato runs get <run-id>
 ato config-changes list --agent <slug> [--since 7d]
 # [v2.3+]
 
-# Regressions detected (joins config changes × trace stats)
-ato regressions list [--days 7|30|90] [--severity regression|improvement]
-# [v2.3+] — local-mode planned; today requires cloud sign-in via the GUI
+# Regressions detected (joins config changes × trace stats, local-mode)
+ato regressions list [--days 30] [--window-hours 168] [--min-samples 20]
+# [v2.3.2] — runs entirely over local SQLite, no cloud sign-in needed.
+# Returns "local-no-schema" source string when the desktop hasn't applied
+# the v2.3.2 migration yet — the agent should surface that to the human.
 
-# Failing examples for a specific regression
-ato regressions failing-examples <change-id>
-# [v2.3+]
+# Failing examples are included inline in `regressions list` output
+# under failing_trace_ids (up to 10 per change). Drill them with
+# `ato runs get <id>`.
 
 # Cost recommendations (when historical multi-runtime data justifies a swap)
-ato cost recommendations [--agent <slug>]
-# [v2.3+]
+ato cost recommendations [--days 30] [--min-runs 10]
+# [v2.3.2] — also local-mode. Same schema dependency as regressions.
 
 # File attribution for a specific dispatch
 ato files-touched <run-id>

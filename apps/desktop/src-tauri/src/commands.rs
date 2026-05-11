@@ -3191,7 +3191,14 @@ async fn prompt_agent_inner(
     // MCP run_agent, headless cron) since they all funnel through
     // prompt_agent_inner.
     let duration_ms = started.elapsed().as_millis() as i32;
-    persist_execution_log(&runtime, &prompt, &result, duration_ms, model_override.as_deref());
+    persist_execution_log(
+        &runtime,
+        &prompt,
+        &result,
+        duration_ms,
+        model_override.as_deref(),
+        agent_slug.as_deref(),
+    );
     result
 }
 
@@ -3212,6 +3219,7 @@ fn persist_execution_log(
     result: &Result<String, String>,
     duration_ms: i32,
     model_override: Option<&str>,
+    agent_slug: Option<&str>,
 ) {
     let db_path = crate::get_db_path();
     let conn = match rusqlite::Connection::open(&db_path) {
@@ -3240,8 +3248,12 @@ fn persist_execution_log(
             }
             _ => (None, None, None),
         };
+    // v2.3.2 — agent_slug + model columns make local-mode regressions
+    // and cost recommendations possible (they need to join + group by
+    // these). NULL stays valid for no-agent dispatches + ad-hoc runs
+    // that don't resolve a default model.
     let _ = conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             id,
             runtime,
@@ -3254,6 +3266,8 @@ fn persist_execution_log(
             error_message,
             now,
             cost_usd,
+            agent_slug,
+            effective_model,
         ],
     );
 }
@@ -3332,6 +3346,45 @@ fn estimate_cost_usd(model: &str, prompt: &str, response: &str) -> Option<f64> {
 fn truncate_for_log(s: &str) -> String {
     const MAX: usize = 64 * 1024;
     if s.len() <= MAX { s.to_string() } else { format!("{}…[truncated]", &s[..MAX]) }
+}
+
+// ── v2.3.2 Phase 2 — Local-mode regressions + cost recommendations ────
+//
+// Thin Tauri wrappers around the algorithm in `local_insights.rs`. The
+// GUI's RegressionsPanel + CostBenchmarksPanel call these as a fallback
+// when the cloud routes 401 (signed-out or expired token). Same result
+// shape so the existing UI components don't need to fork.
+
+#[tauri::command]
+pub fn compute_regressions_local(
+    days: Option<i64>,
+    window_hours: Option<i64>,
+    min_samples: Option<i64>,
+) -> Result<crate::local_insights::LocalRegressionsResult, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    crate::local_insights::compute_regressions_local(
+        &conn,
+        days.unwrap_or(30),
+        window_hours.unwrap_or(168),
+        min_samples.unwrap_or(20),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn compute_cost_recommendations_local(
+    days: Option<i64>,
+    min_runs: Option<i64>,
+) -> Result<crate::local_insights::LocalCostRecsResult, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    crate::local_insights::compute_cost_recommendations_local(
+        &conn,
+        days.unwrap_or(30),
+        min_runs.unwrap_or(10),
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ── v2.1.0 Replay infra ─────────────────────────────────────────────────
@@ -14840,7 +14893,14 @@ async fn spawn_streaming_dispatch(
         // if execution_logs is empty when the link command runs, the
         // ±10s temporal match has nothing to attach the cloud trace
         // ID to, and replay fails with prompt-not-local.
-        persist_execution_log(runtime, prompt, &Ok(full.clone()), duration_ms, model_override.as_deref());
+        persist_execution_log(
+            runtime,
+            prompt,
+            &Ok(full.clone()),
+            duration_ms,
+            model_override.as_deref(),
+            agent_slug,
+        );
         let _ = on_event.send(StreamEvent::Done { full });
     } else {
         // Drain stderr for the error message — best-effort.
@@ -14853,7 +14913,14 @@ async fn spawn_streaming_dispatch(
         } else {
             err_text
         };
-        persist_execution_log(runtime, prompt, &Err(final_msg.clone()), duration_ms, model_override.as_deref());
+        persist_execution_log(
+            runtime,
+            prompt,
+            &Err(final_msg.clone()),
+            duration_ms,
+            model_override.as_deref(),
+            agent_slug,
+        );
         let _ = on_event.send(StreamEvent::Error { message: final_msg });
     }
 

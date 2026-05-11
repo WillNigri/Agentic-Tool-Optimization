@@ -1,10 +1,12 @@
 pub mod agents;
 pub mod compare;
 pub mod config_changes;
+pub mod cost;
 pub mod dispatch;
 pub mod dispatches;
 pub mod files_touched;
 pub mod kill;
+pub mod regressions;
 pub mod replay;
 pub mod replays;
 pub mod runs;

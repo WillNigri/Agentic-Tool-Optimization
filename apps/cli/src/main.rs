@@ -121,6 +121,45 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Regression detection (joins config changes with trace stats over local data)
+    Regressions {
+        #[command(subcommand)]
+        sub: RegressionsSub,
+    },
+    /// Cost recommendations (when historical multi-runtime data justifies a swap)
+    Cost {
+        #[command(subcommand)]
+        sub: CostSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RegressionsSub {
+    /// List regressions detected over local data
+    List {
+        /// Days of history to consider (default 30, max 365)
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// Window on each side of a config change (hours; default 168 = 7d)
+        #[arg(long = "window-hours", default_value_t = 168)]
+        window_hours: i64,
+        /// Min samples on each side to render a change (default 20)
+        #[arg(long = "min-samples", default_value_t = 20)]
+        min_samples: i64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CostSub {
+    /// Surface model-swap recommendations when local data justifies them
+    Recommendations {
+        /// Days of history to consider (default 30)
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// Min runs per (agent, runtime) combo to be considered (default 10)
+        #[arg(long = "min-runs", default_value_t = 10)]
+        min_runs: i64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -328,6 +367,18 @@ fn main() -> Result<()> {
         },
         Commands::Kill { run_id } => commands::kill::run(&ro_conn()?, &run_id, &opts),
         Commands::SetupPath { check, dir, force } => commands::setup_path::run(check, dir, force, &opts),
+        Commands::Regressions { sub } => match sub {
+            RegressionsSub::List {
+                days,
+                window_hours,
+                min_samples,
+            } => commands::regressions::list(&ro_conn()?, days, window_hours, min_samples, &opts),
+        },
+        Commands::Cost { sub } => match sub {
+            CostSub::Recommendations { days, min_runs } => {
+                commands::cost::recommendations(&ro_conn()?, days, min_runs, &opts)
+            }
+        },
         Commands::Agents { sub } => {
             let conn = db::open_readwrite(&db_path)?;
             match sub {
