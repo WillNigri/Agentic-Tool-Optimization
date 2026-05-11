@@ -15,9 +15,22 @@ cp target/release/ato /usr/local/bin/   # or ~/.local/bin/ — anywhere on PATH
 ato --version
 ```
 
-### Pre-built (planned)
+### Pre-built (shipped in v2.3.0)
 
-The `ato` binary will ship alongside the desktop app via Homebrew + the Tauri sidecar bundle. Once that lands, `brew install --cask ato` will put both `ato-desktop` (the GUI) and `ato` (this CLI) on your PATH. Tracking issue: v2.3.1 CI work.
+The `ato` binary now ships as a Tauri sidecar inside every desktop bundle (DMG, AppImage, NSIS installer, .deb). After installing the desktop app:
+
+```bash
+# One-time PATH setup
+ato setup-path
+```
+
+This symlinks the bundled CLI to `/usr/local/bin/ato` (or `~/.local/bin/ato` if `/usr/local/bin` isn't writable). Idempotent — running it again is a no-op once set up. On macOS, the bundled binary lives at `/Applications/ATO.app/Contents/Resources/binaries/ato-<arch>`; the first `setup-path` invocation typically looks like:
+
+```bash
+/Applications/ATO.app/Contents/Resources/binaries/ato-aarch64-apple-darwin setup-path
+```
+
+After that one command, plain `ato <command>` works from any shell.
 
 ## Quick check
 

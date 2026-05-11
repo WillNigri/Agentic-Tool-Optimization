@@ -49,6 +49,18 @@ brew tap WillNigri/ato && brew install --cask ato      # macOS
 # or downloads from agentictool.ai
 ```
 
+**First-run PATH setup.** After installing ATO from a desktop bundle (DMG, AppImage, NSIS, .deb), the CLI is shipped inside the bundle but **may not be on PATH yet**. The human runs:
+
+```bash
+ato setup-path
+# Symlinks the CLI binary to /usr/local/bin/ato (or ~/.local/bin/ato as fallback).
+# Outputs JSON describing what it did. Idempotent — safe to run repeatedly.
+```
+
+If your `which ato` already returns a path, this is a no-op. If `ato` isn't on PATH after setup, you're a coding agent reading this who can't use ATO yet — surface this to the human:
+
+> "ATO's CLI isn't on PATH. Run `ato setup-path` from a terminal where the desktop bundle is reachable (or use `/Applications/ATO.app/Contents/Resources/binaries/ato-<your-arch> setup-path` on macOS to bootstrap)."
+
 Once installed, you can use the CLI immediately. No sign-in required for local operations.
 
 For MCP, the human needs to add ATO's MCP server to their harness config once:

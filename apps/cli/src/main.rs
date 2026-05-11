@@ -108,6 +108,19 @@ enum Commands {
         #[command(subcommand)]
         sub: AgentsSub,
     },
+    /// Make `ato` reachable on your shell's PATH (run once after install)
+    #[command(name = "setup-path")]
+    SetupPath {
+        /// Only check whether ato is already on PATH; don't make changes
+        #[arg(long)]
+        check: bool,
+        /// Override the install directory (defaults to /usr/local/bin then ~/.local/bin)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Replace an existing `ato` on PATH that points at a different binary
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -238,6 +251,15 @@ enum AgentsSub {
         /// New description
         #[arg(long)]
         description: Option<String>,
+        /// Replace the skills list with this comma-separated set (skill slugs)
+        #[arg(long, value_delimiter = ',')]
+        skills: Option<Vec<String>>,
+        /// Add a single skill to the agent's list (idempotent)
+        #[arg(long = "add-skill")]
+        add_skill: Option<String>,
+        /// Remove a single skill from the agent's list (no-op if absent)
+        #[arg(long = "remove-skill")]
+        remove_skill: Option<String>,
     },
 }
 
@@ -305,6 +327,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Kill { run_id } => commands::kill::run(&ro_conn()?, &run_id, &opts),
+        Commands::SetupPath { check, dir, force } => commands::setup_path::run(check, dir, force, &opts),
         Commands::Agents { sub } => {
             let conn = db::open_readwrite(&db_path)?;
             match sub {
@@ -334,16 +357,34 @@ fn main() -> Result<()> {
                     system_prompt,
                     display_name,
                     description,
-                } => commands::agents::update(
-                    &conn,
-                    &slug,
-                    runtime,
-                    model,
-                    system_prompt,
-                    display_name,
-                    description,
-                    &opts,
-                ),
+                    skills,
+                    add_skill,
+                    remove_skill,
+                } => {
+                    // Translate the three CLI flags into a single
+                    // mutation enum. The flags are mutually exclusive;
+                    // multiple at once is a user error worth surfacing.
+                    let mutation = match (skills, add_skill, remove_skill) {
+                        (Some(list), None, None) => Some(commands::agents::SkillsMutation::Replace(list)),
+                        (None, Some(s), None) => Some(commands::agents::SkillsMutation::Add(s)),
+                        (None, None, Some(s)) => Some(commands::agents::SkillsMutation::Remove(s)),
+                        (None, None, None) => None,
+                        _ => return Err(anyhow::anyhow!(
+                            "Pass at most one of --skills, --add-skill, --remove-skill."
+                        )),
+                    };
+                    commands::agents::update(
+                        &conn,
+                        &slug,
+                        runtime,
+                        model,
+                        system_prompt,
+                        display_name,
+                        description,
+                        mutation,
+                        &opts,
+                    )
+                }
             }
         }
     }
