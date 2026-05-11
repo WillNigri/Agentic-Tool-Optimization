@@ -1,6 +1,7 @@
 // v2.3.8 Phase 4.2 — Ops recipe execution engine.
 // v2.3.11 Phase 4.5 — PostWebhook executor added.
 // v2.3.12 Phase 4.6 — RunScript executor added.
+// v2.3.13 Phase 4.7 — DispatchLongRunning watcher + KillRun re-enable.
 //
 // Long-running tokio task that:
 //   1. Subscribes to events::bus
@@ -11,8 +12,7 @@
 //   4. Audits the run to ops_recipe_runs
 //
 // Implemented action executors: DraftSkillFromReplay, ReplayOnAlt,
-// DispatchAgent, PostWebhook, RunScript. Stubs: KillRun (waits on an
-// event variant that carries a live active_runs key), NotifyHuman
+// DispatchAgent, PostWebhook, RunScript, KillRun. Stubs: NotifyHuman
 // (waits on the Phase 5 activity feed).
 
 use crate::events::{bus, AtoEvent, RegressionSeverity, ReplayStatus};
@@ -39,13 +39,59 @@ fn lock_for_slug(slug: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// Start the engine. Spawns TWO tokio tasks:
+/// v2.3.13 Phase 4.7 — per-recipe set of recently-claimed event_seqs.
+///
+/// Codex round-1 caught that in-process bus::publish events hit BOTH
+/// the live broadcast AND the events_log poll loop, so the same
+/// (recipe, event) pair was processed twice. Round-2 caught that a
+/// monotonic watermark would also drop legitimate OUT-OF-ORDER events
+/// (lagged subscriber recovering older seqs from the ledger;
+/// cross-process CLI events arriving after a higher-seq in-process
+/// event).
+///
+/// Solution: per-slug bounded BTreeSet<u64>. claim_recipe_event
+/// inserts the seq; returns true on first claim, false on duplicate.
+/// The set is capped at SEEN_CAP entries — when over cap, the
+/// smallest seq is evicted. At ~10 events/min and cap=256, that's
+/// ~25min of retention — far longer than any plausible bus/poll
+/// reorder window.
+const SEEN_CAP: usize = 256;
+
+fn recipe_seen_seqs() -> &'static Mutex<HashMap<String, std::collections::BTreeSet<u64>>> {
+    static SEEN: OnceLock<Mutex<HashMap<String, std::collections::BTreeSet<u64>>>> =
+        OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Claim (slug, seq) for processing. Returns true if newly claimed
+/// (proceed); false if already in the recent-seen set (duplicate,
+/// skip).
+fn claim_recipe_event(slug: &str, seq: u64) -> bool {
+    let mut map = recipe_seen_seqs().lock().expect("seen-seqs map poisoned");
+    let set = map.entry(slug.to_string()).or_default();
+    let newly = set.insert(seq);
+    while set.len() > SEEN_CAP {
+        // BTreeSet iter is sorted ascending — first() = smallest seq.
+        let min = match set.iter().next() {
+            Some(&m) => m,
+            None => break,
+        };
+        set.remove(&min);
+    }
+    newly
+}
+
+/// Start the engine. Spawns THREE tokio tasks:
 ///   1. Live bus subscriber — fast path for in-process events
 ///   2. events_log poll loop — picks up cross-process events (CLI
 ///      dispatches publish there since they can't reach the in-memory
 ///      bus). Polls every 2s for new event_seqs.
+///   3. Long-running watcher (v2.3.13 Phase 4.7) — scans active_runs
+///      every 30s, emits DispatchLongRunning when an active run first
+///      crosses each threshold any enabled recipe asked about. Lets
+///      `kill_run` finally have an event variant it can act on.
 ///
-/// Both paths converge on handle_event, which dedupes via
+/// The first two paths converge on handle_event, which dedupes via
 /// ops_recipe_runs (skip events already processed). Multiple calls to
 /// start() are safe but only one should fire at app boot.
 pub fn start() {
@@ -106,6 +152,144 @@ pub fn start() {
             }
         }
     });
+
+    // v2.3.13 Phase 4.7 — long-running watcher. Scans active_runs
+    // every 30s, computes the set of (runtime, threshold) pairs any
+    // enabled recipe is subscribed to, and emits DispatchLongRunning
+    // for each new (run_id, threshold) crossing. State lives in a
+    // local HashMap; tracking is dropped when a run leaves the
+    // registry (active_runs::finish_run removes the entry on
+    // completion — no tombstone window).
+    tauri::async_runtime::spawn(async move {
+        let interval = std::time::Duration::from_secs(30);
+        let mut emitted: std::collections::HashMap<String, std::collections::HashSet<u32>> =
+            std::collections::HashMap::new();
+        loop {
+            tokio::time::sleep(interval).await;
+            run_long_running_watcher_tick(&mut emitted).await;
+        }
+    });
+}
+
+/// v2.3.13 Phase 4.7 — One tick of the long-running watcher.
+///
+/// 1. Snapshot active_runs (cheap, single Mutex lock).
+/// 2. Pull the set of distinct threshold_secs values referenced by
+///    ENABLED OnDispatchLongRunning recipes. If nothing subscribes,
+///    skip the tick — no point computing crossings nobody will react
+///    to.
+/// 3. For each (running run, threshold) pair where elapsed >=
+///    threshold AND we haven't emitted yet, publish DispatchLongRunning.
+/// 4. Garbage-collect emission state for runs no longer in the registry.
+///
+/// The `emitted` map persists across ticks: key = run_id, value = set
+/// of thresholds already emitted for that run. Resets when a run drops
+/// from active_runs.
+async fn run_long_running_watcher_tick(
+    emitted: &mut std::collections::HashMap<String, std::collections::HashSet<u32>>,
+) {
+    let runs = crate::active_runs::list_runs();
+    let active_run_ids: std::collections::HashSet<String> = runs
+        .iter()
+        .filter(|r| r.status == "running")
+        .map(|r| r.run_id.clone())
+        .collect();
+    // GC tracking for runs no longer in the registry.
+    emitted.retain(|run_id, _| active_run_ids.contains(run_id));
+
+    let thresholds = match active_thresholds_from_db() {
+        Ok(ts) if !ts.is_empty() => ts,
+        _ => return,
+    };
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for run in runs.into_iter().filter(|r| r.status == "running") {
+        let elapsed = now_unix.saturating_sub(run.started_at_unix);
+        for &t in &thresholds {
+            if elapsed < t as u64 {
+                continue;
+            }
+            let set = emitted.entry(run.run_id.clone()).or_default();
+            if !set.insert(t) {
+                continue; // already emitted for this (run, threshold)
+            }
+            // Codex round-1 important: re-check the run is still
+            // active right before publishing. active_runs has no
+            // tombstone — `finish_run` removes immediately — so a
+            // run that finished between snapshot and now would
+            // otherwise produce a phantom event that notify/webhook
+            // recipes would still act on.
+            let still_running = crate::active_runs::list_runs()
+                .iter()
+                .any(|r| r.run_id == run.run_id && r.status == "running");
+            if !still_running {
+                continue;
+            }
+            let seq = crate::events::bus::next_seq();
+            let event = crate::events::AtoEvent::DispatchLongRunning {
+                event_seq: seq,
+                run_id: run.run_id.clone(),
+                runtime: run.runtime.clone(),
+                agent_slug: run.agent_slug.clone(),
+                started_at_unix: run.started_at_unix,
+                elapsed_secs: elapsed,
+                threshold_secs: t,
+            };
+            crate::events::bus::publish(event);
+        }
+    }
+}
+
+/// Read distinct threshold_secs values from enabled
+/// OnDispatchLongRunning recipes. Codex round-1 nit: deserialize
+/// through the typed RecipeTrigger so schema changes (added fields,
+/// nesting) fail loudly instead of silently making the watcher stop
+/// emitting.
+fn active_thresholds_from_db() -> Result<Vec<u32>, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let _ = conn.busy_timeout(Duration::from_millis(500));
+    let mut stmt = conn
+        .prepare(
+            "SELECT slug, trigger_config FROM ops_recipes
+              WHERE enabled = 1 AND trigger_type = 'on_dispatch_long_running'",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut out: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for (slug, tj) in rows {
+        match serde_json::from_str::<crate::recipes::RecipeTrigger>(&tj) {
+            Ok(crate::recipes::RecipeTrigger::OnDispatchLongRunning {
+                threshold_secs,
+                ..
+            }) => {
+                if threshold_secs > 0 {
+                    out.insert(threshold_secs);
+                }
+            }
+            Ok(_) => {
+                // Wrong trigger variant for this row — shouldn't be
+                // reachable given the SQL filter.
+            }
+            Err(e) => {
+                eprintln!(
+                    "recipes_engine: malformed trigger_config for enabled recipe @{}: {}",
+                    slug, e
+                );
+            }
+        }
+    }
+    let mut sorted: Vec<u32> = out.into_iter().collect();
+    sorted.sort();
+    Ok(sorted)
 }
 
 /// Read events_log rows with event_seq > since, in seq order. Returns
@@ -184,6 +368,17 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
         // independently so unrelated triggers stay parallel.
         let slug_lock = lock_for_slug(&recipe.slug);
         let _serialize = slug_lock.lock().expect("recipe rate-limit lock poisoned");
+
+        // v2.3.13 Phase 4.7 — dedupe across the live-bus and
+        // events_log-poll paths. Both call handle_event for the same
+        // in-process event; without this, every recipe would fire
+        // twice. The watermark check inside the per-slug lock means
+        // the two arrivals race for who gets to claim — exactly one
+        // wins and proceeds, the other returns immediately.
+        if !claim_recipe_event(&recipe.slug, event.event_seq()) {
+            continue;
+        }
+
         if let Some(count) = runs_in_window_executed_only(&recipe.slug, 60) {
             if count >= 10 {
                 let run_id = uuid::Uuid::new_v4().to_string();
@@ -419,6 +614,41 @@ fn trigger_filters_match(trigger: &RecipeTrigger, event: &AtoEvent) -> bool {
             if let Some(want) = tslug {
                 if want != easlug {
                     return false;
+                }
+            }
+            true
+        }
+        (
+            RecipeTrigger::OnDispatchLongRunning {
+                runtime: trt,
+                agent_slug: tslug,
+                threshold_secs: t_threshold,
+            },
+            AtoEvent::DispatchLongRunning {
+                runtime: ert,
+                agent_slug: easlug,
+                threshold_secs: e_threshold,
+                ..
+            },
+        ) => {
+            // The watcher already emits one event per (run_id,
+            // threshold) crossing keyed off this recipe's threshold,
+            // so the match here is exact: recipe and event must agree
+            // on threshold_secs OR the event was scheduled by another
+            // recipe at a different tier. Skip the mismatch case so
+            // the rate limit doesn't burn on tier-irrelevant events.
+            if t_threshold != e_threshold {
+                return false;
+            }
+            if let Some(want) = trt {
+                if want != ert {
+                    return false;
+                }
+            }
+            if let Some(want) = tslug {
+                match easlug {
+                    Some(got) if want == got => (),
+                    _ => return false,
                 }
             }
             true
@@ -1241,25 +1471,46 @@ async fn run_script(
 
 /// Executor: kill a run referenced by the trigger event's payload.
 ///
-/// Honest scope (caught by codex in v2.3.10 review): in v1, the events
-/// that carry an ID DON'T carry a live active_runs registry key — they
-/// carry execution_logs.id (DispatchFailed fires AFTER the run has
-/// already finished, so there's nothing live to kill). So this executor
-/// will essentially always be a no-op until a future event type
-/// (e.g. DispatchTimedOut, or a periodic "long-running" tick) carries
-/// the live registry ID.
-///
-/// We return status="not_implemented_yet" rather than fake "done" to
-/// surface the limitation visibly. Reinstate full behavior when an
-/// event variant ships with an actionable live-registry key.
+/// v2.3.13 Phase 4.7: now actually acts on DispatchLongRunning events,
+/// whose run_id is the active_runs registry key (in-memory map keyed
+/// by ATO's begin_run UUID, NOT execution_logs.id). For other event
+/// variants (DispatchFailed, RegressionDetected, ...) the run_id
+/// either doesn't exist or refers to a different ID space, so we
+/// surface a clear "wrong-event-shape" error instead of silently
+/// pretending to kill.
 fn kill_run(event: &AtoEvent) -> ActionOutcome {
-    ActionOutcome {
-        status: "not_implemented_yet",
-        result: None,
-        error: Some(format!(
-            "kill_run can't act on '{}' — the event carries execution_logs.id, not the live active_runs registry key. The action will work once an event variant ships with a live run handle (planned for a future 'on_dispatch_long_running' trigger).",
-            event.type_name()
-        )),
+    let run_id = match event {
+        AtoEvent::DispatchLongRunning { run_id, .. } => run_id.clone(),
+        _ => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "kill_run only knows how to act on 'dispatch_long_running' events (got '{}') — other event variants don't carry a live active_runs registry key",
+                    event.type_name()
+                )),
+            };
+        }
+    };
+    let killed = crate::active_runs::kill_run(&run_id);
+    if killed {
+        ActionOutcome {
+            status: "done",
+            result: Some(format!("Killed active run {}", run_id)),
+            error: None,
+        }
+    } else {
+        // Either the run already finished (active_runs::finish_run
+        // removed the entry on completion) or it never had a kill
+        // handler attached (subagent groups, MCP-routed runs).
+        ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "kill_run: active_runs::kill_run returned false for '{}' (run finished or has no kill handler)",
+                run_id
+            )),
+        }
     }
 }
 

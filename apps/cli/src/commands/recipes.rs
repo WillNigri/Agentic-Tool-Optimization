@@ -44,6 +44,15 @@ pub enum RecipeTrigger {
         cron: Option<String>,
         agent_slug: Option<String>,
     },
+    /// v2.3.13 Phase 4.7 — fires when an active dispatch has been
+    /// running for at least threshold_secs. Engine emits one event per
+    /// (run_id, threshold) crossing.
+    #[serde(rename = "on_dispatch_long_running")]
+    OnDispatchLongRunning {
+        runtime: Option<String>,
+        agent_slug: Option<String>,
+        threshold_secs: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,6 +539,7 @@ fn trigger_type_name(t: &RecipeTrigger) -> &'static str {
         RecipeTrigger::OnReplayDone { .. } => "on_replay_done",
         RecipeTrigger::OnCostThresholdExceeded { .. } => "on_cost_threshold_exceeded",
         RecipeTrigger::OnSchedule { .. } => "on_schedule",
+        RecipeTrigger::OnDispatchLongRunning { .. } => "on_dispatch_long_running",
     }
 }
 

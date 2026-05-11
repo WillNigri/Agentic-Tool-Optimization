@@ -105,6 +105,25 @@ pub enum RecipeTrigger {
         cron: Option<String>,
         agent_slug: Option<String>,
     },
+
+    /// v2.3.13 Phase 4.7 — fires when an active dispatch has been
+    /// running for at least `threshold_secs`. The engine's watcher
+    /// task scans active_runs every 30s and emits one event per
+    /// (run_id, threshold) crossing, so a 10-min run with thresholds
+    /// 60s and 300s sees TWO events (one for each tier).
+    #[serde(rename = "on_dispatch_long_running")]
+    OnDispatchLongRunning {
+        /// Filter to a specific runtime ("claude" / "codex" / ...).
+        /// None matches any runtime.
+        runtime: Option<String>,
+        /// Filter to a specific agent slug. None matches any.
+        agent_slug: Option<String>,
+        /// REQUIRED threshold (seconds). The watcher only emits an
+        /// event when elapsed first crosses each subscribed threshold,
+        /// so missing this would fire on every 30s tick — noisy. The
+        /// recipe must declare its own tier.
+        threshold_secs: u32,
+    },
 }
 
 /// Action types — what to do when a trigger fires. Like triggers, each
@@ -425,6 +444,7 @@ fn trigger_type_name(t: &RecipeTrigger) -> &'static str {
         RecipeTrigger::OnReplayDone { .. } => "on_replay_done",
         RecipeTrigger::OnCostThresholdExceeded { .. } => "on_cost_threshold_exceeded",
         RecipeTrigger::OnSchedule { .. } => "on_schedule",
+        RecipeTrigger::OnDispatchLongRunning { .. } => "on_dispatch_long_running",
     }
 }
 

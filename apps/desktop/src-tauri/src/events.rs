@@ -135,6 +135,27 @@ pub enum AtoEvent {
         agent_slug: String,
         fired_at: String,
     },
+
+    /// v2.3.13 Phase 4.7 — emitted by the recipes_engine long-running
+    /// watcher when an active_runs entry has been running for at least
+    /// the threshold a recipe asked about. `run_id` is the in-memory
+    /// active_runs registry key (NOT execution_logs.id) — that's what
+    /// `active_runs::kill_run` expects, so KillRun actions can finally
+    /// act on these events.
+    #[serde(rename = "dispatch_long_running")]
+    DispatchLongRunning {
+        event_seq: u64,
+        run_id: String,
+        runtime: String,
+        agent_slug: Option<String>,
+        started_at_unix: u64,
+        elapsed_secs: u64,
+        /// Which recipe threshold (in seconds) this emission crossed.
+        /// Lets the recipe filter avoid wildcards like "always match"
+        /// when the user wants tier semantics ("warn at 60s, kill at
+        /// 300s") — see RecipeTrigger::OnDispatchLongRunning.
+        threshold_secs: u32,
+    },
 }
 
 impl AtoEvent {
@@ -148,6 +169,7 @@ impl AtoEvent {
             AtoEvent::ReplayDone { .. } => "replay_done",
             AtoEvent::CostThresholdExceeded { .. } => "cost_threshold_exceeded",
             AtoEvent::ScheduleFired { .. } => "schedule_fired",
+            AtoEvent::DispatchLongRunning { .. } => "dispatch_long_running",
         }
     }
 
@@ -161,6 +183,7 @@ impl AtoEvent {
             AtoEvent::ReplayDone { event_seq, .. } => *event_seq,
             AtoEvent::CostThresholdExceeded { event_seq, .. } => *event_seq,
             AtoEvent::ScheduleFired { event_seq, .. } => *event_seq,
+            AtoEvent::DispatchLongRunning { event_seq, .. } => *event_seq,
         }
     }
 }
