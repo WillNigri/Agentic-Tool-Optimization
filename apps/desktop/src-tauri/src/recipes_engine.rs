@@ -1,4 +1,5 @@
 // v2.3.8 Phase 4.2 — Ops recipe execution engine.
+// v2.3.11 Phase 4.5 — PostWebhook executor added.
 //
 // Long-running tokio task that:
 //   1. Subscribes to events::bus
@@ -8,12 +9,10 @@
 //   3. Runs each matching recipe's action
 //   4. Audits the run to ops_recipe_runs
 //
-// Scope for v1: two action executors (DraftSkillFromReplay,
-// ReplayOnAlt) — enough to close the Skillify loop end-to-end. Other
-// action variants stub with "not_implemented" status. Recursion guard
-// is intentionally absent because the v1 chains don't loop (drafting
-// a skill produces no event; replaying produces a single replay_done
-// event that only Skillify subscribes to, and Skillify drafts files).
+// Implemented action executors: DraftSkillFromReplay, ReplayOnAlt,
+// DispatchAgent, PostWebhook. Stubs: KillRun (waits on an event variant
+// that carries a live active_runs key), NotifyHuman (waits on the Phase 5
+// activity feed), RunScript (waits on a security review).
 
 use crate::events::{bus, AtoEvent, RegressionSeverity, ReplayStatus};
 use crate::recipes::{OpsRecipe, RecipeAction, RecipeTrigger};
@@ -458,11 +457,13 @@ async fn execute_action(action: &RecipeAction, event: &AtoEvent) -> ActionOutcom
             let resolved_prompt = substitute_simple_placeholders(prompt_template, event);
             dispatch_agent(&resolved_runtime, agent_slug.as_deref(), &resolved_prompt).await
         }
-        // Phase 4.4 v1 stubs — PostWebhook needs reqwest dep
-        // decisions, RunScript needs explicit security review,
-        // NotifyHuman waits for Phase 5 activity feed.
-        RecipeAction::PostWebhook { .. }
-        | RecipeAction::NotifyHuman { .. }
+        // v2.3.11 Phase 4.5 — PostWebhook implemented.
+        RecipeAction::PostWebhook { url, body_template } => {
+            post_webhook(event, url, body_template.as_deref()).await
+        }
+        // Phase 4.5 v1 stubs — RunScript needs explicit security
+        // review, NotifyHuman waits for Phase 5 activity feed.
+        RecipeAction::NotifyHuman { .. }
         | RecipeAction::RunScript { .. } => ActionOutcome {
             status: "not_implemented",
             result: None,
@@ -470,6 +471,362 @@ async fn execute_action(action: &RecipeAction, event: &AtoEvent) -> ActionOutcom
                 "Action '{}' is not yet implemented.",
                 action_name(action)
             )),
+        },
+    }
+}
+
+/// Known {{placeholder}} tokens. Used for two purposes:
+///   1. Detect which placeholders a URL/body template uses, so we can
+///      validate the event actually carries values for them BEFORE
+///      substitution (codex round-2 caught that substituting empty
+///      strings silently hid missing fields).
+///   2. Drive the per-token replace loop in apply_substitution.
+const KNOWN_PLACEHOLDERS: &[&str] = &[
+    "{{source_runtime}}",
+    "{{target_runtime}}",
+    "{{agent_slug}}",
+    "{{previous_runtime}}",
+];
+
+#[derive(Default)]
+struct EventFields {
+    source_runtime: String,
+    target_runtime: String,
+    agent_slug: String,
+    previous_runtime: String,
+}
+
+impl EventFields {
+    fn lookup(&self, placeholder: &str) -> &str {
+        match placeholder {
+            "{{source_runtime}}" => &self.source_runtime,
+            "{{target_runtime}}" => &self.target_runtime,
+            "{{agent_slug}}" => &self.agent_slug,
+            "{{previous_runtime}}" => &self.previous_runtime,
+            _ => "",
+        }
+    }
+}
+
+fn extract_event_fields(event: &AtoEvent) -> EventFields {
+    match event {
+        AtoEvent::RegressionDetected {
+            agent_slug,
+            field,
+            old_value,
+            new_value,
+            ..
+        } => {
+            let prev = if field == "runtime" {
+                old_value.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let curr = if field == "runtime" {
+                new_value.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            EventFields {
+                source_runtime: curr,
+                target_runtime: prev.clone(),
+                agent_slug: agent_slug.clone(),
+                previous_runtime: prev,
+            }
+        }
+        AtoEvent::ReplayDone {
+            source_runtime,
+            target_runtime,
+            ..
+        } => EventFields {
+            source_runtime: source_runtime.clone(),
+            target_runtime: target_runtime.clone(),
+            agent_slug: String::new(),
+            previous_runtime: source_runtime.clone(),
+        },
+        AtoEvent::DispatchFailed {
+            runtime,
+            agent_slug,
+            ..
+        } => EventFields {
+            source_runtime: runtime.clone(),
+            target_runtime: String::new(),
+            agent_slug: agent_slug.clone().unwrap_or_default(),
+            previous_runtime: String::new(),
+        },
+        _ => EventFields::default(),
+    }
+}
+
+/// Return the first placeholder used in `template` whose value in the
+/// event is empty (missing field). Codex round-2: previously we tried
+/// to detect unresolved placeholders AFTER substitution, but
+/// substitute_simple_placeholders replaces unknown fields with "" so
+/// the literal placeholder was never visible in the output. The right
+/// time to check is BEFORE substitution, against the template + the
+/// event's actual field values.
+fn first_missing_placeholder(
+    template: &str,
+    fields: &EventFields,
+) -> Option<&'static str> {
+    for ph in KNOWN_PLACEHOLDERS {
+        if template.contains(ph) && fields.lookup(ph).is_empty() {
+            return Some(ph);
+        }
+    }
+    None
+}
+
+/// Redact a webhook URL for audit logs. Slack/Discord URLs are
+/// credentials (anyone holding the URL can post to that channel).
+/// We keep scheme + host (+ port if non-default) and drop the
+/// path/query/fragment. IPv6 hosts get re-bracketed since `host_str()`
+/// returns them unbracketed.
+fn redact_url(url: &str) -> String {
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return "[unparseable URL]".to_string(),
+    };
+    let mut out = format!("{}://", parsed.scheme());
+    match parsed.host_str() {
+        Some(h) if h.contains(':') => {
+            out.push('[');
+            out.push_str(h);
+            out.push(']');
+        }
+        Some(h) => out.push_str(h),
+        None => out.push('?'),
+    }
+    if let Some(port) = parsed.port() {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    out.push_str("/…");
+    out
+}
+
+/// JSON-escape a string for safe inline substitution inside a JSON body
+/// template (template author writes `"name": "{{source_runtime}}"`).
+/// Uses serde_json::to_string for correctness and strips outer quotes
+/// since the template already provides them.
+fn json_escape_inner(s: &str) -> String {
+    let encoded = match serde_json::to_string(s) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    if encoded.len() >= 2 && encoded.starts_with('"') && encoded.ends_with('"') {
+        encoded[1..encoded.len() - 1].to_string()
+    } else {
+        encoded
+    }
+}
+
+/// Single-pass placeholder substitution.
+///
+/// Codex round-3 caught that the previous implementation
+/// (`out = out.replace(ph, ...)` looped over each known placeholder)
+/// was order-dependent and could re-expand placeholder-shaped content
+/// from a substituted value. E.g. agent_slug = "{{previous_runtime}}"
+/// would get its inner placeholder expanded on the next loop iteration.
+///
+/// This walks the template left-to-right, emits non-placeholder text
+/// verbatim, and resolves `{{known_token}}` ranges once each. Unknown
+/// `{{...}}` tokens are passed through unchanged (intentional — users
+/// may template-process downstream like Slack's own `{user_id}`).
+fn apply_substitution(template: &str, fields: &EventFields, json_safe: bool) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while !rest.is_empty() {
+        let Some(open_idx) = rest.find("{{") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..open_idx]);
+        let after_open = &rest[open_idx + 2..];
+        let Some(close_rel) = after_open.find("}}") else {
+            // Unmatched "{{" — emit the rest verbatim.
+            out.push_str(&rest[open_idx..]);
+            break;
+        };
+        let token_end = open_idx + 2 + close_rel + 2;
+        let token = &rest[open_idx..token_end];
+        if KNOWN_PLACEHOLDERS.contains(&token) {
+            let value = fields.lookup(token);
+            if json_safe {
+                out.push_str(&json_escape_inner(value));
+            } else {
+                out.push_str(value);
+            }
+        } else {
+            // Unknown placeholder — keep verbatim.
+            out.push_str(token);
+        }
+        rest = &rest[token_end..];
+    }
+    out
+}
+
+/// Executor: POST the event payload to a user-supplied URL.
+///
+/// Use cases: Slack incoming webhooks ("@channel a regression just
+/// fired"), Discord webhooks, custom dashboards.
+///
+/// Security posture for v1 (post codex review):
+///   - URL parsed via `reqwest::Url::parse` (not just a prefix check).
+///     Scheme must be http or https. Rejects file://, javascript:,
+///     data:, gopher:, and malformed URLs.
+///   - URL is NOT screened for private/internal IPs (SSRF). Recipes are
+///     user-authored in v1, so the user owns the destination. If/when
+///     recipes get imported from a marketplace, this is where the
+///     allowlist policy lands. HTTP redirects are NOT disabled, so the
+///     SSRF surface includes anywhere reqwest follows redirects to —
+///     documenting that explicitly per codex feedback.
+///   - 10s timeout. Webhooks should be fast.
+///   - Content-Type is always application/json. body_template values
+///     are JSON-escaped on substitution so a `"` or newline in an agent
+///     slug can't corrupt the JSON shape.
+///   - Audit logs (ops_recipe_runs.result / .error) NEVER contain the
+///     full URL — only scheme+host. Webhook URLs are credentials and
+///     leaking them to disk would be a real secret-exposure.
+///   - Unresolved KNOWN placeholders in URL/body fail loud. The check
+///     is precise (matches `{{source_runtime}}` etc., not any `{{`) so
+///     user templates that legitimately contain `{{` for unrelated
+///     reasons aren't false-flagged.
+async fn post_webhook(
+    event: &AtoEvent,
+    url: &str,
+    body_template: Option<&str>,
+) -> ActionOutcome {
+    let fields = extract_event_fields(event);
+
+    if let Some(p) = first_missing_placeholder(url, &fields) {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "post_webhook: URL uses placeholder {} but event did not provide a value",
+                p
+            )),
+        };
+    }
+    let url_resolved = apply_substitution(url, &fields, false);
+    if url_resolved.is_empty() {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some("post_webhook: empty URL after substitution".to_string()),
+        };
+    }
+    let parsed_url = match reqwest::Url::parse(&url_resolved) {
+        Ok(u) => u,
+        Err(e) => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!("post_webhook: invalid URL: {}", e)),
+            };
+        }
+    };
+    let scheme = parsed_url.scheme();
+    if scheme != "http" && scheme != "https" {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "post_webhook: scheme must be http or https, got '{}'",
+                scheme
+            )),
+        };
+    }
+    let redacted = redact_url(&url_resolved);
+    let body = match body_template {
+        Some(t) => {
+            if let Some(p) = first_missing_placeholder(t, &fields) {
+                return ActionOutcome {
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "post_webhook: body uses placeholder {} but event did not provide a value",
+                        p
+                    )),
+                };
+            }
+            let resolved = apply_substitution(t, &fields, true);
+            // Validate the resolved body is parseable JSON. Codex
+            // round-2: a malformed template like `"k": {{x}}` (no quotes
+            // around the placeholder) would produce invalid JSON post-
+            // substitution. Catch it here, not at the remote endpoint.
+            if let Err(e) =
+                serde_json::from_str::<serde_json::Value>(&resolved)
+            {
+                return ActionOutcome {
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "post_webhook: body is not valid JSON after substitution: {}",
+                        e
+                    )),
+                };
+            }
+            resolved
+        }
+        None => match serde_json::to_string(event) {
+            Ok(s) => s,
+            Err(e) => {
+                return ActionOutcome {
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "post_webhook: serialize event failed: {}",
+                        e
+                    )),
+                };
+            }
+        },
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!("post_webhook: build client: {}", e)),
+            };
+        }
+    };
+    match client
+        .post(parsed_url)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status_code = resp.status();
+            if status_code.is_success() {
+                ActionOutcome {
+                    status: "done",
+                    result: Some(format!("POST {} → {}", redacted, status_code)),
+                    error: None,
+                }
+            } else {
+                ActionOutcome {
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "post_webhook: {} returned {}",
+                        redacted, status_code
+                    )),
+                }
+            }
+        }
+        Err(e) => ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!("post_webhook: {} → {}", redacted, e)),
         },
     }
 }
