@@ -7,6 +7,7 @@ mod active_runs;
 pub mod pty;
 pub mod local_insights;
 pub mod events;
+pub mod recipes;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -812,6 +813,32 @@ pub fn init_database(conn: &Connection) {
     // Clear stale rows from a previous desktop run. We're booting; if
     // any live_runs survived a prior crash, they're dead by definition.
     let _ = conn.execute("DELETE FROM live_runs", []);
+
+    // v2.3.7 Phase 4 — Ops recipes (user-authored trigger→action
+    // workflows). trigger_config / action_config are TEXT (JSON
+    // serialization of the typed enums in recipes.rs). Indexed by
+    // trigger_type so the execution engine's dispatch path is O(log n)
+    // when an event fires.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS ops_recipes (
+            id              TEXT PRIMARY KEY,
+            slug            TEXT NOT NULL UNIQUE,
+            name            TEXT NOT NULL,
+            description     TEXT,
+            trigger_type    TEXT NOT NULL,
+            trigger_config  TEXT NOT NULL,
+            action_type     TEXT NOT NULL,
+            action_config   TEXT NOT NULL,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_recipes_trigger ON ops_recipes(trigger_type, enabled)",
+        [],
+    );
 }
 
 
@@ -837,6 +864,10 @@ pub fn run() {
 
     let db_path = get_db_path();
     let conn = Connection::open(&db_path).expect("Failed to open SQLite database");
+    // v2.3.7 — 5s busy_timeout. With the CLI now also writing to the
+    // same DB, overlap is common; without this, both sides see
+    // transient "database is locked" errors on first contention.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     init_database(&conn);
 
     tauri::Builder::default()
@@ -1016,6 +1047,14 @@ pub fn run() {
             compute_regressions_local,
             compute_cost_recommendations_local,
             record_local_config_change,
+            // v2.3.7 Phase 4 — ops recipes
+            recipes_list,
+            recipes_get,
+            recipes_create,
+            recipes_set_enabled,
+            recipes_delete,
+            recipes_templates,
+            recipes_install_template,
             // Health Checks
             get_health_status,
             record_health_check,

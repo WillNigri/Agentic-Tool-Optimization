@@ -131,6 +131,35 @@ enum Commands {
         #[command(subcommand)]
         sub: CostSub,
     },
+    /// Manage ops recipes (programmable trigger→action workflows)
+    Recipes {
+        #[command(subcommand)]
+        sub: RecipesSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RecipesSub {
+    /// List installed recipes
+    List,
+    /// Get a single recipe by slug
+    Get { slug: String },
+    /// List built-in recipe templates available to install
+    Templates,
+    /// Install a built-in template as a working recipe
+    Install {
+        /// Template slug (see `ato recipes templates`)
+        template_slug: String,
+        /// Override the installed recipe's slug
+        #[arg(long = "as")]
+        rename_to: Option<String>,
+    },
+    /// Enable a recipe (start firing on matching events)
+    Enable { slug: String },
+    /// Disable a recipe (stop firing; preserves config)
+    Disable { slug: String },
+    /// Delete a recipe (config + JSON mirror)
+    Delete { slug: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -377,6 +406,30 @@ fn main() -> Result<()> {
         Commands::Cost { sub } => match sub {
             CostSub::Recommendations { days, min_runs } => {
                 commands::cost::recommendations(&ro_conn()?, days, min_runs, &opts)
+            }
+        },
+        Commands::Recipes { sub } => match sub {
+            RecipesSub::List => commands::recipes::list(&ro_conn()?, &opts),
+            RecipesSub::Get { slug } => commands::recipes::get(&ro_conn()?, &slug, &opts),
+            RecipesSub::Templates => commands::recipes::templates(&opts),
+            RecipesSub::Install {
+                template_slug,
+                rename_to,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::recipes::install_template(&conn, &template_slug, rename_to, &opts)
+            }
+            RecipesSub::Enable { slug } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::recipes::set_enabled(&conn, &slug, true, &opts)
+            }
+            RecipesSub::Disable { slug } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::recipes::set_enabled(&conn, &slug, false, &opts)
+            }
+            RecipesSub::Delete { slug } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::recipes::delete(&conn, &slug, &opts)
             }
         },
         Commands::Agents { sub } => {

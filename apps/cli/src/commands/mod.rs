@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod dispatches;
 pub mod files_touched;
 pub mod kill;
+pub mod recipes;
 pub mod regressions;
 pub mod replay;
 pub mod replays;

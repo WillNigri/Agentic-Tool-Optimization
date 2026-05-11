@@ -29,6 +29,13 @@ pub fn home_dir() -> PathBuf {
     }
 }
 
+/// 5 second busy_timeout — when desktop and CLI overlap on the same
+/// SQLite, the loser waits up to this long for the lock to clear
+/// before failing with `database is locked`. Without it, concurrent
+/// writes from both processes can transient-fail. Caught by
+/// codex-reviewer in the v2.3.7 review.
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     if !path.exists() {
         return Err(anyhow!(
@@ -40,6 +47,7 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     Ok(conn)
 }
 
@@ -58,6 +66,7 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     Ok(conn)
 }
 
