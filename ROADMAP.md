@@ -240,9 +240,23 @@ Patch on `2.0.0`. All fixes for things broken-as-shipped, plus two Phase 5 bulle
 - **CI fix** — extracted `queryClient` from `main.tsx` to `lib/queryClient.ts` so non-React callers (the demo store) don't drag in `ReactDOM.createRoot(...)` at module load. Vitest's jsdom env was crashing on every CI run since v2.0.0-alpha.x.
 - **Diagnostic on Pipelines empty state** + console-logged trace upload failures, so the next "panel says empty" mystery is a 30-second diagnosis instead of a 30-minute one.
 
+### v2.3.0 — Agent-driveable platform (Active, next 60 days)
+
+**Goal:** ATO becomes operable end-to-end by the developer's coding agent. Same data, same operations, same audit trail, accessible from three actor surfaces: GUI (humans), CLI (`ato <command>` shelling out, primary agent surface), MCP (stdio, in-harness agents). Pairs with the platform amendment in `ato-cloud/docs/STRATEGY.md` (2026-05-11).
+
+Load-bearing pieces:
+
+- **`ato` CLI binary** — separate from `ato-desktop`; pure Rust; talks to the local SQLite DB directly. Subcommand structure: `dispatches`, `runs`, `regressions`, `cost`, `replay`, `compare`, `skills`, `agents`, `recipes`, `events`. JSON output by default, `--human` flag for readable formatting. Documented in `AGENTS.md` at the repo root.
+- **Expanded MCP server** — grow from 8 tools to ~25 covering Observation / Operations / Authoring / Events categories. Stdio transport stays.
+- **`AGENTS.md` doc** *(shipped 2026-05-11)* — canonical agent-facing manual covering CLI commands, MCP tools, file paths, event subscriptions, common recipes, safety notes. The doc a coding agent reads to learn ATO.
+- **Local-mode for regressions and cost recs** — currently cloud-side endpoints; ports the algorithms to run over local `execution_logs` + `agent_config_changes`. Same algorithm, no sign-in required. Cloud version stays for cross-device aggregation.
+- **Ops recipes (programmable trigger→action workflows)** — extends the Automations canvas with event-trigger node types (`on regression`, `on dispatch_failed`, `on cost_threshold`, `on replay_done`, `on schedule`) and ops-action node types (`draft skill`, `replay on alt runtime`, `kill run`, `post to webhook`, `notify human in activity feed`). Skillify ships as one example recipe template, not a hardcoded feature.
+- **Activity feed** — chronological view in the GUI where humans and agents both post. Where shared insights between human and agent surface.
+- **Event subscription protocol** — `ato events watch --type <event>` streams JSON events one per line so agents can stay long-lived and react to what happens.
+
 ### v3.0.0+ / v4.0.0+ / v5.0.0+ — Blue-sky
 
-Items that previously sat in this section (federated agent network, kubectl-for-agents, compliance bundles, marketplace for agent templates, etc.) have been moved to [`BLUE-SKY.md`](BLUE-SKY.md). They don't currently fit the north star (`ato-cloud/docs/STRATEGY.md`: *the developer-workflow operations layer for multi-runtime AI agents*). They live in the blue-sky doc so engineering decisions don't drift into them by accident; reconsider only when a north-star invalidation trigger fires.
+Items that previously sat in this section (federated agent network, kubectl-for-agents, compliance bundles, marketplace for agent templates, etc.) have been moved to [`BLUE-SKY.md`](BLUE-SKY.md). They don't currently fit the north star (`ato-cloud/docs/STRATEGY.md`: *the developer-workflow operations platform for multi-runtime AI agents*). They live in the blue-sky doc so engineering decisions don't drift into them by accident; reconsider only when a north-star invalidation trigger fires.
 
 ### v1.7.0–1.8.0 — Polish (Planned, fits between v1.6 and v2.0)
 - Cron-driven evaluator scheduling

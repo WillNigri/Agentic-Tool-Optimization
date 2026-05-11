@@ -1,6 +1,8 @@
 # ATO — Agentic Tool Optimization
 
-**Build agents that adapt, not repeat.** Static system prompts are the floor, not the ceiling. ATO makes it trivial to build agents whose prompts resolve from files, env vars, databases, or other LLMs at fire time. Multi-runtime by protocol. Local-first. MIT.
+**The local-first developer-workflow operations platform for multi-runtime AI agents — used by humans and their coding agents together.** Static system prompts are the floor, not the ceiling. ATO makes it trivial to build agents whose prompts resolve from files, env vars, databases, or other LLMs at fire time. Multi-runtime by protocol. Local-first. MIT.
+
+> **Coding agent? Read [`AGENTS.md`](./AGENTS.md) first.** ATO is built to be driven by both humans (via the GUI) and AI coding agents (via CLI and MCP). The AGENTS.md doc covers everything an AI agent needs to know to operate ATO on a developer's behalf.
 
 ```ts
 // Your system prompt:
@@ -24,8 +26,19 @@ Supported: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**,
 - **First-time users** — chat-style guided wizard ("describe what you want") suggests runtime, model, skills, MCPs. Or pick a starter template. Working agent in under two minutes.
 - **Power users** — Quick form, command palette (⌘K), embedded `portable-pty` terminal, persistent threads, drag-drop file attachments, streaming responses with syntax-highlighted markdown, sequential automation pipelines.
 - **Teams** — cloud sync, shared agents, team-wide observability, SSO, audit retention via the optional Pro / Team tier.
+- **AI coding agents** *(new)* — every meaningful operation is reachable from a local CLI (`ato <command>`) or a stdio MCP server. The agent reads [`AGENTS.md`](./AGENTS.md), discovers ATO's surface, and operates it alongside the human. Local SQLite means zero network round-trip; agents never have to leave the machine.
 
 Bring your own auth: ATO rides your existing logged-in CLI subscriptions (Claude Code, Codex, Gemini CLI) the way VS Code rides your GitHub login — *or* you can use stored API keys. Your choice, per runtime.
+
+### Local-first by design
+
+ATO writes everything to `~/.ato/` on the developer's machine:
+
+- **`~/.ato/local.db`** — SQLite database with every dispatch, replay, config change, agent definition, chat thread, skill registration. Agents can `sqlite3` query it directly for fast reads.
+- **`~/.ato/agent-logs.jsonl`** — append-only JSONL log; grep-friendly.
+- **`~/.ato/workflows/`**, **`~/.ato/cron-jobs.json`**, **`~/.ato/backups/`** — workflows, schedules, auto-backups.
+
+Sign-in is **optional** and only matters for cloud sync features (cross-device trace history, team workspaces). Every core operation — dispatch, replay, compare, file attribution, configuration ledger — works fully offline.
 
 ### Relationship to other tools
 
