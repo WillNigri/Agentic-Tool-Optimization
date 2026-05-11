@@ -8,7 +8,7 @@
 use crate::output::{emit_human, emit_json, Opts};
 use anyhow::{anyhow, Context, Result};
 use ato_posts::{validate_author_slug, validate_text, CreatePostInput, Post, PostAuthorKind, PostKind};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 fn parse_author_kind(s: &str) -> Result<PostAuthorKind> {
     match s {
@@ -142,10 +142,6 @@ pub fn list(conn: &Connection, limit: usize, kind_filter: Option<String>, opts: 
         let ak: String = r.get(2)?;
         let k: String = r.get(4)?;
         let payload_s: Option<String> = r.get(7)?;
-        let payload = match payload_s {
-            Some(s) => Some(serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)),
-            None => None,
-        };
         out.push(Post {
             id: r.get(0)?,
             created_at: r.get(1)?,
@@ -154,7 +150,7 @@ pub fn list(conn: &Connection, limit: usize, kind_filter: Option<String>, opts: 
             kind: parse_kind(&k).map_err(|e| anyhow!(e))?,
             text: r.get(5)?,
             related_event_seq: r.get(6)?,
-            payload,
+            payload: parse_payload(payload_s.as_deref())?,
         });
     }
     if opts.human {
@@ -207,4 +203,290 @@ fn has_table(conn: &Connection) -> bool {
         )
         .unwrap_or(0);
     c > 0
+}
+
+pub fn get(conn: &Connection, id: &str, opts: &Opts) -> Result<()> {
+    if !has_table(conn) {
+        return Err(anyhow!(
+            "activity_posts table not found. Launch the ATO desktop (v2.3.16+) once to apply the migration."
+        ));
+    }
+    // Codex round-1 5.2: hard-fail on unknown enum values rather
+    // than silently downgrading to System/Message. The other readers
+    // (list, tail, desktop storage) already do this; making get
+    // consistent prevents a corrupted-row reader from lying.
+    let raw: Option<(String, String, String, Option<String>, String, String, Option<i64>, Option<String>)> = conn
+        .query_row(
+            "SELECT id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload
+               FROM activity_posts WHERE id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .context("query post")?;
+    let row: Option<Post> = match raw {
+        Some((id, created_at, ak, slug, k, text, related, payload_s)) => Some(Post {
+            id,
+            created_at,
+            author_kind: parse_author_kind(&ak).map_err(|e| anyhow!(e))?,
+            author_slug: slug,
+            kind: parse_kind(&k).map_err(|e| anyhow!(e))?,
+            text,
+            related_event_seq: related,
+            payload: parse_payload(payload_s.as_deref())?,
+        }),
+        None => None,
+    };
+    match row {
+        Some(p) => {
+            if opts.human {
+                let author = match &p.author_slug {
+                    Some(s) => format!("{} @{}", author_kind_str(p.author_kind), s),
+                    None => author_kind_str(p.author_kind).to_string(),
+                };
+                emit_human(&format!(
+                    "Post {}\n  created_at: {}\n  author: {}\n  kind: {}\n  related_event_seq: {}\n  text: {}",
+                    p.id,
+                    p.created_at,
+                    author,
+                    kind_str(p.kind),
+                    p.related_event_seq
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "—".to_string()),
+                    p.text
+                ));
+            } else {
+                emit_json(&p)?;
+            }
+            Ok(())
+        }
+        None => Err(anyhow!("No post with id '{}'.", id)),
+    }
+}
+
+/// Tail new posts as JSONL on stdout. Mirrors `ato events watch` —
+/// same retry-on-transient-error pattern, same de-duped stderr
+/// logging, same JSONL-on-stdout output.
+///
+/// Cursor: composite (created_at, id). Codex round-1 5.2 caught that
+/// a plain created_at watermark would PERMANENTLY drop rows sharing
+/// the previous emit's timestamp. created_at comes from
+/// `Utc::now().to_rfc3339()`, not a DB-generated monotonic value, so
+/// ties depend on clock granularity + scheduling. With a composite
+/// cursor and `WHERE created_at > ?1 OR (created_at = ?1 AND id > ?2)`
+/// every row is reachable.
+#[derive(Clone)]
+struct Cursor {
+    created_at: String,
+    id: String,
+}
+
+pub fn tail(
+    db_path: &std::path::PathBuf,
+    kind_filter: Option<String>,
+    since_id: Option<String>,
+    max_rows: Option<usize>,
+    poll_ms: u64,
+    opts: &Opts,
+) -> Result<()> {
+    let poll_ms = poll_ms.clamp(100, 5_000);
+    let interval = std::time::Duration::from_millis(poll_ms);
+    let kind_parsed: Option<PostKind> = match kind_filter {
+        Some(s) => Some(parse_kind(&s)?),
+        None => None,
+    };
+
+    // Bootstrap cursor. --since-id -> use that post's (created_at,
+    // id); otherwise default to the (created_at, id) of the row at
+    // MAX(created_at), so new posts (later created_at or equal+later
+    // id) start streaming from then on.
+    let mut cursor: Cursor = loop {
+        match crate::db::open_readonly(db_path) {
+            Ok(conn) => {
+                if !has_table(&conn) {
+                    if opts.human {
+                        emit_human(
+                            "activity_posts table not found. Launch the ATO desktop (v2.3.16+) once to apply the migration.",
+                        );
+                    }
+                    return Ok(());
+                }
+                if let Some(id) = since_id.as_ref() {
+                    let row: Option<(String, String)> = conn
+                        .query_row(
+                            "SELECT created_at, id FROM activity_posts WHERE id = ?1",
+                            [id],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()?;
+                    match row {
+                        Some((ts, id)) => break Cursor { created_at: ts, id },
+                        None => {
+                            return Err(anyhow!(
+                                "No post with id '{}' to start streaming after.",
+                                id
+                            ))
+                        }
+                    }
+                }
+                // tail-f: latest existing row at boot, or epoch sentinel if empty.
+                let row: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT created_at, id FROM activity_posts ORDER BY created_at DESC, id DESC LIMIT 1",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .unwrap_or(None);
+                break match row {
+                    Some((ts, id)) => Cursor { created_at: ts, id },
+                    None => Cursor {
+                        created_at: "1970-01-01T00:00:00+00:00".to_string(),
+                        id: String::new(),
+                    },
+                };
+            }
+            Err(_) => {
+                std::thread::sleep(interval);
+                continue;
+            }
+        }
+    };
+
+    if opts.human {
+        emit_human(&format!(
+            "Tailing activity_posts after ({}, {}) (poll {}ms). Ctrl-C to stop.",
+            cursor.created_at, cursor.id, poll_ms
+        ));
+    }
+
+    let mut emitted: usize = 0;
+    let mut last_error_msg: Option<String> = None;
+    loop {
+        let conn = match crate::db::open_readonly(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = e.to_string();
+                if last_error_msg.as_ref() != Some(&msg) {
+                    eprintln!("ato posts tail: open error (will retry): {}", msg);
+                    last_error_msg = Some(msg);
+                }
+                std::thread::sleep(interval);
+                continue;
+            }
+        };
+        let new_rows = match fetch_new(&conn, &cursor, kind_parsed) {
+            Ok(rows) => {
+                last_error_msg = None;
+                rows
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if last_error_msg.as_ref() != Some(&msg) {
+                    eprintln!("ato posts tail: fetch error (will retry): {}", msg);
+                    last_error_msg = Some(msg);
+                }
+                drop(conn);
+                std::thread::sleep(interval);
+                continue;
+            }
+        };
+        for row in new_rows {
+            cursor = Cursor {
+                created_at: row.created_at.clone(),
+                id: row.id.clone(),
+            };
+            if opts.human {
+                let author = match &row.author_slug {
+                    Some(s) => format!("{} @{}", author_kind_str(row.author_kind), s),
+                    None => author_kind_str(row.author_kind).to_string(),
+                };
+                emit_human(&format!(
+                    "  [{}] {} — {}: {}",
+                    kind_str(row.kind),
+                    row.created_at,
+                    author,
+                    one_line(&row.text)
+                ));
+            } else {
+                let line = serde_json::to_string(&row)
+                    .unwrap_or_else(|_| String::from("{}"));
+                println!("{}", line);
+            }
+            emitted += 1;
+            if let Some(cap) = max_rows {
+                if emitted >= cap {
+                    return Ok(());
+                }
+            }
+        }
+        drop(conn);
+        std::thread::sleep(interval);
+    }
+}
+
+fn fetch_new(
+    conn: &Connection,
+    cursor: &Cursor,
+    kind_filter: Option<PostKind>,
+) -> Result<Vec<Post>> {
+    let mut out: Vec<Post> = Vec::new();
+    let kind_str_opt: Option<&str> = kind_filter.map(kind_str);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload
+               FROM activity_posts
+              WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
+                AND (?3 IS NULL OR kind = ?3)
+              ORDER BY created_at ASC, id ASC
+              LIMIT 500",
+        )
+        .context("prepare posts tail query")?;
+    let mut rows = stmt.query(rusqlite::params![
+        &cursor.created_at,
+        &cursor.id,
+        kind_str_opt
+    ])?;
+    while let Some(r) = rows.next()? {
+        let ak: String = r.get(2)?;
+        let k: String = r.get(4)?;
+        let payload_s: Option<String> = r.get(7)?;
+        out.push(Post {
+            id: r.get(0)?,
+            created_at: r.get(1)?,
+            author_kind: parse_author_kind(&ak).map_err(|e| anyhow!(e))?,
+            author_slug: r.get(3)?,
+            kind: parse_kind(&k).map_err(|e| anyhow!(e))?,
+            text: r.get(5)?,
+            related_event_seq: r.get(6)?,
+            payload: parse_payload(payload_s.as_deref())?,
+        });
+    }
+    Ok(out)
+}
+
+/// Decode the optional `payload` column. Codex round-2 5.2: previously
+/// `.and_then(serde_json::from_str(...).ok())` silently dropped
+/// malformed payloads to None, while desktop storage hard-fails on
+/// the same row. Now consistent: NULL → None, valid JSON → Some(v),
+/// invalid JSON → Err.
+fn parse_payload(s: Option<&str>) -> Result<Option<serde_json::Value>> {
+    match s {
+        Some(raw) => Ok(Some(
+            serde_json::from_str::<serde_json::Value>(raw)
+                .context("payload column is not valid JSON")?,
+        )),
+        None => Ok(None),
+    }
 }

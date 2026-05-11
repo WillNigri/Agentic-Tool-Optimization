@@ -177,6 +177,28 @@ enum PostsSub {
         #[arg(long = "kind")]
         kind: Option<String>,
     },
+    /// Get a single post by id
+    Get {
+        /// Post id (uuid)
+        id: String,
+    },
+    /// Tail new posts as they land. Emits one JSONL row per post.
+    Tail {
+        /// Only emit posts of this kind.
+        #[arg(long = "kind")]
+        kind: Option<String>,
+        /// Start streaming from posts created AFTER this id's
+        /// timestamp. Default: skip everything that exists now and
+        /// only show new posts (tail-f semantics).
+        #[arg(long = "since-id")]
+        since_id: Option<String>,
+        /// Stop after emitting N posts (default: no cap).
+        #[arg(long = "max-rows")]
+        max_rows: Option<usize>,
+        /// Poll interval in milliseconds (default 500, min 100, max 5000).
+        #[arg(long = "poll-ms", default_value_t = 500)]
+        poll_ms: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -551,6 +573,13 @@ fn main() -> Result<()> {
             PostsSub::List { limit, kind } => {
                 commands::posts::list(&ro_conn()?, limit, kind, &opts)
             }
+            PostsSub::Get { id } => commands::posts::get(&ro_conn()?, &id, &opts),
+            PostsSub::Tail {
+                kind,
+                since_id,
+                max_rows,
+                poll_ms,
+            } => commands::posts::tail(&db_path, kind, since_id, max_rows, poll_ms, &opts),
         },
         Commands::Agents { sub } => {
             let conn = db::open_readwrite(&db_path)?;
