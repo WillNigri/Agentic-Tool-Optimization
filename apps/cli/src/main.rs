@@ -199,6 +199,29 @@ enum PostsSub {
         #[arg(long = "poll-ms", default_value_t = 500)]
         poll_ms: u64,
     },
+    /// Approve an ApprovalRequest post (writes an ApprovalDecision)
+    Approve {
+        /// Id of the ApprovalRequest post to approve
+        request_id: String,
+        /// Optional note explaining the decision
+        #[arg(long = "notes")]
+        notes: Option<String>,
+    },
+    /// Deny an ApprovalRequest post (writes an ApprovalDecision)
+    Deny {
+        /// Id of the ApprovalRequest post to deny
+        request_id: String,
+        /// Optional note explaining the decision
+        #[arg(long = "notes")]
+        notes: Option<String>,
+    },
+    /// List ApprovalRequest posts that don't have a matching
+    /// ApprovalDecision yet
+    Pending {
+        /// How many to return (default 20)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -580,6 +603,17 @@ fn main() -> Result<()> {
                 max_rows,
                 poll_ms,
             } => commands::posts::tail(&db_path, kind, since_id, max_rows, poll_ms, &opts),
+            PostsSub::Approve { request_id, notes } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::posts::decide(&conn, &request_id, true, notes, &opts)
+            }
+            PostsSub::Deny { request_id, notes } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::posts::decide(&conn, &request_id, false, notes, &opts)
+            }
+            PostsSub::Pending { limit } => {
+                commands::posts::pending(&ro_conn()?, limit, &opts)
+            }
         },
         Commands::Agents { sub } => {
             let conn = db::open_readwrite(&db_path)?;

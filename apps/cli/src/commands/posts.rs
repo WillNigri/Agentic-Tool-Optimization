@@ -490,3 +490,219 @@ fn parse_payload(s: Option<&str>) -> Result<Option<serde_json::Value>> {
         None => Ok(None),
     }
 }
+
+// ─── Approval flow (Phase 5.3) ────────────────────────────────────────
+
+/// Write an ApprovalDecision post linking to the given ApprovalRequest.
+/// Validates: the target row exists, is kind=ApprovalRequest, and has
+/// no prior ApprovalDecision in payload.request_post_id pointing at
+/// it (one decision per request). Decision payload format:
+///   { "request_post_id": "<id>", "decision": "approved"|"denied",
+///     "notes": "<text>" }
+pub fn decide(
+    conn: &Connection,
+    request_id: &str,
+    approved: bool,
+    notes: Option<String>,
+    opts: &Opts,
+) -> Result<()> {
+    if !has_table(conn) {
+        return Err(anyhow!(
+            "activity_posts table not found. Launch the ATO desktop (v2.3.16+) once to apply the migration."
+        ));
+    }
+    // Codex round-2 5.3: the unique index is only created in the
+    // desktop's init_database. If the user runs `ato posts approve`
+    // on a DB that hasn't been migrated yet (CLI upgraded but desktop
+    // not relaunched after upgrade), the storage-layer race
+    // protection is missing. Ensure it idempotently here on every
+    // decide call. Surface failures (duplicates from before this
+    // protection landed) instead of silently downgrading.
+    ensure_decision_unique_index(conn).context(
+        "approval decisions rely on a partial UNIQUE index — its creation failed (existing duplicates?)",
+    )?;
+    // Validate target.
+    let target_kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM activity_posts WHERE id = ?1",
+            [request_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("look up target post")?;
+    let target_kind = target_kind.ok_or_else(|| {
+        anyhow!("No post with id '{}' to approve / deny.", request_id)
+    })?;
+    if target_kind != "approval_request" {
+        return Err(anyhow!(
+            "Post '{}' is kind={}, not approval_request — cannot decide.",
+            request_id,
+            target_kind
+        ));
+    }
+    if has_existing_decision(conn, request_id)? {
+        return Err(anyhow!(
+            "Post '{}' already has an ApprovalDecision — refusing to write a second."
+        , request_id));
+    }
+
+    let decision_str = if approved { "approved" } else { "denied" };
+    let payload = serde_json::json!({
+        "request_post_id": request_id,
+        "decision": decision_str,
+        "notes": notes,
+    });
+    let body = match &notes {
+        Some(n) if !n.trim().is_empty() => format!("{} (notes: {})", decision_str, n.trim()),
+        _ => decision_str.to_string(),
+    };
+    validate_text(&body).map_err(|e| anyhow!(e))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let payload_str = serde_json::to_string(&payload).context("serialize decision payload")?;
+    // The partial unique index on (kind='approval_decision',
+    // json_extract(payload, '$.request_post_id')) catches the
+    // race between has_existing_decision and the INSERT (codex 5.3
+    // round-1 medium). On collision we surface the same logical
+    // error the pre-flight check would have.
+    if let Err(e) = conn.execute(
+        "INSERT INTO activity_posts (id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload)
+         VALUES (?1, ?2, 'human', NULL, 'approval_decision', ?3, NULL, ?4)",
+        rusqlite::params![id, created_at, body, payload_str],
+    ) {
+        let msg = e.to_string();
+        if msg.contains("UNIQUE constraint") {
+            return Err(anyhow!(
+                "Post '{}' already has an ApprovalDecision (race detected by storage).",
+                request_id
+            ));
+        }
+        return Err(e).context("insert ApprovalDecision row");
+    }
+
+    let post = Post {
+        id: id.clone(),
+        created_at,
+        author_kind: PostAuthorKind::Human,
+        author_slug: None,
+        kind: PostKind::ApprovalDecision,
+        text: body,
+        related_event_seq: None,
+        payload: Some(payload),
+    };
+    if opts.human {
+        emit_human(&format!(
+            "Wrote ApprovalDecision #{} ({}) for request '{}'.",
+            post.id, decision_str, request_id
+        ));
+    } else {
+        emit_json(&post)?;
+    }
+    Ok(())
+}
+
+/// Create the partial UNIQUE index that enforces one
+/// ApprovalDecision per ApprovalRequest. Idempotent under
+/// `IF NOT EXISTS`. Returns Err if creation fails (typically
+/// pre-existing duplicates that block the constraint).
+fn ensure_decision_unique_index(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_posts_decision_request
+            ON activity_posts(json_extract(payload, '$.request_post_id'))
+          WHERE kind = 'approval_decision'",
+        [],
+    )
+    .map(|_| ())
+    .context("create idx_activity_posts_decision_request")
+}
+
+fn has_existing_decision(conn: &Connection, request_id: &str) -> Result<bool> {
+    // SQLite's json_extract works on the payload TEXT. The string is
+    // a JSON object so this is the cleanest check; no need to load
+    // all decisions into memory and parse them client-side.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM activity_posts
+              WHERE kind = 'approval_decision'
+                AND json_extract(payload, '$.request_post_id') = ?1",
+            [request_id],
+            |r| r.get(0),
+        )
+        .context("check for existing decision")?;
+    Ok(count > 0)
+}
+
+/// List ApprovalRequest posts that don't yet have a matching
+/// ApprovalDecision. Newest pending first.
+pub fn pending(conn: &Connection, limit: usize, opts: &Opts) -> Result<()> {
+    if !has_table(conn) {
+        if opts.human {
+            emit_human("activity_posts table not found. Launch the ATO desktop (v2.3.16+) once.");
+        } else {
+            emit_json(&Vec::<Post>::new())?;
+        }
+        return Ok(());
+    }
+    let safe_limit = limit.min(10_000) as i64;
+    // Codex round-1 5.3: NOT IN with json_extract is brittle —
+    // a single NULL from a malformed payload (or a decision row
+    // shaped differently in the future) propagates NULL semantics
+    // and makes the predicate evaluate to unknown for every
+    // candidate row. NOT EXISTS is the safer form because it
+    // checks for the existence of a row matching the inner
+    // condition explicitly, with no NULL-collapsing arithmetic.
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload
+               FROM activity_posts AS req
+              WHERE req.kind = 'approval_request'
+                AND NOT EXISTS (
+                  SELECT 1 FROM activity_posts AS d
+                   WHERE d.kind = 'approval_decision'
+                     AND json_extract(d.payload, '$.request_post_id') = req.id
+                )
+              ORDER BY req.created_at DESC
+              LIMIT ?1",
+        )
+        .context("prepare pending approvals query")?;
+    let mut rows = stmt.query(rusqlite::params![safe_limit])?;
+    let mut out: Vec<Post> = Vec::new();
+    while let Some(r) = rows.next()? {
+        let ak: String = r.get(2)?;
+        let k: String = r.get(4)?;
+        let payload_s: Option<String> = r.get(7)?;
+        out.push(Post {
+            id: r.get(0)?,
+            created_at: r.get(1)?,
+            author_kind: parse_author_kind(&ak).map_err(|e| anyhow!(e))?,
+            author_slug: r.get(3)?,
+            kind: parse_kind(&k).map_err(|e| anyhow!(e))?,
+            text: r.get(5)?,
+            related_event_seq: r.get(6)?,
+            payload: parse_payload(payload_s.as_deref())?,
+        });
+    }
+    if opts.human {
+        if out.is_empty() {
+            emit_human("No pending approvals.");
+        } else {
+            emit_human(&format!("{} pending approvals:", out.len()));
+            for p in &out {
+                let author = match &p.author_slug {
+                    Some(s) => format!("{} @{}", author_kind_str(p.author_kind), s),
+                    None => author_kind_str(p.author_kind).to_string(),
+                };
+                emit_human(&format!(
+                    "  {} — {}: {}",
+                    p.id,
+                    author,
+                    one_line(&p.text)
+                ));
+            }
+        }
+    } else {
+        emit_json(&out)?;
+    }
+    Ok(())
+}

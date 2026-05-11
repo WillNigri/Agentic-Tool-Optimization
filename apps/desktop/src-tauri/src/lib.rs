@@ -926,6 +926,32 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_activity_posts_kind_created ON activity_posts(kind, created_at DESC)",
         [],
     );
+    // v2.3.18 Phase 5.3 — partial UNIQUE index enforcing
+    // one-ApprovalDecision-per-ApprovalRequest at the storage layer.
+    // Codex 5.3 round-1 caught that the CLI's check-then-insert was
+    // a race window; concurrent approve/deny would both succeed. The
+    // SQL UNIQUE constraint serializes writers without needing a
+    // transaction-level lock in app code.
+    //
+    // Codex round-2 caught that `let _ = conn.execute(...)` would
+    // silently swallow the creation failure on DBs that already
+    // have duplicates from the pre-fix race. We surface it here
+    // so the user (or a future migration) can clean up before
+    // relying on the protection.
+    if let Err(e) = conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_posts_decision_request
+            ON activity_posts(json_extract(payload, '$.request_post_id'))
+          WHERE kind = 'approval_decision'",
+        [],
+    ) {
+        eprintln!(
+            "WARN: failed to create unique approval-decision index: {} \
+             (likely a pre-existing duplicate from a v2.3.17-or-earlier race). \
+             Run `sqlite3 ~/.ato/local.db` and inspect duplicate \
+             json_extract(payload,'$.request_post_id') values, then retry.",
+            e
+        );
+    }
 }
 
 
