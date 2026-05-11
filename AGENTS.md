@@ -226,14 +226,20 @@ Connect over stdio. Tools below are available today (v2.1.x) or planned. Use `to
 | `get_agent_logs` | Execution logs (filterable by runtime) |
 | `run_agent` | Dispatch any ATO-managed agent regardless of native runtime |
 
-### Planned expansion (v2.3+)
+### v2.3.4 expansion (shipped — Phase 3)
 
-Mirrors the CLI reference. Each CLI subcommand has an equivalent MCP tool:
+Mirrors the CLI reference. Each CLI subcommand has an equivalent MCP tool, implemented as a thin shell-out so the CLI is the canonical implementation:
 
-- **Observation:** `get_recent_dispatches`, `get_active_runs`, `get_regressions`, `get_failing_examples`, `get_config_changes`, `get_cost_recommendations`, `get_file_attribution`, `get_replay_history`
-- **Operations:** `start_dispatch`, `start_replay`, `get_replay_job`, `kill_run`, `bulk_kill`, `compare_traces`
-- **Authoring:** `draft_skill_from_replay`, `create_agent`, `update_agent_config`, `create_ops_recipe`
-- **Events:** `subscribe_to_events`, `acknowledge_event`
+- **Observation:** `get_recent_dispatches`, `get_active_runs`, `get_run`, `get_regressions`, `get_failing_examples`, `get_config_changes`, `get_cost_recommendations`, `get_file_attribution`, `get_replay_history`
+- **Operations:** `start_dispatch`, `start_replay`, `get_replay_job`, `kill_run`, `compare_traces`
+- **Authoring:** `draft_skill_from_replay`, `create_agent`, `update_agent`
+
+The MCP server needs the `ato` CLI to be reachable. Set `ATO_CLI_PATH` env var to override the lookup; otherwise it tries `ato` on PATH (most common after `ato setup-path`), then falls back to the macOS bundle sidecar path.
+
+### Planned for Phase 4+ (not yet shipped)
+
+- **`create_ops_recipe`** — programmable trigger→action workflows
+- **Events:** `subscribe_to_events`, `acknowledge_event` — long-lived event subscription protocol
 
 ## 7. Common recipes — patterns to copy
 
