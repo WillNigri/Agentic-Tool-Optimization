@@ -4,6 +4,7 @@ pub mod config_changes;
 pub mod cost;
 pub mod dispatch;
 pub mod dispatches;
+pub mod events;
 pub mod files_touched;
 pub mod kill;
 pub mod recipes;

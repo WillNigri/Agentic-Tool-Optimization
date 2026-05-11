@@ -3279,6 +3279,22 @@ fn persist_execution_log(
             effective_model,
         ],
     );
+
+    // v2.3.8 Phase 4.2 — Publish DispatchFailed on error. The events
+    // bus subscriber (recipes engine) reacts; the table-bound audit
+    // happens inside publish() via events_log.
+    if status == "error" {
+        let event = crate::events::AtoEvent::DispatchFailed {
+            event_seq: crate::events::next_seq(),
+            run_id: id.clone(),
+            agent_slug: agent_slug.map(|s| s.to_string()),
+            runtime: runtime.to_string(),
+            error_message: error_message.clone().unwrap_or_default(),
+            duration_ms: duration_ms as i64,
+            failed_at: now.clone(),
+        };
+        crate::events::bus::publish(event);
+    }
 }
 
 // ── v2.2.0 cost estimation helpers ────────────────────────────────────
@@ -3770,6 +3786,41 @@ fn finish_replay(
         ],
     )
     .map_err(|e| e.to_string())?;
+
+    // v2.3.8 Phase 4.2 — Publish ReplayDone so recipes (Skillify) can
+    // react. Look up the source_trace_id from the just-updated row so
+    // the event carries enough payload for action executors.
+    let (source_trace_id, source_runtime, target_runtime, target_model): (
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT COALESCE(source_cloud_trace_id, source_execution_log_id), source_runtime, target_runtime, target_model
+               FROM replay_jobs WHERE id = ?1",
+            [job_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap_or_else(|_| (String::new(), String::new(), String::new(), None));
+    let status_typed = match status {
+        "done" => crate::events::ReplayStatus::Done,
+        _ => crate::events::ReplayStatus::Failed,
+    };
+    let event = crate::events::AtoEvent::ReplayDone {
+        event_seq: crate::events::next_seq(),
+        job_id: job_id.to_string(),
+        source_trace_id,
+        source_runtime,
+        target_runtime,
+        target_model,
+        status: status_typed,
+        duration_ms: Some(duration_ms as i64),
+        cost_usd_estimated: cost_usd,
+        error_message: error.clone(),
+        finished_at: finished_at.clone(),
+    };
+    crate::events::bus::publish(event);
     Ok(())
 }
 

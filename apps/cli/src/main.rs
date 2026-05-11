@@ -136,6 +136,24 @@ enum Commands {
         #[command(subcommand)]
         sub: RecipesSub,
     },
+    /// Inspect the event bus (event audit log)
+    Events {
+        #[command(subcommand)]
+        sub: EventsSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum EventsSub {
+    /// Recent events (from events_log table; populated by the desktop bus)
+    Recent {
+        /// Optional event type filter (regression_detected, dispatch_failed, replay_done, etc.)
+        #[arg(long = "type")]
+        event_type: Option<String>,
+        /// How many to return (default 20)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -158,6 +176,12 @@ enum RecipesSub {
     Enable { slug: String },
     /// Disable a recipe (stop firing; preserves config)
     Disable { slug: String },
+    /// Show audit log of recent runs for a recipe
+    Runs {
+        slug: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Delete a recipe (config + JSON mirror)
     Delete { slug: String },
 }
@@ -427,9 +451,17 @@ fn main() -> Result<()> {
                 let conn = db::open_readwrite(&db_path)?;
                 commands::recipes::set_enabled(&conn, &slug, false, &opts)
             }
+            RecipesSub::Runs { slug, limit } => {
+                commands::recipes::runs(&ro_conn()?, &slug, limit, &opts)
+            }
             RecipesSub::Delete { slug } => {
                 let conn = db::open_readwrite(&db_path)?;
                 commands::recipes::delete(&conn, &slug, &opts)
+            }
+        },
+        Commands::Events { sub } => match sub {
+            EventsSub::Recent { event_type, limit } => {
+                commands::events::recent(&ro_conn()?, event_type, limit, &opts)
             }
         },
         Commands::Agents { sub } => {

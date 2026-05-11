@@ -171,8 +171,13 @@ pub mod bus {
     const CHANNEL_CAPACITY: usize = 256;
 
     static BUS: OnceLock<broadcast::Sender<AtoEvent>> = OnceLock::new();
-    /// Monotonic event sequence counter. Callers of `publish_with_seq`
-    /// stamp the event with `next_seq()` before sending.
+    /// Monotonic event sequence counter. Callers stamp the event with
+    /// `next_seq()` before sending. Seeded from MAX(event_seq) in
+    /// events_log on app boot (`init_seq_from_db`) so the counter
+    /// stays strictly increasing across desktop restarts. Without that
+    /// seeding, the previous run's events would be overwritten when
+    /// the new run reuses seq 1, 2, 3... — caught by codex-reviewer
+    /// in v2.3.8 review.
     static SEQ: AtomicU64 = AtomicU64::new(1);
 
     fn sender() -> &'static broadcast::Sender<AtoEvent> {
@@ -183,6 +188,34 @@ pub mod bus {
     /// this once per event they construct.
     pub fn next_seq() -> u64 {
         SEQ.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// v2.3.8 — Seed the in-memory sequence counter from the highest
+    /// event_seq already persisted in events_log. Called by the
+    /// desktop at app boot, after the DB schema is initialized.
+    /// Idempotent: subsequent calls only ratchet UP, never down.
+    pub fn init_seq_from_db(db_path: &std::path::Path) {
+        let conn = match rusqlite::Connection::open(db_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(event_seq), 0) FROM events_log", [], |r| r.get(0))
+            .unwrap_or(0);
+        let next = (max as u64).saturating_add(1);
+        // Ratchet: only raise SEQ, never lower it. Concurrent next_seq
+        // calls during boot are unlikely but safe — they always end up
+        // >= the persisted max.
+        loop {
+            let cur = SEQ.load(Ordering::Relaxed);
+            if cur >= next {
+                return;
+            }
+            match SEQ.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Outcome of publishing an event. Distinguishes "delivered to N
@@ -200,11 +233,46 @@ pub mod bus {
     /// Publish an event. Caller passes ownership; we don't clone.
     /// Returns the outcome with `delivered_to` populated from the send
     /// result (not from `receiver_count()`, which can drift).
+    ///
+    /// v2.3.8 — Also persists to the events_log SQLite table so
+    /// `ato events recent` can read history + lagging subscribers can
+    /// re-read from a deterministic source. Persistence is best-effort:
+    /// a locked DB doesn't block the send.
     pub fn publish(event: AtoEvent) -> PublishOutcome {
+        persist_event(&event);
         match sender().send(event) {
             Ok(n) => PublishOutcome { delivered_to: n },
             Err(_) => PublishOutcome { delivered_to: 0 },
         }
+    }
+
+    /// Best-effort insert into events_log. Failure is logged but never
+    /// blocks the broadcast send — the bus is the primary signal path.
+    fn persist_event(event: &AtoEvent) {
+        let db_path = crate::get_db_path();
+        let conn = match rusqlite::Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let payload = match serde_json::to_string(event) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let occurred_at = chrono::Utc::now().to_rfc3339();
+        // Plain INSERT — `event_seq` is seeded from MAX on app boot so
+        // collisions don't happen across restarts (caught by codex-
+        // reviewer in v2.3.8). If insert fails (DB locked, schema
+        // missing on older DB), silently drop — the broadcast send
+        // still happens.
+        let _ = conn.execute(
+            "INSERT INTO events_log (event_seq, event_type, payload, occurred_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                event.event_seq() as i64,
+                event.type_name(),
+                payload,
+                occurred_at,
+            ],
+        );
     }
 
     /// Get a fresh subscriber. Each receiver sees events published after

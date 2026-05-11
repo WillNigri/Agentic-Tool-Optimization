@@ -110,23 +110,9 @@ pub struct RecipeTemplate {
 // apps/desktop/src-tauri/src/recipes.rs::builtin_templates.
 fn builtin_templates() -> Vec<RecipeTemplate> {
     vec![
-        RecipeTemplate {
-            slug: "auto-replay-regression-failures".to_string(),
-            name: "Auto-replay regression failing examples".to_string(),
-            description:
-                "When a regression fires, replay each failing example on the previous runtime. \
-                The replay's own `replay_done` event can chain into the skillify-replays template \
-                below to draft skills automatically."
-                    .to_string(),
-            trigger: RecipeTrigger::OnRegressionDetected {
-                severity: Some("regression".to_string()),
-                agent_slug: None,
-            },
-            action: RecipeAction::ReplayOnAlt {
-                target_runtime: "{{previous_runtime}}".to_string(),
-                target_model: None,
-            },
-        },
+        // v2.3.8 — auto-replay-regression-failures held back: see the
+        // matching comment in the desktop crate. Reinstate once
+        // RegressionDetected carries old_value/new_value.
         RecipeTemplate {
             slug: "skillify-successful-replays".to_string(),
             name: "Skillify successful cross-runtime replays".to_string(),
@@ -411,6 +397,90 @@ pub fn set_enabled(conn: &Connection, slug: &str, enabled: bool, opts: &Opts) ->
         ));
     } else {
         emit_json(&recipe)?;
+    }
+    Ok(())
+}
+
+/// `ato recipes runs <slug>` — tail the ops_recipe_runs audit table
+/// for a recipe. Shows what the engine has done on the user's behalf:
+/// when it fired, what status, what result/error.
+pub fn runs(conn: &Connection, slug: &str, limit: usize, opts: &Opts) -> Result<()> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ops_recipe_runs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        if opts.human {
+            emit_human(
+                "ops_recipe_runs table not found. Launch the ATO desktop (v2.3.8+) once.",
+            );
+        } else {
+            emit_json(&serde_json::json!({"runs": []}))?;
+        }
+        return Ok(());
+    }
+    let safe_limit = limit.min(10_000) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT id, event_seq, event_type, action_type, status, result, error_message, started_at, finished_at
+           FROM ops_recipe_runs
+          WHERE recipe_slug = ?1
+          ORDER BY started_at DESC
+          LIMIT ?2",
+    )?;
+    #[derive(serde::Serialize)]
+    struct RunRow {
+        id: String,
+        event_seq: i64,
+        event_type: String,
+        action_type: String,
+        status: String,
+        result: Option<String>,
+        error_message: Option<String>,
+        started_at: String,
+        finished_at: Option<String>,
+    }
+    let rows: Vec<RunRow> = stmt
+        .query_map(rusqlite::params![slug, safe_limit], |r| {
+            Ok(RunRow {
+                id: r.get(0)?,
+                event_seq: r.get(1)?,
+                event_type: r.get(2)?,
+                action_type: r.get(3)?,
+                status: r.get(4)?,
+                result: r.get(5)?,
+                error_message: r.get(6)?,
+                started_at: r.get(7)?,
+                finished_at: r.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if opts.human {
+        if rows.is_empty() {
+            emit_human(&format!("No runs for recipe @{} yet.", slug));
+        } else {
+            emit_human(&format!("{} runs for recipe @{}:", rows.len(), slug));
+            for r in &rows {
+                emit_human(&format!(
+                    "  [{}] {} -> {} (#{} {})",
+                    r.status,
+                    r.event_type,
+                    r.action_type,
+                    r.event_seq,
+                    r.started_at
+                ));
+                if let Some(err) = &r.error_message {
+                    emit_human(&format!("    error: {}", err));
+                }
+                if let Some(res) = &r.result {
+                    emit_human(&format!("    result: {}", res));
+                }
+            }
+        }
+    } else {
+        emit_json(&rows)?;
     }
     Ok(())
 }

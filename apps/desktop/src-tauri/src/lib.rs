@@ -8,6 +8,7 @@ pub mod pty;
 pub mod local_insights;
 pub mod events;
 pub mod recipes;
+pub mod recipes_engine;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -839,6 +840,52 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_ops_recipes_trigger ON ops_recipes(trigger_type, enabled)",
         [],
     );
+
+    // v2.3.8 Phase 4.2 — Event audit log. Every event published on
+    // events::bus is persisted here. Powers `ato events recent` and
+    // gives the execution engine a deterministic re-read path when a
+    // subscriber lagged (RecvError::Lagged). event_seq mirrors the
+    // monotonic counter from events::bus::next_seq.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS events_log (
+            event_seq   INTEGER PRIMARY KEY,
+            event_type  TEXT NOT NULL,
+            payload     TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_log_type_time ON events_log(event_type, occurred_at DESC)",
+        [],
+    );
+
+    // v2.3.8 Phase 4.2 — Recipe execution audit. Every action the
+    // engine runs leaves a row here so users can see "what did my
+    // recipes actually do, when, did they succeed?" The trigger payload
+    // is captured so re-runs are reproducible if we ever build a
+    // "replay this recipe run" tool.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS ops_recipe_runs (
+            id              TEXT PRIMARY KEY,
+            recipe_id       TEXT NOT NULL,
+            recipe_slug     TEXT NOT NULL,
+            event_seq       INTEGER NOT NULL,
+            event_type      TEXT NOT NULL,
+            event_payload   TEXT NOT NULL,
+            action_type     TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            result          TEXT,
+            error_message   TEXT,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_recipe_runs_slug_time ON ops_recipe_runs(recipe_slug, started_at DESC)",
+        [],
+    );
 }
 
 
@@ -868,6 +915,12 @@ pub fn run() {
     // same DB, overlap is common; without this, both sides see
     // transient "database is locked" errors on first contention.
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    // v2.3.8 Phase 4.2 — seed the in-memory event sequence counter
+    // from the highest event_seq already persisted, so the counter
+    // stays strictly increasing across desktop restarts. Must happen
+    // after init_database has created (or migrated) the events_log
+    // table, before any event is published.
+    events::bus::init_seq_from_db(&db_path);
     init_database(&conn);
 
     tauri::Builder::default()
@@ -887,6 +940,10 @@ pub fn run() {
             let poller_state = app.state::<HealthPollerState>();
             let poller = poller_state.0.lock().unwrap();
             poller.start(app.handle().clone(), db_path_str);
+            // v2.3.8 Phase 4.2 — start the recipe execution engine.
+            // Tokio task lives for the duration of the desktop process,
+            // subscribes to events::bus, runs matching recipe actions.
+            recipes_engine::start();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
