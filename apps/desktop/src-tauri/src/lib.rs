@@ -896,6 +896,26 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_ops_recipe_runs_slug_time ON ops_recipe_runs(recipe_slug, started_at DESC)",
         [],
     );
+    // v2.3.19 Phase 5.4 — RequestApproval support. recipe_runs with
+    // a RequestApproval action park in status='awaiting_approval'
+    // and store the ApprovalRequest post id; the resume watcher
+    // updates `decision` + `decision_post_id` when an
+    // ApprovalDecision post lands. Best-effort ALTER TABLE since
+    // ADD COLUMN fails if the column already exists.
+    let _ = conn.execute(
+        "ALTER TABLE ops_recipe_runs ADD COLUMN awaiting_approval_request_post_id TEXT",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE ops_recipe_runs ADD COLUMN decision TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE ops_recipe_runs ADD COLUMN decision_post_id TEXT",
+        [],
+    );
+    // Indexed because the resume watcher scans by status every 5s.
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ops_recipe_runs_status ON ops_recipe_runs(status)",
+        [],
+    );
 
     // v2.3.16 Phase 5.1 — Activity feed. A single chronological
     // stream where humans, agents, and the system post. NotifyHuman

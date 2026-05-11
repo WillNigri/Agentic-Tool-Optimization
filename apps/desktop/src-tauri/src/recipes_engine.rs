@@ -3,6 +3,7 @@
 // v2.3.12 Phase 4.6 — RunScript executor added.
 // v2.3.13 Phase 4.7 — DispatchLongRunning watcher + KillRun re-enable.
 // v2.3.16 Phase 5.1 — NotifyHuman executor (writes to activity feed).
+// v2.3.19 Phase 5.4 — RequestApproval executor + approval-resume watcher.
 //
 // Long-running tokio task that:
 //   1. Subscribes to events::bus
@@ -12,9 +13,15 @@
 //   3. Runs each matching recipe's action
 //   4. Audits the run to ops_recipe_runs
 //
-// All seven action executors are implemented: DraftSkillFromReplay,
+// Watchers spawned at start():
+//   - long-running-dispatch watcher (Phase 4.7)
+//   - approval-resume watcher (Phase 5.4) — parks runs go from
+//     status='awaiting_approval' to 'approved'/'denied' when a
+//     matching ApprovalDecision post lands.
+//
+// All eight action executors are implemented: DraftSkillFromReplay,
 // ReplayOnAlt, DispatchAgent, PostWebhook, RunScript, KillRun,
-// NotifyHuman. No stubs remain.
+// NotifyHuman, RequestApproval. No stubs remain.
 
 use crate::events::{bus, AtoEvent, RegressionSeverity, ReplayStatus};
 use crate::recipes::{OpsRecipe, RecipeAction, RecipeTrigger};
@@ -170,6 +177,96 @@ pub fn start() {
             run_long_running_watcher_tick(&mut emitted).await;
         }
     });
+
+    // v2.3.19 Phase 5.4 — approval resume watcher. Scans recipe runs
+    // parked in status='awaiting_approval' every 5s. For each, looks
+    // up the matching ApprovalDecision post via the request_post_id;
+    // if found, updates ops_recipe_runs.status (approved|denied),
+    // decision_post_id, finished_at. No retry / chained-action logic
+    // for v1 — the post + audit row are the data, the GUI / future
+    // recipes can act on them.
+    tauri::async_runtime::spawn(async move {
+        let interval = std::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(interval).await;
+            run_approval_resume_tick();
+        }
+    });
+}
+
+/// One tick of the approval resume watcher. Cheap: a single SELECT
+/// joining ops_recipe_runs to activity_posts, then per-row UPDATEs.
+/// All read/write through a single short-lived connection.
+fn run_approval_resume_tick() {
+    let db_path = crate::get_db_path();
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(2));
+
+    let mut stmt = match conn.prepare(
+        "SELECT r.id, r.awaiting_approval_request_post_id,
+                d.id, json_extract(d.payload, '$.decision')
+           FROM ops_recipe_runs r
+           JOIN activity_posts d
+             ON d.kind = 'approval_decision'
+            AND json_extract(d.payload, '$.request_post_id') = r.awaiting_approval_request_post_id
+          WHERE r.status = 'awaiting_approval'
+            AND r.awaiting_approval_request_post_id IS NOT NULL",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("recipes_engine: approval resume prepare failed: {}", e);
+            return;
+        }
+    };
+    let resolved: Vec<(String, String, String, String)> = match stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .and_then(|iter| iter.collect::<rusqlite::Result<Vec<_>>>())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("recipes_engine: approval resume query failed: {}", e);
+            return;
+        }
+    };
+
+    for (run_id, _request_id, decision_post_id, decision) in resolved {
+        // decision is the SQL-extracted value: "approved" or
+        // "denied". Map it to the final run status.
+        let final_status = match decision.as_str() {
+            "approved" => "approved",
+            "denied" => "denied",
+            other => {
+                eprintln!(
+                    "recipes_engine: approval decision for run {} has unknown value '{}' — leaving parked",
+                    run_id, other
+                );
+                continue;
+            }
+        };
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = conn.execute(
+            "UPDATE ops_recipe_runs
+                SET status = ?1, decision = ?2, decision_post_id = ?3, finished_at = ?4
+              WHERE id = ?5
+                AND status = 'awaiting_approval'",
+            rusqlite::params![final_status, final_status, decision_post_id, finished_at, run_id],
+        ) {
+            eprintln!(
+                "recipes_engine: failed to resume run {}: {}",
+                run_id, e
+            );
+        }
+    }
 }
 
 /// v2.3.13 Phase 4.7 — One tick of the long-running watcher.
@@ -426,7 +523,7 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
         drop(_serialize);
 
         // Execute the action.
-        let outcome = execute_action(&recipe.action, &event, &recipe.slug).await;
+        let outcome = execute_action(&recipe.action, &event, &recipe.slug, &run_id).await;
         let finished_at = chrono::Utc::now().to_rfc3339();
         finalize_run_row(&run_id, outcome, &finished_at);
     }
@@ -670,6 +767,7 @@ async fn execute_action(
     action: &RecipeAction,
     event: &AtoEvent,
     recipe_slug: &str,
+    run_id: &str,
 ) -> ActionOutcome {
     match action {
         RecipeAction::DraftSkillFromReplay { out } => draft_skill_from_replay(event, out.as_deref()),
@@ -703,6 +801,13 @@ async fn execute_action(
         // activity feed.
         RecipeAction::NotifyHuman { text_template } => {
             notify_human(event, text_template, recipe_slug)
+        }
+        // v2.3.19 Phase 5.4 — RequestApproval: write an
+        // ApprovalRequest post and park the recipe_run as
+        // status='awaiting_approval'. The resume watcher updates
+        // the row when a matching ApprovalDecision lands.
+        RecipeAction::RequestApproval { text_template } => {
+            request_approval(event, text_template, recipe_slug, run_id)
         }
     }
 }
@@ -1635,11 +1740,155 @@ fn notify_human(event: &AtoEvent, text_template: &str, recipe_slug: &str) -> Act
     }
 }
 
+/// Executor: post an ApprovalRequest and park the recipe_run.
+///
+/// v2.3.19 Phase 5.4. Returns ActionOutcome { status:
+/// "awaiting_approval", result: Some(post_id), error: None }. The
+/// run's awaiting_approval_request_post_id is written here directly
+/// so the resume watcher can find it (separate UPDATE in the same
+/// connection to keep this contained). finalize_run_row honors the
+/// awaiting_approval status by NOT setting finished_at.
+fn request_approval(
+    event: &AtoEvent,
+    text_template: &str,
+    recipe_slug: &str,
+    run_id: &str,
+) -> ActionOutcome {
+    let fields = extract_event_fields(event);
+    if let Some(p) = first_missing_placeholder(text_template, &fields) {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "request_approval: text uses placeholder {} but event did not provide a value",
+                p
+            )),
+        };
+    }
+    let resolved = apply_substitution(text_template, &fields, false);
+    if resolved.trim().is_empty() {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some("request_approval: resolved text is empty".to_string()),
+        };
+    }
+    let db_path = crate::get_db_path();
+    let mut conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!("request_approval: open db: {}", e)),
+            };
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+    // Codex round-1 5.4 (high): the post-create + recipe_run UPDATE
+    // must be atomic. Without that, three failure modes strand the
+    // run permanently: post created + UPDATE fails (parked with
+    // NULL request_id → watcher can't find it), post created +
+    // process crashes before finalize (status stays 'running' →
+    // watcher's WHERE clause excludes it), post created + later
+    // finalize is skipped. Wrap both writes in a single
+    // transaction. If either fails, neither commits — the executor
+    // returns "failed" and the human re-tries with consistent state.
+    let payload = serde_json::json!({
+        "recipe_run_id": run_id,
+        "recipe_slug": recipe_slug,
+    });
+    let post_id = uuid::Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let payload_str = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!("request_approval: serialize payload: {}", e)),
+            };
+        }
+    };
+    if let Err(e) = ato_posts::validate_text(&resolved) {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!("request_approval: validate text: {}", e)),
+        };
+    }
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!("request_approval: begin tx: {}", e)),
+            };
+        }
+    };
+    let event_seq_for_post = event.event_seq() as i64;
+    let resolved_trimmed = resolved.trim();
+    let result_summary = format!("Parked on ApprovalRequest {}", post_id);
+    // Codex round-2 5.4 (high): include the status flip in the
+    // same transaction. If the process dies between commit and
+    // finalize_run_row, the row was previously stranded at
+    // status='running' with a request_post_id set — invisible to
+    // the resume watcher. Folding the status + result writes here
+    // closes that window; finalize_run_row's awaiting_approval
+    // branch is now a no-op for these rows.
+    if let Err(e) = tx.execute(
+        "INSERT INTO activity_posts (id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload)
+         VALUES (?1, ?2, 'system', ?3, 'approval_request', ?4, ?5, ?6)",
+        rusqlite::params![
+            &post_id,
+            &created_at,
+            recipe_slug,
+            resolved_trimmed,
+            event_seq_for_post,
+            &payload_str,
+        ],
+    ) {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!("request_approval: insert post: {}", e)),
+        };
+    }
+    if let Err(e) = tx.execute(
+        "UPDATE ops_recipe_runs
+            SET status = 'awaiting_approval',
+                awaiting_approval_request_post_id = ?1,
+                result = ?2
+          WHERE id = ?3",
+        rusqlite::params![&post_id, &result_summary, run_id],
+    ) {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!("request_approval: park run row: {}", e)),
+        };
+    }
+    if let Err(e) = tx.commit() {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!("request_approval: commit tx: {}", e)),
+        };
+    }
+    ActionOutcome {
+        status: "awaiting_approval",
+        result: Some(result_summary),
+        error: None,
+    }
+}
+
 fn action_name(a: &RecipeAction) -> &'static str {
     match a {
         RecipeAction::DraftSkillFromReplay { .. } => "draft_skill_from_replay",
         RecipeAction::ReplayOnAlt { .. } => "replay_on_alt",
         RecipeAction::KillRun => "kill_run",
+        RecipeAction::RequestApproval { .. } => "request_approval",
         RecipeAction::DispatchAgent { .. } => "dispatch_agent",
         RecipeAction::PostWebhook { .. } => "post_webhook",
         RecipeAction::NotifyHuman { .. } => "notify_human",
@@ -1966,6 +2215,13 @@ fn finalize_run_row(run_id: &str, outcome: ActionOutcome, finished_at: &str) {
     let Ok(conn) = rusqlite::Connection::open(&db_path) else {
         return;
     };
+    // v2.3.19 Phase 5.4: RequestApproval's executor wrote status +
+    // result + awaiting_approval_request_post_id atomically inside
+    // its own transaction (closes the codex round-2 crash window).
+    // Nothing left to do here for parked runs.
+    if outcome.status == "awaiting_approval" {
+        return;
+    }
     let _ = conn.execute(
         "UPDATE ops_recipe_runs SET status = ?1, result = ?2, error_message = ?3, finished_at = ?4 WHERE id = ?5",
         rusqlite::params![

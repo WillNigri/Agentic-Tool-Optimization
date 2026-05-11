@@ -130,6 +130,15 @@ pub enum RecipeAction {
     #[serde(rename = "notify_human")]
     NotifyHuman { text_template: String },
 
+    /// v2.3.19 Phase 5.4 — request human approval before continuing.
+    /// Writes an ApprovalRequest post and marks the recipe_run as
+    /// `awaiting_approval`. A separate watcher task in the engine
+    /// scans awaiting_approval runs every few seconds and resumes
+    /// them when an ApprovalDecision post lands. Same placeholder
+    /// substitution as NotifyHuman.
+    #[serde(rename = "request_approval")]
+    RequestApproval { text_template: String },
+
     /// Run a local shell script with the event payload as JSON on stdin.
     #[serde(rename = "run_script")]
     RunScript {
@@ -224,6 +233,7 @@ pub fn action_type_name(a: &RecipeAction) -> &'static str {
         RecipeAction::PostWebhook { .. } => "post_webhook",
         RecipeAction::NotifyHuman { .. } => "notify_human",
         RecipeAction::RunScript { .. } => "run_script",
+        RecipeAction::RequestApproval { .. } => "request_approval",
     }
 }
 

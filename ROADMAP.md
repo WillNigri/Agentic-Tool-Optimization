@@ -268,6 +268,63 @@ Items that previously sat in this section (federated agent network, kubectl-for-
 
 ---
 
+## Phase 6 — Cross-runtime agent conversations (Planned)
+
+The activity feed (Phase 5) is async broadcast — anyone posts, anyone
+reads. Phase 6 adds the synchronous conversation primitive: two LLMs
+talking to each other *through* ATO until they reach consensus or one
+side calls a final decision.
+
+Today every `ato dispatch` opens a fresh chat. The continuity lives
+in the dispatcher's context (e.g. Claude Code packing prior rounds
+into each new prompt). That works for one-shot review but not for:
+- Multi-turn delegation ("kick off a 5-step task, come back later,
+  resume where you left off")
+- Iterative refinement between two agents (codex asks Claude a
+  clarifying question mid-review; Claude answers; codex revises)
+- Long-running negotiations where consensus matters more than speed
+
+### Surface
+
+- `ato sessions new --runtime claude --as <slug>` — open a sticky
+  conversation, returns a session id
+- `ato dispatch claude "..." --session <id>` — append to the
+  conversation, returns the response
+- `ato sessions list` / `ato sessions get <id>` / `ato sessions
+  archive <id>`
+- ATO maintains `session_id → runtime-native-session-id` mapping
+  per runtime (claude `--resume`, codex `--continue` flag, Gemini's
+  similar). Each runtime stays in its own thread; ATO is the
+  registry, not a multiplexer.
+
+### Cross-runtime conversations
+
+The harder, more interesting half: codex and Claude talking *to
+each other* through ATO.
+- Codex receives a review request, replies with "approving but
+  want @claude's read on X"
+- ATO parses the @-mention, dispatches X to Claude on a new (or
+  existing) session
+- Claude's response goes back into codex's session as a turn
+- Loop until one side outputs `[CONSENSUS]` or the human
+  intervenes
+
+The mechanism is plumbing: tag detection, session bridging, turn
+budgeting (cap at N round-trips), termination keywords. The
+*judgment* — when is the discussion converging vs spinning —
+is the harder design question and probably starts as
+"human-in-the-loop after 3 rounds."
+
+### Why it lives after Phase 5
+
+The activity feed gives us the storage shape (posts with
+author_kind / kind / payload). Phase 6 sessions could be modeled
+as `kind=session_turn` posts grouped by `payload.session_id`,
+making the feed and sessions the same substrate viewed two ways.
+Or sessions get their own table — TBD when scoping.
+
+---
+
 ## Future Runtime Support
 
 As new AI coding agents emerge:
