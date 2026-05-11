@@ -1,5 +1,9 @@
+pub mod compare;
 pub mod config_changes;
+pub mod dispatch;
 pub mod dispatches;
 pub mod files_touched;
+pub mod replay;
 pub mod replays;
 pub mod runs;
+pub mod skills;

@@ -5,18 +5,15 @@
 // every meaningful operation outputs JSON to stdout by default
 // (parseable), with a --human flag that switches to a readable
 // terminal-friendly view.
-//
-// Status: Phase 1 of v2.3.0 (agent-driveable platform). Shipping the
-// read-only Observation commands first; Operations + Authoring land
-// in subsequent commits so each subcommand is reviewable in isolation.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod commands;
 mod db;
 mod output;
-mod commands;
+mod runtime;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,6 +68,36 @@ enum Commands {
         #[command(subcommand)]
         sub: ReplaysSub,
     },
+    /// Dispatch a prompt to a runtime
+    Dispatch {
+        /// Runtime: claude, codex, gemini, openclaw, hermes
+        runtime: String,
+        /// The prompt text
+        prompt: String,
+        /// Override the model (per-runtime: --model claude-sonnet-4-6, etc.)
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional agent slug — for labeling only in this Phase 1 cut
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Replay an existing dispatch against a different runtime/model
+    Replay {
+        #[command(subcommand)]
+        sub: ReplaySub,
+    },
+    /// Compare two runs side-by-side (by id or cloud trace ID)
+    Compare {
+        /// First run ID
+        a: String,
+        /// Second run ID
+        b: String,
+    },
+    /// Author skills (Phase 1 ships only "draft from replay")
+    Skills {
+        #[command(subcommand)]
+        sub: SkillsSub,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -120,19 +147,53 @@ enum ReplaysSub {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum ReplaySub {
+    /// Start a replay (synchronous — waits for the dispatch to finish)
+    Start {
+        /// Source trace ID (cloud_trace_id) or execution_logs ID
+        source_id: String,
+        /// Target runtime to replay against
+        #[arg(long)]
+        runtime: String,
+        /// Override the target model
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Get a replay job by ID (use --wait to poll until terminal)
+    Get {
+        /// Replay job ID
+        job_id: String,
+        /// Block until the replay reaches done/failed/cancelled
+        #[arg(long)]
+        wait: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillsSub {
+    /// Draft a SKILL.md from a successful replay
+    Draft {
+        /// Replay job ID to derive the skill from
+        #[arg(long = "from-replay")]
+        from_replay: String,
+        /// Output path; defaults to ~/.<target-runtime>/skills/<slug>/SKILL.md
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Determine DB path: --db override → ~/.ato/local.db default.
-    let db_path = cli
-        .db
-        .clone()
-        .unwrap_or_else(db::default_db_path);
+    let db_path = cli.db.clone().unwrap_or_else(db::default_db_path);
 
-    // Open read-only by default; subcommands that need write access
-    // reopen with write privileges.
-    let conn = db::open_readonly(&db_path)
-        .with_context(|| format!("Could not open ATO database at {}", db_path.display()))?;
+    // Open read-only for read-paths; write commands re-open with
+    // write privileges internally.
+    let ro_conn = || -> Result<rusqlite::Connection> {
+        db::open_readonly(&db_path)
+            .with_context(|| format!("Could not open ATO database at {}", db_path.display()))
+    };
 
     let opts = output::Opts {
         human: cli.human,
@@ -145,21 +206,44 @@ fn main() -> Result<()> {
                 limit,
                 runtime,
                 status,
-            } => commands::dispatches::recent(&conn, limit, runtime, status, &opts),
+            } => commands::dispatches::recent(&ro_conn()?, limit, runtime, status, &opts),
         },
         Commands::Runs { sub } => match sub {
-            RunsSub::Live => commands::runs::live(&conn, &opts),
-            RunsSub::Get { id } => commands::runs::get(&conn, &id, &opts),
+            RunsSub::Live => commands::runs::live(&ro_conn()?, &opts),
+            RunsSub::Get { id } => commands::runs::get(&ro_conn()?, &id, &opts),
         },
         Commands::ConfigChanges { sub } => match sub {
             ConfigChangesSub::List { agent, since } => {
-                commands::config_changes::list(&conn, &agent, &since, &opts)
+                commands::config_changes::list(&ro_conn()?, &agent, &since, &opts)
             }
         },
-        Commands::FilesTouched { id } => commands::files_touched::run(&conn, &id, &opts),
+        Commands::FilesTouched { id } => commands::files_touched::run(&ro_conn()?, &id, &opts),
         Commands::Replays { sub } => match sub {
             ReplaysSub::ForTrace { trace_id } => {
-                commands::replays::for_trace(&conn, &trace_id, &opts)
+                commands::replays::for_trace(&ro_conn()?, &trace_id, &opts)
+            }
+        },
+        Commands::Dispatch {
+            runtime,
+            prompt,
+            model,
+            agent,
+        } => commands::dispatch::run(&runtime, &prompt, model, agent, &db_path, &opts),
+        Commands::Replay { sub } => match sub {
+            ReplaySub::Start {
+                source_id,
+                runtime,
+                model,
+            } => commands::replay::start(&source_id, &runtime, model, &db_path, &opts),
+            ReplaySub::Get { job_id, wait } => {
+                commands::replay::get(&job_id, wait, &db_path, &opts)
+            }
+        },
+        Commands::Compare { a, b } => commands::compare::run(&ro_conn()?, &a, &b, &opts),
+        Commands::Skills { sub } => match sub {
+            SkillsSub::Draft { from_replay, out } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::skills::draft_from_replay(&conn, &from_replay, out, &opts)
             }
         },
     }

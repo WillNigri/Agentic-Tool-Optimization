@@ -43,6 +43,24 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open the same DB with write permissions. Used by Operations and
+/// Authoring commands that need to INSERT/UPDATE rows. Same path-existence
+/// check + same error message — the schema is assumed to be in place
+/// (created by the desktop on first launch).
+pub fn open_readwrite(path: &Path) -> Result<Connection> {
+    if !path.exists() {
+        return Err(anyhow!(
+            "ATO database not found at {}.\n\nWrite operations require the ATO desktop app to have run at least once to create the schema. Install: https://agentictool.ai or `brew install --cask ato`.",
+            path.display()
+        ));
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    Ok(conn)
+}
+
 /// Parse a `--since` window string like "7d", "24h", "30m" into a SQLite
 /// `datetime('now', '-...')` modifier string. Returns the modifier so
 /// callers can do `datetime('now', modifier)` in their queries.

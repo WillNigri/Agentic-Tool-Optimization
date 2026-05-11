@@ -751,6 +751,27 @@ pub fn init_database(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN input_tokens INTEGER", []);
     let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN output_tokens INTEGER", []);
     let _ = conn.execute("ALTER TABLE replay_jobs ADD COLUMN cost_usd_estimated REAL", []);
+    // v2.3.0 — live_runs SQLite mirror of the in-memory active_runs
+    // registry. The registry stays authoritative; this mirror exists
+    // so the `ato` CLI (a separate process) can read what's currently
+    // running without IPC. Rows are best-effort INSERT'd by
+    // active_runs::begin_run and DELETE'd by finish_run; if the writes
+    // fail (DB locked, etc) the in-memory map is unaffected.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS live_runs (
+            run_id      TEXT PRIMARY KEY,
+            agent_slug  TEXT,
+            runtime     TEXT NOT NULL,
+            workspace   TEXT,
+            source      TEXT,
+            started_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'running'
+        )",
+        [],
+    );
+    // Clear stale rows from a previous desktop run. We're booting; if
+    // any live_runs survived a prior crash, they're dead by definition.
+    let _ = conn.execute("DELETE FROM live_runs", []);
 }
 
 

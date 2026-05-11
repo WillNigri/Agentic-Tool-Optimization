@@ -154,10 +154,48 @@ pub fn begin_run(
         }
         map.insert(
             run_id.clone(),
-            Slot { info, kill_fn: None, overlapped: my_overlaps },
+            Slot { info: info.clone(), kill_fn: None, overlapped: my_overlaps },
         );
+        // v2.3.0 — best-effort SQLite mirror so the `ato` CLI (separate
+        // process) can read currently-running dispatches. The in-memory
+        // map remains authoritative; failures here are silent.
+        mirror_begin(&info);
     }
     run_id
+}
+
+/// v2.3.0 — INSERT into live_runs table for the agent-driveable CLI
+/// surface. Best-effort: a locked DB or missing file is non-fatal —
+/// the dispatch still runs, the in-memory registry still tracks it,
+/// the GUI's Live Runs panel still shows it. Only the CLI's view
+/// degrades, and `ato runs live` already handles the missing-table case.
+fn mirror_begin(run: &ActiveRun) {
+    let db_path = crate::get_db_path();
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        let started_at = chrono::DateTime::from_timestamp(run.started_at_unix as i64, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO live_runs (run_id, agent_slug, runtime, workspace, source, started_at, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                run.run_id,
+                run.agent_slug,
+                run.runtime,
+                run.workspace,
+                run.source,
+                started_at,
+                run.status,
+            ],
+        );
+    }
+}
+
+/// v2.3.0 — DELETE from live_runs. Pairs with mirror_begin.
+fn mirror_finish(run_id: &str) {
+    let db_path = crate::get_db_path();
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        let _ = conn.execute("DELETE FROM live_runs WHERE run_id = ?1", [run_id]);
+    }
 }
 
 /// v2.1.0+ — Drain the overlap evidence for a run before / instead
@@ -209,6 +247,8 @@ pub fn finish_run(run_id: &str) {
     if let Ok(mut map) = registry().inner.lock() {
         map.remove(run_id);
     }
+    // v2.3.0 — also remove from the SQLite mirror.
+    mirror_finish(run_id);
 }
 
 /// Snapshot of every active run. Cheap — clones the small
