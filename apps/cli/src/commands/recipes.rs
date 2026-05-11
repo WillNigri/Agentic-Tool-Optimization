@@ -110,9 +110,26 @@ pub struct RecipeTemplate {
 // apps/desktop/src-tauri/src/recipes.rs::builtin_templates.
 fn builtin_templates() -> Vec<RecipeTemplate> {
     vec![
-        // v2.3.8 — auto-replay-regression-failures held back: see the
-        // matching comment in the desktop crate. Reinstate once
-        // RegressionDetected carries old_value/new_value.
+        // v2.3.9 — reinstated; RegressionDetected now carries
+        // old_value/new_value. Kept BYTE-IDENTICAL with the desktop
+        // crate's version. TODO(v2.3.8): extract to shared crate.
+        RecipeTemplate {
+            slug: "auto-replay-regression-failures".to_string(),
+            name: "Auto-replay regression failing examples".to_string(),
+            description:
+                "When a regression fires, replay each failing example on the previous runtime. \
+                The replay's own `replay_done` event can chain into the skillify-replays template \
+                below to draft skills automatically."
+                    .to_string(),
+            trigger: RecipeTrigger::OnRegressionDetected {
+                severity: Some("regression".to_string()),
+                agent_slug: None,
+            },
+            action: RecipeAction::ReplayOnAlt {
+                target_runtime: "{{previous_runtime}}".to_string(),
+                target_model: None,
+            },
+        },
         RecipeTemplate {
             slug: "skillify-successful-replays".to_string(),
             name: "Skillify successful cross-runtime replays".to_string(),

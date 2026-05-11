@@ -3624,10 +3624,16 @@ pub async fn start_replay(
 ) -> Result<String, String> {
     let db_path = crate::get_db_path();
     // Look up the source prompt + runtime + model from execution_logs.
+    // v2.3.9 — accept either cloud_trace_id OR execution_logs.id. The
+    // parameter name stays cloud_trace_id for compatibility with
+    // existing GUI callers; the lookup now mirrors the CLI's. Closes
+    // codex #2 from the v2.3.8 review: the recipe engine's
+    // DispatchFailed → ReplayOnAlt chain passes execution_logs.id but
+    // start_replay previously only matched cloud_trace_id.
     let (source_id, source_runtime, _source_status, prompt) = {
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
         let row = conn.query_row(
-            "SELECT id, runtime, status, prompt FROM execution_logs WHERE cloud_trace_id = ?1 LIMIT 1",
+            "SELECT id, runtime, status, prompt FROM execution_logs WHERE cloud_trace_id = ?1 OR id = ?1 LIMIT 1",
             rusqlite::params![cloud_trace_id],
             |r| {
                 Ok((

@@ -38,7 +38,7 @@ pub fn run(
     runtime_name: &str,
     prompt: &str,
     model: Option<String>,
-    _agent_slug: Option<String>,
+    agent_slug_for_event: Option<String>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -142,6 +142,22 @@ pub fn run(
             cost_usd,
         ],
     ).context("Failed to write execution_logs row")?;
+
+    // v2.3.9 Phase 4.3 — publish a DispatchFailed event to events_log
+    // so the desktop's engine poll loop can pick it up and run matching
+    // recipes. CLI dispatches don't go through the in-memory bus
+    // (different process); events_log is the cross-process channel.
+    if status == "error" {
+        crate::events_publisher::publish_dispatch_failed(
+            &conn,
+            &id,
+            agent_slug_for_event.as_deref(),
+            runtime_name,
+            error_persisted.as_deref().unwrap_or(""),
+            duration_ms,
+            &now,
+        );
+    }
 
     let result = DispatchResult {
         id: id.clone(),

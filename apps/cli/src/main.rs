@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 mod commands;
 mod db;
+mod events_publisher;
 mod output;
 mod runtime;
 

@@ -20,12 +20,12 @@
 //     would help but add boilerplate without changing behavior for v1.
 //     Newtype'd if/when the schema escapes the desktop process boundary.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Severity precomputed by the publisher. "neutral" deltas are filtered
 /// at the source — recipes shouldn't have to dedupe noise.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegressionSeverity {
     Regression,
@@ -34,7 +34,7 @@ pub enum RegressionSeverity {
 
 /// Replay job terminal status. Maps 1:1 to replay_jobs.status when the
 /// job finishes; in-flight states never produce a ReplayDone event.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayStatus {
     Done,
@@ -43,7 +43,7 @@ pub enum ReplayStatus {
 
 /// Cost-window cadence. Recipes filter on this so a "daily spend over
 /// $X" rule doesn't double-fire when the 7d window crosses too.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CostWindow {
     #[serde(rename = "1d")]
@@ -61,7 +61,10 @@ pub enum CostWindow {
 /// Every variant carries `event_seq` — a monotonic counter from the
 /// publish path. Subscribers track the last seq they processed; on
 /// `RecvError::Lagged` they can query the ledger for missed seqs.
-#[derive(Debug, Clone, Serialize)]
+// v2.3.9 — Deserialize added so the events_log poll loop can parse
+// stored payloads. The {{previous_runtime}} placeholder grammar
+// expansion + cross-process event publishing both need this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AtoEvent {
     #[serde(rename = "regression_detected")]
@@ -70,6 +73,13 @@ pub enum AtoEvent {
         change_id: String,
         agent_slug: String,
         field: String,
+        /// v2.3.9 — old/new field values, copied from the
+        /// agent_config_changes row that caused the regression. Lets
+        /// the recipe engine resolve {{previous_runtime}} from
+        /// old_value when field == "runtime". None when the original
+        /// change row didn't capture them.
+        old_value: Option<String>,
+        new_value: Option<String>,
         severity: RegressionSeverity,
         eval_delta_pp: Option<f64>, // null when no evaluators
         ok_delta_pp: f64,

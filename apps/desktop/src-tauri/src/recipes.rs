@@ -457,12 +457,26 @@ pub struct RecipeTemplate {
 
 pub fn builtin_templates() -> Vec<RecipeTemplate> {
     vec![
-        // v2.3.8 — `auto-replay-regression-failures` was a v1 template
-        // but is held back because RegressionDetected doesn't yet
-        // carry the previous_runtime in its payload, so
-        // {{previous_runtime}} resolves to empty and the action always
-        // fails. Add it back after the RegressionDetected schema
-        // gains old_value/new_value (Phase 4.3).
+        // v2.3.9 — reinstated. RegressionDetected now carries
+        // old_value/new_value so {{previous_runtime}} resolves
+        // correctly when the regression is on the "runtime" field.
+        RecipeTemplate {
+            slug: "auto-replay-regression-failures".to_string(),
+            name: "Auto-replay regression failing examples".to_string(),
+            description:
+                "When a regression fires, replay each failing example on the previous runtime. \
+                The replay's own `replay_done` event can chain into the skillify-replays template \
+                below to draft skills automatically."
+                    .to_string(),
+            trigger: RecipeTrigger::OnRegressionDetected {
+                severity: Some("regression".to_string()),
+                agent_slug: None,
+            },
+            action: RecipeAction::ReplayOnAlt {
+                target_runtime: "{{previous_runtime}}".to_string(),
+                target_model: None,
+            },
+        },
         RecipeTemplate {
             slug: "skillify-successful-replays".to_string(),
             name: "Skillify successful cross-runtime replays".to_string(),

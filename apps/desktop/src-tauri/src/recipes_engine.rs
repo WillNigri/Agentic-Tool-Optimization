@@ -20,12 +20,18 @@ use crate::recipes::{OpsRecipe, RecipeAction, RecipeTrigger};
 use rusqlite::Connection;
 use std::time::Duration;
 
-/// Start the engine. Spawns a tokio task that lives for the duration
-/// of the desktop process. Multiple calls are safe — broadcast::Receiver
-/// is per-call so each subscribe gets its own queue; but for correctness
-/// we should only call this once at app boot.
+/// Start the engine. Spawns TWO tokio tasks:
+///   1. Live bus subscriber — fast path for in-process events
+///   2. events_log poll loop — picks up cross-process events (CLI
+///      dispatches publish there since they can't reach the in-memory
+///      bus). Polls every 2s for new event_seqs.
+///
+/// Both paths converge on handle_event, which dedupes via
+/// ops_recipe_runs (skip events already processed). Multiple calls to
+/// start() are safe but only one should fire at app boot.
 pub fn start() {
-    tokio::spawn(async move {
+    // Live bus subscriber.
+    tauri::async_runtime::spawn(async move {
         let mut rx = bus::subscribe();
         loop {
             match rx.recv().await {
@@ -35,14 +41,11 @@ pub fn start() {
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    // Subscriber fell behind. v1 just warns. The
-                    // events_log table holds a record of every
-                    // published event, so a future "boot-time
-                    // catch-up + lag-time replay" path is buildable —
-                    // it would query events_log for seqs > last_seen
-                    // and re-enter handle_event. Phase 4.3 work.
+                    // Subscriber fell behind. The poll loop below
+                    // recovers any missed events from events_log on
+                    // the next tick.
                     eprintln!(
-                        "recipes_engine: lagged {} events (no v1 catch-up; see events_log for the persisted record)",
+                        "recipes_engine: bus lagged {} events; poll loop will recover from events_log",
                         skipped
                     );
                 }
@@ -53,6 +56,73 @@ pub fn start() {
             }
         }
     });
+
+    // events_log poll loop (catches CLI-published events + recovers
+    // from any bus lag). Bootstrap last_seen_seq from MAX(event_seq)
+    // at startup so we don't reprocess history.
+    tauri::async_runtime::spawn(async move {
+        let mut last_seen_seq: i64 = 0;
+        // Initial bootstrap — skip all existing events so first launch
+        // doesn't replay your historical event log into the engine.
+        if let Ok(conn) = rusqlite::Connection::open(crate::get_db_path()) {
+            last_seen_seq = conn
+                .query_row("SELECT COALESCE(MAX(event_seq), 0) FROM events_log", [], |r| r.get(0))
+                .unwrap_or(0);
+        }
+        let interval = std::time::Duration::from_millis(2000);
+        loop {
+            tokio::time::sleep(interval).await;
+            match poll_events_log(last_seen_seq) {
+                Ok((events, max_seen)) => {
+                    last_seen_seq = max_seen.max(last_seen_seq);
+                    for ev in events {
+                        if let Err(e) = handle_event(ev).await {
+                            eprintln!("recipes_engine: poll handle_event error: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("recipes_engine: poll error: {}", e);
+                }
+            }
+        }
+    });
+}
+
+/// Read events_log rows with event_seq > since, in seq order. Returns
+/// the parsed events and the highest event_seq seen (or `since` if no
+/// new rows). Best-effort: a locked DB returns no rows and the next
+/// tick retries.
+fn poll_events_log(since: i64) -> Result<(Vec<AtoEvent>, i64), String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let _ = conn.busy_timeout(Duration::from_millis(500));
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_seq, payload FROM events_log WHERE event_seq > ?1 ORDER BY event_seq ASC LIMIT 200",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut events = Vec::new();
+    let mut max_seq = since;
+    for (seq, payload) in rows {
+        if seq > max_seq {
+            max_seq = seq;
+        }
+        match serde_json::from_str::<AtoEvent>(&payload) {
+            Ok(ev) => events.push(ev),
+            Err(e) => {
+                // Skip malformed rows; advance past them so we don't
+                // re-hit on every tick.
+                eprintln!("recipes_engine: skip malformed event #{}: {}", seq, e);
+            }
+        }
+    }
+    Ok((events, max_seq))
 }
 
 async fn handle_event(event: AtoEvent) -> Result<(), String> {
@@ -60,8 +130,15 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
     let event_payload =
         serde_json::to_string(&event).map_err(|e| format!("serialize event: {}", e))?;
 
+    // v2.3.9 — Recipes store trigger_type with an `on_` prefix
+    // ("on_replay_done") while events publish without it
+    // ("replay_done"). The mismatch was caught by codex in the 4.1
+    // review but not fixed until end-to-end dogfooding surfaced the
+    // silent no-fire. Build the recipe-side lookup key explicitly.
+    let trigger_lookup = format!("on_{}", event_type);
+
     // Find all enabled recipes whose trigger_type matches this event.
-    let candidates = match find_candidates(event_type) {
+    let candidates = match find_candidates(&trigger_lookup) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("recipes_engine: candidate lookup failed: {}", e);
@@ -325,12 +402,27 @@ fn action_name(a: &RecipeAction) -> &'static str {
 /// as a "failed" run with a clear error.
 fn substitute_simple_placeholders(template: &str, event: &AtoEvent) -> String {
     let (source_runtime, target_runtime, agent_slug, previous_runtime) = match event {
-        AtoEvent::RegressionDetected { agent_slug, .. } => (
-            String::new(),
-            String::new(),
-            agent_slug.clone(),
-            String::new(),
-        ),
+        AtoEvent::RegressionDetected {
+            agent_slug,
+            field,
+            old_value,
+            new_value,
+            ..
+        } => {
+            // For a runtime swap regression, old_value is the previous
+            // runtime. v2.3.9 — the schema now carries this.
+            let prev = if field == "runtime" {
+                old_value.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let curr = if field == "runtime" {
+                new_value.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (curr, prev.clone(), agent_slug.clone(), prev)
+        }
         AtoEvent::ReplayDone {
             source_runtime,
             target_runtime,

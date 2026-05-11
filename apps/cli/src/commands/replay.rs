@@ -120,6 +120,28 @@ pub fn start(
         ],
     )?;
 
+    // v2.3.9 Phase 4.3 — publish replay_done to events_log so the
+    // desktop engine's poll loop picks it up. Without this, CLI
+    // replays never trigger Skillify; the loop only closes when the
+    // GUI fires the replay. Source trace ID can be either the cloud
+    // trace or the execution log id — pass whichever the row has.
+    let source_for_event = source_cloud_id
+        .clone()
+        .unwrap_or_else(|| source_log_id.clone());
+    crate::events_publisher::publish_replay_done(
+        &conn,
+        &job_id,
+        &source_for_event,
+        &source_runtime,
+        target_runtime,
+        target_model.as_deref(),
+        final_status,
+        dispatch_result.duration_ms.into(),
+        dispatch_result.cost_usd_estimated,
+        dispatch_result.error_message.as_deref(),
+        &finished_at,
+    );
+
     // Read back the final row to emit it consistently.
     let row = fetch_replay_row(&conn, &job_id)?;
 
