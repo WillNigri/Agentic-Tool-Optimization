@@ -2998,6 +2998,12 @@ async fn dispatch_command_killable(
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {}", runtime_label, e))?;
 
+    // v2.3.0 — record the child's OS PID in live_runs so the `ato`
+    // CLI can SIGTERM it from another process. Best-effort write.
+    if let Some(pid) = child.id() {
+        crate::active_runs::set_child_pid(active_run_id, pid);
+    }
+
     let mut stdout = child
         .stdout
         .take()

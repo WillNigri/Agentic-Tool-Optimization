@@ -20,3 +20,6 @@ apps/desktop/src-tauri/gen/
 
 # CLI build artifacts (apps/cli has its own target/ dir)
 apps/cli/target/
+
+# Sidecar binaries are built per-target in CI; ignored locally
+apps/desktop/src-tauri/binaries/

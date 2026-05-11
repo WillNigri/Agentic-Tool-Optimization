@@ -765,10 +765,14 @@ pub fn init_database(conn: &Connection) {
             workspace   TEXT,
             source      TEXT,
             started_at  TEXT NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'running'
+            status      TEXT NOT NULL DEFAULT 'running',
+            child_pid   INTEGER
         )",
         [],
     );
+    // Backfill for installs that already created live_runs before the
+    // child_pid column existed.
+    let _ = conn.execute("ALTER TABLE live_runs ADD COLUMN child_pid INTEGER", []);
     // Clear stale rows from a previous desktop run. We're booting; if
     // any live_runs survived a prior crash, they're dead by definition.
     let _ = conn.execute("DELETE FROM live_runs", []);

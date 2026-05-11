@@ -88,6 +88,36 @@ jobs:
         run: npm install
         working-directory: apps/desktop
 
+      # v2.3.0 — Build the `ato` CLI for this target and stage it as a
+      # Tauri sidecar binary. Tauri's externalBin convention expects the
+      # file at `src-tauri/binaries/<name>-<target-triple>` (no extension
+      # on unix; `.exe` on Windows). When the user installs the desktop
+      # app, the CLI ships in the same bundle and the Tauri runtime
+      # copies it to a known path inside the app's resources folder.
+      #
+      # The Homebrew cask post-install hook (and equivalent on Linux/
+      # Windows) symlinks the CLI binary onto PATH so `ato <command>`
+      # works from any shell. Until that hook lands, users on macOS
+      # can run the CLI directly from the bundle:
+      #   /Applications/ATO.app/Contents/Resources/binaries/ato-aarch64-apple-darwin
+      - name: Build ato CLI for sidecar
+        shell: bash
+        run: |
+          set -e
+          cd apps/cli
+          cargo build --release --target ${{ matrix.target }}
+          mkdir -p ../desktop/src-tauri/binaries
+          if [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.target }}/release/ato.exe \
+               ../desktop/src-tauri/binaries/ato-${{ matrix.target }}.exe
+          else
+            cp target/${{ matrix.target }}/release/ato \
+               ../desktop/src-tauri/binaries/ato-${{ matrix.target }}
+            chmod +x ../desktop/src-tauri/binaries/ato-${{ matrix.target }}
+          fi
+          echo "Staged sidecar binary:"
+          ls -la ../desktop/src-tauri/binaries/
+
       # v2.0.0 — Decode the App Store Connect API .p8 file from its
       # base64 secret and stash it on disk, so tauri-action can point at
       # APPLE_API_KEY_PATH for notarization. macOS-only; the secret

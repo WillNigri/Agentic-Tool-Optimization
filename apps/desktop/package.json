@@ -1,6 +1,6 @@
 {
   "name": "@ato/desktop",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:build": "npm run build-sidecar && tauri build",
+    "build-sidecar": "bash scripts/build-sidecar.sh",
     "test": "vitest run",
     "test:watch": "vitest"
   },

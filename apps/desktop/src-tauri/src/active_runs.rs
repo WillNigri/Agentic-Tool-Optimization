@@ -176,7 +176,7 @@ fn mirror_begin(run: &ActiveRun) {
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO live_runs (run_id, agent_slug, runtime, workspace, source, started_at, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO live_runs (run_id, agent_slug, runtime, workspace, source, started_at, status, child_pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
             rusqlite::params![
                 run.run_id,
                 run.agent_slug,
@@ -195,6 +195,20 @@ fn mirror_finish(run_id: &str) {
     let db_path = crate::get_db_path();
     if let Ok(conn) = rusqlite::Connection::open(&db_path) {
         let _ = conn.execute("DELETE FROM live_runs WHERE run_id = ?1", [run_id]);
+    }
+}
+
+/// v2.3.0 — Record the child process's OS PID for a registered run,
+/// so the `ato` CLI can SIGTERM it directly from another process.
+/// Called after the dispatch path successfully spawns the runtime
+/// subprocess (we don't have the PID until after spawn).
+pub fn set_child_pid(run_id: &str, pid: u32) {
+    let db_path = crate::get_db_path();
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        let _ = conn.execute(
+            "UPDATE live_runs SET child_pid = ?1 WHERE run_id = ?2",
+            rusqlite::params![pid as i64, run_id],
+        );
     }
 }
 

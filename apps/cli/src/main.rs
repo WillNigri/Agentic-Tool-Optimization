@@ -98,6 +98,16 @@ enum Commands {
         #[command(subcommand)]
         sub: SkillsSub,
     },
+    /// Terminate a running dispatch
+    Kill {
+        /// Run ID to kill (must be currently in live_runs)
+        run_id: String,
+    },
+    /// Manage agents (create / update minimal records — full authoring lives in the GUI)
+    Agents {
+        #[command(subcommand)]
+        sub: AgentsSub,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -183,6 +193,54 @@ enum SkillsSub {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum AgentsSub {
+    /// Create a new agent record
+    Create {
+        /// Unique slug (per-runtime)
+        #[arg(long)]
+        slug: String,
+        /// Runtime: claude, codex, gemini, openclaw, hermes, ollama
+        #[arg(long)]
+        runtime: String,
+        /// Display name (defaults to slug)
+        #[arg(long = "display-name")]
+        display_name: Option<String>,
+        /// Description / one-line summary of what the agent does
+        #[arg(long)]
+        description: Option<String>,
+        /// Model override (e.g. claude-sonnet-4-6)
+        #[arg(long)]
+        model: Option<String>,
+        /// System prompt
+        #[arg(long = "system-prompt")]
+        system_prompt: Option<String>,
+        /// Optional project ID to scope the agent to
+        #[arg(long = "project-id")]
+        project_id: Option<String>,
+    },
+    /// Update an existing agent's editable fields
+    Update {
+        /// Slug of the agent to update
+        slug: String,
+        /// Disambiguate when the same slug exists on multiple runtimes
+        #[arg(long)]
+        runtime: Option<String>,
+        /// New model
+        #[arg(long)]
+        model: Option<String>,
+        /// New system prompt
+        #[arg(long = "system-prompt")]
+        system_prompt: Option<String>,
+        /// New display name
+        #[arg(long = "display-name")]
+        display_name: Option<String>,
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -246,5 +304,47 @@ fn main() -> Result<()> {
                 commands::skills::draft_from_replay(&conn, &from_replay, out, &opts)
             }
         },
+        Commands::Kill { run_id } => commands::kill::run(&ro_conn()?, &run_id, &opts),
+        Commands::Agents { sub } => {
+            let conn = db::open_readwrite(&db_path)?;
+            match sub {
+                AgentsSub::Create {
+                    slug,
+                    runtime,
+                    display_name,
+                    description,
+                    model,
+                    system_prompt,
+                    project_id,
+                } => commands::agents::create(
+                    &conn,
+                    &slug,
+                    &runtime,
+                    display_name,
+                    description,
+                    model,
+                    system_prompt,
+                    project_id,
+                    &opts,
+                ),
+                AgentsSub::Update {
+                    slug,
+                    runtime,
+                    model,
+                    system_prompt,
+                    display_name,
+                    description,
+                } => commands::agents::update(
+                    &conn,
+                    &slug,
+                    runtime,
+                    model,
+                    system_prompt,
+                    display_name,
+                    description,
+                    &opts,
+                ),
+            }
+        }
     }
 }
