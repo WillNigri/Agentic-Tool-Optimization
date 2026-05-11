@@ -8,6 +8,7 @@ pub mod pty;
 pub mod local_insights;
 pub mod events;
 pub mod recipes;
+pub mod posts;
 pub mod recipes_engine;
 
 use rusqlite::{Connection, params};
@@ -893,6 +894,36 @@ pub fn init_database(conn: &Connection) {
     );
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ops_recipe_runs_slug_time ON ops_recipe_runs(recipe_slug, started_at DESC)",
+        [],
+    );
+
+    // v2.3.16 Phase 5.1 — Activity feed. A single chronological
+    // stream where humans, agents, and the system post. NotifyHuman
+    // recipe action writes here; users post via `ato posts add` or
+    // the GUI; the system can auto-post when events fire.
+    //
+    // payload is optional structured JSON for approval kinds and
+    // expanded agent responses. related_event_seq lets the GUI link
+    // an event_notice post back to its events_log row.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS activity_posts (
+            id                TEXT PRIMARY KEY,
+            created_at        TEXT NOT NULL,
+            author_kind       TEXT NOT NULL,
+            author_slug       TEXT,
+            kind              TEXT NOT NULL,
+            text              TEXT NOT NULL,
+            related_event_seq INTEGER,
+            payload           TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_activity_posts_created_at ON activity_posts(created_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_activity_posts_kind_created ON activity_posts(kind, created_at DESC)",
         [],
     );
 }

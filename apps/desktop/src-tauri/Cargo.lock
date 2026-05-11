@@ -273,8 +273,9 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop"
-version = "2.3.15"
+version = "2.3.16"
 dependencies = [
+ "ato-posts",
  "ato-recipes",
  "base64 0.22.1",
  "chrono",
@@ -302,6 +303,14 @@ dependencies = [
  "tokio-tungstenite",
  "toml 0.8.2",
  "uuid",
+]
+
+[[package]]
+name = "ato-posts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

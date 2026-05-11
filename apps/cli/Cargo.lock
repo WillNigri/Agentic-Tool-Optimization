@@ -81,9 +81,10 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ato"
-version = "2.3.15"
+version = "2.3.16"
 dependencies = [
  "anyhow",
+ "ato-posts",
  "ato-recipes",
  "chrono",
  "clap",
@@ -93,6 +94,14 @@ dependencies = [
  "serde_json",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "ato-posts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

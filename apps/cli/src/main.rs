@@ -142,6 +142,41 @@ enum Commands {
         #[command(subcommand)]
         sub: EventsSub,
     },
+    /// Activity feed — shared human + agent + system post stream
+    Posts {
+        #[command(subcommand)]
+        sub: PostsSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PostsSub {
+    /// Post a message to the activity feed
+    Add {
+        /// Body text
+        text: String,
+        /// Author kind: human (default), agent, or system
+        #[arg(long = "as", default_value = "human")]
+        author_kind: String,
+        /// Author slug (e.g. "codex-reviewer"). Omit for plain humans.
+        #[arg(long = "slug")]
+        author_slug: Option<String>,
+        /// Post kind: message (default), event_notice, approval_request, approval_decision
+        #[arg(long = "kind", default_value = "message")]
+        kind: String,
+        /// Optional events_log.event_seq this post relates to
+        #[arg(long = "related-event-seq")]
+        related_event_seq: Option<i64>,
+    },
+    /// List recent posts (newest first)
+    List {
+        /// How many to return (default 20)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Filter by kind
+        #[arg(long = "kind")]
+        kind: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -493,6 +528,29 @@ fn main() -> Result<()> {
                 poll_ms,
                 &opts,
             ),
+        },
+        Commands::Posts { sub } => match sub {
+            PostsSub::Add {
+                text,
+                author_kind,
+                author_slug,
+                kind,
+                related_event_seq,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::posts::add(
+                    &conn,
+                    text,
+                    author_kind,
+                    author_slug,
+                    kind,
+                    related_event_seq,
+                    &opts,
+                )
+            }
+            PostsSub::List { limit, kind } => {
+                commands::posts::list(&ro_conn()?, limit, kind, &opts)
+            }
         },
         Commands::Agents { sub } => {
             let conn = db::open_readwrite(&db_path)?;

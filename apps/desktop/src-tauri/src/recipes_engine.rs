@@ -2,6 +2,7 @@
 // v2.3.11 Phase 4.5 — PostWebhook executor added.
 // v2.3.12 Phase 4.6 — RunScript executor added.
 // v2.3.13 Phase 4.7 — DispatchLongRunning watcher + KillRun re-enable.
+// v2.3.16 Phase 5.1 — NotifyHuman executor (writes to activity feed).
 //
 // Long-running tokio task that:
 //   1. Subscribes to events::bus
@@ -11,9 +12,9 @@
 //   3. Runs each matching recipe's action
 //   4. Audits the run to ops_recipe_runs
 //
-// Implemented action executors: DraftSkillFromReplay, ReplayOnAlt,
-// DispatchAgent, PostWebhook, RunScript, KillRun. Stubs: NotifyHuman
-// (waits on the Phase 5 activity feed).
+// All seven action executors are implemented: DraftSkillFromReplay,
+// ReplayOnAlt, DispatchAgent, PostWebhook, RunScript, KillRun,
+// NotifyHuman. No stubs remain.
 
 use crate::events::{bus, AtoEvent, RegressionSeverity, ReplayStatus};
 use crate::recipes::{OpsRecipe, RecipeAction, RecipeTrigger};
@@ -425,7 +426,7 @@ async fn handle_event(event: AtoEvent) -> Result<(), String> {
         drop(_serialize);
 
         // Execute the action.
-        let outcome = execute_action(&recipe.action, &event).await;
+        let outcome = execute_action(&recipe.action, &event, &recipe.slug).await;
         let finished_at = chrono::Utc::now().to_rfc3339();
         finalize_run_row(&run_id, outcome, &finished_at);
     }
@@ -665,7 +666,11 @@ struct ActionOutcome {
     error: Option<String>,
 }
 
-async fn execute_action(action: &RecipeAction, event: &AtoEvent) -> ActionOutcome {
+async fn execute_action(
+    action: &RecipeAction,
+    event: &AtoEvent,
+    recipe_slug: &str,
+) -> ActionOutcome {
     match action {
         RecipeAction::DraftSkillFromReplay { out } => draft_skill_from_replay(event, out.as_deref()),
         RecipeAction::ReplayOnAlt {
@@ -694,15 +699,11 @@ async fn execute_action(action: &RecipeAction, event: &AtoEvent) -> ActionOutcom
         }
         // v2.3.12 Phase 4.6 — RunScript implemented.
         RecipeAction::RunScript { path, args } => run_script(event, path, args).await,
-        // Phase 4.6 v1 stub — NotifyHuman waits for Phase 5 activity feed.
-        RecipeAction::NotifyHuman { .. } => ActionOutcome {
-            status: "not_implemented",
-            result: None,
-            error: Some(format!(
-                "Action '{}' is not yet implemented.",
-                action_name(action)
-            )),
-        },
+        // v2.3.16 Phase 5.1 — NotifyHuman implemented; writes to the
+        // activity feed.
+        RecipeAction::NotifyHuman { text_template } => {
+            notify_human(event, text_template, recipe_slug)
+        }
     }
 }
 
@@ -1560,6 +1561,76 @@ async fn dispatch_agent(
             status: "failed",
             result: None,
             error: Some(e),
+        },
+    }
+}
+
+/// Executor: write a post to the activity feed.
+///
+/// v2.3.16 Phase 5.1 — closes the NotifyHuman stub that's been
+/// waiting since Phase 4.5. Posts are attributed as `system` author
+/// with the originating recipe's slug, so the GUI can group "what
+/// the system told me" separately from named-agent posts and the
+/// human can see WHICH recipe authored the notice. text_template
+/// runs through the same placeholder substitution as DispatchAgent /
+/// PostWebhook ({{source_runtime}}, {{target_runtime}},
+/// {{agent_slug}}, {{previous_runtime}}). Text is validated via
+/// ato_posts::validate_text — embedded control chars / ANSI escapes
+/// are rejected at write time so the feed stays safely renderable.
+fn notify_human(event: &AtoEvent, text_template: &str, recipe_slug: &str) -> ActionOutcome {
+    let fields = extract_event_fields(event);
+    if let Some(p) = first_missing_placeholder(text_template, &fields) {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "notify_human: text uses placeholder {} but event did not provide a value",
+                p
+            )),
+        };
+    }
+    let resolved = apply_substitution(text_template, &fields, false);
+    if resolved.trim().is_empty() {
+        return ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some("notify_human: resolved text is empty".to_string()),
+        };
+    }
+    let db_path = crate::get_db_path();
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return ActionOutcome {
+                status: "failed",
+                result: None,
+                error: Some(format!("notify_human: open db: {}", e)),
+            };
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+    let input = crate::posts::CreatePostInput {
+        author_kind: crate::posts::PostAuthorKind::System,
+        author_slug: Some(recipe_slug.to_string()),
+        kind: crate::posts::PostKind::EventNotice,
+        text: resolved.clone(),
+        related_event_seq: Some(event.event_seq() as i64),
+        payload: None,
+    };
+    match crate::posts::create(&conn, input) {
+        Ok(post) => ActionOutcome {
+            status: "done",
+            result: Some(format!(
+                "Posted to activity feed (id={}, related_event_seq={})",
+                post.id,
+                event.event_seq()
+            )),
+            error: None,
+        },
+        Err(e) => ActionOutcome {
+            status: "failed",
+            result: None,
+            error: Some(format!("notify_human: {}", e)),
         },
     }
 }

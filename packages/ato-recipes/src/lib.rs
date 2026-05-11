@@ -122,8 +122,11 @@ pub enum RecipeAction {
         body_template: Option<String>,
     },
 
-    /// Post a message to the activity feed (Phase 5). Until the feed
-    /// lands, this action no-ops with a warning.
+    /// Post a message to the activity feed. text_template runs
+    /// through the engine's standard placeholder substitution
+    /// ({{source_runtime}}, {{target_runtime}}, {{agent_slug}},
+    /// {{previous_runtime}}). The post is attributed as
+    /// `system` author with the recipe's slug.
     #[serde(rename = "notify_human")]
     NotifyHuman { text_template: String },
 

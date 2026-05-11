@@ -1,6 +1,6 @@
 [package]
 name = "ato-desktop"
-version = "2.3.15"
+version = "2.3.16"
 edition = "2021"
 
 [lib]
@@ -43,6 +43,7 @@ base64 = "0.22"
 sha2 = "0.10"
 portable-pty = "0.8"
 ato-recipes = { path = "../../../packages/ato-recipes" }
+ato-posts = { path = "../../../packages/ato-posts" }
 
 [dev-dependencies]
 tempfile = "3"
