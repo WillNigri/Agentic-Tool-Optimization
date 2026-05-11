@@ -8,8 +8,8 @@
 // stream, not a config), no GUI bindings yet (Phase 5.2). The
 // recipes engine's NotifyHuman executor calls `create` directly.
 
-use ato_posts::{validate_author_slug, validate_text};
-pub use ato_posts::{CreatePostInput, Post, PostAuthorKind, PostKind};
+use ato_posts::{validate_author_slug};
+pub use ato_posts::{validate_text, CreatePostInput, Post, PostAuthorKind, PostKind};
 use rusqlite::Connection;
 
 type Result<T> = std::result::Result<T, String>;

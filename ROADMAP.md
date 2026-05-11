@@ -268,6 +268,28 @@ Items that previously sat in this section (federated agent network, kubectl-for-
 
 ---
 
+## Phase 6.x — Runtime quota visibility (Planned, small)
+
+Rate-limit info is only visible when you try a dispatch and it fails.
+ATO already sees these errors (they flow through `ato dispatch`'s
+stderr) but doesn't persist or surface them proactively. Caught
+during the v2.3.19 commit when codex hit its limit mid-review.
+
+### Surface
+
+- New table `runtime_quotas (runtime TEXT, resets_at TEXT, source
+  TEXT, captured_at TEXT)`.
+- Dispatch error path: regex `try again at <timestamp>` patterns
+  and upsert into runtime_quotas.
+- `ato runtimes status` (extension to existing): per runtime,
+  show "ok" or "rate-limited until <ts>".
+- `ato dispatch <runtime>` pre-flight: if runtime_quotas has a
+  future resets_at, return the saved reset time without burning
+  another dispatch attempt.
+
+~50 LOC total. Worth shipping standalone or alongside Phase 6
+sessions.
+
 ## Phase 6 — Cross-runtime agent conversations (Planned)
 
 The activity feed (Phase 5) is async broadcast — anyone posts, anyone

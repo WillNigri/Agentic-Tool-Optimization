@@ -1198,6 +1198,11 @@ pub fn run() {
             recipes_delete,
             recipes_templates,
             recipes_install_template,
+            // v2.3.20 Phase 5.5 — Activity feed (posts)
+            posts_list,
+            posts_create,
+            posts_pending,
+            posts_decide,
             // Health Checks
             get_health_status,
             record_health_check,
