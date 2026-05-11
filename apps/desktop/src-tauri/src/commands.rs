@@ -3348,6 +3348,45 @@ fn truncate_for_log(s: &str) -> String {
     if s.len() <= MAX { s.to_string() } else { format!("{}…[truncated]", &s[..MAX]) }
 }
 
+// ── v2.3.2 Phase 2.x — Local config-change ledger ─────────────────────
+//
+// The CLI's `ato agents create | update` writes to local
+// `agent_config_changes` already. This Tauri command lets the GUI's
+// agent-update paths do the same dual-write (cloud + local). Without
+// it, signed-out users would have GUI-driven edits invisible to the
+// local regression detector. Best-effort: never fail.
+
+#[tauri::command]
+pub fn record_local_config_change(
+    agent_slug: String,
+    field: String,
+    old_value: Option<String>,
+    new_value: Option<String>,
+    actor: Option<String>,
+) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        // Best-effort: failure here doesn't block the GUI edit.
+        Err(_) => return Ok(()),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "INSERT INTO agent_config_changes (id, agent_slug, field, old_value, new_value, actor, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            id,
+            agent_slug,
+            field,
+            old_value,
+            new_value,
+            actor.unwrap_or_else(|| "desktop:gui".to_string()),
+            now,
+        ],
+    );
+    Ok(())
+}
+
 // ── v2.3.2 Phase 2 — Local-mode regressions + cost recommendations ────
 //
 // Thin Tauri wrappers around the algorithm in `local_insights.rs`. The

@@ -1014,6 +1014,7 @@ pub fn run() {
             // v2.3.2 Phase 2 — local-mode insights
             compute_regressions_local,
             compute_cost_recommendations_local,
+            record_local_config_change,
             // Health Checks
             get_health_status,
             record_health_check,

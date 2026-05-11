@@ -24,6 +24,10 @@ import {
   type RegressionRow,
   type CloudAgentTrace,
 } from "@/lib/cloudAgentTraces";
+// v2.3.2 Phase 2.x — local-mode fallback so signed-out users still see
+// regressions detected from their own machine's dispatches. Same
+// algorithm, no cloud round-trip.
+import { getRegressionsLocal } from "@/lib/localInsights";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { asNumber } from "@/lib/pricing";
@@ -64,42 +68,45 @@ export default function RegressionsPanel() {
   const isCloudUser = useAuthStore((s) => s.isCloudUser);
   const accessToken = useAuthStore((s) => s.accessToken);
   const mock = import.meta.env.VITE_USE_MOCK_CLOUD === "true";
-  const canQuery = mock || (isCloudUser && accessToken);
+  // v2.3.2 Phase 2.x — cloud is preferred (cross-device aggregation),
+  // but local-mode is the fallback so signed-out users still get value.
+  // Auth state decides which path; both query types return the same
+  // shape so the rendering below doesn't fork.
+  const cloudEligible = !!(mock || (isCloudUser && accessToken)) && isPro;
   const [days, setDays] = useState<7 | 30 | 90>(30);
   const [showAll, setShowAll] = useState(false);
   const [openDrill, setOpenDrill] = useState<RegressionRow | null>(null);
 
-  const query = useQuery({
-    queryKey: ["regressions", days],
+  const cloudQuery = useQuery({
+    queryKey: ["regressions-cloud", days],
     queryFn: () => getRegressions({ days }),
-    enabled: !!canQuery && isPro,
+    enabled: cloudEligible,
     staleTime: 60_000,
   });
 
-  if (!isPro) {
-    return (
-      <Empty
-        icon={<Zap size={20} />}
-        title={t("insights.regressions.proRequired", "Regression detection is a Pro feature")}
-        body={t(
-          "insights.regressions.proBody",
-          "Compares trace stats before and after every config change so you spot quality drops the moment you have enough data. Pro tier unlocks it.",
-        )}
-      />
-    );
-  }
-  if (!canQuery) {
-    return (
-      <Empty
-        icon={<Cloud size={20} />}
-        title={t("insights.regressions.signInRequired", "Sign in to see regressions")}
-        body={t(
-          "insights.regressions.signInBody",
-          "Regression detection joins your config-change ledger with cloud trace data — needs a cloud login. Settings → Cloud → Sign in.",
-        )}
-      />
-    );
-  }
+  const localQuery = useQuery({
+    queryKey: ["regressions-local", days],
+    queryFn: () => getRegressionsLocal({ days }),
+    // Run local only when cloud isn't eligible OR when the cloud query
+    // errored (fallback). The latter case handles transient cloud
+    // outages cleanly — local data is always available.
+    enabled: !cloudEligible || cloudQuery.isError,
+    staleTime: 60_000,
+  });
+
+  // Pick whichever source has data. Cloud wins when eligible AND
+  // successful; otherwise fall back to local.
+  const usingLocal =
+    !cloudEligible || cloudQuery.isError || !cloudQuery.data;
+  const query = usingLocal ? localQuery : cloudQuery;
+  const data = query.data;
+  const mode: "cloud" | "local" | "local-no-schema" =
+    !usingLocal
+      ? "cloud"
+      : (data as { source?: string } | undefined)?.source === "local-no-schema"
+        ? "local-no-schema"
+        : "local";
+
   if (query.isLoading) {
     return (
       <div className="flex items-center justify-center h-32 text-cs-muted">
@@ -117,6 +124,28 @@ export default function RegressionsPanel() {
     );
   }
 
+  // Bail early when the local schema isn't there yet — clearer signal
+  // than "0 regressions detected."
+  if (mode === "local-no-schema") {
+    return (
+      <Empty
+        icon={<Cloud size={20} />}
+        title={t(
+          "insights.regressions.schemaNotReady",
+          "Regression schema not migrated yet",
+        )}
+        body={t(
+          "insights.regressions.schemaNotReadyBody",
+          "Local-mode regressions need the v2.3.2 schema. This usually means the desktop hasn't restarted since v2.3.2 landed. Reload the app and try again.",
+        )}
+      />
+    );
+  }
+
+  // Cloud-side window/min-samples might differ slightly from local;
+  // pick whichever the active source returned.
+  const windowHours = (data as any)?.windowHours ?? (data as any)?.window_hours ?? 168;
+  const minSamples = (data as any)?.minSamples ?? (data as any)?.min_samples ?? 20;
   const all = query.data?.regressions ?? [];
   const regressions = all.filter((r) => r.severity === "regression");
   const improvements = all.filter((r) => r.severity === "improvement");
@@ -130,12 +159,13 @@ export default function RegressionsPanel() {
           <h3 className="flex items-center gap-2 text-sm font-medium text-cs-text">
             <GitCommit size={14} className="text-cs-accent" />
             {t("insights.regressions.title", "Regression detector")}
+            <ModeBadge mode={mode} />
           </h3>
           <p className="mt-0.5 text-[11px] text-cs-muted">
             {t(
               "insights.regressions.subtitle",
               "Every config change with enough traces on both sides — sorted regressions first. Window: {{h}}h before vs after each change, min {{n}} samples per side.",
-              { h: query.data?.windowHours ?? 168, n: query.data?.minSamples ?? 20 },
+              { h: windowHours, n: minSamples },
             )}
           </p>
         </div>
@@ -314,6 +344,30 @@ function RegressionCard({
         </div>
       </div>
     </li>
+  );
+}
+
+// v2.3.2 Phase 2.x — surfaces which data source the panel is showing.
+// Cloud = cross-device aggregation (Pro). Local = this machine's
+// SQLite. Local-no-schema = migration hasn't run yet.
+function ModeBadge({ mode }: { mode: "cloud" | "local" | "local-no-schema" }) {
+  if (mode === "cloud") {
+    return (
+      <span
+        title="Cross-device aggregation (Pro)"
+        className="inline-flex items-center gap-1 rounded-full border border-cs-accent/40 bg-cs-accent/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-cs-accent"
+      >
+        <Cloud size={9} /> cloud
+      </span>
+    );
+  }
+  return (
+    <span
+      title="Computed from this machine's dispatches only. Sign in for cross-device aggregation."
+      className="inline-flex items-center gap-1 rounded-full border border-cs-border bg-cs-bg-raised px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-cs-muted"
+    >
+      local
+    </span>
   );
 }
 

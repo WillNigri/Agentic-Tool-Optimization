@@ -10,6 +10,7 @@
 
 import { useAuthStore } from "@/hooks/useAuth";
 import { isMockMode, MOCK_CONFIG_CHANGES } from "@/lib/cloudMockData";
+import { invoke } from "@tauri-apps/api/core";
 
 const CLOUD_API_URL =
   import.meta.env.VITE_CLOUD_API_URL || "https://api.agentictool.ai";
@@ -96,6 +97,14 @@ export async function recordConfigChange(payload: RecordPayload): Promise<void> 
     return;
   }
 
+  // v2.3.2 Phase 2.x — dual-write to local agent_config_changes so the
+  // local-mode regression detector sees GUI edits even when the user
+  // isn't signed in. Cloud path stays as the cross-device source of
+  // truth; this is the offline mirror. Fire and silently swallow.
+  recordLocalConfigChange(payload).catch(() => {
+    /* silent — local write must never break the GUI flow */
+  });
+
   try {
     await fetch(`${CLOUD_API_URL}/api/agent-config-changes`, {
       method: "POST",
@@ -111,6 +120,38 @@ export async function recordConfigChange(payload: RecordPayload): Promise<void> 
     });
   } catch {
     // Silent — never block a local edit on telemetry.
+  }
+}
+
+/** v2.3.2 Phase 2.x — best-effort local agent_config_changes write.
+ *  Mirrors the cloud row for the offline-first regression detector.
+ *  Stringifies non-string old/new values for the JSON column shape the
+ *  desktop's local table expects (it stores everything as TEXT). */
+async function recordLocalConfigChange(payload: RecordPayload): Promise<void> {
+  if (isMockMode()) return;
+  // Both old/new might be undefined (e.g. "created" marker); we serialize
+  // them as null in that case so SQLite stores SQL NULL rather than a
+  // string "undefined".
+  const stringify = (v: unknown): string | null => {
+    if (v === undefined || v === null) return null;
+    if (typeof v === "string") return v;
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+  try {
+    await invoke("record_local_config_change", {
+      agentSlug: payload.agentSlug,
+      field: payload.field,
+      oldValue: stringify(payload.oldValue),
+      newValue: stringify(payload.newValue),
+      actor: payload.changedBy ?? defaultActor(),
+    });
+  } catch {
+    // Silent — best-effort. If Tauri command fails (e.g. unit-test
+    // environment without the runtime), the cloud post still runs.
   }
 }
 

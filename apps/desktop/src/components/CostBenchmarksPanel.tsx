@@ -18,6 +18,10 @@ import {
   type CostBenchmarkRow,
   type CostRecommendation,
 } from "@/lib/cloudAgentTraces";
+// v2.3.2 Phase 2.x — local-mode fallback for cost recommendations.
+// Benchmarks (the per-(agent, runtime) cost table) stays cloud-only
+// for now since the local aggregator hasn't been ported yet.
+import { getCostRecommendationsLocal } from "@/lib/localInsights";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { asNumber } from "@/lib/pricing";
@@ -66,12 +70,32 @@ export default function CostBenchmarksPanel() {
   // Cost recommendations — prescriptive companion. Renders only when
   // the user has historical data on multiple runtimes for the same
   // agent AND the alt is meaningfully cheaper at preserved quality.
-  const recsQuery = useQuery({
-    queryKey: ["cost-recommendations", days],
+  // v2.3.2 Phase 2.x — local fallback so signed-out users still get
+  // recs from their own machine's dispatches.
+  const recsCloudEligible = !!canQuery && isPro;
+  const recsCloudQuery = useQuery({
+    queryKey: ["cost-recommendations-cloud", days],
     queryFn: () => getCostRecommendations({ days }),
-    enabled: !!canQuery && isPro,
+    enabled: recsCloudEligible,
     staleTime: 60_000,
   });
+  const recsLocalQuery = useQuery({
+    queryKey: ["cost-recommendations-local", days],
+    queryFn: () => getCostRecommendationsLocal({ days }),
+    enabled: !recsCloudEligible || recsCloudQuery.isError,
+    staleTime: 60_000,
+  });
+  const recsUsingLocal =
+    !recsCloudEligible || recsCloudQuery.isError || !recsCloudQuery.data;
+  const recs: CostRecommendation[] = recsUsingLocal
+    ? recsLocalQuery.data?.recommendations ?? []
+    : recsCloudQuery.data?.recommendations ?? [];
+  const recsMode: "cloud" | "local" | "local-no-schema" =
+    !recsUsingLocal
+      ? "cloud"
+      : (recsLocalQuery.data?.source ?? "local") === "local-no-schema"
+        ? "local-no-schema"
+        : "local";
 
   if (!isPro) {
     return (
@@ -165,11 +189,16 @@ export default function CostBenchmarksPanel() {
 
       {/* v2.1 Phase 5 — Cost recommendations. Surface above the
           benchmarks because they're the actionable bit. Render-nothing
-          when no recs in the window so the panel stays clean. */}
-      <RecommendationsSection
-        recs={recsQuery.data?.recommendations ?? []}
-        windowDays={days}
-      />
+          when no recs in the window so the panel stays clean.
+          v2.3.2 Phase 2.x — cloud preferred, local fallback. The
+          local-no-schema case renders nothing too. */}
+      {recsMode !== "local-no-schema" && (
+        <RecommendationsSection
+          recs={recs}
+          windowDays={days}
+          mode={recsMode}
+        />
+      )}
 
       {/* Summary bar. Show total calls always; cost stats only when
           some row actually reported cost. */}
@@ -402,9 +431,14 @@ function Empty({
 function RecommendationsSection({
   recs,
   windowDays,
+  mode,
 }: {
   recs: CostRecommendation[];
   windowDays: number;
+  // v2.3.2 Phase 2.x — surfaces which data source the recommendations
+  // come from so the user knows whether this includes cross-device
+  // aggregation (cloud) or just this machine's dispatches (local).
+  mode: "cloud" | "local" | "local-no-schema";
 }) {
   const { t } = useTranslation();
   if (recs.length === 0) return null;
@@ -415,6 +449,21 @@ function RecommendationsSection({
         <h4 className="text-[12px] font-medium text-cs-text">
           {t("insights.cost.recsTitle", "Cost recommendations")}
         </h4>
+        <span
+          title={
+            mode === "cloud"
+              ? "Cross-device aggregation (Pro)"
+              : "Computed from this machine's dispatches only. Sign in for cross-device aggregation."
+          }
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
+            mode === "cloud"
+              ? "border-cs-accent/40 bg-cs-accent/10 text-cs-accent"
+              : "border-cs-border bg-cs-bg-raised text-cs-muted",
+          )}
+        >
+          {mode === "cloud" ? "cloud" : "local"}
+        </span>
         <span className="text-[10px] text-cs-muted">
           {t(
             "insights.cost.recsSubtitle",
