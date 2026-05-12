@@ -1203,6 +1203,8 @@ pub fn run() {
             posts_create,
             posts_pending,
             posts_decide,
+            // v2.3.23 Phase 6.x-B — unified runtime picker
+            list_available_runtimes,
             // Health Checks
             get_health_status,
             record_health_check,

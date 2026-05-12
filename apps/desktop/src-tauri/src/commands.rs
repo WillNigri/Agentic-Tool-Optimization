@@ -2895,6 +2895,101 @@ pub fn get_runtime_path(runtime: String) -> Result<Option<String>, String> {
     Ok(read_file_lossy(&file_path).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
+// v2.3.23 Phase 6.x-B — unified runtime picker source.
+//
+// The PromptBar / agent-creation dropdowns previously hardcoded the
+// 5 CLI runtimes (claude, codex, gemini, openclaw, hermes). After
+// adding API-key dispatch in v2.3.21, the same dropdowns need to
+// surface API providers (MiniMax, Grok, ...) that the user has keys
+// for, AND hide CLI runtimes the user doesn't have installed.
+//
+// Single source of truth for that picker: this command returns the
+// union, tagged by kind. The frontend filters by `available=true`.
+
+/// One row in the runtime picker.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AvailableRuntime {
+    /// Stable slug used for dispatch (claude, codex, minimax, grok, ...).
+    pub slug: String,
+    /// Human label for the dropdown.
+    pub label: String,
+    /// "cli" — needs a binary on PATH; "api" — needs an active
+    /// llm_api_keys row.
+    pub kind: String,
+    /// Did the gate check pass? Frontend hides rows where this is false.
+    pub available: bool,
+    /// "no_binary" / "no_key" / "ok" — surfaceable hint for the UI's
+    /// "why not?" tooltip on a disabled row.
+    pub reason: String,
+}
+
+// Provider slugs the desktop knows correspond to API-key dispatch.
+// Kept in sync with apps/cli/src/api_dispatch.rs::registry(). TODO:
+// extract both into packages/ato-api-providers when we add a 6th
+// provider (drift risk = O(providers) and right now it's 5).
+const API_PROVIDER_SLUGS: &[(&str, &str)] = &[
+    ("minimax", "MiniMax"),
+    ("grok", "Grok"),
+    ("deepseek", "DeepSeek"),
+    ("qwen", "Qwen"),
+    ("openrouter", "OpenRouter"),
+];
+
+#[tauri::command]
+pub fn list_available_runtimes() -> Result<Vec<AvailableRuntime>, String> {
+    let mut out: Vec<AvailableRuntime> = Vec::new();
+
+    // CLI runtimes — same set detect_agent_runtimes inspects. Each is
+    // "available" iff the binary resolves.
+    for (slug, label, path) in [
+        ("claude", "Claude", which_claude().or_else(|| which_cli("claude"))),
+        ("codex", "Codex", which_cli("codex")),
+        ("gemini", "Gemini", which_cli("gemini")),
+        ("openclaw", "OpenClaw", which_cli("openclaw")),
+        ("hermes", "Hermes", which_cli("hermes")),
+    ] {
+        let available = path.is_some();
+        out.push(AvailableRuntime {
+            slug: slug.to_string(),
+            label: label.to_string(),
+            kind: "cli".to_string(),
+            available,
+            reason: if available { "ok".to_string() } else { "no_binary".to_string() },
+        });
+    }
+
+    // API providers — "available" iff llm_api_keys has at least one
+    // active row whose provider matches (case-insensitive). Single
+    // query gathers them all so the picker is O(1) trips to SQLite.
+    let conn = rusqlite::Connection::open(crate::get_db_path())
+        .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT LOWER(provider) FROM llm_api_keys
+              WHERE is_active = 1
+           GROUP BY LOWER(provider)",
+        )
+        .map_err(|e| e.to_string())?;
+    let active_providers: std::collections::HashSet<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (slug, label) in API_PROVIDER_SLUGS {
+        let available = active_providers.contains(*slug);
+        out.push(AvailableRuntime {
+            slug: slug.to_string(),
+            label: label.to_string(),
+            kind: "api".to_string(),
+            available,
+            reason: if available { "ok".to_string() } else { "no_key".to_string() },
+        });
+    }
+
+    Ok(out)
+}
+
 #[tauri::command]
 pub fn detect_agent_runtimes() -> Result<Vec<DetectedRuntime>, String> {
     let runtimes = vec![

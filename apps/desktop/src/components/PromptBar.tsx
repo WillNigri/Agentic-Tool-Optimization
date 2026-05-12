@@ -55,6 +55,27 @@ const isTauri =
   typeof window !== "undefined" &&
   ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
 
+// v2.3.23 Phase 6.x-B — picker is now data-driven from
+// `list_available_runtimes` (CLI runtimes + API providers with active
+// keys). This map defines the rendering metadata for any slug the
+// command can return; the picker filters by which slugs come back
+// available=true.
+const RUNTIME_META: Record<
+  string,
+  { label: string; icon: typeof Terminal; color: string }
+> = {
+  claude: { label: "Claude", icon: Terminal, color: "#f97316" },
+  codex: { label: "Codex", icon: Cpu, color: "#22c55e" },
+  gemini: { label: "Gemini", icon: Globe, color: "#4285f4" },
+  openclaw: { label: "OpenClaw", icon: Server, color: "#06b6d4" },
+  hermes: { label: "Hermes", icon: Globe, color: "#a855f7" },
+  minimax: { label: "MiniMax", icon: Cpu, color: "#1456ff" },
+  grok: { label: "Grok", icon: Cpu, color: "#fff" },
+  deepseek: { label: "DeepSeek", icon: Cpu, color: "#4d6bfe" },
+  qwen: { label: "Qwen", icon: Cpu, color: "#7c3aed" },
+  openrouter: { label: "OpenRouter", icon: Globe, color: "#10b981" },
+};
+
 const RUNTIME_OPTIONS: {
   id: AgentRuntime;
   label: string;
@@ -66,6 +87,14 @@ const RUNTIME_OPTIONS: {
   { id: "openclaw", label: "OpenClaw", icon: Server, color: "#06b6d4" },
   { id: "hermes", label: "Hermes", icon: Globe, color: "#a855f7" },
 ];
+
+interface AvailableRuntimeRow {
+  slug: string;
+  label: string;
+  kind: "cli" | "api";
+  available: boolean;
+  reason: string;
+}
 
 const MAX_ATTACHMENT_BYTES = 32 * 1024;
 
@@ -98,6 +127,25 @@ export default function PromptBar() {
   const [streamingText, setStreamingText] = useState("");
   const [runtime, setRuntime] = useState<AgentRuntime>("claude");
   const [showRuntimePicker, setShowRuntimePicker] = useState(false);
+  // v2.3.23 Phase 6.x-B — populated by list_available_runtimes.
+  // Picker iterates over this when present, falling back to the
+  // hardcoded RUNTIME_OPTIONS in dev/web (no Tauri) builds.
+  const [availableRuntimes, setAvailableRuntimes] = useState<AvailableRuntimeRow[] | null>(null);
+  useEffect(() => {
+    if (!IS_TAURI) return;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const rows = await invoke<AvailableRuntimeRow[]>("list_available_runtimes");
+        setAvailableRuntimes(rows);
+      } catch (e) {
+        // If the command isn't registered (old desktop binary), keep
+        // the fallback. Don't surface to the user — the dropdown
+        // still works with the hardcoded list.
+        console.warn("list_available_runtimes failed:", e);
+      }
+    })();
+  }, []);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
   // Group dispatch — when set, prompt routes through the group's router
@@ -1062,29 +1110,82 @@ export default function PromptBar() {
                 className="fixed inset-0 z-30"
                 onClick={() => setShowRuntimePicker(false)}
               />
-              <div className="absolute bottom-full left-0 mb-1 w-36 rounded-lg border border-cs-border bg-cs-card shadow-xl z-40 overflow-hidden">
-                {RUNTIME_OPTIONS.map((rt) => {
-                  const Icon = rt.icon;
+              <div className="absolute bottom-full left-0 mb-1 w-44 rounded-lg border border-cs-border bg-cs-card shadow-xl z-40 overflow-hidden">
+                {(() => {
+                  // Use the queried list when available, else the
+                  // legacy 4-CLI hardcoded list. Filter to available
+                  // rows; render API providers as a separate group
+                  // with a clear "CLI dispatch only" hint.
+                  const rows: AvailableRuntimeRow[] = availableRuntimes
+                    ? availableRuntimes.filter((r) => r.available)
+                    : RUNTIME_OPTIONS.map((o) => ({
+                        slug: o.id,
+                        label: o.label,
+                        kind: "cli" as const,
+                        available: true,
+                        reason: "ok",
+                      }));
+                  const cliRows = rows.filter((r) => r.kind === "cli");
+                  const apiRows = rows.filter((r) => r.kind === "api");
+                  const renderRow = (r: AvailableRuntimeRow) => {
+                    const meta = RUNTIME_META[r.slug] ?? {
+                      label: r.label,
+                      icon: Globe,
+                      color: "#888",
+                    };
+                    const Icon = meta.icon;
+                    const isApi = r.kind === "api";
+                    // v2.3.23: API providers visible-but-not-yet-clickable
+                    // from the GUI. Click selects the runtime so the
+                    // user can see what they have configured, but the
+                    // existing dispatch path doesn't know how to route
+                    // it. Tooltip points to the CLI workaround. Phase
+                    // 6.x-C will wire desktop-side API dispatch.
+                    return (
+                      <button
+                        key={r.slug}
+                        type="button"
+                        onClick={() => {
+                          setRuntime(r.slug as AgentRuntime);
+                          setShowRuntimePicker(false);
+                        }}
+                        title={
+                          isApi
+                            ? `${meta.label} — API provider. Today: dispatch via \`ato dispatch ${r.slug} "…"\`. GUI dispatch lands in Phase 6.x-C.`
+                            : meta.label
+                        }
+                        className={cn(
+                          "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors",
+                          runtime === r.slug ? "bg-cs-accent/5" : "hover:bg-cs-bg"
+                        )}
+                      >
+                        <Icon size={12} style={{ color: meta.color }} />
+                        <span
+                          className="flex-1 text-left"
+                          style={{ color: runtime === r.slug ? meta.color : undefined }}
+                        >
+                          {meta.label}
+                        </span>
+                        {isApi ? (
+                          <span className="text-[9px] uppercase tracking-wide text-cs-muted">
+                            CLI
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  };
                   return (
-                    <button
-                      key={rt.id}
-                      type="button"
-                      onClick={() => {
-                        setRuntime(rt.id);
-                        setShowRuntimePicker(false);
-                      }}
-                      className={cn(
-                        "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors",
-                        runtime === rt.id ? "bg-cs-accent/5" : "hover:bg-cs-bg"
-                      )}
-                    >
-                      <Icon size={12} style={{ color: rt.color }} />
-                      <span style={{ color: runtime === rt.id ? rt.color : undefined }}>
-                        {rt.label}
-                      </span>
-                    </button>
+                    <>
+                      {cliRows.map(renderRow)}
+                      {apiRows.length > 0 ? (
+                        <div className="px-3 pt-2 pb-1 text-[9px] uppercase tracking-wide text-cs-muted border-t border-cs-border">
+                          API providers
+                        </div>
+                      ) : null}
+                      {apiRows.map(renderRow)}
+                    </>
                   );
-                })}
+                })()}
               </div>
             </>
           )}
