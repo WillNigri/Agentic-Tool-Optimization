@@ -1,0 +1,8 @@
+[package]
+name = "ato-api-providers"
+version = "0.1.0"
+edition = "2021"
+description = "Shared API-provider registry for ATO desktop + CLI. Pure type defs + registry, no HTTP."
+license = "MIT"
+
+[dependencies]

@@ -27,80 +27,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::time::Duration;
 
-/// Static registry. Adding a new OpenAI-compatible provider is one
-/// entry here + nothing else. MiniMax has its own response shape so
-/// it has a custom path; others use the shared OpenAI shape.
-#[derive(Debug, Clone)]
-pub struct ApiProvider {
-    pub slug: &'static str,
-    pub base_url: &'static str,
-    pub path: &'static str,
-    pub default_model: &'static str,
-    pub env_var: &'static str,
-    /// "openai" = standard chat-completions shape. "minimax" = custom
-    /// success check via base_resp.status_code.
-    pub flavor: &'static str,
-}
-
-pub fn registry() -> &'static [ApiProvider] {
-    &[
-        ApiProvider {
-            slug: "minimax",
-            base_url: "https://api.minimax.io",
-            path: "/v1/text/chatcompletion_v2",
-            // MiniMax-M2.7-highspeed is the Plus Token Plan default;
-            // users on other tiers can override with --model. The
-            // older MiniMax-M2 and MiniMax-Text-01 are gated on the
-            // metered API, not the subscription.
-            default_model: "MiniMax-M2.7-highspeed",
-            env_var: "MINIMAX_API_KEY",
-            flavor: "minimax",
-        },
-        ApiProvider {
-            slug: "grok",
-            base_url: "https://api.x.ai",
-            path: "/v1/chat/completions",
-            default_model: "grok-2-latest",
-            env_var: "GROK_API_KEY",
-            flavor: "openai",
-        },
-        ApiProvider {
-            slug: "deepseek",
-            base_url: "https://api.deepseek.com",
-            path: "/v1/chat/completions",
-            default_model: "deepseek-chat",
-            env_var: "DEEPSEEK_API_KEY",
-            flavor: "openai",
-        },
-        ApiProvider {
-            slug: "qwen",
-            base_url: "https://dashscope-intl.aliyuncs.com",
-            path: "/compatible-mode/v1/chat/completions",
-            default_model: "qwen-plus",
-            env_var: "DASHSCOPE_API_KEY",
-            flavor: "openai",
-        },
-        ApiProvider {
-            slug: "openrouter",
-            base_url: "https://openrouter.ai",
-            path: "/api/v1/chat/completions",
-            // OpenRouter is a meta-provider — no "default" makes
-            // sense, so we require --model. Empty string flags that.
-            default_model: "",
-            env_var: "OPENROUTER_API_KEY",
-            flavor: "openai",
-        },
-    ]
-}
-
-pub fn find_provider(slug: &str) -> Option<&'static ApiProvider> {
-    let lower = slug.to_ascii_lowercase();
-    registry().iter().find(|p| p.slug == lower.as_str())
-}
-
-pub fn is_api_provider(slug: &str) -> bool {
-    find_provider(slug).is_some()
-}
+// v2.3.28 Phase 6.x-E — ApiProvider + registry live in the shared
+// `ato-api-providers` crate. Re-exported here so call sites
+// (dispatch.rs etc.) keep working without import churn.
+pub use ato_api_providers::{find_provider, is_api_provider, registry, ApiProvider};
 
 #[derive(Debug, Serialize)]
 pub struct ApiDispatchOutcome {

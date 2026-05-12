@@ -81,9 +81,10 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ato"
-version = "2.3.26"
+version = "2.3.27"
 dependencies = [
  "anyhow",
+ "ato-api-providers",
  "ato-posts",
  "ato-recipes",
  "base64",
@@ -97,6 +98,10 @@ dependencies = [
  "uuid",
  "which",
 ]
+
+[[package]]
+name = "ato-api-providers"
+version = "0.1.0"
 
 [[package]]
 name = "ato-posts"

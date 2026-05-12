@@ -21,69 +21,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
-pub struct ApiProvider {
-    pub slug: &'static str,
-    pub base_url: &'static str,
-    pub path: &'static str,
-    pub default_model: &'static str,
-    pub env_var: &'static str,
-    pub flavor: &'static str,
-}
-
-pub fn registry() -> &'static [ApiProvider] {
-    &[
-        ApiProvider {
-            slug: "minimax",
-            base_url: "https://api.minimax.io",
-            path: "/v1/text/chatcompletion_v2",
-            default_model: "MiniMax-M2.7-highspeed",
-            env_var: "MINIMAX_API_KEY",
-            flavor: "minimax",
-        },
-        ApiProvider {
-            slug: "grok",
-            base_url: "https://api.x.ai",
-            path: "/v1/chat/completions",
-            default_model: "grok-2-latest",
-            env_var: "GROK_API_KEY",
-            flavor: "openai",
-        },
-        ApiProvider {
-            slug: "deepseek",
-            base_url: "https://api.deepseek.com",
-            path: "/v1/chat/completions",
-            default_model: "deepseek-chat",
-            env_var: "DEEPSEEK_API_KEY",
-            flavor: "openai",
-        },
-        ApiProvider {
-            slug: "qwen",
-            base_url: "https://dashscope-intl.aliyuncs.com",
-            path: "/compatible-mode/v1/chat/completions",
-            default_model: "qwen-plus",
-            env_var: "DASHSCOPE_API_KEY",
-            flavor: "openai",
-        },
-        ApiProvider {
-            slug: "openrouter",
-            base_url: "https://openrouter.ai",
-            path: "/api/v1/chat/completions",
-            default_model: "",
-            env_var: "OPENROUTER_API_KEY",
-            flavor: "openai",
-        },
-    ]
-}
-
-pub fn find_provider(slug: &str) -> Option<&'static ApiProvider> {
-    let lower = slug.to_ascii_lowercase();
-    registry().iter().find(|p| p.slug == lower.as_str())
-}
-
-pub fn is_api_provider(slug: &str) -> bool {
-    find_provider(slug).is_some()
-}
+// v2.3.28 Phase 6.x-E — ApiProvider + registry live in the shared
+// `ato-api-providers` crate. Re-exported so the rest of this file
+// (and commands.rs) keep their existing import shape.
+pub use ato_api_providers::{find_provider, is_api_provider, registry, ApiProvider};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ApiDispatchOutcome {

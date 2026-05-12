@@ -1,6 +1,6 @@
 [package]
 name = "ato"
-version = "2.3.27"
+version = "2.3.28"
 edition = "2021"
 description = "ATO CLI — local-first developer-workflow operations platform for multi-runtime AI agents"
 license = "MIT"
@@ -27,6 +27,7 @@ which = "6"
 colored = "2.1"
 ato-recipes = { path = "../../packages/ato-recipes" }
 ato-posts = { path = "../../packages/ato-posts" }
+ato-api-providers = { path = "../../packages/ato-api-providers" }
 # v2.3.21 Phase 6.x — API-key dispatch for non-CLI providers
 # (MiniMax, Grok, Qwen, DeepSeek, OpenRouter). Blocking client keeps
 # dispatch.rs synchronous like the existing shell-out path.

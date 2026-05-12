@@ -2923,17 +2923,9 @@ pub struct AvailableRuntime {
     pub reason: String,
 }
 
-// Provider slugs the desktop knows correspond to API-key dispatch.
-// Kept in sync with apps/cli/src/api_dispatch.rs::registry(). TODO:
-// extract both into packages/ato-api-providers when we add a 6th
-// provider (drift risk = O(providers) and right now it's 5).
-const API_PROVIDER_SLUGS: &[(&str, &str)] = &[
-    ("minimax", "MiniMax"),
-    ("grok", "Grok"),
-    ("deepseek", "DeepSeek"),
-    ("qwen", "Qwen"),
-    ("openrouter", "OpenRouter"),
-];
+// v2.3.28 Phase 6.x-E — provider slugs+labels now come from the
+// shared ato-api-providers crate. No more drift between this list
+// and api_dispatch.rs::registry().
 
 #[tauri::command]
 pub fn list_available_runtimes() -> Result<Vec<AvailableRuntime>, String> {
@@ -2976,8 +2968,8 @@ pub fn list_available_runtimes() -> Result<Vec<AvailableRuntime>, String> {
         .filter_map(|r| r.ok())
         .collect();
 
-    for (slug, label) in API_PROVIDER_SLUGS {
-        let available = active_providers.contains(*slug);
+    for (slug, label) in ato_api_providers::slugs_and_labels() {
+        let available = active_providers.contains(slug);
         out.push(AvailableRuntime {
             slug: slug.to_string(),
             label: label.to_string(),

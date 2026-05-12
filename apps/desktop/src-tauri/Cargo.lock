@@ -272,9 +272,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-api-providers"
+version = "0.1.0"
+
+[[package]]
 name = "ato-desktop"
-version = "2.3.25"
+version = "2.3.28"
 dependencies = [
+ "ato-api-providers",
  "ato-posts",
  "ato-recipes",
  "base64 0.22.1",
