@@ -19,6 +19,20 @@ There is no shortcut on §0. It runs always.
 
 ---
 
+## §0a Cross-runtime review (`ato-review` skill)
+
+Triggered before any commit that touches a public surface (CLI subcommand /
+Tauri command / MCP tool / schema migration / `Command::new` / IPC boundary)
+or exceeds ~50 LOC of behavior change. The
+[`ato-review`](.claude/skills/ato-review/SKILL.md) skill at the repo root
+codifies the procedure. Summary:
+
+- [ ] Diff dispatched to a reviewer runtime via `ato dispatch <reviewer> --session review/<branch>`.
+- [ ] Findings parsed; each one applied OR explicitly deferred with a one-line justification.
+- [ ] Commit body includes the `### Dogfood + review process` section listing the reviewer + applied/deferred findings.
+
+If the change doesn't trip the skill's trigger heuristics, note "trivial — skill skipped" in the commit body so the next reader sees it was a decision, not an oversight.
+
 ## §0 Pre-flight (always runs)
 
 - [ ] `cargo build --manifest-path apps/cli/Cargo.toml -p ato` succeeds with zero new warnings (existing warnings tolerated).

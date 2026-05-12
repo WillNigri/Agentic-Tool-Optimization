@@ -97,6 +97,12 @@ If you have an existing production stack and want general LLM observability, use
 
 The MCP server exposes `run_agent` — any MCP-aware runtime can dispatch to any ATO-managed agent regardless of native runtime. Cross-runtime by protocol, not by hack.
 
+### Claude Code skill: `ato-review`
+
+The repo ships a Claude Code skill at [`.claude/skills/ato-review/SKILL.md`](.claude/skills/ato-review/SKILL.md). When a Claude session is in this repo, the skill instructs Claude to dispatch every non-trivial diff to a reviewer runtime (default: MiniMax) via `ato dispatch` before committing. Findings are parsed, applied or deferred with justification, and recorded in the commit body. Codifies the "build passes ≠ reviewed" guardrail described in Garry Tan's [AI Agent Complexity Ratchet](https://garrytan.com/) post — turns review into a contract Claude follows automatically.
+
+To use it on another project: copy `.claude/skills/ato-review/` into your repo, ensure `ato` is on PATH, and set `$ATO_REVIEWER` to whichever runtime you want as the second-opinion source (or rely on the MiniMax default).
+
 ---
 
 ## What's in the box
