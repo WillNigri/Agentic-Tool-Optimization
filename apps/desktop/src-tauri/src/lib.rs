@@ -1342,6 +1342,9 @@ pub fn run() {
             // v2.3.45 — ratchet view (Phase 6.x-K surface in the GUI)
             ratchet_view::list_ratchets,
             ratchet_view::list_ratchet_breaches,
+            // v2.3.49 — ratchet lock/unlock from the GUI
+            ratchet_view::lock_ratchet,
+            ratchet_view::unlock_ratchet,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,

@@ -12,6 +12,7 @@
 
 use rusqlite::Connection;
 use serde::Serialize;
+use std::process::Command;
 use tauri::State;
 
 use crate::DbState;
@@ -214,4 +215,81 @@ pub fn list_ratchet_breaches(
         })
         .collect();
     Ok(rows)
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// v2.3.49 — Lock / unlock from the GUI.
+//
+// Same shell-out pattern as sessions_view::create_session — the CLI
+// is the canonical implementation of `ato ratchet lock` so we call
+// it directly. Avoids re-implementing baseline computation here.
+
+fn resolve_ato_binary() -> Result<String, String> {
+    if let Some(p) = crate::commands::which_cli("ato") {
+        return Ok(p);
+    }
+    // Deliberate fallback to the bare command name: a user may have
+    // installed `ato` after the desktop process started, in which case
+    // PATH (via login shell) will resolve it at exec time even though
+    // our cached `which_cli` came back empty. Worst case: Command::new
+    // surfaces ENOENT and we propagate it as a clean spawn-error
+    // string — that's a clearer signal than the GUI silently no-op'ing.
+    Ok("ato".to_string())
+}
+
+#[tauri::command]
+pub fn lock_ratchet(
+    target: String,
+    days: Option<i64>,
+    threshold: Option<f64>,
+    notes: Option<String>,
+) -> Result<(), String> {
+    // v2.3.49 — IPC boundary input validation. React side validates
+    // these too, but a bypassed UI (custom Tauri caller, automation)
+    // can send garbage; the CLI then bails with a less actionable
+    // error. Catch it here.
+    if let Some(d) = days {
+        if !(1..=365).contains(&d) {
+            return Err(format!("days must be 1..=365 (got {})", d));
+        }
+    }
+    if let Some(t) = threshold {
+        if !(0.0..=1.0).contains(&t) {
+            return Err(format!("threshold must be 0.0..=1.0 (got {})", t));
+        }
+    }
+    let bin = resolve_ato_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(["ratchet", "lock", "--target", &target]);
+    if let Some(d) = days {
+        cmd.args(["--days", &d.to_string()]);
+    }
+    if let Some(t) = threshold {
+        cmd.args(["--threshold", &t.to_string()]);
+    }
+    if let Some(n) = &notes {
+        cmd.args(["--notes", n]);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("spawn ato ratchet lock: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(format!("ato ratchet lock failed: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unlock_ratchet(target: String) -> Result<(), String> {
+    let bin = resolve_ato_binary()?;
+    let out = Command::new(&bin)
+        .args(["ratchet", "unlock", "--target", &target])
+        .output()
+        .map_err(|e| format!("spawn ato ratchet unlock: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(format!("ato ratchet unlock failed: {}", stderr.trim()));
+    }
+    Ok(())
 }
