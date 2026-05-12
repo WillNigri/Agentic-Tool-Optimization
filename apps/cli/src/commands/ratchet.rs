@@ -290,10 +290,18 @@ const DEFAULT_CHECK_WINDOW_DAYS: i64 = 7;
 /// `ato ratchet check`. Returns Ok(true) when every ratchet passes,
 /// Ok(false) when at least one fails. The CLI handler exits with the
 /// inverted code so this lands cleanly in CI as a gate.
+///
+/// v2.3.40 — when `emit_events` is true (the default for `check`,
+/// false for `status`), each failing target also gets a
+/// `ratchet_breach` event published to events_log. When `post_on_fail`
+/// is true, a matching activity-feed post is created so a human
+/// glancing at the Activity pane sees the breach.
 pub fn check(
     db_path: &PathBuf,
     target_filter: Option<(String, String)>,
     check_window_days: i64,
+    emit_events: bool,
+    post_on_fail: bool,
     opts: &Opts,
 ) -> Result<bool> {
     let conn = db::open_readonly(db_path)?;
@@ -338,7 +346,7 @@ pub fn check(
                 )
             }
         };
-        rows.push(RatchetCheckRow {
+        let check_row = RatchetCheckRow {
             target_kind: r.target_kind.clone(),
             target_value: r.target_value.clone(),
             metric: r.metric.clone(),
@@ -348,9 +356,68 @@ pub fn check(
             current_sample_count: samples,
             current_window_days: check_window_days,
             floor_with_tolerance: floor_tol,
-            verdict,
-            note,
-        });
+            verdict: verdict.clone(),
+            note: note.clone(),
+        };
+
+        // v2.3.40 — when this row is a fail, publish a ratchet_breach
+        // event and optionally a matching activity-feed post. Skipped
+        // for `status` callers (emit_events=false). Best-effort: a DB
+        // write failure here doesn't change the CLI exit code, since
+        // the verdict is already determined.
+        if emit_events && check_row.verdict == "fail" {
+            if let (Some(c), Ok(rw_conn)) = (current, db::open_readwrite(db_path)) {
+                let now = chrono::Utc::now().to_rfc3339();
+                let seq = crate::events_publisher::publish_ratchet_breach(
+                    &rw_conn,
+                    &check_row.target_kind,
+                    &check_row.target_value,
+                    &check_row.metric,
+                    check_row.baseline_value,
+                    check_row.threshold,
+                    check_row.floor_with_tolerance,
+                    c,
+                    check_row.current_sample_count,
+                    check_row.current_window_days,
+                    &now,
+                );
+                if post_on_fail {
+                    let target_disp = if check_row.target_kind == "global" {
+                        "global".to_string()
+                    } else {
+                        format!("{}:{}", check_row.target_kind, check_row.target_value)
+                    };
+                    let text = format!(
+                        "Ratchet breach on {}: current {:.1}% < floor-tolerance {:.1}% over {}d window ({} samples)",
+                        target_disp,
+                        c * 100.0,
+                        check_row.floor_with_tolerance * 100.0,
+                        check_row.current_window_days,
+                        check_row.current_sample_count,
+                    );
+                    let post_id = uuid::Uuid::new_v4().to_string();
+                    let _ = rw_conn.execute(
+                        "INSERT INTO activity_posts (id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload)
+                         VALUES (?1, ?2, 'system', 'ratchet', 'event_notice', ?3, ?4, ?5)",
+                        rusqlite::params![
+                            post_id,
+                            now,
+                            text,
+                            seq,
+                            serde_json::json!({
+                                "event_type": "ratchet_breach",
+                                "target_kind": check_row.target_kind,
+                                "target_value": check_row.target_value,
+                                "baseline_value": check_row.baseline_value,
+                                "current_value": c,
+                            }).to_string(),
+                        ],
+                    );
+                }
+            }
+        }
+
+        rows.push(check_row);
     }
 
     if opts.human {
@@ -398,10 +465,17 @@ pub fn status(
     target_filter: Option<(String, String)>,
     opts: &Opts,
 ) -> Result<()> {
-    // Status is just a check with verdict-suppression — surfaces
-    // current numbers without failing the CLI. Used for "where do we
-    // stand?" queries outside CI.
-    let _ = check(db_path, target_filter, DEFAULT_CHECK_WINDOW_DAYS, opts)?;
+    // Status is just a check with side-effects + exit-code-fail
+    // suppressed. Doesn't emit events or post — that's `check`'s job
+    // as the CI gate. `status` is read-only ("where do we stand?").
+    let _ = check(
+        db_path,
+        target_filter,
+        DEFAULT_CHECK_WINDOW_DAYS,
+        /* emit_events */ false,
+        /* post_on_fail */ false,
+        opts,
+    )?;
     Ok(())
 }
 

@@ -227,6 +227,11 @@ enum RatchetSub {
         /// Window the check looks back over (default 7 days).
         #[arg(long, default_value_t = commands::ratchet::CHECK_WINDOW_DEFAULT)]
         window_days: i64,
+        /// Also post a system message to the activity feed for every
+        /// breach. Ops recipes consume the underlying ratchet_breach
+        /// event already; this flag is for the human-glance use case.
+        #[arg(long, default_value_t = false)]
+        post_on_fail: bool,
     },
     /// Show current rates vs floors without failing the CLI on a breach.
     Status {
@@ -859,9 +864,17 @@ fn main() -> Result<()> {
             RatchetSub::Check {
                 target,
                 window_days,
+                post_on_fail,
             } => {
                 let filter = target.as_deref().map(commands::ratchet::parse_target).transpose()?;
-                let ok = commands::ratchet::check(&db_path, filter, window_days, &opts)?;
+                let ok = commands::ratchet::check(
+                    &db_path,
+                    filter,
+                    window_days,
+                    /* emit_events */ true,
+                    post_on_fail,
+                    &opts,
+                )?;
                 // CI gate: non-zero exit on any breach so a failed
                 // ratchet fails the pipeline step it ran in.
                 if !ok {

@@ -159,3 +159,70 @@ pub fn publish_replay_done(
         );
     }
 }
+
+/// v2.3.40 — Publish a RatchetBreach event.
+///
+/// One event per breached target so consumers (ops recipes,
+/// `ato events watch`, the GUI feed) can react per-target without
+/// re-parsing a compound payload. `event_seq` is returned so a
+/// caller can attach it to an activity_post via `related_event_seq`
+/// for traceability across feed + bus.
+pub fn publish_ratchet_breach(
+    conn: &Connection,
+    target_kind: &str,
+    target_value: &str,
+    metric: &str,
+    baseline_value: f64,
+    threshold: f64,
+    floor_with_tolerance: f64,
+    current_value: f64,
+    current_sample_count: i64,
+    current_window_days: i64,
+    occurred_at: &str,
+) -> Option<i64> {
+    let table_exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='events_log'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if table_exists == 0 {
+        return None;
+    }
+    let payload = serde_json::json!({
+        "type": "ratchet_breach",
+        "event_seq": 0_u64,
+        "target_kind": target_kind,
+        "target_value": target_value,
+        "metric": metric,
+        "baseline_value": baseline_value,
+        "threshold": threshold,
+        "floor_with_tolerance": floor_with_tolerance,
+        "current_value": current_value,
+        "current_sample_count": current_sample_count,
+        "current_window_days": current_window_days,
+        "occurred_at": occurred_at,
+    });
+    let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+    let seq = insert_event_row(conn, "ratchet_breach", &payload_str, occurred_at).ok()?;
+    let final_payload = serde_json::json!({
+        "type": "ratchet_breach",
+        "event_seq": seq,
+        "target_kind": target_kind,
+        "target_value": target_value,
+        "metric": metric,
+        "baseline_value": baseline_value,
+        "threshold": threshold,
+        "floor_with_tolerance": floor_with_tolerance,
+        "current_value": current_value,
+        "current_sample_count": current_sample_count,
+        "current_window_days": current_window_days,
+        "occurred_at": occurred_at,
+    });
+    let _ = conn.execute(
+        "UPDATE events_log SET payload = ?1 WHERE event_seq = ?2",
+        rusqlite::params![final_payload.to_string(), seq],
+    );
+    Some(seq)
+}
