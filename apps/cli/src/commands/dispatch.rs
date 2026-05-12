@@ -41,6 +41,7 @@ pub fn run(
     agent_slug_for_event: Option<String>,
     session_id: Option<String>,
     stream: bool,
+    stream_jsonl: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -161,6 +162,7 @@ pub fn run(
             agent_slug_for_event,
             session,
             stream,
+            stream_jsonl,
             db_path,
             opts,
         );
@@ -512,6 +514,7 @@ fn run_api(
     agent_slug_for_event: Option<String>,
     session: Option<crate::commands::sessions::Session>,
     stream: bool,
+    stream_jsonl: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -555,14 +558,17 @@ fn run_api(
             .collect(),
         None => Vec::new(),
     };
-    // v2.3.47 Phase 6.x-F — streaming. When --stream is set, write
-    // each chunk to stdout as it arrives and let the assembled full
-    // response flow through the same persistence path below.
-    // For --human, prefix with a marker so the user sees streaming
-    // started; for JSON we suppress stdout chunks entirely because
-    // the JSON envelope at the end is the contract.
+    // v2.3.47 Phase 6.x-F — streaming. Three output modes:
+    //   - --human + --stream: write raw chunks to stdout as they
+    //     arrive, then print the normal footer at the end.
+    //   - --stream-jsonl (any --human setting): emit one JSON line
+    //     per chunk {"type":"chunk","text":"..."} for desktop GUI
+    //     / wrappers, then a {"type":"done","result":{...}} at end.
+    //   - --stream alone in JSON mode: chunks suppressed; final
+    //     DispatchResult JSON is the only stdout output (scripted
+    //     callers' contract).
     let outcome = if stream {
-        if opts.human {
+        if opts.human && !stream_jsonl {
             emit_human(&format!(
                 "[streaming from {} — chunks below]",
                 provider.slug
@@ -577,10 +583,14 @@ fn run_api(
             model_override.as_deref(),
             &conn,
             |chunk| {
-                if opts.human {
-                    // Write directly to stdout + flush so chunks
-                    // appear in real time rather than buffered to a
-                    // newline.
+                if stream_jsonl {
+                    let event = serde_json::json!({
+                        "type": "chunk",
+                        "text": chunk,
+                    });
+                    println!("{}", event);
+                    let _ = std::io::stdout().flush();
+                } else if opts.human {
                     let mut out = std::io::stdout().lock();
                     let _ = out.write_all(chunk.as_bytes());
                     let _ = out.flush();
@@ -596,7 +606,7 @@ fn run_api(
             &conn,
         )
     };
-    if stream && opts.human {
+    if stream && opts.human && !stream_jsonl {
         // Final newline after the stream so the next emit_human
         // doesn't run-on with the last chunk.
         println!();
@@ -733,7 +743,13 @@ fn run_api(
         created_at: now,
     };
 
-    if opts.human {
+    if stream_jsonl {
+        // v2.3.48 — final done event for the JSONL stream. Wraps the
+        // same DispatchResult shape `emit_json` would emit so a
+        // wrapper can use the line as a drop-in result.
+        let done = serde_json::json!({"type": "done", "result": result});
+        println!("{}", done);
+    } else if opts.human {
         let head = format!(
             "[{}] {} {} ({}ms, {}, subscription)",
             result.status,

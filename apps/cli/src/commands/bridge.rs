@@ -359,6 +359,7 @@ pub fn run_loop(
             None, // no agent label
             Some(primary_session_id.to_string()),
             false, // bridge doesn't stream individual turns
+            false, // no JSONL output during bridge loop
             db_path,
             opts,
         ) {

@@ -11,9 +11,10 @@
 // with --session). Document linked in the empty state directs the
 // user to the CLI as the interim path.
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   MessagesSquare,
   ArrowLeft,
@@ -247,6 +248,42 @@ function SessionTranscriptView({
   const [sendError, setSendError] = useState<string | null>(null);
   const [bridging, setBridging] = useState(false);
   const [bridgeLog, setBridgeLog] = useState<string | null>(null);
+  // v2.3.48 — streaming buffer for the in-flight assistant turn.
+  // Populated chunk-by-chunk from the Tauri `session-stream-chunk`
+  // event; cleared on `session-stream-done` or send error.
+  const [streamingText, setStreamingText] = useState("");
+  const [streamingRuntime, setStreamingRuntime] = useState<string | null>(null);
+  const streamingRef = useRef("");
+
+  // Listen for streaming chunks scoped to this session. We filter on
+  // sessionId because the chat pane elsewhere may stream concurrently.
+  useEffect(() => {
+    let unlistenChunk: UnlistenFn | undefined;
+    let unlistenDone: UnlistenFn | undefined;
+    (async () => {
+      unlistenChunk = await listen<{ sessionId: string; text: string }>(
+        "session-stream-chunk",
+        (e) => {
+          if (e.payload.sessionId !== sessionId) return;
+          streamingRef.current += e.payload.text;
+          setStreamingText(streamingRef.current);
+        },
+      );
+      unlistenDone = await listen<{ sessionId: string }>(
+        "session-stream-done",
+        (e) => {
+          if (e.payload.sessionId !== sessionId) return;
+          streamingRef.current = "";
+          setStreamingText("");
+          setStreamingRuntime(null);
+        },
+      );
+    })();
+    return () => {
+      unlistenChunk?.();
+      unlistenDone?.();
+    };
+  }, [sessionId]);
 
   // Keep continueRuntime in sync when the transcript loads / a new
   // assistant turn lands — but never override if the user has manually
@@ -255,24 +292,51 @@ function SessionTranscriptView({
   // Cheap heuristic: only auto-set when current value matches the
   // *previous* default, i.e. the user hasn't touched it.
   // (For a more careful sync we'd use a ref; this is good enough.)
+  // Runtimes whose CLI streams via SSE (the api_providers crate's
+  // registry). For these, we use the streaming Tauri command so
+  // chunks render live in the transcript. Other runtimes (claude /
+  // codex / gemini / hermes / openclaw — CLI subprocess dispatch)
+  // don't yet emit JSONL chunks; fall back to the buffered path.
+  const API_STREAMING_RUNTIMES = new Set([
+    "minimax",
+    "grok",
+    "deepseek",
+    "qwen",
+    "openrouter",
+  ]);
+
   const handleSend = async () => {
     if (!continuePrompt.trim() || sending) return;
     setSending(true);
     setSendError(null);
+    const useStreaming = API_STREAMING_RUNTIMES.has(continueRuntime);
+    streamingRef.current = "";
+    setStreamingText("");
+    setStreamingRuntime(useStreaming ? continueRuntime : null);
     try {
-      await invoke("dispatch_into_session", {
-        runtime: continueRuntime,
-        prompt: continuePrompt,
-        sessionId,
-      });
+      if (useStreaming) {
+        await invoke("dispatch_into_session_streaming", {
+          runtime: continueRuntime,
+          prompt: continuePrompt,
+          sessionId,
+        });
+      } else {
+        await invoke("dispatch_into_session", {
+          runtime: continueRuntime,
+          prompt: continuePrompt,
+          sessionId,
+        });
+      }
       setContinuePrompt("");
-      // Refetch the transcript so the new turn pair lands immediately.
       await queryClient.invalidateQueries({
         queryKey: ["session-transcript", sessionId],
       });
       await queryClient.invalidateQueries({ queryKey: ["sessions-full"] });
     } catch (e) {
       setSendError(String(e));
+      streamingRef.current = "";
+      setStreamingText("");
+      setStreamingRuntime(null);
     } finally {
       setSending(false);
     }
@@ -366,13 +430,7 @@ function SessionTranscriptView({
       ) : (
         <div className="space-y-3">
           {q.data.turns.map((turn) => (
-            <div
-              key={turn.turnIndex}
-              className={cn(
-                "flex gap-3",
-                turn.role === "user" ? "flex-row" : "flex-row"
-              )}
-            >
+            <div key={turn.turnIndex} className="flex gap-3">
               <div
                 className={cn(
                   "shrink-0 w-8 h-8 rounded-full flex items-center justify-center",
@@ -411,6 +469,34 @@ function SessionTranscriptView({
               </div>
             </div>
           ))}
+          {/* v2.3.48 — streaming placeholder turn. Renders while
+              session-stream-chunk events are landing; cleared by
+              session-stream-done + transcript refetch. The cursor
+              signals "live". */}
+          {streamingText && streamingRuntime && (
+            <div className="flex gap-3">
+              <div className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-cs-accent/20 text-cs-accent">
+                <Bot size={14} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-medium uppercase text-cs-accent">
+                    assistant
+                  </span>
+                  <span className={runtimeBadge(streamingRuntime)}>
+                    {streamingRuntime}
+                  </span>
+                  <span className="text-[10px] text-cs-muted animate-pulse">
+                    streaming…
+                  </span>
+                </div>
+                <pre className="p-3 rounded-md text-sm whitespace-pre-wrap font-sans border bg-cs-accent/5 border-cs-accent/20">
+                  {streamingText}
+                  <span className="animate-pulse">▎</span>
+                </pre>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

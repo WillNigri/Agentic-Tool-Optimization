@@ -105,6 +105,13 @@ enum Commands {
         /// Qwen / OpenRouter); ignored for CLI runtimes.
         #[arg(long, default_value_t = false)]
         stream: bool,
+        /// v2.3.48 — emit streamed chunks as line-delimited JSON
+        /// events (`{"type":"chunk","text":"..."}` per chunk, then
+        /// `{"type":"done","result":{...}}` at the end). Designed
+        /// for desktop GUI / wrappers parsing per-line. Implies
+        /// `--stream`; ignored without an API provider runtime.
+        #[arg(long, default_value_t = false)]
+        stream_jsonl: bool,
     },
     /// Replay an existing dispatch against a different runtime/model
     Replay {
@@ -680,7 +687,11 @@ fn main() -> Result<()> {
             tag_bridge,
             max_rounds,
             stream,
+            stream_jsonl,
         } => {
+            // stream-jsonl implies stream; a wrapper can set just
+            // --stream-jsonl without needing to also pass --stream.
+            let stream = stream || stream_jsonl;
             if tag_bridge && session.is_none() {
                 anyhow::bail!(
                     "--tag-bridge requires --session (the bridge loop appends to that session's turn history)."
@@ -696,6 +707,7 @@ fn main() -> Result<()> {
                 agent,
                 session.clone(),
                 stream,
+                stream_jsonl,
                 &db_path,
                 &opts,
             )?;

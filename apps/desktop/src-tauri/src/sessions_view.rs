@@ -17,8 +17,9 @@
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
-use tauri::State;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::DbState;
 
@@ -332,4 +333,125 @@ pub fn bridge_session(
     // return the whole transcript so the UI can show it in a "bridge
     // result" panel.
     Ok(stdout.trim().to_string())
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChunkEventPayload {
+    session_id: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DoneEventPayload {
+    session_id: String,
+    result: serde_json::Value,
+}
+
+/// v2.3.48 — streaming dispatch into a session. Spawns the CLI with
+/// `--stream-jsonl`, reads each line of stdout as a JSON event, and
+/// emits Tauri events for the frontend to render:
+///   - `session-stream-chunk` { sessionId, text } per chunk
+///   - `session-stream-done`  { sessionId, result } at the end
+/// Returns the final DispatchResult once the stream completes so the
+/// caller can await it like a regular Tauri command. Errors propagate
+/// as Tauri-command errors with stderr context.
+#[tauri::command]
+pub fn dispatch_into_session_streaming(
+    app: AppHandle,
+    runtime: String,
+    prompt: String,
+    session_id: String,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let bin = resolve_ato_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args([
+        "dispatch",
+        &runtime,
+        &prompt,
+        "--session",
+        &session_id,
+        "--stream-jsonl",
+    ]);
+    if let Some(m) = &model {
+        cmd.args(["--model", m]);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn ato dispatch --stream-jsonl: {}", e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "missing stdout pipe".to_string())?;
+    let reader = BufReader::new(stdout);
+
+    let mut final_result: Option<serde_json::Value> = None;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                return Err(format!("read CLI stdout: {}", e));
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue, // skip non-JSON lines defensively
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("chunk") => {
+                let text = v
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let _ = app.emit(
+                    "session-stream-chunk",
+                    ChunkEventPayload {
+                        session_id: session_id.clone(),
+                        text,
+                    },
+                );
+            }
+            Some("done") => {
+                let result = v.get("result").cloned().unwrap_or(serde_json::Value::Null);
+                let _ = app.emit(
+                    "session-stream-done",
+                    DoneEventPayload {
+                        session_id: session_id.clone(),
+                        result: result.clone(),
+                    },
+                );
+                final_result = Some(result);
+            }
+            _ => {}
+        }
+    }
+
+    // Reap the child to surface any non-zero exit + stderr.
+    let exit_status = child
+        .wait()
+        .map_err(|e| format!("wait CLI exit: {}", e))?;
+    if !exit_status.success() {
+        let mut stderr_buf = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr.read_to_string(&mut stderr_buf);
+        }
+        return Err(format!(
+            "ato dispatch exited with {}: {}",
+            exit_status,
+            stderr_buf.trim()
+        ));
+    }
+
+    final_result.ok_or_else(|| "stream finished without a `done` event".to_string())
 }

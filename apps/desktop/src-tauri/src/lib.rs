@@ -1337,6 +1337,8 @@ pub fn run() {
             sessions_view::create_session,
             sessions_view::dispatch_into_session,
             sessions_view::bridge_session,
+            // v2.3.48 — streaming dispatch (Phase 6.x-F GUI render)
+            sessions_view::dispatch_into_session_streaming,
             // v2.3.45 — ratchet view (Phase 6.x-K surface in the GUI)
             ratchet_view::list_ratchets,
             ratchet_view::list_ratchet_breaches,
