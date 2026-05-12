@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Home as HomeIcon,
   Bot,
@@ -14,6 +14,7 @@ import {
   Loader2,
   FolderKanban,
 } from "lucide-react";
+import { pendingCount } from "@/lib/activityPosts";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/hooks/useAuth";
@@ -53,6 +54,51 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
   const logout = useAuthStore((s) => s.logout);
   const user = useAuthStore((s) => s.user);
   const cronAlertCount = useCronStore((s) => s.getActiveAlertCount());
+  // v2.3.24 Phase 5.6 — pending-approvals badge on the Runs entry.
+  // Polled every 3s as a fallback + bumped immediately by the
+  // "activity_posts:new" Tauri event. The poll handles background-
+  // generated requests (NotifyHuman / RequestApproval from recipes);
+  // the event handles GUI-driven create/decide.
+  const [pendingApprovals, setPendingApprovals] = useState(0);
+  useEffect(() => {
+    const isTauri =
+      typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+    if (!isTauri) return;
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const n = await pendingCount();
+        if (alive) setPendingApprovals(n);
+      } catch {
+        // Older desktop binary or missing migration — keep last value.
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(refresh, 3000);
+    let unlisten: (() => void) | null = null;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen("activity_posts:new", () => {
+          if (alive) void refresh();
+        })
+      )
+      .then((u) => {
+        // Race-guard for unmount-before-listener-installed.
+        if (!alive) {
+          u();
+        } else {
+          unlisten = u;
+        }
+      })
+      .catch(() => {
+        // Event API unavailable; poll fallback covers it.
+      });
+    return () => {
+      alive = false;
+      window.clearInterval(interval);
+      if (unlisten) unlisten();
+    };
+  }, []);
   const isCloudUser = useAuthStore((s) => s.isCloudUser);
   const [showLogin, setShowLogin] = useState(false);
 
@@ -151,6 +197,11 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
           const isActive = active === item.id;
           // Cron alerts surface on the Runs entry now (cron lives under Runs → Schedules).
           const showAlertDot = item.id === "runs" && cronAlertCount > 0;
+          // v2.3.24 Phase 5.6 — pending-approvals badge on Runs.
+          // Stacks with the cron alert dot if both fire; both live
+          // under Runs in the IA. Cap displayed count at 99+.
+          const pendingBadge =
+            item.id === "runs" && pendingApprovals > 0 ? pendingApprovals : 0;
           return (
             <button
               key={item.id}
@@ -165,6 +216,14 @@ export default function Sidebar({ active, onNavigate }: SidebarProps) {
             >
               <Icon size={18} />
               <span className="flex-1 text-left">{t(item.labelKey)}</span>
+              {pendingBadge > 0 && (
+                <span
+                  className="px-1.5 py-0.5 rounded-md text-[10px] font-mono bg-yellow-500/20 text-yellow-300 border border-yellow-500/40"
+                  title={`${pendingBadge} pending approval${pendingBadge === 1 ? "" : "s"}`}
+                >
+                  {pendingBadge > 99 ? "99+" : pendingBadge}
+                </span>
+              )}
               {showAlertDot && (
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               )}

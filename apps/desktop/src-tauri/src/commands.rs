@@ -3567,6 +3567,7 @@ pub fn posts_list(
 
 #[tauri::command]
 pub fn posts_create(
+    app: tauri::AppHandle,
     text: String,
     author_kind: String,
     author_slug: Option<String>,
@@ -3594,7 +3595,15 @@ pub fn posts_create(
         related_event_seq: None,
         payload: None,
     };
-    crate::posts::create(&conn, input)
+    let post = crate::posts::create(&conn, input)?;
+    // v2.3.24 Phase 5.6 — emit a Tauri event so the feed pane can
+    // refresh sub-100ms instead of waiting for the 1s poll. Background
+    // post creation (NotifyHuman / RequestApproval / approval-resume
+    // watcher) still relies on the poll for now; the GUI-driven path
+    // gets the snappy refresh.
+    use tauri::Emitter as _;
+    let _ = app.emit("activity_posts:new", &post);
+    Ok(post)
 }
 
 #[tauri::command]
@@ -3659,6 +3668,7 @@ pub fn posts_pending(limit: usize) -> Result<Vec<crate::posts::Post>, String> {
 
 #[tauri::command]
 pub fn posts_decide(
+    app: tauri::AppHandle,
     request_id: String,
     approved: bool,
     notes: Option<String>,
@@ -3720,7 +3730,7 @@ pub fn posts_decide(
         }
         return Err(format!("insert ApprovalDecision: {}", msg));
     }
-    Ok(crate::posts::Post {
+    let post = crate::posts::Post {
         id,
         created_at,
         author_kind: crate::posts::PostAuthorKind::Human,
@@ -3729,7 +3739,38 @@ pub fn posts_decide(
         text: body,
         related_event_seq: None,
         payload: Some(payload),
-    })
+    };
+    // v2.3.24 Phase 5.6 — emit so the GUI can flip the parked
+    // request out of the pending list immediately, before the next
+    // poll tick. Resume watcher (5s) still handles the recipe_run
+    // state transition separately.
+    use tauri::Emitter as _;
+    let _ = app.emit("activity_posts:new", &post);
+    Ok(post)
+}
+
+// New Tauri command — used by the badge component on the sidebar.
+// Counts only; faster than posts_pending which returns full rows.
+#[tauri::command]
+pub fn posts_pending_count() -> Result<i64, String> {
+    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
+    // Mirror posts_pending's NOT EXISTS shape so the count matches
+    // the list exactly. The single-row query is cheap (indexed scan
+    // over approval_requests + a NOT EXISTS probe per row).
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM activity_posts AS req
+              WHERE req.kind = 'approval_request'
+                AND NOT EXISTS (
+                  SELECT 1 FROM activity_posts AS d
+                   WHERE d.kind = 'approval_decision'
+                     AND json_extract(d.payload, '$.request_post_id') = req.id
+                )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(n)
 }
 
 // crate::posts requires `validate_text` re-exported for the GUI's

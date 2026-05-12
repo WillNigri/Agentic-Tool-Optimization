@@ -62,3 +62,9 @@ export async function decidePost(
     notes: notes ?? null,
   });
 }
+
+// v2.3.24 Phase 5.6 — count-only fetch for the sidebar badge.
+// Faster than listPending() because the SQL returns one row.
+export async function pendingCount(): Promise<number> {
+  return await invoke<number>("posts_pending_count");
+}

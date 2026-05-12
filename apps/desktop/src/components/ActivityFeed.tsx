@@ -52,9 +52,41 @@ export default function ActivityFeed() {
   }, [filter]);
 
   useEffect(() => {
+    let alive = true;
     void refresh();
+    // v2.3.24 Phase 5.6 — listen for posts:new events from the
+    // backend so GUI-driven creates / decisions refresh sub-100ms
+    // (vs the 1s poll fallback). Background post writes — the
+    // recipes engine's NotifyHuman / RequestApproval / resume
+    // watcher — still rely on the poll because they don't have an
+    // AppHandle wired through yet.
     const id = window.setInterval(refresh, POLL_MS);
-    return () => window.clearInterval(id);
+    let unlisten: (() => void) | null = null;
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      void import("@tauri-apps/api/event")
+        .then(({ listen }) => listen("activity_posts:new", () => {
+          if (alive) void refresh();
+        }))
+        .then((u) => {
+          // MiniMax round-1 5.6: if the component unmounted before
+          // this resolves, the cleanup already ran with
+          // unlisten=null. Detect and tear down immediately to
+          // avoid leaking the listener.
+          if (!alive) {
+            u();
+          } else {
+            unlisten = u;
+          }
+        })
+        .catch(() => {
+          // Non-Tauri env or event API unavailable — poll fallback covers it.
+        });
+    }
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+      if (unlisten) unlisten();
+    };
   }, [refresh]);
 
   async function handleSubmit() {
