@@ -76,17 +76,27 @@ pub fn parse_mentions(text: &str) -> Vec<String> {
 /// code don't trigger a real bridge. Inline backticks aren't stripped
 /// because they're more often used for emphasizing words than
 /// quoting agent prompts.
+///
+/// Treats ``` as a toggle delimiter regardless of line position.
+/// Earlier line-based version assumed each fence marker was on its
+/// own line; dogfood QA caught a case where claude wrote
+/// `Example usage: ```\n...\n```` and the parser drained the wrong
+/// half (everything *after* the closer instead of everything inside).
+/// This walk-by-marker version handles both cases.
 fn strip_code_fences(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_fence = false;
-    for line in s.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
+    let mut cursor = 0;
+    while let Some(rel) = s[cursor..].find("```") {
+        let marker = cursor + rel;
         if !in_fence {
-            out.push_str(line);
+            out.push_str(&s[cursor..marker]);
         }
+        in_fence = !in_fence;
+        cursor = marker + 3;
+    }
+    if !in_fence {
+        out.push_str(&s[cursor..]);
     }
     out
 }
@@ -292,6 +302,20 @@ mod tests {
         let text = "first response\n\n```\nuse @internal-helper\n```\n\nbut for real @codex please review";
         let m = parse_mentions(text);
         assert_eq!(m, vec!["codex".to_string()]);
+    }
+
+    #[test]
+    fn strips_inline_code_fences() {
+        // Regression — QA caught this on 2026-05-12. The old
+        // line-based stripper drained everything AFTER the closing
+        // fence when the opening fence wasn't on its own line.
+        // Now ``` toggles regardless of line position.
+        let text = "Example usage: ```\nato dispatch codex --agent @codex-reviewer \"test\"\n```\nBut for the real review, @bogus_runtime should weigh in.";
+        let m = parse_mentions(text);
+        // codex-reviewer is inside the fence → must not appear.
+        // bogus_runtime is outside → must appear.
+        assert!(!m.contains(&"codex-reviewer".to_string()), "leaked inside-fence mention: {:?}", m);
+        assert!(m.contains(&"bogus_runtime".to_string()), "missed outside-fence mention: {:?}", m);
     }
 
     #[test]

