@@ -279,30 +279,127 @@ pub fn list_runs() -> Vec<ActiveRun> {
 }
 
 /// Invoke the kill handler attached to this run, if any. Returns
-/// false when the run is unknown OR has no kill handler attached
-/// (UI shows the run as "kill not supported" in that case). Always
-/// marks status='killing' on a known run so the user's intent is
-/// reflected even when we can't actually terminate.
+/// false when neither the in-memory registry nor the live_runs row
+/// can be acted on. Always marks status='killing' on a known
+/// in-memory run so the user's intent is reflected even when we
+/// can't actually terminate.
+///
+/// v2.3.29 Phase 6.x-H: if the run isn't in the in-memory map but
+/// IS in live_runs with a non-null child_pid, fall through to
+/// kill_via_pid which sends SIGKILL via the OS. This is how CLI-
+/// process dispatches (written into live_runs by apps/cli/src/
+/// live_runs.rs) become killable from the desktop's Live tab.
 pub fn kill_run(run_id: &str) -> bool {
+    // First: try in-memory registry (the existing path for GUI
+    // dispatches that registered a kill closure).
     let kill_fn = {
         let mut map = match registry().inner.lock() {
             Ok(m) => m,
             Err(_) => return false,
         };
-        let slot = match map.get_mut(run_id) {
-            Some(s) => s,
-            None => return false,
-        };
-        slot.info.status = "killing".to_string();
-        slot.kill_fn.take()
-    };
-    match kill_fn {
-        Some(f) => {
-            f();
-            true
+        if let Some(slot) = map.get_mut(run_id) {
+            slot.info.status = "killing".to_string();
+            Some(slot.kill_fn.take())
+        } else {
+            None
         }
-        None => false,
+    };
+    if let Some(maybe_fn) = kill_fn {
+        if let Some(f) = maybe_fn {
+            f();
+            return true;
+        }
+        // In-memory but no kill handler attached — common for
+        // subagent / MCP paths that pre-date kill support. Don't
+        // fall through to PID-based kill here because the
+        // in-memory run isn't necessarily a separate process; its
+        // owner is the desktop itself.
+        return false;
     }
+    // Not in-memory: try live_runs.child_pid (CLI-process path).
+    kill_via_pid(run_id)
+}
+
+/// Look up child_pid in live_runs and send SIGKILL via OS. Best-
+/// effort; failures (no pid, OS rejects signal, etc.) return false.
+/// Always clears the live_runs row when we attempt a kill so the
+/// Live tab updates immediately — if the OS kill failed, the row
+/// would otherwise sit there until process exit anyway.
+///
+/// Security posture: live_runs is local-only and only writable by
+/// processes the user owns (the ATO desktop + ATO CLI). A row's
+/// child_pid is whatever the writer recorded. If a future attacker
+/// can write arbitrary rows there, they can already do worse with
+/// the same filesystem access. Documenting the trust scope rather
+/// than adding a PID-belongs-to-our-user check.
+fn kill_via_pid(run_id: &str) -> bool {
+    let db_path = crate::get_db_path();
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let pid: Option<i64> = conn
+        .query_row(
+            "SELECT child_pid FROM live_runs WHERE run_id = ?1",
+            [run_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    let pid = match pid {
+        Some(p) if p > 0 => p,
+        _ => return false,
+    };
+    // Shelling out to `kill` keeps us free of an extra `libc`/`nix`
+    // dep, works on macOS + Linux. Windows isn't supported by ATO
+    // yet; when it is, add a `taskkill` branch under
+    // #[cfg(windows)].
+    let kill_output = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
+    let killed = match &kill_output {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    };
+
+    // MiniMax round-1 6.x-H caught a real HIGH issue: the previous
+    // version deleted the live_runs row unconditionally. If kill -9
+    // failed (wrong-user/EPERM, GIL-blocked Python, etc.) the
+    // process is still alive but the row is gone — ghost runs.
+    //
+    // ESRCH ("No such process") is a special case: the process is
+    // already dead, the kill "failed" but the row SHOULD be cleared
+    // because the dispatch effectively ended. Detect it by parsing
+    // kill's stderr — POSIX `kill` reports "No such process" when
+    // SIGKILL targets a non-existent pid.
+    let process_already_gone = matches!(&kill_output, Ok(o)
+        if !o.status.success()
+            && String::from_utf8_lossy(&o.stderr).contains("No such process"));
+
+    if killed || process_already_gone {
+        let _ = conn.execute("DELETE FROM live_runs WHERE run_id = ?1", [run_id]);
+        return true;
+    }
+
+    // Kill genuinely failed — leave the row so the user can see
+    // the dispatch is still ongoing and decide what to do. Logging
+    // the failure to stderr so it isn't fully silent (a separate
+    // reconciliation watcher could clean stale rows later if we
+    // ever need it).
+    if let Ok(o) = &kill_output {
+        eprintln!(
+            "active_runs::kill_via_pid: kill -9 {} failed: status={:?} stderr={}",
+            pid,
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        );
+    } else if let Err(e) = &kill_output {
+        eprintln!(
+            "active_runs::kill_via_pid: kill -9 {} spawn failed: {}",
+            pid, e
+        );
+    }
+    false
 }
 
 // ─── Tauri commands ─────────────────────────────────────────────────
