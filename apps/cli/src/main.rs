@@ -17,6 +17,7 @@ mod events_publisher;
 mod live_runs;
 mod output;
 mod quota;
+mod remote_runtime;
 mod runtime;
 
 #[derive(Parser, Debug)]
@@ -196,6 +197,47 @@ enum RuntimesSub {
     /// Show known runtime quotas: which runtimes are rate-limited
     /// and until when (parsed from previous dispatch errors).
     Status,
+    /// Register a remote machine that runs a runtime CLI. Once added,
+    /// `ato dispatch <slug> "..."` routes over SSH instead of spawning
+    /// a local binary. Phase 6.x-J — laptop ↔ server bridging.
+    AddRemote {
+        /// Local slug for this remote (e.g. `claude-server`). Used as
+        /// the runtime argument in `ato dispatch <slug>`.
+        #[arg(long)]
+        name: String,
+        /// SSH host. Either bare host (with --user) or user@host.
+        #[arg(long)]
+        host: String,
+        /// SSH port (default 22).
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        /// SSH user. Required unless --host already contains user@.
+        #[arg(long)]
+        user: Option<String>,
+        /// Path to the SSH private key. If omitted, ssh-agent / default
+        /// keys are used (BatchMode=yes still applies).
+        #[arg(long)]
+        key_path: Option<String>,
+        /// Base runtime running on the remote: claude / codex / gemini
+        /// / hermes / openclaw. Drives argument shape.
+        #[arg(long)]
+        runtime: String,
+        /// Path to the runtime binary on the remote, or a PATH-resolvable
+        /// name (e.g. `claude` if it's in the login shell's PATH).
+        #[arg(long, default_value = "")]
+        binary_path: String,
+        /// Optional extra args appended verbatim to every dispatch
+        /// (e.g. `--no-update-check`).
+        #[arg(long)]
+        extra_args: Option<String>,
+    },
+    /// List registered remote runtimes.
+    ListRemote,
+    /// Remove a registered remote runtime by slug.
+    RemoveRemote {
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -705,6 +747,108 @@ fn main() -> Result<()> {
                     }
                 } else {
                     output::emit_json(&rows)?;
+                }
+                Ok(())
+            }
+            RuntimesSub::AddRemote {
+                name,
+                host,
+                port,
+                user,
+                key_path,
+                runtime,
+                binary_path,
+                extra_args,
+            } => {
+                // Accept either `--host user@server` or `--host server
+                // --user u`. Normalize so the stored row always has
+                // ssh_user separate from host (clearer for `ato
+                // runtimes list-remote` output, and avoids quoting
+                // surprises when building the ssh command).
+                let (effective_user, effective_host) = match (user.as_deref(), host.split_once('@')) {
+                    (None, Some((u, h))) => (Some(u.to_string()), h.to_string()),
+                    (Some(u), Some((_existing, h))) => (Some(u.to_string()), h.to_string()),
+                    (Some(u), None) => (Some(u.to_string()), host.clone()),
+                    (None, None) => (None, host.clone()),
+                };
+                // Default binary_path to the bare runtime name — matches
+                // the convention of having the binary on the remote
+                // login shell's PATH. Users can override per-row.
+                let effective_binary = if binary_path.trim().is_empty() {
+                    runtime.clone()
+                } else {
+                    binary_path.clone()
+                };
+                let conn = db::open_readwrite(&db_path)?;
+                remote_runtime::insert(
+                    &conn,
+                    &name,
+                    &effective_host,
+                    port as i64,
+                    effective_user.as_deref(),
+                    key_path.as_deref(),
+                    &runtime,
+                    &effective_binary,
+                    extra_args.as_deref(),
+                )?;
+                if opts.human {
+                    output::emit_human(&format!(
+                        "Registered remote runtime '{}' → ssh {}{} (runtime: {}, binary: {})",
+                        name,
+                        effective_user
+                            .as_deref()
+                            .map(|u| format!("{}@", u))
+                            .unwrap_or_default(),
+                        effective_host,
+                        runtime,
+                        effective_binary,
+                    ));
+                    output::emit_human(&format!(
+                        "Try: ato dispatch {} \"hello from the laptop\"",
+                        name
+                    ));
+                } else {
+                    output::emit_json(&serde_json::json!({ "slug": name, "ok": true }))?;
+                }
+                Ok(())
+            }
+            RuntimesSub::ListRemote => {
+                let conn = db::open_readonly(&db_path)?;
+                let rows = remote_runtime::list(&conn)?;
+                if opts.human {
+                    if rows.is_empty() {
+                        output::emit_human(
+                            "No remote runtimes registered. Add one with `ato runtimes add-remote`.",
+                        );
+                    } else {
+                        output::emit_human(&format!("{} remote runtime(s):", rows.len()));
+                        for r in &rows {
+                            let target = match &r.ssh_user {
+                                Some(u) => format!("{}@{}", u, r.host),
+                                None => r.host.clone(),
+                            };
+                            output::emit_human(&format!(
+                                "  {:20} ssh {} (port {}) → {} {}",
+                                r.slug, target, r.port, r.runtime, r.binary_path
+                            ));
+                        }
+                    }
+                } else {
+                    output::emit_json(&rows)?;
+                }
+                Ok(())
+            }
+            RuntimesSub::RemoveRemote { name } => {
+                let conn = db::open_readwrite(&db_path)?;
+                let n = remote_runtime::delete(&conn, &name)?;
+                if opts.human {
+                    if n == 0 {
+                        output::emit_human(&format!("No remote runtime named '{}'.", name));
+                    } else {
+                        output::emit_human(&format!("Removed remote runtime '{}'.", name));
+                    }
+                } else {
+                    output::emit_json(&serde_json::json!({ "slug": name, "deleted": n }))?;
                 }
                 Ok(())
             }

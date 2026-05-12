@@ -78,8 +78,32 @@ pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<Stri
     String::from_utf8(bytes).context("decoded key is not UTF-8")
 }
 
+/// One message in the chat-completions `messages` array. `role` is
+/// "user" | "assistant" (we don't use "system" yet). Compatible with
+/// every provider in the registry.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+}
+
 pub fn dispatch(
     provider: &ApiProvider,
+    prompt: &str,
+    model_override: Option<&str>,
+    conn: &Connection,
+) -> Result<ApiDispatchOutcome> {
+    dispatch_with_history(provider, &[], prompt, model_override, conn)
+}
+
+/// v2.3.32 Slice A.2 — dispatch with prior conversation history.
+/// `history` is the chronological list of past turns; we append the
+/// new user prompt and send the whole messages array. Stateless
+/// providers like MiniMax need this because they don't maintain
+/// session state on their end.
+pub fn dispatch_with_history(
+    provider: &ApiProvider,
+    history: &[Message],
     prompt: &str,
     model_override: Option<&str>,
     conn: &Connection,
@@ -102,9 +126,16 @@ pub fn dispatch(
         .build()
         .context("build reqwest client")?;
 
+    // Build messages = [...history, {role:'user', content:prompt}]
+    let mut messages: Vec<serde_json::Value> = history
+        .iter()
+        .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+        .collect();
+    messages.push(serde_json::json!({"role": "user", "content": prompt}));
+
     let body = serde_json::json!({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         // 4k cap is generous for a review reply; users can extend by
         // adding a flag later if they need long-form output. Keeps
         // us under cost/latency surprises on most providers.

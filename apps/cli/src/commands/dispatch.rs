@@ -74,13 +74,39 @@ pub fn run(
         );
     }
 
+    // v2.3.32 Phase 6.x-J — SSH-backed remote runtime. The slug the
+    // user typed (e.g. `claude-server`) may resolve to a row in
+    // remote_runtimes, in which case we route over SSH instead of
+    // spawning a local CLI. Checked before find_provider so a user
+    // who happens to name their remote after a provider (uncommon)
+    // gets the remote, since that's a more specific intent.
+    if let Some(remote) = crate::remote_runtime::lookup_in_db(db_path, runtime_name)? {
+        return run_remote(
+            remote,
+            prompt,
+            model,
+            agent_slug_for_event,
+            session_id,
+            db_path,
+            opts,
+        );
+    }
+
     // v2.3.21 Phase 6.x — API-key providers (MiniMax, Grok, Qwen, ...)
     // take a different path: no CLI binary to resolve, key comes from
     // env var or llm_api_keys, response over HTTPS. Persistence and
     // output shape are identical so downstream tools (events, audits)
     // don't need to care which transport was used.
     if let Some(provider) = crate::api_dispatch::find_provider(runtime_name) {
-        return run_api(provider, prompt, model, agent_slug_for_event, db_path, opts);
+        return run_api(
+            provider,
+            prompt,
+            model,
+            agent_slug_for_event,
+            session,
+            db_path,
+            opts,
+        );
     }
     let cli_path = runtime::resolve_runtime_cli(runtime_name)?;
 
@@ -289,7 +315,28 @@ pub fn run(
     // bump turn_count + last_used_at, and persist the captured
     // runtime_session_id when it's the first turn. COALESCE in the
     // UPDATE keeps the original session id stable across turns.
+    // v2.3.32 Slice A.2 — ALSO append the turn to session_turns so
+    // Slice B (cross-runtime switching) sees unified history. Claude
+    // uses --resume on its own side, but we mirror here too.
     if let Some(s) = &session {
+        let _ = crate::commands::sessions::append_turn(
+            &conn,
+            &s.id,
+            "user",
+            prompt,
+            runtime_name,
+        );
+        if status == "success" {
+            if let Some(resp) = response_persisted.as_deref() {
+                let _ = crate::commands::sessions::append_turn(
+                    &conn,
+                    &s.id,
+                    "assistant",
+                    resp,
+                    runtime_name,
+                );
+            }
+        }
         if let Err(e) = crate::commands::sessions::record_turn(
             &conn,
             &s.id,
@@ -354,11 +401,16 @@ fn truncate(s: &str) -> String {
 
 /// v2.3.21 Phase 6.x — API-provider dispatch path. Same persistence
 /// shape as the CLI path so execution_logs / events stay uniform.
+/// v2.3.32 Slice A.2 — when `session` is Some, we fetch prior turns
+/// and dispatch with full history (stateless providers can't resume
+/// otherwise), then append the new user prompt + assistant response
+/// as the next two turns.
 fn run_api(
     provider: &crate::api_dispatch::ApiProvider,
     prompt: &str,
     model_override: Option<String>,
     agent_slug_for_event: Option<String>,
+    session: Option<crate::commands::sessions::Session>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -386,8 +438,25 @@ fn run_api(
     );
     let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
 
-    let outcome = crate::api_dispatch::dispatch(
+    // v2.3.32 Slice A.2 — if this dispatch is in a sticky session,
+    // fetch the prior turns and replay them as the messages array.
+    // Stateless providers (minimax / grok / deepseek / qwen /
+    // openrouter) don't maintain session state on their end, so the
+    // history HAS to come from us.
+    let history: Vec<crate::api_dispatch::Message> = match &session {
+        Some(s) => crate::commands::sessions::fetch_turns(&conn, &s.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| crate::api_dispatch::Message {
+                role: t.role,
+                content: t.text,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let outcome = crate::api_dispatch::dispatch_with_history(
         provider,
+        &history,
         prompt,
         model_override.as_deref(),
         &conn,
@@ -474,6 +543,38 @@ fn run_api(
         }
     }
 
+    // v2.3.32 Slice A.2 — log this turn into session_turns for the
+    // history replay path and bump session metadata. Only on
+    // success-with-real-response do we append the assistant turn;
+    // we still log the user turn so subsequent retries see what
+    // was attempted.
+    if let Some(s) = &session {
+        let _ = crate::commands::sessions::append_turn(
+            &conn,
+            &s.id,
+            "user",
+            prompt,
+            provider.slug,
+        );
+        if status == "success" {
+            if let Some(resp) = response_persisted.as_deref() {
+                let _ = crate::commands::sessions::append_turn(
+                    &conn,
+                    &s.id,
+                    "assistant",
+                    resp,
+                    provider.slug,
+                );
+            }
+        }
+        // record_turn updates last_used_at + turn_count. For API
+        // providers there's no runtime_session_id (stateless), so
+        // pass None.
+        if let Err(e) = crate::commands::sessions::record_turn(&conn, &s.id, None) {
+            eprintln!("ato dispatch: failed to record session turn: {}", e);
+        }
+    }
+
     let result = DispatchResult {
         id: id.clone(),
         runtime: provider.slug.to_string(),
@@ -493,6 +594,134 @@ fn run_api(
             "[{}] {} {} ({}ms, {}, subscription)",
             result.status,
             result.runtime,
+            result.model.as_deref().unwrap_or("?"),
+            result.duration_ms,
+            &result.id[..8.min(result.id.len())],
+        );
+        emit_human(&head);
+        if let Some(r) = &result.response {
+            emit_human("\n--- Response ---");
+            emit_human(r);
+        }
+        if let Some(e) = &result.error_message {
+            emit_human("\n--- Error ---");
+            emit_human(e);
+        }
+    } else {
+        emit_json(&result)?;
+    }
+    Ok(())
+}
+
+/// v2.3.32 Phase 6.x-J — Remote runtime dispatch. Routes prompt to a
+/// remote machine over SSH, captures stdout/stderr like a local
+/// dispatch, persists to execution_logs with the *remote's slug* as
+/// the runtime field. That way `ato dispatches list` shows the slug
+/// the user typed (`claude-server`) instead of the base runtime
+/// (`claude`), preserving the laptop-vs-server distinction in audits.
+///
+/// Sessions are intentionally NOT supported in this slice. Slice A
+/// session storage assumes the base runtime can resume locally; the
+/// remote-side equivalent (passing `--resume <rsid>` over SSH) needs
+/// its own dogfood pass before we promise it works. Bails with a
+/// clear error if the user passes --session.
+fn run_remote(
+    remote: crate::remote_runtime::RemoteRuntime,
+    prompt: &str,
+    model: Option<String>,
+    agent_slug_for_event: Option<String>,
+    session_id: Option<String>,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    if session_id.is_some() {
+        anyhow::bail!(
+            "Sessions aren't supported on remote runtimes yet (Phase 6.x-J ships stateless dispatch only). Drop --session for one-shot remote calls."
+        );
+    }
+
+    let live_run_id = uuid::Uuid::new_v4().to_string();
+    let _ = crate::live_runs::insert(
+        db_path,
+        &live_run_id,
+        &remote.slug,
+        agent_slug_for_event.as_deref(),
+        None,
+        "cli",
+    );
+    let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
+
+    let started = Instant::now();
+    let output = crate::remote_runtime::exec(&remote, prompt, model.as_deref())?;
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    let response_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let (status, response_persisted, error_persisted): (&str, Option<String>, Option<String>) =
+        if output.status.success() {
+            ("success", Some(truncate(&response_text)), None)
+        } else {
+            let msg = if stderr_text.is_empty() {
+                format!(
+                    "{} (remote) exited with status {}",
+                    remote.slug, output.status
+                )
+            } else {
+                stderr_text
+            };
+            ("error", None, Some(truncate(&msg)))
+        };
+
+    let tokens_in = Some(crate::runtime::estimate_text_tokens(prompt));
+    let tokens_out = Some(crate::runtime::estimate_text_tokens(
+        response_persisted.as_deref().unwrap_or(""),
+    ));
+    let cost_usd: Option<f64> = None;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let conn = db::open_readwrite(db_path)?;
+    conn.execute(
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11)",
+        rusqlite::params![
+            id,
+            remote.slug,
+            truncate(prompt),
+            response_persisted,
+            tokens_in,
+            tokens_out,
+            duration_ms,
+            status,
+            error_persisted,
+            now,
+            cost_usd,
+        ],
+    )
+    .context("Failed to write execution_logs row (remote)")?;
+
+    let result = DispatchResult {
+        id: id.clone(),
+        runtime: remote.slug.clone(),
+        model: model.clone(),
+        status: status.to_string(),
+        response: response_persisted.clone(),
+        error_message: error_persisted.clone(),
+        duration_ms,
+        tokens_in,
+        tokens_out,
+        cost_usd_estimated: cost_usd,
+        created_at: now,
+    };
+
+    if opts.human {
+        let head = format!(
+            "[{}] {} (ssh→{}) model={} dur={}ms id={}",
+            result.status,
+            result.runtime,
+            remote.host,
             result.model.as_deref().unwrap_or("?"),
             result.duration_ms,
             &result.id[..8.min(result.id.len())],

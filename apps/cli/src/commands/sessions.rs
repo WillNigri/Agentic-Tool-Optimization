@@ -46,16 +46,103 @@ fn has_table(conn: &Connection) -> bool {
     c > 0
 }
 
-const SUPPORTED_RUNTIMES: &[&str] = &["claude"];
+// v2.3.32 Slice A.2 — sessions work with claude (native --resume),
+// and the API providers from the registry (history replay since
+// they're stateless). Codex / Gemini still need their resume flag
+// wiring (and codex needs its signing cert back); they'll land
+// in Slice A.3 / A.4. Hermes / OpenClaw have no session story yet.
+fn supported_runtimes() -> Vec<&'static str> {
+    let mut v = vec!["claude"];
+    for p in ato_api_providers::registry() {
+        v.push(p.slug);
+    }
+    v
+}
 
 fn validate_runtime(runtime: &str) -> Result<()> {
-    if !SUPPORTED_RUNTIMES.contains(&runtime) {
+    let supported = supported_runtimes();
+    if !supported.contains(&runtime) {
         return Err(anyhow!(
-            "Runtime '{}' is not yet supported by `ato sessions`. Slice A supports: {}. Other runtimes land in follow-up slices.",
+            "Runtime '{}' is not yet supported by `ato sessions`. Currently: {}. Codex/Gemini land in follow-up slices.",
             runtime,
-            SUPPORTED_RUNTIMES.join(", ")
+            supported.join(", ")
         ));
     }
+    Ok(())
+}
+
+/// "native" runtimes maintain conversation state themselves; ATO
+/// just hands them a resume token. "history_replay" runtimes are
+/// stateless APIs; ATO rebuilds the prior conversation into the
+/// messages array on every turn.
+pub fn session_strategy(runtime: &str) -> &'static str {
+    if runtime == "claude" {
+        "native_resume"
+    } else if ato_api_providers::is_api_provider(runtime) {
+        "history_replay"
+    } else {
+        "unsupported"
+    }
+}
+
+// ─── Turn history (dual-written by both strategies) ────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Turn {
+    pub session_id: String,
+    pub turn_index: i64,
+    pub role: String,
+    pub text: String,
+    pub runtime: String,
+    pub created_at: String,
+}
+
+/// Fetch all turns for a session in chronological order. Used by
+/// history_replay dispatchers to rebuild the messages array.
+pub fn fetch_turns(conn: &Connection, session_id: &str) -> Result<Vec<Turn>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, turn_index, role, text, runtime, created_at
+           FROM session_turns
+          WHERE session_id = ?1
+          ORDER BY turn_index ASC",
+    )?;
+    let rows = stmt.query_map([session_id], |r| {
+        Ok(Turn {
+            session_id: r.get(0)?,
+            turn_index: r.get(1)?,
+            role: r.get(2)?,
+            text: r.get(3)?,
+            runtime: r.get(4)?,
+            created_at: r.get(5)?,
+        })
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Append one turn. Auto-increments turn_index by querying MAX+1.
+/// Best-effort: a failure here doesn't fail the dispatch, it just
+/// means the next turn won't see this one in context — surface via
+/// log but don't propagate.
+pub fn append_turn(
+    conn: &Connection,
+    session_id: &str,
+    role: &str,
+    text: &str,
+    runtime: &str,
+) -> Result<()> {
+    let next_index: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(turn_index), -1) + 1 FROM session_turns WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO session_turns (session_id, turn_index, role, text, runtime, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![session_id, next_index, role, text, runtime, now],
+    )?;
     Ok(())
 }
 

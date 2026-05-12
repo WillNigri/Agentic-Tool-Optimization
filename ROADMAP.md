@@ -333,6 +333,74 @@ during the v2.3.19 commit when codex hit its limit mid-review.
 ~50 LOC total. Worth shipping standalone or alongside Phase 6
 sessions.
 
+## Phase 6.x-J — SSH-backed remote runtime adapter (Planned, small)
+
+Triggered by @iamknownasfesal on X (2026-05-11): *"how can i make my
+claude agent that is on my computer vs that is on my server talk with
+each other? atm just copying responses into each other lol"*
+
+ATO already has the SSH primitive (OpenClaw runtime uses key-based
+auth over SSH). Generalize it so any registered runtime can target a
+remote host and answers route back through the same dispatch path
+that powers Live Runs / activity feed / sessions.
+
+### Surface
+
+- `ato runtimes add-remote --name <label> --host user@server
+  --runtime claude --binary-path /usr/local/bin/claude` — registers
+  a remote endpoint with a local slug (e.g. `claude-server`).
+- `ato dispatch claude-server "..."` — routes to the remote via
+  SSH, captures stdout/stderr/exit status, persists to
+  execution_logs as if it ran locally.
+- Sessions (Phase 6) work transparently: a session bound to
+  `claude-server` keeps `--resume` on the remote machine; the
+  history mirror still lives in the local SQLite so cross-runtime
+  history replay works between local and remote runtimes.
+- Failure modes: SSH connect timeout, auth failure, remote binary
+  missing → all surface as dispatch error rows, not crashes.
+
+### What it does NOT do
+
+This is the *fast* shape — one-way invocation from the laptop to
+the server. The remote ATO daemon doesn't need to exist yet. The
+server is a dumb runtime executor; ATO on the laptop owns sessions,
+logs, and the bridging logic. If the user wants the server-side
+agent to initiate work back at the laptop, that's the bi-directional
+mesh in Phase 7+.
+
+~150 LOC: lift `services/ssh-openclaw.rs`'s exec path into a generic
+`remote_runtime::exec(host, key_path, cmd, args)`; add a
+`remote_runtimes` table (slug PK, host, key_path, runtime, binary_path);
+extend the runtime registry to look up remote slugs and route
+through the SSH executor instead of `Command::new`.
+
+## Phase 7+ — Bi-directional ATO daemon mesh (Blue-sky)
+
+The full version of Phase 6.x-J's remote runtime story: every machine
+runs an `ato daemon` that registers itself with a peer ATO daemon
+(via mDNS on a LAN, or an authenticated cloud-relay handshake across
+the open internet). Once two daemons know about each other,
+dispatches route as wire-protocol calls in either direction —
+laptop → server *or* server → laptop — and the activity feed /
+sessions sync between them.
+
+Concretely:
+- `ato daemon` (background service) listens on a Unix socket + an
+  authenticated WebSocket; persists its identity (keypair) in
+  `~/.ato/daemon/`.
+- Peer discovery: mDNS (LAN), invite codes (manual pairing), or a
+  cloud-relay channel (Pro tier) for NAT-traversal.
+- Wire protocol: dispatch / kill / list-runs / sessions / activity
+  posts — same surface as the local Tauri commands today.
+- ACL: per-peer scopes (e.g. server can call `claude` but not read
+  `secrets`).
+
+This is Phase 7+ territory because the security / pairing / NAT
+story alone is multi-week, and the existing one-way SSH adapter
+already covers ~80% of the practical use case (most people want to
+*invoke* a beefy remote machine, not have the remote initiate back).
+Worth scoping the moment a real user asks for the reverse direction.
+
 ## Phase 6 — Cross-runtime agent conversations (Planned)
 
 The activity feed (Phase 5) is async broadcast — anyone posts, anyone

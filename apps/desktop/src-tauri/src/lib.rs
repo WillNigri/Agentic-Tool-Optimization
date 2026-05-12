@@ -971,6 +971,32 @@ pub fn init_database(conn: &Connection) {
             ON sessions(runtime, last_used_at DESC)",
         [],
     );
+    // v2.3.32 Phase 6 Slice A.2 — unified turn history. Stateful
+    // runtimes (claude --resume) and stateless API providers
+    // (minimax etc.) both dual-write into this table on every
+    // dispatch in a session, so:
+    //   - History-replay providers can rebuild the messages array
+    //   - Slice B (cross-runtime mid-session switching) sees a
+    //     unified log to feed into whichever runtime takes the
+    //     next turn
+    // turn_index is monotonic per session (max+1 on insert).
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_turns (
+            session_id  TEXT NOT NULL,
+            turn_index  INTEGER NOT NULL,
+            role        TEXT NOT NULL,
+            text        TEXT NOT NULL,
+            runtime     TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (session_id, turn_index)
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_turns_session
+            ON session_turns(session_id, turn_index ASC)",
+        [],
+    );
 
     // v2.3.27 Phase 6.x — Runtime quota visibility. Stores parsed
     // "rate limit until X" timestamps surfaced from dispatch errors.
@@ -986,6 +1012,31 @@ pub fn init_database(conn: &Connection) {
         )",
         [],
     );
+
+    // v2.3.32 Phase 6.x-J — SSH-backed remote runtimes. Each row is a
+    // user-registered remote that `ato dispatch <slug> "..."` should
+    // route to via `ssh -i <key> -p <port> user@host '<binary> <args>'`
+    // instead of spawning a local CLI. Triggered by @iamknownasfesal's
+    // X question about laptop ↔ server Claude bridging. One-way only:
+    // the laptop initiates; the remote runs the binary; stdout comes
+    // back into execution_logs like any other dispatch. The Phase 7+
+    // bi-directional mesh (daemons discovering each other) is roadmap
+    // but out of scope here.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS remote_runtimes (
+            slug          TEXT PRIMARY KEY,
+            host          TEXT NOT NULL,
+            port          INTEGER NOT NULL DEFAULT 22,
+            ssh_user      TEXT,
+            key_path      TEXT,
+            runtime       TEXT NOT NULL,
+            binary_path   TEXT NOT NULL,
+            extra_args    TEXT,
+            created_at    TEXT NOT NULL
+        )",
+        [],
+    );
+
     // v2.3.18 Phase 5.3 — partial UNIQUE index enforcing
     // one-ApprovalDecision-per-ApprovalRequest at the storage layer.
     // Codex 5.3 round-1 caught that the CLI's check-then-insert was
