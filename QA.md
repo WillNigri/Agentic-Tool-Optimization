@@ -124,6 +124,18 @@ Build once before this section: `cargo build --manifest-path apps/cli/Cargo.toml
 - [ ] `ato regressions list --human` — runs without error.
 - [ ] `ato cost recommendations --human` — runs without error.
 
+### §1.10b Eval-score ratchet (Phase 6.x-K)
+
+- [ ] `ato ratchet lock --target runtime:claude --days 30 --human` — succeeds when there's recent data, persists a floor.
+- [ ] `ato ratchet lock --target agent:nonexistent` — fails cleanly with "no dispatches in the last N days" (no panic, exit code != 0).
+- [ ] `ato ratchet list --human` — shows locked floors with target, threshold, window, locked-at date.
+- [ ] `ato ratchet check --human` — exit 0 when current rate ≥ floor-tolerance for every target.
+- [ ] **CI-gate fail**: synthesize a breach by manually tightening a lock (`UPDATE eval_ratchets SET threshold=0.0`) + inserting an error row, then run `ato ratchet check`. Exit code must be 1, output must show "✗ FAIL" for that target.
+- [ ] `ato ratchet status --human` — same info as check, but exit 0 even on breach (informational).
+- [ ] `ato ratchet check --target runtime:<r>` — only checks that target; unaffected ratchets aren't reported.
+- [ ] `ato ratchet unlock --target ...` — removes the lock, subsequent `list` shows it gone.
+- [ ] `parse_target` rejects typos (`agnet:foo`, bare `foo`, `agent:`) — `cargo test ratchet`.
+
 ### §1.11 Recipes
 
 - [ ] `ato recipes templates --human` — lists built-in templates.

@@ -1038,6 +1038,35 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.3.39 Phase 6.x-K — Eval-score ratchet.
+    //
+    // Inspired by Garry Tan's "AI Agent Complexity Ratchet" (2026-05).
+    // Locks a quality floor per target (agent / runtime / global).
+    // `ato ratchet check` compares the floor against the current
+    // success-rate window and exits non-zero if breached — designed
+    // to drop into CI / pre-deploy hooks so a config change that
+    // regresses an agent's quality fails the build.
+    //
+    // Metric for v1 is `success_rate` (0.0–1.0), computed from
+    // execution_logs.status. Cloud eval_score can layer on later
+    // as a second metric without schema migration: add a `metric`
+    // discriminator column and the same table holds both.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS eval_ratchets (
+            target_kind          TEXT NOT NULL,
+            target_value         TEXT NOT NULL,
+            metric               TEXT NOT NULL DEFAULT 'success_rate',
+            baseline_value       REAL NOT NULL,
+            baseline_window_days INTEGER NOT NULL,
+            threshold            REAL NOT NULL DEFAULT 0.05,
+            locked_at            TEXT NOT NULL,
+            locked_by            TEXT,
+            notes                TEXT,
+            PRIMARY KEY (target_kind, target_value, metric)
+        )",
+        [],
+    );
+
     // v2.3.18 Phase 5.3 — partial UNIQUE index enforcing
     // one-ApprovalDecision-per-ApprovalRequest at the storage layer.
     // Codex 5.3 round-1 caught that the CLI's check-then-insert was

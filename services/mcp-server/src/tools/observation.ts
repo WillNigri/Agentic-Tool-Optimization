@@ -148,6 +148,28 @@ export function registerObservationTools(server: McpServer) {
   );
 
   server.tool(
+    "ratchet_check",
+    "Phase 6.x-K — eval-score ratchet. Compares current 7-day success rate against the locked floor for every ratchet (or one if `target` is set). Returns a per-target verdict (pass / fail / insufficient_data). Same semantics as the CLI's `ato ratchet check`; the CI exit code isn't propagated through MCP — agents should inspect `verdict` field.",
+    {
+      target: z.string().optional().describe("Optional filter: `agent:<slug>`, `runtime:<name>`, or `global`."),
+      window_days: z.number().optional().describe("Days to look back for the current value (default 7)."),
+    },
+    async ({ target, window_days }) => {
+      const args = ["ratchet", "check"];
+      if (target) args.push("--target", target);
+      if (window_days) args.push("--window-days", String(window_days));
+      return toolText(await runAtoCli(args));
+    },
+  );
+
+  server.tool(
+    "ratchet_list",
+    "List locked ratchets. Read-only.",
+    {},
+    async () => toolText(await runAtoCli(["ratchet", "list"])),
+  );
+
+  server.tool(
     "list_recent_events",
     "List recent events from the events_log bus (dispatch_failed, regression_detected, replay_done, etc.). Read-only. Use to spot patterns over the last N events without needing a live --watch tail.",
     {

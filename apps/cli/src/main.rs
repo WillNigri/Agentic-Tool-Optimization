@@ -188,6 +188,56 @@ enum Commands {
         #[arg(long, default_value_t = 3)]
         max_rounds: u32,
     },
+    /// Phase 6.x-K — eval-score ratchet. Lock a quality floor per
+    /// agent / runtime / global; `ratchet check` exits non-zero when
+    /// the recent window's success rate dips below it. Designed to
+    /// drop into CI / pre-deploy hooks.
+    Ratchet {
+        #[command(subcommand)]
+        sub: RatchetSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RatchetSub {
+    /// Lock a quality floor for a target.
+    Lock {
+        /// `agent:<slug>`, `runtime:<name>`, or `global`.
+        #[arg(long)]
+        target: String,
+        /// How many days back to use for the baseline (default 30).
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// How far below baseline counts as fail, in absolute terms.
+        /// E.g. 0.05 = 5 percentage points. Default 0.05.
+        #[arg(long, default_value_t = 0.05)]
+        threshold: f64,
+        /// Optional free-text note saved with the lock.
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// List all locked ratchets.
+    List,
+    /// Check the recent window against the locked floors. Exits
+    /// non-zero (CI-fail) when any ratchet is breached.
+    Check {
+        /// Optional `--target ...` to check only one ratchet.
+        #[arg(long)]
+        target: Option<String>,
+        /// Window the check looks back over (default 7 days).
+        #[arg(long, default_value_t = commands::ratchet::CHECK_WINDOW_DEFAULT)]
+        window_days: i64,
+    },
+    /// Show current rates vs floors without failing the CLI on a breach.
+    Status {
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Remove a locked ratchet.
+    Unlock {
+        #[arg(long)]
+        target: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -787,6 +837,47 @@ fn main() -> Result<()> {
             session,
             max_rounds,
         } => commands::bridge::run_loop(&session, max_rounds, &db_path, &opts),
+        Commands::Ratchet { sub } => match sub {
+            RatchetSub::Lock {
+                target,
+                days,
+                threshold,
+                notes,
+            } => {
+                let (kind, value) = commands::ratchet::parse_target(&target)?;
+                commands::ratchet::lock(
+                    &db_path,
+                    &kind,
+                    &value,
+                    days,
+                    threshold,
+                    notes.as_deref(),
+                    &opts,
+                )
+            }
+            RatchetSub::List => commands::ratchet::list(&db_path, &opts),
+            RatchetSub::Check {
+                target,
+                window_days,
+            } => {
+                let filter = target.as_deref().map(commands::ratchet::parse_target).transpose()?;
+                let ok = commands::ratchet::check(&db_path, filter, window_days, &opts)?;
+                // CI gate: non-zero exit on any breach so a failed
+                // ratchet fails the pipeline step it ran in.
+                if !ok {
+                    std::process::exit(1);
+                }
+                Ok(())
+            }
+            RatchetSub::Status { target } => {
+                let filter = target.as_deref().map(commands::ratchet::parse_target).transpose()?;
+                commands::ratchet::status(&db_path, filter, &opts)
+            }
+            RatchetSub::Unlock { target } => {
+                let (kind, value) = commands::ratchet::parse_target(&target)?;
+                commands::ratchet::unlock(&db_path, &kind, &value, &opts)
+            }
+        },
         Commands::Runtimes { sub } => match sub {
             RuntimesSub::Status => {
                 let rows = quota::list_all(&db_path)?;

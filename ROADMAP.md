@@ -358,6 +358,47 @@ during the v2.3.19 commit when codex hit its limit mid-review.
 ~50 LOC total. Worth shipping standalone or alongside Phase 6
 sessions.
 
+## Phase 6.x-K — Eval-score ratchet (Shipped v2.3.39)
+
+Inspired by Garry Tan's *AI Agent Complexity Ratchet* (May 2026):
+the idea that AI coding agents make 90% test coverage free, and the
+ratchet of test + doc + eval threshold means quality only goes up.
+ATO's eval-score ratchet brings the same primitive to agent ops:
+lock a quality floor per target, and `ato ratchet check` fails CI
+whenever recent activity dips below it.
+
+### Surface
+
+- `ato ratchet lock --target <agent:slug | runtime:name | global>
+   [--days 30] [--threshold 0.05] [--notes "..."]` — computes the
+   target's success rate over the last `days` and persists it as a
+   floor. Fails fast when there's no data to baseline against.
+- `ato ratchet check [--target ...] [--window-days 7]` — for each
+  lock, computes the recent window's success rate, compares to
+  `floor - threshold`. Exit 1 when any target breaches; exit 0 when
+  all pass. Drop into CI as a deploy gate.
+- `ato ratchet status [--target ...]` — same shape as `check` but
+  always exits 0 (informational, for humans).
+- `ato ratchet list` / `ato ratchet unlock --target ...`.
+- MCP: `ratchet_check` + `ratchet_list` tools for MCP-only harnesses.
+
+### Metric for v1
+
+`success_rate` from `execution_logs.status`. Coarse but universally
+available locally — no cloud sign-in, no separate evaluator needed.
+The schema's `metric` discriminator column means adding `eval_score`
+(when cloud evals land locally, or when users opt into a local LLM-
+judge) is additive: same table, same query path, new code path
+behind the metric branch.
+
+### Why this fits ATO's wedge
+
+Tan's framework is general SWE wisdom; the *AI-agent-specific* part
+is the closed loop "agent runs → evaluator scores → result locks
+the floor for the next agent run." That loop lives at the workflow-
+ops layer, which is ATO's exact wedge. Tests-as-coverage and TTY
+harnesses don't fit; eval-score ratcheting does.
+
 ## Phase 6.x-J — SSH-backed remote runtime adapter (Planned, small)
 
 Triggered by @iamknownasfesal on X (2026-05-11): *"how can i make my
