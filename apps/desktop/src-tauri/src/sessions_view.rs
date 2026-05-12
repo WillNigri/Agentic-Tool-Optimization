@@ -16,7 +16,8 @@
 // view layer).
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::process::Command;
 use tauri::State;
 
 use crate::DbState;
@@ -195,4 +196,140 @@ pub fn get_session_transcript(
         title,
         turns,
     })
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// v2.3.43 — Tauri commands for the New / Continue / Bridge buttons.
+//
+// Each shells out to the `ato` CLI binary, which is the canonical
+// implementation of sessions / dispatch / bridge. The desktop's own
+// prompt_agent path doesn't yet support --session natively (a deeper
+// change); going through the CLI keeps these slices independent and
+// the behavior provably identical to what an agent invoking
+// `ato dispatch ... --session` would do.
+
+#[derive(Debug, Deserialize)]
+struct CliSessionNewOutput {
+    id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchIntoSessionResult {
+    pub run_id: String,
+    pub status: String,
+    pub response: Option<String>,
+    pub error_message: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
+fn resolve_ato_binary() -> Result<String, String> {
+    // Prefer the bundled installation paths, then fall through to the
+    // same PATH resolution other Tauri commands use. Falls back to bare
+    // "ato" so the user's shell can locate it if installed elsewhere.
+    if let Some(p) = crate::commands::which_cli("ato") {
+        return Ok(p);
+    }
+    // Last resort: bare command name; Command::new will surface a clean
+    // exec error if PATH doesn't include it.
+    Ok("ato".to_string())
+}
+
+#[tauri::command]
+pub fn create_session(
+    runtime: String,
+    title: Option<String>,
+    agent_slug: Option<String>,
+) -> Result<String, String> {
+    let bin = resolve_ato_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(["sessions", "new", "--runtime", &runtime]);
+    if let Some(t) = &title {
+        cmd.args(["--title", t]);
+    }
+    if let Some(slug) = &agent_slug {
+        cmd.args(["--as", slug]);
+    }
+    let out = cmd.output().map_err(|e| format!("spawn ato: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(format!("ato sessions new failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: CliSessionNewOutput = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("parse ato output: {} (raw: {})", e, stdout))?;
+    Ok(parsed.id)
+}
+
+#[tauri::command]
+pub fn dispatch_into_session(
+    runtime: String,
+    prompt: String,
+    session_id: String,
+    model: Option<String>,
+) -> Result<DispatchIntoSessionResult, String> {
+    let bin = resolve_ato_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(["dispatch", &runtime, &prompt, "--session", &session_id]);
+    if let Some(m) = &model {
+        cmd.args(["--model", m]);
+    }
+    let out = cmd.output().map_err(|e| format!("spawn ato: {}", e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // The CLI exits non-zero only on a pre-flight error (quota / unknown
+    // runtime). Real per-dispatch errors come back as a JSON payload
+    // with status="error", so we still need to parse stdout when present.
+    let raw = if stdout.trim().is_empty() {
+        // No stdout — fall back to surfacing stderr to the user.
+        return Err(format!(
+            "ato dispatch produced no JSON output: {}",
+            stderr.trim()
+        ));
+    } else {
+        stdout
+    };
+    let v: serde_json::Value =
+        serde_json::from_str(raw.trim()).map_err(|e| format!("parse ato output: {}", e))?;
+    Ok(DispatchIntoSessionResult {
+        run_id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        status: v
+            .get("status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        response: v.get("response").and_then(|x| x.as_str()).map(String::from),
+        error_message: v
+            .get("error_message")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        duration_ms: v.get("duration_ms").and_then(|x| x.as_i64()),
+    })
+}
+
+#[tauri::command]
+pub fn bridge_session(
+    session_id: String,
+    max_rounds: Option<u32>,
+) -> Result<String, String> {
+    let bin = resolve_ato_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(["bridge", "--session", &session_id, "--human"]);
+    if let Some(n) = max_rounds {
+        cmd.args(["--max-rounds", &n.to_string()]);
+    }
+    let out = cmd.output().map_err(|e| format!("spawn ato: {}", e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        return Err(format!(
+            "ato bridge failed (status {}): {}",
+            out.status,
+            stderr.trim()
+        ));
+    }
+    // The bridge writes its progress as human-readable lines to stdout;
+    // return the whole transcript so the UI can show it in a "bridge
+    // result" panel.
+    Ok(stdout.trim().to_string())
 }
