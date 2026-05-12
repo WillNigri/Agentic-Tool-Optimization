@@ -425,6 +425,61 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn xattr_removes_quarantine_end_to_end() {
+        // QA §5 — end-to-end verification of the "Run fix" button's
+        // quarantine path. Synthesizes a quarantined file, runs the
+        // allowlisted xattr command, verifies the xattr is gone.
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("ato-qa-quarantine-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("fakecli");
+        fs::write(&path, b"#!/bin/bash\necho fake\n").expect("write fake binary");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("chmod +x fake binary");
+        // Apply the Safari-style quarantine xattr Gatekeeper would set.
+        let set = Command::new("xattr")
+            .args(["-w", "com.apple.quarantine", "0001;0;Safari;"])
+            .arg(&path)
+            .status()
+            .expect("xattr -w");
+        assert!(set.success(), "xattr -w failed");
+        // Sanity-check: the xattr is present before we run the fix.
+        let probe_before = Command::new("xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&path)
+            .status()
+            .expect("xattr -p before");
+        assert!(
+            probe_before.success(),
+            "quarantine xattr should be present before fix"
+        );
+
+        // Run the Tauri command's allowlisted fix path with the real path.
+        let cmd = format!("xattr -d com.apple.quarantine {}", path.display());
+        let r = runtime_health_run_fix(cmd);
+        assert!(r.is_ok(), "fix should succeed: {:?}", r);
+
+        // Verify the xattr is gone — `xattr -p` exits non-zero when the
+        // attribute doesn't exist.
+        let probe_after = Command::new("xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&path)
+            .status()
+            .expect("xattr -p after");
+        assert!(
+            !probe_after.success(),
+            "quarantine xattr should be gone after fix"
+        );
+
+        if let Err(e) = fs::remove_dir_all(&dir) {
+            eprintln!("xattr_removes_quarantine_end_to_end cleanup failed: {}", e);
+        }
+    }
+
     #[test]
     fn xattr_accepts_clean_path() {
         // We can't actually have a quarantined file to remove here,
