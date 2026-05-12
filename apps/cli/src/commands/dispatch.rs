@@ -52,6 +52,23 @@ pub fn run(
     }
     let cli_path = runtime::resolve_runtime_cli(runtime_name)?;
 
+    // v2.3.25 Phase 6.x — register in live_runs so the desktop's
+    // Live tab shows this dispatch while it's in flight. Best-effort:
+    // a missing table or locked DB just means the run is invisible
+    // to the GUI, not that the dispatch fails. MiniMax round-1: use
+    // a Drop guard so cleanup runs on every exit path (including
+    // early `?` returns on spawn failure, panics, etc.).
+    let live_run_id = uuid::Uuid::new_v4().to_string();
+    let _ = crate::live_runs::insert(
+        db_path,
+        &live_run_id,
+        runtime_name,
+        agent_slug_for_event.as_deref(),
+        None,
+        "cli",
+    );
+    let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
+
     let mut cmd = Command::new(&cli_path);
     match runtime_name {
         "claude" => {
@@ -95,6 +112,8 @@ pub fn run(
         .output()
         .with_context(|| format!("Failed to spawn {} CLI", runtime_name))?;
     let duration_ms = started.elapsed().as_millis() as i64;
+    // _live_run_guard above will Drop at end of this fn / on any
+    // early ? return; no manual delete call needed here.
 
     let response_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
@@ -231,6 +250,20 @@ fn run_api(
     opts: &Opts,
 ) -> Result<()> {
     let conn = db::open_readwrite(db_path)?;
+
+    // v2.3.25 Phase 6.x — register in live_runs so the desktop's
+    // Live tab sees this API-provider dispatch in flight. Drop
+    // guard handles cleanup on every exit path.
+    let live_run_id = uuid::Uuid::new_v4().to_string();
+    let _ = crate::live_runs::insert(
+        db_path,
+        &live_run_id,
+        provider.slug,
+        agent_slug_for_event.as_deref(),
+        None,
+        "cli",
+    );
+    let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
 
     let outcome = crate::api_dispatch::dispatch(
         provider,

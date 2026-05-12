@@ -309,7 +309,55 @@ pub fn kill_run(run_id: &str) -> bool {
 
 #[tauri::command]
 pub fn list_active_runs() -> Vec<ActiveRun> {
-    list_runs()
+    let mut runs = list_runs();
+    // v2.3.25 Phase 6.x — also include CLI-process dispatches that
+    // wrote themselves into live_runs (visible-but-unkillable from
+    // the desktop's perspective, since the kill closure lives in
+    // the CLI process). Dedupe by run_id; in-memory rows always win
+    // because they carry kill capability and current status.
+    let mem_ids: std::collections::HashSet<String> =
+        runs.iter().map(|r| r.run_id.clone()).collect();
+    let db_path = crate::get_db_path();
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT run_id, agent_slug, runtime, workspace, source, started_at, status
+               FROM live_runs",
+        ) {
+            let mapped = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            });
+            if let Ok(iter) = mapped {
+                for row in iter.flatten() {
+                    let (run_id, agent_slug, runtime, workspace, source, started_at, status) = row;
+                    if mem_ids.contains(&run_id) {
+                        continue;
+                    }
+                    let started_unix = chrono::DateTime::parse_from_rfc3339(&started_at)
+                        .map(|dt| dt.timestamp() as u64)
+                        .unwrap_or_else(|_| now_unix());
+                    runs.push(ActiveRun {
+                        run_id,
+                        agent_slug,
+                        runtime,
+                        workspace,
+                        started_at_unix: started_unix,
+                        status,
+                        source,
+                    });
+                }
+            }
+        }
+    }
+    runs.sort_by(|a, b| b.started_at_unix.cmp(&a.started_at_unix));
+    runs
 }
 
 // async (vs `pub fn`) so Tauri runs us inside a tokio runtime

@@ -14,6 +14,7 @@ mod api_dispatch;
 mod commands;
 mod db;
 mod events_publisher;
+mod live_runs;
 mod output;
 mod runtime;
 
