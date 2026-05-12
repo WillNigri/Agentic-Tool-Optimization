@@ -42,6 +42,14 @@ pub fn run(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // v2.3.21 Phase 6.x — API-key providers (MiniMax, Grok, Qwen, ...)
+    // take a different path: no CLI binary to resolve, key comes from
+    // env var or llm_api_keys, response over HTTPS. Persistence and
+    // output shape are identical so downstream tools (events, audits)
+    // don't need to care which transport was used.
+    if let Some(provider) = crate::api_dispatch::find_provider(runtime_name) {
+        return run_api(provider, prompt, model, agent_slug_for_event, db_path, opts);
+    }
     let cli_path = runtime::resolve_runtime_cli(runtime_name)?;
 
     let mut cmd = Command::new(&cli_path);
@@ -210,4 +218,123 @@ fn truncate(s: &str) -> String {
     } else {
         format!("{}…[truncated]", &s[..MAX])
     }
+}
+
+/// v2.3.21 Phase 6.x — API-provider dispatch path. Same persistence
+/// shape as the CLI path so execution_logs / events stay uniform.
+fn run_api(
+    provider: &crate::api_dispatch::ApiProvider,
+    prompt: &str,
+    model_override: Option<String>,
+    agent_slug_for_event: Option<String>,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+
+    let outcome = crate::api_dispatch::dispatch(
+        provider,
+        prompt,
+        model_override.as_deref(),
+        &conn,
+    );
+
+    let (status, response_persisted, error_persisted, duration_ms, model_used, tokens_in, tokens_out) =
+        match outcome {
+            Ok(o) => {
+                let status = if o.response.is_some() { "success" } else { "error" };
+                (
+                    status,
+                    o.response.map(|s| truncate(&s)),
+                    o.error_message.map(|s| truncate(&s)),
+                    o.duration_ms,
+                    Some(o.model_used),
+                    o.tokens_in,
+                    o.tokens_out,
+                )
+            }
+            Err(e) => (
+                "error",
+                None,
+                Some(truncate(&e.to_string())),
+                0_i64,
+                None,
+                None,
+                None,
+            ),
+        };
+
+    // Fall back to char-count estimate when the provider didn't return
+    // a usage block (or when the call failed before reaching one).
+    let tokens_in = tokens_in.or_else(|| Some(runtime::estimate_text_tokens(prompt)));
+    let response_for_cost = response_persisted.as_deref().unwrap_or("");
+    let tokens_out = tokens_out.or_else(|| Some(runtime::estimate_text_tokens(response_for_cost)));
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL)",
+        rusqlite::params![
+            id,
+            provider.slug,
+            truncate(prompt),
+            response_persisted,
+            tokens_in,
+            tokens_out,
+            duration_ms,
+            status,
+            error_persisted,
+            now,
+        ],
+    )
+    .context("Failed to write execution_logs row")?;
+
+    if status == "error" {
+        crate::events_publisher::publish_dispatch_failed(
+            &conn,
+            &id,
+            agent_slug_for_event.as_deref(),
+            provider.slug,
+            error_persisted.as_deref().unwrap_or(""),
+            duration_ms,
+            &now,
+        );
+    }
+
+    let result = DispatchResult {
+        id: id.clone(),
+        runtime: provider.slug.to_string(),
+        model: model_used,
+        status: status.to_string(),
+        response: response_persisted,
+        error_message: error_persisted,
+        duration_ms,
+        tokens_in,
+        tokens_out,
+        cost_usd_estimated: None,
+        created_at: now,
+    };
+
+    if opts.human {
+        let head = format!(
+            "[{}] {} {} ({}ms, {}, subscription)",
+            result.status,
+            result.runtime,
+            result.model.as_deref().unwrap_or("?"),
+            result.duration_ms,
+            &result.id[..8.min(result.id.len())],
+        );
+        emit_human(&head);
+        if let Some(r) = &result.response {
+            emit_human("\n--- Response ---");
+            emit_human(r);
+        }
+        if let Some(e) = &result.error_message {
+            emit_human("\n--- Error ---");
+            emit_human(e);
+        }
+    } else {
+        emit_json(&result)?;
+    }
+    Ok(())
 }

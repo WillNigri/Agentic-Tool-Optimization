@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod api_dispatch;
 mod commands;
 mod db;
 mod events_publisher;
