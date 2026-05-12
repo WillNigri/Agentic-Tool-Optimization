@@ -9,6 +9,7 @@ pub mod local_insights;
 pub mod events;
 pub mod recipes;
 pub mod posts;
+pub mod api_dispatch;
 pub mod recipes_engine;
 
 use rusqlite::{Connection, params};
@@ -1207,6 +1208,8 @@ pub fn run() {
             posts_pending_count,
             // v2.3.23 Phase 6.x-B — unified runtime picker
             list_available_runtimes,
+            // v2.3.26 Phase 6.x-C — GUI dispatch for API providers
+            prompt_api_provider,
             // Health Checks
             get_health_status,
             record_health_check,

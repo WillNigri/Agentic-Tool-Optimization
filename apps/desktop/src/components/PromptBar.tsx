@@ -499,7 +499,45 @@ export default function PromptBar() {
       const dispatchStartedAtMs = Date.now();
       setStreamingText("");
       try {
-        if (selectedGroup) {
+        // v2.3.26 Phase 6.x-C — API providers (MiniMax, Grok, ...)
+        // take a non-streaming path: single HTTPS POST via the new
+        // prompt_api_provider Tauri command. Skips agents / groups /
+        // history (those are CLI-runtime concepts for now).
+        //
+        // MiniMax round-1 6.x-C: derive the list from
+        // availableRuntimes instead of duplicating the backend
+        // registry — single source of truth, no drift when a new
+        // provider lands. Falls back to the static set in non-Tauri
+        // contexts where availableRuntimes is null.
+        const apiSlugs = availableRuntimes
+          ? availableRuntimes.filter((r) => r.kind === "api").map((r) => r.slug)
+          : ["minimax", "grok", "deepseek", "qwen", "openrouter"];
+        if (apiSlugs.includes(runtime)) {
+          if (!IS_TAURI) {
+            response = simulateMock(prompt);
+          } else {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const result = await invoke<{
+              status: string;
+              response: string | null;
+              error_message: string | null;
+              model: string;
+              duration_ms: number;
+            }>("prompt_api_provider", {
+              runtime,
+              prompt,
+              model: null,
+              agentSlug: selectedAgent?.slug ?? null,
+            });
+            if (result.status === "success" && result.response) {
+              response = result.response;
+            } else {
+              throw new Error(
+                result.error_message ?? `${runtime} dispatch failed`
+              );
+            }
+          }
+        } else if (selectedGroup) {
           // Group dispatch — router picks (routed) or pipeline runs all
           // children (sequential). Single round-trip; we still stitch
           // thread history so the dispatcher sees recent context.
@@ -1135,12 +1173,12 @@ export default function PromptBar() {
                     };
                     const Icon = meta.icon;
                     const isApi = r.kind === "api";
-                    // v2.3.23: API providers visible-but-not-yet-clickable
-                    // from the GUI. Click selects the runtime so the
-                    // user can see what they have configured, but the
-                    // existing dispatch path doesn't know how to route
-                    // it. Tooltip points to the CLI workaround. Phase
-                    // 6.x-C will wire desktop-side API dispatch.
+                    // v2.3.26 Phase 6.x-C: GUI dispatch for API
+                    // providers now wired via prompt_api_provider
+                    // Tauri command. The "API" tag stays as a label
+                    // (different billing model — flat-rate
+                    // subscription via key) but the runtime is
+                    // fully clickable + dispatchable.
                     return (
                       <button
                         key={r.slug}
@@ -1151,7 +1189,7 @@ export default function PromptBar() {
                         }}
                         title={
                           isApi
-                            ? `${meta.label} — API provider. Today: dispatch via \`ato dispatch ${r.slug} "…"\`. GUI dispatch lands in Phase 6.x-C.`
+                            ? `${meta.label} — API provider (subscription via API key)`
                             : meta.label
                         }
                         className={cn(
@@ -1168,7 +1206,7 @@ export default function PromptBar() {
                         </span>
                         {isApi ? (
                           <span className="text-[9px] uppercase tracking-wide text-cs-muted">
-                            CLI
+                            API
                           </span>
                         ) : null}
                       </button>

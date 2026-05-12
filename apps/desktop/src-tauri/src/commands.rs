@@ -3749,6 +3749,152 @@ pub fn posts_decide(
     Ok(post)
 }
 
+// v2.3.26 Phase 6.x-C — GUI-side API-provider dispatch.
+//
+// When the user picks MiniMax/Grok/etc. in PromptBar, the existing
+// promptAgent path errors because there's no CLI binary. This
+// command takes the API-provider slug, runs the same HTTPS dispatch
+// the CLI's `ato dispatch <provider>` does, and persists the result
+// to execution_logs so it shows up in History alongside CLI runs.
+//
+// Live-runs registration: writes to live_runs at the start +
+// removes at the end (same pattern as v2.3.25 for CLI-process
+// dispatches), so the Runs → Live tab shows the in-flight API call.
+
+#[derive(serde::Serialize)]
+pub struct ApiDispatchResult {
+    pub id: String,
+    pub runtime: String,
+    pub model: String,
+    pub status: String,
+    pub response: Option<String>,
+    pub error_message: Option<String>,
+    pub duration_ms: i64,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub async fn prompt_api_provider(
+    runtime: String,
+    prompt: String,
+    model: Option<String>,
+    agent_slug: Option<String>,
+) -> Result<ApiDispatchResult, String> {
+    let provider = crate::api_dispatch::find_provider(&runtime).ok_or_else(|| {
+        format!(
+            "'{}' is not a known API provider (expected one of: minimax, grok, deepseek, qwen, openrouter)",
+            runtime
+        )
+    })?;
+
+    let db_path = crate::get_db_path();
+
+    // Mirror into active_runs so the Live tab shows this dispatch.
+    // MiniMax round-1 6.x-C flagged that finish_run wasn't panic-safe;
+    // wrap in a Drop guard so the active_runs row is cleared even if
+    // the dispatch fn panics or an early return slips in later.
+    let active_run_id = crate::active_runs::begin_run(
+        provider.slug,
+        agent_slug.as_deref(),
+        None,
+        Some("desktop:api"),
+    );
+    struct ActiveRunGuard(String);
+    impl Drop for ActiveRunGuard {
+        fn drop(&mut self) {
+            crate::active_runs::finish_run(&self.0);
+        }
+    }
+    let _active_run_guard = ActiveRunGuard(active_run_id);
+
+    // dispatch() opens its own short-lived connection for the key
+    // lookup and drops it before any .await — Connection isn't Send.
+    let outcome =
+        crate::api_dispatch::dispatch(provider, &prompt, model.as_deref(), &db_path).await;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Open a fresh conn for the persistence write (the original was
+    // dropped at the end of the match arm above).
+    let write_conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("open db: {}", e))?;
+
+    let result = match outcome {
+        Ok(o) => {
+            let status = if o.response.is_some() { "success" } else { "error" };
+            // MiniMax round-1 6.x-C: surface write failures instead
+            // of swallowing them. The dispatch still succeeds; the
+            // log row just doesn't exist, and the user sees why.
+            if let Err(e) = write_conn.execute(
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL)",
+                rusqlite::params![
+                    id,
+                    provider.slug,
+                    truncate_api_log(&prompt),
+                    o.response.as_ref().map(|s| truncate_api_log(s)),
+                    o.tokens_in,
+                    o.tokens_out,
+                    o.duration_ms,
+                    status,
+                    o.error_message.as_ref().map(|s| truncate_api_log(s)),
+                    now,
+                ],
+            ) {
+                eprintln!("prompt_api_provider: execution_logs write failed: {}", e);
+            }
+            ApiDispatchResult {
+                id,
+                runtime: provider.slug.to_string(),
+                model: o.model_used,
+                status: status.to_string(),
+                response: o.response,
+                error_message: o.error_message,
+                duration_ms: o.duration_ms,
+                tokens_in: o.tokens_in,
+                tokens_out: o.tokens_out,
+                created_at: now,
+            }
+        }
+        Err(e) => {
+            if let Err(write_err) = write_conn.execute(
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated)
+                 VALUES (?1, ?2, ?3, NULL, NULL, NULL, 0, 'error', ?4, NULL, NULL, ?5, NULL)",
+                rusqlite::params![id, provider.slug, truncate_api_log(&prompt), &e, now],
+            ) {
+                eprintln!(
+                    "prompt_api_provider: execution_logs error-write failed: {}",
+                    write_err
+                );
+            }
+            ApiDispatchResult {
+                id,
+                runtime: provider.slug.to_string(),
+                model: model.unwrap_or_default(),
+                status: "error".to_string(),
+                response: None,
+                error_message: Some(e),
+                duration_ms: 0,
+                tokens_in: None,
+                tokens_out: None,
+                created_at: now,
+            }
+        }
+    };
+    Ok(result)
+}
+
+fn truncate_api_log(s: &str) -> String {
+    const MAX: usize = 64 * 1024;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}…[truncated]", &s[..MAX])
+    }
+}
+
 // New Tauri command — used by the badge component on the sidebar.
 // Counts only; faster than posts_pending which returns full rows.
 #[tauri::command]

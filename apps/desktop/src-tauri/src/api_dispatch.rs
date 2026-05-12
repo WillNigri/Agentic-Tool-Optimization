@@ -1,0 +1,276 @@
+// v2.3.26 Phase 6.x-C — desktop-side API-key dispatch.
+//
+// Mirror of apps/cli/src/api_dispatch.rs so the GUI's PromptBar can
+// dispatch to MiniMax / Grok / DeepSeek / Qwen / OpenRouter directly
+// (instead of falling through the prompt_agent path and erroring on
+// "no CLI for runtime 'minimax'"). Two source-of-truths is fine for
+// v1; Phase 6.x-E will extract the registry to a shared crate.
+//
+// Shape:
+//   - Same provider registry as the CLI module (slugs must match for
+//     llm_api_keys lookups to succeed).
+//   - Async reqwest::Client (the desktop runs on tokio); the CLI uses
+//     blocking. Identical request/response handling.
+//   - Same MiniMax-flavored success check (base_resp.status_code).
+//   - Key resolution: env var → llm_api_keys (case-insensitive,
+//     base64-decoded). usage_count + last_used columns updated on
+//     successful dispatch so the GUI's "API Keys" panel reflects use.
+
+use base64::Engine as _;
+use rusqlite::Connection;
+use serde::Serialize;
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub struct ApiProvider {
+    pub slug: &'static str,
+    pub base_url: &'static str,
+    pub path: &'static str,
+    pub default_model: &'static str,
+    pub env_var: &'static str,
+    pub flavor: &'static str,
+}
+
+pub fn registry() -> &'static [ApiProvider] {
+    &[
+        ApiProvider {
+            slug: "minimax",
+            base_url: "https://api.minimax.io",
+            path: "/v1/text/chatcompletion_v2",
+            default_model: "MiniMax-M2.7-highspeed",
+            env_var: "MINIMAX_API_KEY",
+            flavor: "minimax",
+        },
+        ApiProvider {
+            slug: "grok",
+            base_url: "https://api.x.ai",
+            path: "/v1/chat/completions",
+            default_model: "grok-2-latest",
+            env_var: "GROK_API_KEY",
+            flavor: "openai",
+        },
+        ApiProvider {
+            slug: "deepseek",
+            base_url: "https://api.deepseek.com",
+            path: "/v1/chat/completions",
+            default_model: "deepseek-chat",
+            env_var: "DEEPSEEK_API_KEY",
+            flavor: "openai",
+        },
+        ApiProvider {
+            slug: "qwen",
+            base_url: "https://dashscope-intl.aliyuncs.com",
+            path: "/compatible-mode/v1/chat/completions",
+            default_model: "qwen-plus",
+            env_var: "DASHSCOPE_API_KEY",
+            flavor: "openai",
+        },
+        ApiProvider {
+            slug: "openrouter",
+            base_url: "https://openrouter.ai",
+            path: "/api/v1/chat/completions",
+            default_model: "",
+            env_var: "OPENROUTER_API_KEY",
+            flavor: "openai",
+        },
+    ]
+}
+
+pub fn find_provider(slug: &str) -> Option<&'static ApiProvider> {
+    let lower = slug.to_ascii_lowercase();
+    registry().iter().find(|p| p.slug == lower.as_str())
+}
+
+pub fn is_api_provider(slug: &str) -> bool {
+    find_provider(slug).is_some()
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ApiDispatchOutcome {
+    pub response: Option<String>,
+    pub error_message: Option<String>,
+    pub model_used: String,
+    pub duration_ms: i64,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+}
+
+pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<String, String> {
+    if let Ok(v) = std::env::var(provider.env_var) {
+        if !v.trim().is_empty() {
+            return Ok(v);
+        }
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, encrypted_key FROM llm_api_keys
+              WHERE LOWER(provider) = ?1
+                AND is_active = 1
+              ORDER BY updated_at DESC LIMIT 1",
+            [provider.slug],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let (key_id, encrypted) = row.ok_or_else(|| {
+        format!(
+            "No active API key for provider '{}'. Set ${} or add one in Settings → API Keys.",
+            provider.slug, provider.env_var,
+        )
+    })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encrypted.as_bytes())
+        .map_err(|e| format!("decode llm_api_keys.encrypted_key: {}", e))?;
+    let key = String::from_utf8(bytes).map_err(|e| format!("decoded key not UTF-8: {}", e))?;
+    // Touch last_used + usage_count so the API Keys panel's "0 uses"
+    // counter increments when the GUI dispatches. Best-effort.
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "UPDATE llm_api_keys
+            SET last_used = ?1, usage_count = usage_count + 1, updated_at = ?1
+          WHERE id = ?2",
+        rusqlite::params![now, key_id],
+    );
+    Ok(key)
+}
+
+pub async fn dispatch(
+    provider: &ApiProvider,
+    prompt: &str,
+    model_override: Option<&str>,
+    db_path: &std::path::Path,
+) -> Result<ApiDispatchOutcome, String> {
+    // Resolve the key in a scoped sync block so the Connection
+    // drops before we hit any .await. Connection isn't Send; holding
+    // it across await trips the "future cannot be sent between
+    // threads safely" check Tauri imposes on commands.
+    let key = {
+        let conn = Connection::open(db_path).map_err(|e| format!("open db: {}", e))?;
+        resolve_api_key(provider, &conn)?
+    };
+    let model = match (model_override, provider.default_model) {
+        (Some(m), _) if !m.is_empty() => m.to_string(),
+        (None, "") => {
+            return Err(format!(
+                "Provider '{}' has no default model — pass a model explicitly.",
+                provider.slug
+            ));
+        }
+        (_, default) => default.to_string(),
+    };
+    let url = format!("{}{}", provider.base_url, provider.path);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("build reqwest client: {}", e))?;
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4096,
+    });
+
+    let start = std::time::Instant::now();
+    let resp = client
+        .post(&url)
+        .bearer_auth(&key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("POST {}: {}", url, e))?;
+    let http_status = resp.status();
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("read response body from {}: {}", url, e))?;
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    if !http_status.is_success() {
+        return Ok(ApiDispatchOutcome {
+            response: None,
+            error_message: Some(format!(
+                "HTTP {}: {}",
+                http_status.as_u16(),
+                truncate_for_audit(&body_text, 1000)
+            )),
+            model_used: model,
+            duration_ms,
+            tokens_in: None,
+            tokens_out: None,
+        });
+    }
+    let payload: serde_json::Value =
+        serde_json::from_str(&body_text).map_err(|e| format!("response not valid JSON: {}", e))?;
+    parse_response(provider, payload, model, duration_ms)
+}
+
+fn parse_response(
+    provider: &ApiProvider,
+    payload: serde_json::Value,
+    model: String,
+    duration_ms: i64,
+) -> Result<ApiDispatchOutcome, String> {
+    if provider.flavor == "minimax" {
+        let br = &payload["base_resp"];
+        let status = br["status_code"].as_i64();
+        if status != Some(0) {
+            let msg = br["status_msg"]
+                .as_str()
+                .unwrap_or("(no status_msg)")
+                .to_string();
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!(
+                    "MiniMax base_resp.status_code={:?}: {}",
+                    status, msg
+                )),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+            });
+        }
+    }
+    let choices = payload["choices"].as_array();
+    let content = choices
+        .and_then(|arr| arr.first())
+        .and_then(|c| c["message"]["content"].as_str())
+        .map(|s| s.to_string());
+    let response = match content {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!(
+                    "no choices[0].message.content in response: {}",
+                    truncate_for_audit(&payload.to_string(), 600)
+                )),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+            });
+        }
+    };
+    let usage = &payload["usage"];
+    let tokens_in = usage["prompt_tokens"].as_i64();
+    let tokens_out = usage["completion_tokens"].as_i64();
+    Ok(ApiDispatchOutcome {
+        response: Some(response),
+        error_message: None,
+        model_used: model,
+        duration_ms,
+        tokens_in,
+        tokens_out,
+    })
+}
+
+fn truncate_for_audit(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+}
