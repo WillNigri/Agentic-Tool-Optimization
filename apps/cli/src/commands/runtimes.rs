@@ -123,11 +123,24 @@ fn check_one(runtime: &'static str) -> HealthRow {
         };
     }
 
+    // v2.3.44 — when the runtime CLI is an npm-installed JS shim,
+    // the codesign check on the shim itself returns "not signed at
+    // all" because text scripts aren't signable. The Mach-O sidecar
+    // bundled in the package's optional platform dependency is what
+    // actually gets revoked / quarantined. Try to walk into the
+    // surrounding node_modules and check THAT binary; if found, use
+    // its signature status instead of the shim's.
+    let effective = if is_node_shim(&binary) {
+        find_node_sidecar_binary(&binary, runtime).unwrap_or(binary.clone())
+    } else {
+        binary.clone()
+    };
+
     // codesign --verify catches the headline case: revoked Developer
     // ID certs (CSSMERR_TP_CERT_REVOKED). Triggered on Will's machine
     // 2026-05-11 when Apple revoked OpenAI's signing cert.
     let codesign_out = Command::new("codesign")
-        .args(["--verify", "--verbose=2", &binary.display().to_string()])
+        .args(["--verify", "--verbose=2", &effective.display().to_string()])
         .output();
     match codesign_out {
         Ok(out) => {
@@ -135,7 +148,7 @@ fn check_one(runtime: &'static str) -> HealthRow {
             if stderr.contains("CSSMERR_TP_CERT_REVOKED") {
                 HealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "revoked".into(),
                     detail: Some(extract_codesign_reason(&stderr)),
                     fix_command: install_command_for(runtime).map(String::from),
@@ -143,7 +156,7 @@ fn check_one(runtime: &'static str) -> HealthRow {
             } else if stderr.contains("not signed at all") {
                 HealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "unsigned".into(),
                     detail: Some("code object is not signed at all".into()),
                     // No automatic fix — unsigned third-party CLIs can
@@ -153,7 +166,7 @@ fn check_one(runtime: &'static str) -> HealthRow {
             } else if out.status.success() {
                 HealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "ok".into(),
                     detail: None,
                     fix_command: None,
@@ -161,7 +174,7 @@ fn check_one(runtime: &'static str) -> HealthRow {
             } else {
                 HealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "unknown".into(),
                     detail: Some(extract_codesign_reason(&stderr)),
                     fix_command: None,
@@ -170,7 +183,7 @@ fn check_one(runtime: &'static str) -> HealthRow {
         }
         Err(e) => HealthRow {
             runtime,
-            binary_path: Some(binary.display().to_string()),
+            binary_path: Some(effective.display().to_string()),
             status: "unknown".into(),
             detail: Some(format!("codesign invocation failed: {}", e)),
             fix_command: None,
@@ -216,6 +229,171 @@ fn extract_codesign_reason(stderr: &str) -> String {
 /// suggestion for both `missing` and `revoked`, since both are
 /// resolved by reinstalling from npm (which pulls a freshly-signed
 /// binary).
+/// True when the file is a `#!/usr/bin/env node` (or similar) text
+/// script. We read the first 16 bytes and look for a shebang +
+/// "node" mention. Lets us tell an npm-installed JS shim apart from
+/// a real Mach-O binary.
+fn is_node_shim(path: &PathBuf) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 32];
+    let n = f.read(&mut buf).unwrap_or(0);
+    if n < 3 || &buf[..2] != b"#!" {
+        return false;
+    }
+    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+    head.contains("node")
+}
+
+/// Walk into the package's `node_modules/` looking for a platform
+/// sidecar Mach-O. Vendors typically use the pattern
+/// `node_modules/@<scope>/<pkg>-darwin-<arch>/<runtime>` (anthropic
+/// / openai / google all do this). We look up two levels because
+/// the shim lives at `<prefix>/bin/<runtime>` and the package root
+/// is `<prefix>/lib/node_modules/<pkg>` or `<prefix>/node_modules/<pkg>`.
+fn find_node_sidecar_binary(shim: &PathBuf, runtime: &str) -> Option<PathBuf> {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let target_dir_suffix = format!("darwin-{}", arch);
+
+    // The shim's parent is .../bin; walk up to .../lib (or sibling)
+    // and search node_modules trees. Bounded to 4 levels up to keep
+    // the search cheap for nvm / brew / fnm layouts.
+    let mut cursor = shim.parent()?.to_path_buf();
+    for _ in 0..4 {
+        // Direct sibling: <prefix>/lib/node_modules/<...>
+        let nm = cursor.join("lib").join("node_modules");
+        if nm.exists() {
+            if let Some(found) = scan_node_modules(&nm, runtime, &target_dir_suffix) {
+                return Some(found);
+            }
+        }
+        // Or <prefix>/node_modules/<...> directly
+        let nm2 = cursor.join("node_modules");
+        if nm2.exists() {
+            if let Some(found) = scan_node_modules(&nm2, runtime, &target_dir_suffix) {
+                return Some(found);
+            }
+        }
+        cursor = match cursor.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return None,
+        };
+    }
+    None
+}
+
+fn scan_node_modules(nm: &std::path::Path, runtime: &str, target_suffix: &str) -> Option<PathBuf> {
+    // Look for `*-darwin-<arch>` package directories. Some layouts
+    // hoist them to the top of node_modules (anthropic claude-code);
+    // others nest them inside the parent package's own node_modules
+    // (openai codex: @openai/codex/node_modules/@openai/codex-darwin-arm64).
+    // Recurse one level into each package + each `node_modules`
+    // sub-tree to find both shapes.
+    let top = std::fs::read_dir(nm).ok()?;
+    for entry in top.flatten() {
+        let p = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !p.is_dir() {
+            continue;
+        }
+        if name.starts_with('@') {
+            // Scoped — recurse one level: @vendor/<pkg>
+            let inner = match std::fs::read_dir(&p) {
+                Ok(it) => it,
+                Err(_) => continue,
+            };
+            for sub in inner.flatten() {
+                let subp = sub.path();
+                let subname = sub.file_name().to_string_lossy().to_string();
+                if !subp.is_dir() {
+                    continue;
+                }
+                if subname.ends_with(target_suffix) {
+                    if let Some(found) = walk_for_macho(&subp, runtime, 4) {
+                        return Some(found);
+                    }
+                }
+                // Nested-node_modules layout: @vendor/<pkg>/node_modules/...
+                let nested = subp.join("node_modules");
+                if nested.exists() {
+                    if let Some(found) = scan_node_modules(&nested, runtime, target_suffix) {
+                        return Some(found);
+                    }
+                }
+            }
+        } else if name.ends_with(target_suffix) {
+            if let Some(found) = walk_for_macho(&p, runtime, 4) {
+                return Some(found);
+            }
+        } else if p.is_dir() {
+            // Unscoped package with possibly its own node_modules.
+            let nested = p.join("node_modules");
+            if nested.exists() {
+                if let Some(found) = scan_node_modules(&nested, runtime, target_suffix) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn walk_for_macho(root: &std::path::Path, runtime: &str, depth_budget: usize) -> Option<PathBuf> {
+    if depth_budget == 0 {
+        return None;
+    }
+    // First check the obvious case: a file directly named after the
+    // runtime at this directory level.
+    let direct = root.join(runtime);
+    if direct.is_file() && is_macho(&direct) {
+        return Some(direct);
+    }
+    // Otherwise recurse into immediate child directories. Bounded by
+    // depth_budget so we don't walk into transitive deps if a package
+    // layout is unusual.
+    let it = std::fs::read_dir(root).ok()?;
+    for entry in it.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = walk_for_macho(&p, runtime, depth_budget - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn is_macho(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 4];
+    if f.read(&mut buf).unwrap_or(0) < 4 {
+        return false;
+    }
+    // Mach-O magic numbers: 0xfeedface (32-bit), 0xfeedfacf (64-bit),
+    // 0xcafebabe (fat binary). Little-endian flavors flip the bytes;
+    // accept both orderings.
+    matches!(
+        buf,
+        [0xfe, 0xed, 0xfa, 0xce]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+    )
+}
+
 fn install_command_for(runtime: &str) -> Option<&'static str> {
     match runtime {
         "claude" => Some("npm install -g @anthropic-ai/claude-code@latest"),

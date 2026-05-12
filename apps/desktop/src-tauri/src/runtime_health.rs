@@ -129,8 +129,19 @@ fn check_one(runtime: &'static str) -> RuntimeHealthRow {
         };
     }
 
+    // v2.3.44 — when the runtime CLI is a node JS shim, the codesign
+    // check on the shim itself returns "not signed at all" because
+    // scripts aren't signable. The Mach-O sidecar bundled in the
+    // package's optional platform dep is what actually gets revoked
+    // or quarantined. Walk into node_modules to find and verify it.
+    let effective = if is_node_shim(&binary) {
+        find_node_sidecar_binary(&binary, runtime).unwrap_or(binary.clone())
+    } else {
+        binary.clone()
+    };
+
     let codesign_out = Command::new("codesign")
-        .args(["--verify", "--verbose=2", &binary.display().to_string()])
+        .args(["--verify", "--verbose=2", &effective.display().to_string()])
         .output();
     match codesign_out {
         Ok(out) => {
@@ -138,7 +149,7 @@ fn check_one(runtime: &'static str) -> RuntimeHealthRow {
             if stderr.contains("CSSMERR_TP_CERT_REVOKED") {
                 RuntimeHealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "revoked".into(),
                     detail: Some(extract_codesign_reason(&stderr)),
                     fix_command: install_command_for(runtime).map(String::from),
@@ -146,7 +157,7 @@ fn check_one(runtime: &'static str) -> RuntimeHealthRow {
             } else if stderr.contains("not signed at all") {
                 RuntimeHealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "unsigned".into(),
                     detail: Some("code object is not signed at all".into()),
                     fix_command: None,
@@ -154,7 +165,7 @@ fn check_one(runtime: &'static str) -> RuntimeHealthRow {
             } else if out.status.success() {
                 RuntimeHealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "ok".into(),
                     detail: None,
                     fix_command: None,
@@ -162,7 +173,7 @@ fn check_one(runtime: &'static str) -> RuntimeHealthRow {
             } else {
                 RuntimeHealthRow {
                     runtime,
-                    binary_path: Some(binary.display().to_string()),
+                    binary_path: Some(effective.display().to_string()),
                     status: "unknown".into(),
                     detail: Some(extract_codesign_reason(&stderr)),
                     fix_command: None,
@@ -171,12 +182,146 @@ fn check_one(runtime: &'static str) -> RuntimeHealthRow {
         }
         Err(e) => RuntimeHealthRow {
             runtime,
-            binary_path: Some(binary.display().to_string()),
+            binary_path: Some(effective.display().to_string()),
             status: "unknown".into(),
             detail: Some(format!("codesign invocation failed: {}", e)),
             fix_command: None,
         },
     }
+}
+
+// v2.3.44 — shared helpers for the JS-shim sidecar walk. Logic is
+// duplicated from apps/cli/src/commands/runtimes.rs intentionally:
+// extracting them to a shared crate would mean adding a new package
+// dependency on the desktop, and these two health-check sites are
+// the only consumers. The duplication is bounded and stable.
+
+fn is_node_shim(path: &PathBuf) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 32];
+    let n = f.read(&mut buf).unwrap_or(0);
+    if n < 3 || &buf[..2] != b"#!" {
+        return false;
+    }
+    String::from_utf8_lossy(&buf[..n]).contains("node")
+}
+
+fn find_node_sidecar_binary(shim: &PathBuf, runtime: &str) -> Option<PathBuf> {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let target_dir_suffix = format!("darwin-{}", arch);
+    let mut cursor = shim.parent()?.to_path_buf();
+    for _ in 0..4 {
+        let nm = cursor.join("lib").join("node_modules");
+        if nm.exists() {
+            if let Some(found) = scan_node_modules(&nm, runtime, &target_dir_suffix) {
+                return Some(found);
+            }
+        }
+        let nm2 = cursor.join("node_modules");
+        if nm2.exists() {
+            if let Some(found) = scan_node_modules(&nm2, runtime, &target_dir_suffix) {
+                return Some(found);
+            }
+        }
+        cursor = cursor.parent()?.to_path_buf();
+    }
+    None
+}
+
+fn scan_node_modules(nm: &std::path::Path, runtime: &str, target_suffix: &str) -> Option<PathBuf> {
+    let top = std::fs::read_dir(nm).ok()?;
+    for entry in top.flatten() {
+        let p = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !p.is_dir() {
+            continue;
+        }
+        if name.starts_with('@') {
+            let inner = match std::fs::read_dir(&p) {
+                Ok(it) => it,
+                Err(_) => continue,
+            };
+            for sub in inner.flatten() {
+                let subp = sub.path();
+                let subname = sub.file_name().to_string_lossy().to_string();
+                if !subp.is_dir() {
+                    continue;
+                }
+                if subname.ends_with(target_suffix) {
+                    if let Some(found) = walk_for_macho(&subp, runtime, 4) {
+                        return Some(found);
+                    }
+                }
+                let nested = subp.join("node_modules");
+                if nested.exists() {
+                    if let Some(found) = scan_node_modules(&nested, runtime, target_suffix) {
+                        return Some(found);
+                    }
+                }
+            }
+        } else if name.ends_with(target_suffix) {
+            if let Some(found) = walk_for_macho(&p, runtime, 4) {
+                return Some(found);
+            }
+        } else if p.is_dir() {
+            let nested = p.join("node_modules");
+            if nested.exists() {
+                if let Some(found) = scan_node_modules(&nested, runtime, target_suffix) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn walk_for_macho(root: &std::path::Path, runtime: &str, depth_budget: usize) -> Option<PathBuf> {
+    if depth_budget == 0 {
+        return None;
+    }
+    let direct = root.join(runtime);
+    if direct.is_file() && is_macho(&direct) {
+        return Some(direct);
+    }
+    let it = std::fs::read_dir(root).ok()?;
+    for entry in it.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = walk_for_macho(&p, runtime, depth_budget - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn is_macho(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 4];
+    if f.read(&mut buf).unwrap_or(0) < 4 {
+        return false;
+    }
+    matches!(
+        buf,
+        [0xfe, 0xed, 0xfa, 0xce]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+    )
 }
 
 fn read_quarantine_xattr(path: &PathBuf) -> Option<String> {

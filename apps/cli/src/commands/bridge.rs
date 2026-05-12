@@ -180,14 +180,22 @@ pub fn run_loop(
             }
         };
 
-        // Termination keyword check. Require `[CONSENSUS]` on a line
-        // by itself so a runtime quoting the rules of the cue ("reply
-        // [CONSENSUS] if you agree") doesn't trigger a false positive.
-        // The cue explicitly asks for the standalone form.
+        // Termination keyword check. Accept either:
+        //   - `[CONSENSUS]` on a line by itself (the original v1 form,
+        //     what the bridge cue asks the model to emit), or
+        //   - `<consensus/>` anywhere in the text (v2.3.44 — a
+        //     structured tag harder for the model to emit accidentally
+        //     while quoting the cue, and easier to compose with prose
+        //     summaries on the same line).
+        // We still require the standalone-line form for `[CONSENSUS]`
+        // to avoid the earlier false-positive case where a model
+        // quoted "reply [CONSENSUS] if you agree" while still
+        // disagreeing.
         let consensus_reached = last
             .text
             .lines()
-            .any(|l| l.trim() == "[CONSENSUS]");
+            .any(|l| l.trim() == "[CONSENSUS]")
+            || last.text.contains("<consensus/>");
         if consensus_reached {
             if opts.human {
                 emit_human(&format!(
@@ -199,10 +207,44 @@ pub fn run_loop(
         }
 
         let mentions = parse_mentions(&last.text);
-        let target_slug = mentions
+        // v2.3.44 Slice B polish — multi-mention round-robin. When a
+        // turn names several runtimes (e.g. "@minimax @gemini please
+        // both review"), prefer the one that hasn't yet contributed
+        // an assistant turn to this session. That way a single
+        // bridge run can cycle through every tagged collaborator
+        // before re-bridging to one who already replied. Falls back
+        // to "first resolvable, self-excluded" when every mention
+        // has already been heard from.
+        let prior_runtimes: std::collections::HashSet<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT runtime FROM session_turns
+                  WHERE session_id = ?1 AND role = 'assistant'",
+            )?;
+            let rows = stmt
+                .query_map([primary_session_id], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect::<std::collections::HashSet<String>>();
+            rows
+        };
+        let mentions_filtered: Vec<&String> = mentions
             .iter()
             .filter(|m| *m != &last.runtime) // self-reference guard
-            .find_map(|m| resolve_target(&conn, m));
+            .collect();
+        let target_slug = mentions_filtered
+            .iter()
+            .find_map(|m| {
+                let resolved = resolve_target(&conn, m)?;
+                if !prior_runtimes.contains(&resolved) {
+                    Some(resolved)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                mentions_filtered
+                    .iter()
+                    .find_map(|m| resolve_target(&conn, m))
+            });
 
         let Some(target_slug) = target_slug else {
             if opts.human {
@@ -238,8 +280,9 @@ pub fn run_loop(
 
         let bridge_cue = format!(
             "You were tagged by @{} in the previous turn of this conversation. \
-             Continue the conversation. Reply [CONSENSUS] on a line by itself \
-             when you agree with the resolution and have nothing to add.",
+             Continue the conversation. When you agree with the resolution and \
+             have nothing to add, emit either `[CONSENSUS]` on a line by itself \
+             or `<consensus/>` inline — the bridge loop checks for both.",
             last.runtime
         );
 
@@ -328,11 +371,17 @@ mod tests {
     #[test]
     fn consensus_must_be_on_own_line() {
         // Documents the termination contract used by run_loop: the
-        // keyword has to stand alone on a line. Quoting the cue
-        // ("reply [CONSENSUS] if you agree") must NOT terminate.
+        // bracketed form has to stand alone on a line, the structured
+        // tag form can appear anywhere.
         let standalone = "i agree with the resolution\n[CONSENSUS]";
         let quoted = "Reply [CONSENSUS] if you agree.";
+        let structured_inline = "agreed, ship it <consensus/> — no other concerns";
         assert!(standalone.lines().any(|l| l.trim() == "[CONSENSUS]"));
         assert!(!quoted.lines().any(|l| l.trim() == "[CONSENSUS]"));
+        // v2.3.44 — the structured tag form is detected by .contains()
+        // anywhere in the text; quoting it in a code block won't
+        // trigger because parse_mentions strips fences (and so does
+        // any future consensus parser that wants to be conservative).
+        assert!(structured_inline.contains("<consensus/>"));
     }
 }
