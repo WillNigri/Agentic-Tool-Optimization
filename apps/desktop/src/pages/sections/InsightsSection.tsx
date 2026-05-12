@@ -1,6 +1,6 @@
 import { lazy } from "react";
 import { useTranslation } from "react-i18next";
-import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign, Sparkles, ArrowLeftRight } from "lucide-react";
+import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign, Sparkles, ArrowLeftRight, Lock } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
 const AgentObservability = lazy(() => import("@/components/AgentObservability/Dashboard"));
@@ -16,6 +16,8 @@ const HealthDashboard = lazy(() =>
 const UsageAnalytics = lazy(() => import("@/components/UsageAnalytics"));
 const ContextVisualizer = lazy(() => import("@/components/ContextVisualizer"));
 const AuditLog = lazy(() => import("@/components/AuditLog/AuditLog"));
+// v2.3.45 — Phase 6.x-K eval-score ratchet visualization.
+const RatchetPanel = lazy(() => import("@/components/RatchetPanel"));
 
 export default function InsightsSection() {
   const { t } = useTranslation();
@@ -72,6 +74,17 @@ export default function InsightsSection() {
       label: t("subnav.insightsRegressions", "Regressions"),
       icon: GitCommit,
       Component: RegressionsPanel,
+    },
+    {
+      // v2.3.45 Phase 6.x-K — eval-score ratchet visualization.
+      // Locked floors per target + breach history from the events bus.
+      // Complements Regressions: ratchet = explicit floor I locked;
+      // Regressions = "you didn't lock anything but quality dropped
+      // after a config change anyway."
+      id: "ratchet",
+      label: t("subnav.insightsRatchet", "Ratchet"),
+      icon: Lock,
+      Component: RatchetPanel,
     },
     {
       // v2.1.0 Phase 8 — Usage benchmarks. Always-shown calls + p50 +

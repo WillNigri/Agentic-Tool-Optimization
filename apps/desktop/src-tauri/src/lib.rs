@@ -4,6 +4,7 @@ mod health_poller;
 mod telemetry;
 mod file_attribution;
 mod active_runs;
+mod ratchet_view;
 mod runtime_health;
 mod sessions_view;
 pub mod pty;
@@ -1336,6 +1337,9 @@ pub fn run() {
             sessions_view::create_session,
             sessions_view::dispatch_into_session,
             sessions_view::bridge_session,
+            // v2.3.45 — ratchet view (Phase 6.x-K surface in the GUI)
+            ratchet_view::list_ratchets,
+            ratchet_view::list_ratchet_breaches,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,
