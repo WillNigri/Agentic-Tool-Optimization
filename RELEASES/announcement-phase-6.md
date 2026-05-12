@@ -1,6 +1,13 @@
 # Phase 6 announcement drafts
 
-Three drafts for three channels. Pick the one that fits the audience.
+Two drafts for two channels. The earlier @iamknownasfesal reply has already been posted.
+
+**Demo GIFs** in this directory:
+
+- [`demo.gif`](demo.gif) — single-runtime streaming dispatch with chunks rendering live. ~15s, 217K. Best for the X thread's first post (shows ATO's "alive" feel without needing the viewer to understand the bridge yet).
+- [`demo-bridge.gif`](demo-bridge.gif) — cross-runtime bridge: a seeded claude turn @-mentions minimax, `ato bridge` fires, MiniMax replies with `[CONSENSUS]`, loop exits. ~15s, 84K. The headline visual for the HN post.
+
+Render either with `vhs RELEASES/demo.tape` / `vhs RELEASES/demo-bridge.tape`. The bridge demo needs `bash RELEASES/demo-bridge-seed.sh` run once first to pre-create the session.
 
 ---
 
@@ -36,25 +43,9 @@ MIT. github.com/WillNigri/Agentic-Tool-Optimization
 
 ---
 
-## Draft 2 — Reply to @iamknownasfesal
+## Draft 2 — HN / blog post
 
-Hey — circling back on this. ATO v2.3.32+ ships an answer:
-
-```
-ato runtimes add-remote --name claude-server \
-    --host you@your-server --runtime claude
-ato dispatch claude-server "<prompt>"
-```
-
-The dispatch routes over SSH, response lands in your local execution_logs / Live tab next to your laptop Claude. Same audit surface, no more copy-paste between machines. Sessions and the cross-runtime bridge work transparently with the remote slug.
-
-One-way today (laptop initiates). Full bi-directional mesh (server agent initiates back to laptop) is on the roadmap as Phase 7 — bigger lift because of the pairing / NAT-traversal / wire-protocol story. The one-way version handles the most common case; reverse direction is a deliberate next-scoping decision when there's user pull.
-
-Repo: github.com/WillNigri/Agentic-Tool-Optimization
-
----
-
-## Draft 3 — HN / blog post
+*Inline the [`demo-bridge.gif`](demo-bridge.gif) right after the lede paragraph below — the cross-runtime conversation visual is the headline.*
 
 ### Phase 6: AI agents that talk to each other (and a quality ratchet for when they don't)
 
