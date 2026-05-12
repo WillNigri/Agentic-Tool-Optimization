@@ -5,6 +5,7 @@ mod telemetry;
 mod file_attribution;
 mod active_runs;
 mod runtime_health;
+mod sessions_view;
 pub mod pty;
 pub mod local_insights;
 pub mod events;
@@ -1328,6 +1329,9 @@ pub fn run() {
             // v2.3.36 Phase 6.x-I.2 — runtime-binary health
             runtime_health::runtime_health_check,
             runtime_health::runtime_health_run_fix,
+            // v2.3.42 — sessions view (Phase 6 surface in the GUI)
+            sessions_view::list_sessions_full,
+            sessions_view::get_session_transcript,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,

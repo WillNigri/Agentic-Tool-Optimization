@@ -7,6 +7,7 @@ import {
   Workflow,
   Webhook,
   MessagesSquare,
+  MessageSquare,
 } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
@@ -22,6 +23,8 @@ const HooksManager = lazy(() => import("@/components/HooksManager"));
 // "what's happening between humans and agents" surface, adjacent to
 // the existing Live + Automations tabs.
 const ActivityFeed = lazy(() => import("@/components/ActivityFeed"));
+// v2.3.42 — Sessions tab surfaces Phase 6 Slice A/A.2/B conversations.
+const SessionsList = lazy(() => import("@/components/SessionsList"));
 
 export default function RunsSection() {
   const { t } = useTranslation();
@@ -37,6 +40,12 @@ export default function RunsSection() {
       label: t("subnav.runsHistory", "History"),
       icon: ScrollText,
       Component: LogViewer,
+    },
+    {
+      id: "sessions",
+      label: t("subnav.runsSessions", "Sessions"),
+      icon: MessageSquare,
+      Component: SessionsList,
     },
     {
       id: "feed",
