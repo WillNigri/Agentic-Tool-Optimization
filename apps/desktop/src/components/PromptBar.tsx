@@ -132,7 +132,7 @@ export default function PromptBar() {
   // hardcoded RUNTIME_OPTIONS in dev/web (no Tauri) builds.
   const [availableRuntimes, setAvailableRuntimes] = useState<AvailableRuntimeRow[] | null>(null);
   useEffect(() => {
-    if (!IS_TAURI) return;
+    if (!isTauri) return;
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -513,7 +513,7 @@ export default function PromptBar() {
           ? availableRuntimes.filter((r) => r.kind === "api").map((r) => r.slug)
           : ["minimax", "grok", "deepseek", "qwen", "openrouter"];
         if (apiSlugs.includes(runtime)) {
-          if (!IS_TAURI) {
+          if (!isTauri) {
             response = simulateMock(prompt);
           } else {
             const { invoke } = await import("@tauri-apps/api/core");
