@@ -23,15 +23,20 @@ interface RuntimeHealthRow {
   fix_command: string | null;
 }
 
-// Statuses that justify a banner. `missing` is intentionally excluded
-// — Home already has a "no runtime detected" prompt for first-run,
-// and we don't want to nag for runtimes the user never installed.
-const BROKEN_STATUSES = new Set(["revoked", "quarantined", "unsigned", "unknown"]);
+// Statuses that justify a banner. Intentionally excluded:
+//   - `missing` — Home already has a "no runtime detected" prompt
+//     for first-run; we don't want to nag for runtimes the user
+//     never installed.
+//   - `unsigned` — most npm-installed CLI shims (claude, openclaw,
+//     codex JS wrapper) aren't signed and macOS Gatekeeper doesn't
+//     block exec on those. Surfacing them here just creates noise.
+//     The CLI's `ato runtimes health` still reports them for
+//     diagnostic completeness.
+const BROKEN_STATUSES = new Set(["revoked", "quarantined", "unknown"]);
 
 const STATUS_LABEL: Record<string, string> = {
   revoked: "Developer cert revoked",
   quarantined: "Quarantined by Gatekeeper",
-  unsigned: "Not signed",
   unknown: "Verification failed",
 };
 
