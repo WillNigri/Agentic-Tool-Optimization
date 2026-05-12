@@ -12,6 +12,8 @@ import { registerAgentTools } from "./tools/agents.js";
 import { registerObservationTools } from "./tools/observation.js";
 import { registerOperationsTools } from "./tools/operations.js";
 import { registerAuthoringTools } from "./tools/authoring.js";
+import { registerSessionTools } from "./tools/sessions.js";
+import { registerPostsTools } from "./tools/posts.js";
 
 const server = new McpServer({
   name: "ato",
@@ -32,6 +34,11 @@ registerAgentTools(server); // v1.3.0+ — agents-as-MCPs (cross-runtime dispatc
 registerObservationTools(server);
 registerOperationsTools(server);
 registerAuthoringTools(server);
+// v2.3.35 — sessions / cross-runtime bridge / activity feed surface.
+// Closes the gap between CLI-exposed Phase 6 features and what
+// MCP-only agent harnesses can call.
+registerSessionTools(server);
+registerPostsTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

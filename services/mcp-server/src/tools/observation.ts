@@ -146,4 +146,19 @@ export function registerObservationTools(server: McpServer) {
       return toolText(await runAtoCli(["replays", "for-trace", trace_id]));
     },
   );
+
+  server.tool(
+    "list_recent_events",
+    "List recent events from the events_log bus (dispatch_failed, regression_detected, replay_done, etc.). Read-only. Use to spot patterns over the last N events without needing a live --watch tail.",
+    {
+      limit: z.number().optional().describe("Max rows (default 20)"),
+      event_type: z.string().optional().describe("Filter by event type (e.g. 'regression_detected', 'dispatch_failed')"),
+    },
+    async ({ limit, event_type }) => {
+      const args = ["events", "recent"];
+      if (limit) args.push("--limit", String(limit));
+      if (event_type) args.push("--type", event_type);
+      return toolText(await runAtoCli(args));
+    },
+  );
 }

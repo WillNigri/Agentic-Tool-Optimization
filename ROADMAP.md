@@ -247,7 +247,7 @@ Patch on `2.0.0`. All fixes for things broken-as-shipped, plus two Phase 5 bulle
 Load-bearing pieces:
 
 - **`ato` CLI binary** — separate from `ato-desktop`; pure Rust; talks to the local SQLite DB directly. Subcommand structure: `dispatches`, `runs`, `regressions`, `cost`, `replay`, `compare`, `skills`, `agents`, `recipes`, `events`. JSON output by default, `--human` flag for readable formatting. Documented in `AGENTS.md` at the repo root.
-- **Expanded MCP server** — grow from 8 tools to ~25 covering Observation / Operations / Authoring / Events categories. Stdio transport stays.
+- **Expanded MCP server** — *target hit, v2.3.35: 50 tools across Observation / Operations / Authoring / Sessions / Posts / Runtimes / Events.* Stdio transport stays. Each new tool shells out to the `ato` CLI rather than re-implementing SQLite queries in TS.
 - **`AGENTS.md` doc** *(shipped 2026-05-11)* — canonical agent-facing manual covering CLI commands, MCP tools, file paths, event subscriptions, common recipes, safety notes. The doc a coding agent reads to learn ATO.
 - **Local-mode for regressions and cost recs** — currently cloud-side endpoints; ports the algorithms to run over local `execution_logs` + `agent_config_changes`. Same algorithm, no sign-in required. Cloud version stays for cross-device aggregation.
 - **Ops recipes (programmable trigger→action workflows)** — extends the Automations canvas with event-trigger node types (`on regression`, `on dispatch_failed`, `on cost_threshold`, `on replay_done`, `on schedule`) and ops-action node types (`draft skill`, `replay on alt runtime`, `kill run`, `post to webhook`, `notify human in activity feed`). Skillify ships as one example recipe template, not a hardcoded feature.

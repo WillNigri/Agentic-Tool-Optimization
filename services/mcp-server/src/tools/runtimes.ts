@@ -7,8 +7,15 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { cache, CACHE_KEYS, CACHE_TTL } from "../cache.js";
 import { runtimePaths } from "../runtime-paths.js";
+import { runAtoCli } from "../ato-cli.js";
 
 const execFileAsync = promisify(execFile);
+
+function jsonToolResult(data: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -470,5 +477,73 @@ export function registerRuntimeTools(server: McpServer): void {
         };
       }
     }
+  );
+
+  // v2.3.35 Phase 6.x-I + 6.x-J — runtime health + remote runtimes.
+  // Delegated to the CLI rather than duplicating the codesign /
+  // remote_runtimes logic in TypeScript. Keeps the agent surface and
+  // the human CLI surface guaranteed in sync.
+
+  server.tool(
+    "runtime_health",
+    "Phase 6.x-I — check whether each detected runtime binary is signed / non-quarantined / non-revoked on macOS. Returns one row per runtime with status (ok / missing / revoked / quarantined / unsigned / unknown), detail, and a canned fix_command for the resolvable cases (revoked → npm reinstall; quarantined → xattr -d). Read-only; safe to call any time.",
+    {},
+    async () => jsonToolResult(await runAtoCli(["runtimes", "health"])),
+  );
+
+  server.tool(
+    "add_remote_runtime",
+    "Phase 6.x-J — register an SSH remote that runs a runtime CLI. Once added, start_dispatch with the slug routes over SSH instead of spawning a local binary. Use to bridge a laptop ↔ server agent setup.",
+    {
+      name: z.string().describe("Local slug for this remote (e.g. 'claude-server'). Used as the runtime arg to start_dispatch."),
+      host: z.string().describe("SSH host (bare host, or user@host)"),
+      runtime: z.string().describe("Base runtime running on the remote: claude / codex / gemini / hermes / openclaw"),
+      port: z.number().optional().describe("SSH port (default 22)"),
+      user: z.string().optional().describe("SSH user (required unless host already includes user@)"),
+      key_path: z.string().optional().describe("Path to SSH private key; otherwise ssh-agent / default keys are used"),
+      binary_path: z.string().optional().describe("Path to the runtime binary on the remote (default: same as `runtime`)"),
+      extra_args: z.string().optional().describe("Extra args appended verbatim to every dispatch (e.g. '--no-update-check')"),
+    },
+    async (a) => {
+      const args = [
+        "runtimes",
+        "add-remote",
+        "--name",
+        a.name,
+        "--host",
+        a.host,
+        "--runtime",
+        a.runtime,
+      ];
+      if (a.port !== undefined) args.push("--port", String(a.port));
+      if (a.user) args.push("--user", a.user);
+      if (a.key_path) args.push("--key-path", a.key_path);
+      if (a.binary_path) args.push("--binary-path", a.binary_path);
+      if (a.extra_args) args.push("--extra-args", a.extra_args);
+      return jsonToolResult(await runAtoCli(args));
+    },
+  );
+
+  server.tool(
+    "list_remote_runtimes",
+    "List registered SSH remote runtimes (Phase 6.x-J).",
+    {},
+    async () => jsonToolResult(await runAtoCli(["runtimes", "list-remote"])),
+  );
+
+  server.tool(
+    "remove_remote_runtime",
+    "Remove a registered SSH remote runtime by slug.",
+    {
+      name: z.string().describe("Local slug from list_remote_runtimes"),
+    },
+    async ({ name }) => jsonToolResult(await runAtoCli(["runtimes", "remove-remote", "--name", name])),
+  );
+
+  server.tool(
+    "get_runtime_quotas",
+    "List captured runtime quota / rate-limit windows. ATO parses 'try again at <ts>' out of dispatch errors and caches the ts here; start_dispatch's pre-flight reads it to short-circuit before burning another quota probe.",
+    {},
+    async () => jsonToolResult(await runAtoCli(["runtimes", "status"])),
   );
 }
