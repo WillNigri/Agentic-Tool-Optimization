@@ -26,6 +26,8 @@ ato dispatch claude "Review this. @minimax weigh in." \
 
 The bridge loops until `[CONSENSUS]` / `<consensus/>` lands on its own line, or the round cap hits.
 
+[attach demo-bridge.gif]
+
 **2/**
 Pair it with the eval-score ratchet: lock a quality floor, fail CI when recent runs drop below it.
 
@@ -43,62 +45,34 @@ MIT. github.com/WillNigri/Agentic-Tool-Optimization
 
 ---
 
-## Draft 2 — HN / blog post
+## Draft 2 — HN follow-up post
 
-*Inline the [`demo-bridge.gif`](demo-bridge.gif) right after the lede paragraph below — the cross-runtime conversation visual is the headline.*
+*Title*: `Show HN: ATO – cross-runtime AI agent conversations + a CI gate for agent quality`
 
-### Phase 6: AI agents that talk to each other (and a quality ratchet for when they don't)
+*Inline the [`demo-bridge.gif`](demo-bridge.gif) right after the third paragraph.*
 
-ATO is a local-first developer-workflow ops platform for multi-runtime AI agents. The Phase 6 cluster, shipped over the last two weeks, closes a real loop: agents on different runtimes can hold a single conversation, hand work to each other by @-mention, and the quality of each runtime's contribution gets locked as a CI gate.
+Hey HN,
 
-If you've used Claude Code + Codex + Gemini and wanted to ask "which of these would be better at this task," ATO is one answer. The pitch isn't "pick the right model" — it's "let them figure it out among themselves, with you in the loop."
+I posted ATO 54 days ago as a GUI for seeing what your LLM agents actually wrote to disk. Since then we've shipped Phase 6: AI agents on different runtimes can hold a single conversation through ATO, and you can lock each runtime's quality as a CI gate.
 
-#### What's new
+The problem: when you run Claude Code + Codex + Gemini side-by-side, you can't easily get them to talk to each other. You copy responses between terminals. The agents don't see each other's work. And there's no way to know if a recent config change quietly dropped your agent's success rate by 17pp until something breaks.
 
-**Cross-runtime conversations** (Slice A → B). One sticky session, multiple runtimes contributing turns. When Claude writes `@minimax please weigh in` at the end of its response, `--tag-bridge` parses the mention, history-replays the session into MiniMax, captures MiniMax's reply as the next turn, and so on until someone emits `[CONSENSUS]` on its own line (or `<consensus/>` inline). A structural backstop fires if the same runtime produces 3 consecutive turns — that posts an `approval_request` to the activity feed instead of looping forever. Multi-mention round-robin prefers runtimes that haven't yet replied so "@claude @gemini both please review" gets both opinions before re-bridging.
+What Phase 6 adds:
 
-**Eval-score ratchet for CI**. Garry Tan's [*AI Agent Complexity Ratchet*](https://garrytan.com/) post (May 2026) argues that AI coding agents make 90% test coverage free — they don't experience effort writing the fourteenth edge-case test. We applied that framing one layer up: agent runs → status / eval scored → lock the floor → next run can't regress. `ato ratchet check` exits non-zero in CI when the recent window's success rate drops below floor minus tolerance. Drop it in pre-deploy; a regression that drops your agent's success rate by >5pp fails the pipeline the same way a unit test would. Cloud `eval_score` can layer onto the same table when local evaluator hooks land — the schema's `metric` discriminator is already there.
+- *Cross-runtime sessions*: one `ato sessions new`, multiple runtimes contributing turns. History replay for runtimes that don't share state on their end (MiniMax, Grok, DeepSeek, Qwen, OpenRouter) → native `--resume` where they do (Claude Code).
+- *@-mention bridge*: when Claude's reply contains `@minimax please weigh in`, `ato dispatch ... --tag-bridge` parses the tag, dispatches into MiniMax, threads the reply back into the same session. Loops until `[CONSENSUS]` / `<consensus/>`, a round cap, or no further mention. Heuristic backstop on 3 consecutive turns from one runtime escalates to the activity feed for human review.
+- *Eval-score ratchet*: `ato ratchet lock --target runtime:claude --days 30` computes the rolling success rate and persists it as a floor. `ato ratchet check` exits non-zero in CI when the recent 7-day window drops below floor − tolerance. Inspired by @garrytan's "AI agent complexity ratchet" post.
+- *SSH-backed remote runtimes*: someone on X asked how to get their laptop Claude to talk to their server Claude. `ato runtimes add-remote --host you@server --runtime claude` registers a remote slug; `ato dispatch claude-server "..."` routes over SSH. Same audit / sessions / bridge surface. One-way; the reverse direction (server → laptop) is roadmap when there's user pull.
+- *Runtime health check*: detects revoked Developer ID certs (CSSMERR_TP_CERT_REVOKED) on macOS before they crash you with a generic malware dialog. JS-shim aware — descends into `node_modules/<pkg>-darwin-<arch>/` to verify the bundled Mach-O on npm-installed runtimes like codex.
+- *SSE streaming for API providers*: closes the 7–15s buffered wait on MiniMax / Grok / DeepSeek / Qwen / OpenRouter. CLI flag `--stream`; GUI Sessions transcript renders chunks live.
+- *MCP server*: 8 → 52 tools. Sessions / bridge / ratchet / posts / health all callable from MCP-only harnesses. Includes a stdio smoke test (`npm run qa:stdio`).
 
-**SSH-backed remote runtimes** answers a question [@iamknownasfesal](https://x.com/iamknownasfesal) asked on X last week: "how can I make my Claude agent on my computer talk to the one on my server? atm just copying responses into each other lol." `ato runtimes add-remote --host you@server --runtime claude` registers a remote endpoint with a local slug; `ato dispatch claude-server "..."` then routes over SSH with `BatchMode=yes ConnectTimeout=15`. The remote ATO doesn't need to run; it's just executing the binary on the laptop's behalf. Sessions and bridge work transparently with the remote slug. Full bi-directional daemon mesh (server-initiated calls back to laptop) is roadmap as Phase 7+ — pairing / NAT-traversal / wire-protocol is a multi-week story we'll scope when there's user pull for the reverse direction.
+The repo also ships a Claude Code skill at `.claude/skills/ato-review/SKILL.md` that instructs Claude to dispatch every non-trivial diff to a reviewer runtime via `ato dispatch` before committing — apply findings or defer with a recorded justification in the commit body. The skill itself was reviewed this way before shipping; the review caught a Python f-string quoting bug in the session-reuse path. Two layers of dogfood.
 
-**Runtime health + the JS-shim sidecar walk** caught a real production class of bug: when Apple revoked OpenAI's Developer ID cert, codex stopped working, and macOS's response was a generic malware dialog with no actionable signal. v2.3.34 added `ato runtimes health` running `codesign --verify` + reading `com.apple.quarantine` xattrs. v2.3.36 added the GUI banner with a one-click "Run fix" button that executes the canned fix command through an IPC allowlist (no `sh -c` of untrusted input). v2.3.44 added the JS-shim sidecar walk because npm-installed runtimes are `#!/usr/bin/env node` scripts — the codesign check on the shim itself doesn't catch a revoked cert on the bundled Mach-O. The walker descends into `node_modules/<vendor>/<pkg>-darwin-<arch>/` (including the nested `vendor/<triple>/<runtime>/<runtime>` layout codex uses) and verifies the actual binary.
+What's out of scope: ATO is still a dev-workflow ops layer, not a production agent SDK — Langfuse / Helicone cover the prod sidecar story. The `[CONSENSUS]` termination depends on the model phrasing the cue the way the bridge prompt asks; tested across several internal sessions but isn't a deterministic regression test until a mock-LLM fixture lands.
 
-**SSE streaming for API providers** closes the 7–15s "wait silently for MiniMax to finish" UX gap. Plumbed through to the GUI Sessions transcript so chunks render live as the model generates them. CLI gains `--stream` (raw to stdout) and `--stream-jsonl` (line-delimited JSON events for desktop / wrapper consumption).
+All data is local: `~/.ato/local.db` (SQLite). MIT, installers for macOS (Apple Silicon + Intel), Windows, Linux.
 
-**MCP server** grew from 8 to 52 tools covering Observation / Operations / Authoring / Sessions / Posts / Runtimes / Events / Ratchet. Each new tool wraps the canonical CLI implementation, so the same algorithm runs on both surfaces and a schema migration only needs testing in one place. v2.3.51 ships `npm run qa:stdio` — a smoke test driving the server over real JSON-RPC stdio.
+https://github.com/WillNigri/Agentic-Tool-Optimization
 
-#### The meta-flex: `ato-review`
-
-`.claude/skills/ato-review/SKILL.md` ships in the repo. When a Claude Code session opens this codebase (or any repo with the skill installed), the skill instructs Claude to dispatch every non-trivial diff to a reviewer runtime via `ato dispatch <reviewer> --session review/<branch>` before committing. Findings get applied or deferred with a one-line justification, and the audit trail lands in the commit body. Tan's complexity ratchet applied to the review step rather than test coverage.
-
-The skill itself was MiniMax-reviewed before shipping. That review caught a Python f-string quoting bug in the session-reuse path that would have caused a SyntaxError on every commit — the review primitive caught a real bug in the review primitive.
-
-#### What's not in scope
-
-ATO is positioned as the developer workflow / ops layer, not a production agent SDK. Langfuse, Helicone, and the existing observability vendors cover the production sidecar story. ATO sits next to them.
-
-The Phase 7 daemon mesh — bi-directional discovery + wire-protocol calls between ATO daemons on different machines — is intentionally blue-sky until a real user asks for the reverse direction. The SSH adapter handles the most common laptop → server case; the mesh is a multi-week security / pairing / NAT story that shouldn't autopilot.
-
-Slice B's `[CONSENSUS]` termination depends on the model phrasing agreement the way the bridge cue asks. Tested across several internal cross-runtime sessions on this build; the mock-LLM regression fixture that would make this a real guarantee is targeted for v2.4 and tracked in QA.md §5.
-
-#### Try it
-
-```
-npm install -g @ato/desktop
-ato setup-path
-
-# Cross-runtime conversation in one command
-SID=$(ato sessions new --runtime claude --title demo | jq -r .id)
-ato dispatch claude "Review X. @minimax weigh in." --session $SID --tag-bridge
-
-# Quality ratchet for CI
-ato ratchet lock --target runtime:claude --days 30
-ato ratchet check  # add to your pre-deploy step
-
-# Remote runtimes over SSH
-ato runtimes add-remote --name claude-server --host you@server --runtime claude
-```
-
-Full release notes: [RELEASES/v2.3.x-phase-6.md](RELEASES/v2.3.x-phase-6.md). MIT, local-first, no cloud sign-in required for any of the above.
-
-[github.com/WillNigri/Agentic-Tool-Optimization](https://github.com/WillNigri/Agentic-Tool-Optimization)
+Happy to go deep on any part — the bridge implementation, the ratchet design choices, or why the bi-directional daemon mesh is out of v1.
