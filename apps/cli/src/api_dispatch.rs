@@ -25,6 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use rusqlite::Connection;
 use serde::Serialize;
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 // v2.3.28 Phase 6.x-E — ApiProvider + registry live in the shared
@@ -179,6 +180,215 @@ pub fn dispatch_with_history(
     let payload: serde_json::Value =
         serde_json::from_str(&body_text).context("response was not valid JSON")?;
     parse_response(provider, payload, model, duration_ms)
+}
+
+/// v2.3.47 Phase 6.x-F — streaming dispatch.
+///
+/// Sets `stream: true` on the request and parses the SSE stream
+/// chunk-by-chunk. Each chunk's `choices[0].delta.content` (when
+/// present) is forwarded to `on_chunk` so the caller can print
+/// tokens to stdout as they arrive. The full assembled response
+/// is returned at the end so persistence shape (execution_logs row,
+/// session_turns append, events) stays identical to the non-
+/// streaming path — no separate code path for the audit log.
+///
+/// Provider compatibility:
+/// - OpenAI shape (Grok, DeepSeek, Qwen, OpenRouter) — works natively.
+/// - MiniMax (`flavor = "minimax"`) — also supports `stream=true`
+///   with the same `choices[0].delta` shape. We still check
+///   `base_resp.status_code` on the final non-streaming-style chunk
+///   when MiniMax includes it.
+pub fn dispatch_with_history_streaming<F>(
+    provider: &ApiProvider,
+    history: &[Message],
+    prompt: &str,
+    model_override: Option<&str>,
+    conn: &Connection,
+    mut on_chunk: F,
+) -> Result<ApiDispatchOutcome>
+where
+    F: FnMut(&str),
+{
+    let key = resolve_api_key(provider, conn)?;
+    let model = match (model_override, provider.default_model) {
+        (Some(m), _) if !m.is_empty() => m.to_string(),
+        (None, "") => {
+            return Err(anyhow!(
+                "Provider '{}' has no default model — pass --model explicitly.",
+                provider.slug
+            ));
+        }
+        (_, default) => default.to_string(),
+    };
+
+    let url = format!("{}{}", provider.base_url, provider.path);
+    let client = reqwest::blocking::Client::builder()
+        // Longer timeout for streaming; the response stays open for
+        // the duration of generation, which can exceed the 120s cap
+        // used for buffered dispatches. 5 min is conservative.
+        .timeout(Duration::from_secs(300))
+        .build()
+        .context("build reqwest client")?;
+
+    let mut messages: Vec<serde_json::Value> = history
+        .iter()
+        .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+        .collect();
+    messages.push(serde_json::json!({"role": "user", "content": prompt}));
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": 4096,
+        "stream": true,
+    });
+
+    let start = std::time::Instant::now();
+    let resp = client
+        .post(&url)
+        .bearer_auth(&key)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .json(&body)
+        .send()
+        .with_context(|| format!("POST {} (streaming)", url))?;
+    let http_status = resp.status();
+
+    if !http_status.is_success() {
+        // Drain the body for the error message so the audit has the
+        // full reason, mirroring the buffered path's behavior.
+        let body_text = resp.text().unwrap_or_default();
+        let duration_ms = start.elapsed().as_millis() as i64;
+        return Ok(ApiDispatchOutcome {
+            response: None,
+            error_message: Some(format!(
+                "HTTP {}: {}",
+                http_status.as_u16(),
+                truncate_for_audit(&body_text, 1000)
+            )),
+            model_used: model,
+            duration_ms,
+            tokens_in: None,
+            tokens_out: None,
+        });
+    }
+
+    // Read SSE chunks line-by-line. Reqwest's blocking Response
+    // implements io::Read so BufReader::lines() works directly. Each
+    // SSE event is a `data: <payload>` line followed by a blank line.
+    let reader = BufReader::new(resp);
+    let mut full_response = String::new();
+    let mut last_usage: Option<serde_json::Value> = None;
+    let mut minimax_status: Option<i64> = None;
+    let mut stream_error: Option<String> = None;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                stream_error = Some(format!("read SSE stream: {}", e));
+                break;
+            }
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let data = match line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+            Some(d) => d.trim(),
+            None => continue, // ignore event:/id:/retry: lines
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let payload: serde_json::Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => continue, // skip malformed chunks rather than abort
+        };
+
+        // MiniMax: every chunk carries `base_resp`. status 0 means
+        // ok; non-zero means an in-stream failure we should surface.
+        if provider.flavor == "minimax" {
+            if let Some(code) = payload["base_resp"]["status_code"].as_i64() {
+                if code != 0 {
+                    minimax_status = Some(code);
+                    let msg = payload["base_resp"]["status_msg"]
+                        .as_str()
+                        .unwrap_or("(no status_msg)")
+                        .to_string();
+                    stream_error =
+                        Some(format!("MiniMax base_resp.status_code={}: {}", code, msg));
+                    break;
+                }
+            }
+        }
+
+        // Standard OpenAI shape: choices[0].delta.content per chunk.
+        if let Some(delta) =
+            payload["choices"][0]["delta"]["content"].as_str().filter(|s| !s.is_empty())
+        {
+            full_response.push_str(delta);
+            on_chunk(delta);
+        }
+        // Usage normally only appears on the final chunk.
+        if payload["usage"].is_object() {
+            last_usage = Some(payload["usage"].clone());
+        }
+    }
+
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    if let Some(err) = stream_error {
+        return Ok(ApiDispatchOutcome {
+            response: None,
+            error_message: Some(err),
+            model_used: model,
+            duration_ms,
+            tokens_in: None,
+            tokens_out: None,
+        });
+    }
+    if minimax_status.is_some() {
+        // Already handled above via stream_error; defensive guard for
+        // a future code path that might leave it Some without setting
+        // the error. Keep the audit trail intact.
+        return Ok(ApiDispatchOutcome {
+            response: None,
+            error_message: Some(format!(
+                "MiniMax base_resp.status_code={:?}",
+                minimax_status
+            )),
+            model_used: model,
+            duration_ms,
+            tokens_in: None,
+            tokens_out: None,
+        });
+    }
+    if full_response.is_empty() {
+        return Ok(ApiDispatchOutcome {
+            response: None,
+            error_message: Some("streaming completed without any content".into()),
+            model_used: model,
+            duration_ms,
+            tokens_in: None,
+            tokens_out: None,
+        });
+    }
+
+    let tokens_in = last_usage
+        .as_ref()
+        .and_then(|u| u["prompt_tokens"].as_i64());
+    let tokens_out = last_usage
+        .as_ref()
+        .and_then(|u| u["completion_tokens"].as_i64());
+
+    Ok(ApiDispatchOutcome {
+        response: Some(full_response),
+        error_message: None,
+        model_used: model,
+        duration_ms,
+        tokens_in,
+        tokens_out,
+    })
 }
 
 fn parse_response(

@@ -99,6 +99,12 @@ enum Commands {
         /// the loop bails (default 3).
         #[arg(long, default_value_t = 3)]
         max_rounds: u32,
+        /// v2.3.47 Phase 6.x-F — stream the response chunk-by-chunk
+        /// to stdout instead of buffering the whole reply. Currently
+        /// supported for API providers (MiniMax / Grok / DeepSeek /
+        /// Qwen / OpenRouter); ignored for CLI runtimes.
+        #[arg(long, default_value_t = false)]
+        stream: bool,
     },
     /// Replay an existing dispatch against a different runtime/model
     Replay {
@@ -673,6 +679,7 @@ fn main() -> Result<()> {
             session,
             tag_bridge,
             max_rounds,
+            stream,
         } => {
             if tag_bridge && session.is_none() {
                 anyhow::bail!(
@@ -688,6 +695,7 @@ fn main() -> Result<()> {
                 model,
                 agent,
                 session.clone(),
+                stream,
                 &db_path,
                 &opts,
             )?;

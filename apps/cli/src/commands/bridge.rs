@@ -358,6 +358,7 @@ pub fn run_loop(
             None, // model override is per-mention, future work
             None, // no agent label
             Some(primary_session_id.to_string()),
+            false, // bridge doesn't stream individual turns
             db_path,
             opts,
         ) {

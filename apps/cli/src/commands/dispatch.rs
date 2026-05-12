@@ -40,6 +40,7 @@ pub fn run(
     model: Option<String>,
     agent_slug_for_event: Option<String>,
     session_id: Option<String>,
+    stream: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -159,6 +160,7 @@ pub fn run(
             model,
             agent_slug_for_event,
             session,
+            stream,
             db_path,
             opts,
         );
@@ -509,6 +511,7 @@ fn run_api(
     model_override: Option<String>,
     agent_slug_for_event: Option<String>,
     session: Option<crate::commands::sessions::Session>,
+    stream: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -552,13 +555,52 @@ fn run_api(
             .collect(),
         None => Vec::new(),
     };
-    let outcome = crate::api_dispatch::dispatch_with_history(
-        provider,
-        &history,
-        prompt,
-        model_override.as_deref(),
-        &conn,
-    );
+    // v2.3.47 Phase 6.x-F — streaming. When --stream is set, write
+    // each chunk to stdout as it arrives and let the assembled full
+    // response flow through the same persistence path below.
+    // For --human, prefix with a marker so the user sees streaming
+    // started; for JSON we suppress stdout chunks entirely because
+    // the JSON envelope at the end is the contract.
+    let outcome = if stream {
+        if opts.human {
+            emit_human(&format!(
+                "[streaming from {} — chunks below]",
+                provider.slug
+            ));
+            emit_human("");
+        }
+        use std::io::Write;
+        crate::api_dispatch::dispatch_with_history_streaming(
+            provider,
+            &history,
+            prompt,
+            model_override.as_deref(),
+            &conn,
+            |chunk| {
+                if opts.human {
+                    // Write directly to stdout + flush so chunks
+                    // appear in real time rather than buffered to a
+                    // newline.
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(chunk.as_bytes());
+                    let _ = out.flush();
+                }
+            },
+        )
+    } else {
+        crate::api_dispatch::dispatch_with_history(
+            provider,
+            &history,
+            prompt,
+            model_override.as_deref(),
+            &conn,
+        )
+    };
+    if stream && opts.human {
+        // Final newline after the stream so the next emit_human
+        // doesn't run-on with the last chunk.
+        println!();
+    }
 
     let (status, response_persisted, error_persisted, duration_ms, model_used, tokens_in, tokens_out) =
         match outcome {

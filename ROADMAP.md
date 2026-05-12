@@ -358,6 +358,38 @@ during the v2.3.19 commit when codex hit its limit mid-review.
 ~50 LOC total. Worth shipping standalone or alongside Phase 6
 sessions.
 
+## Phase 6.x-F — API provider streaming (Shipped v2.3.47)
+
+Non-CLI providers (MiniMax, Grok, DeepSeek, Qwen, OpenRouter) were
+buffering 7–15s of output before showing anything. Streaming closes
+that UX gap by emitting SSE chunks to stdout as they arrive.
+
+### Surface
+
+- `ato dispatch <provider> "<prompt>" --stream` — sets `stream: true`
+  on the request, parses the SSE stream chunk-by-chunk, writes each
+  `choices[0].delta.content` to stdout (with flush) the moment it
+  lands. Tokens-in / tokens-out captured from the final `usage`
+  chunk and persisted into `execution_logs` exactly like a buffered
+  dispatch — no separate audit code path.
+- Bridge / MCP / replay paths use the buffered path; streaming is
+  opt-in via the user-facing flag only.
+- Provider compatibility: standard OpenAI-shape works natively
+  (Grok / DeepSeek / Qwen / OpenRouter). MiniMax also supports
+  `stream=true`; we check each chunk's `base_resp.status_code` and
+  surface in-stream failures (model-not-supported, etc.) the same
+  way the buffered path does.
+
+### What's NOT in v1
+
+- CLI runtimes (claude / codex / gemini / hermes / openclaw) ignore
+  `--stream`. They already stream to their own pipe; capturing that
+  for ATO's live tail is a deeper change (per-runtime stdout parser).
+- Tauri event emission for the desktop UI to render chunks live —
+  the chat pane currently waits for the full response. Adding
+  streaming to the GUI is a separate slice that wires the same
+  callback into Tauri events.
+
 ## Phase 6.x-K — Eval-score ratchet (Shipped v2.3.39)
 
 Inspired by Garry Tan's *AI Agent Complexity Ratchet* (May 2026):

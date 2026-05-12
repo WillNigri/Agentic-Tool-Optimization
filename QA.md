@@ -124,6 +124,14 @@ Build once before this section: `cargo build --manifest-path apps/cli/Cargo.toml
 - [ ] `ato regressions list --human` — runs without error.
 - [ ] `ato cost recommendations --human` — runs without error.
 
+### §1.9b API streaming (Phase 6.x-F)
+
+- [ ] `ato dispatch minimax "count to 10 one per line" --stream --human` — chunks land in stdout as they arrive, marked by a "[streaming from <provider> — chunks below]" header. Full response also appears in the final JSON envelope.
+- [ ] `ato dispatch minimax "..." --stream` (no `--human`) — outputs only the final JSON envelope; intermediate chunks suppressed so scripts get a single parseable object.
+- [ ] Tokens captured: `sqlite3 ~/.ato/local.db "SELECT tokens_in, tokens_out FROM execution_logs ORDER BY created_at DESC LIMIT 1"` — both non-NULL after a successful streamed dispatch.
+- [ ] CLI runtime ignores the flag: `ato dispatch claude "..." --stream` runs as a normal buffered dispatch (CLI streaming is a future slice).
+- [ ] Bridge loop doesn't stream individual turns even when triggered from a flag-aware command — internal calls pass stream=false.
+
 ### §1.10b Eval-score ratchet (Phase 6.x-K)
 
 - [ ] `ato ratchet lock --target runtime:claude --days 30 --human` — succeeds when there's recent data, persists a floor.
