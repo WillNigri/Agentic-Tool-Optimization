@@ -168,6 +168,14 @@ pub fn run_loop(
 ) -> Result<()> {
     let conn = crate::db::open_readonly(db_path)?;
     let mut round = 0u32;
+    // v2.3.46 — spinning detector state. Tracks the last assistant
+    // runtime we saw across rounds so we can flag "model A → model A
+    // → model A" loops where the conversation isn't actually moving.
+    // After 2+ rounds with the same runtime replying back-to-back,
+    // post an approval_request to the activity feed and bail. Human
+    // can re-trigger with `ato bridge` if they think it's salvageable.
+    let mut consecutive_same_runtime = 0u32;
+    let mut last_assistant_runtime: Option<String> = None;
 
     loop {
         let last = match last_assistant_turn(&conn, primary_session_id)? {
@@ -179,6 +187,59 @@ pub fn run_loop(
                 return Ok(());
             }
         };
+
+        // v2.3.46 — spinning detector. If the same runtime has now
+        // produced 3 assistant turns in a row inside this bridge run,
+        // the conversation isn't going anywhere — escalate to the
+        // human via the activity feed and bail.
+        match &last_assistant_runtime {
+            Some(prev) if *prev == last.runtime => {
+                consecutive_same_runtime += 1;
+            }
+            _ => {
+                consecutive_same_runtime = 1;
+            }
+        }
+        last_assistant_runtime = Some(last.runtime.clone());
+        // Threshold of 3 same-runtime turns picks up monologue patterns
+        // (model A keeps replying to itself's tags or to filtered self-
+        // mentions) without false-firing on a legitimate two-turn
+        // exchange where A and B alternate.
+        if consecutive_same_runtime >= 3 && round >= 1 {
+            if let Ok(rw_conn) = crate::db::open_readwrite(db_path) {
+                let post_id = uuid::Uuid::new_v4().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
+                let text = format!(
+                    "Bridge spinning on session {}: @{} produced the last {} assistant turns without consensus. Human review needed before continuing.",
+                    primary_session_id,
+                    last.runtime,
+                    consecutive_same_runtime,
+                );
+                let _ = rw_conn.execute(
+                    "INSERT INTO activity_posts (id, created_at, author_kind, author_slug, kind, text, related_event_seq, payload)
+                     VALUES (?1, ?2, 'system', 'bridge', 'approval_request', ?3, NULL, ?4)",
+                    rusqlite::params![
+                        post_id,
+                        now,
+                        text,
+                        serde_json::json!({
+                            "event_type": "bridge_spinning",
+                            "session_id": primary_session_id,
+                            "runtime": last.runtime,
+                            "consecutive_turns": consecutive_same_runtime,
+                            "round": round,
+                        }).to_string(),
+                    ],
+                );
+            }
+            if opts.human {
+                emit_human(&format!(
+                    "Bridge: ⚠  spinning detected — @{} produced {} turns in a row. Escalated to activity feed (approval_request) for human review. Stopping.",
+                    last.runtime, consecutive_same_runtime
+                ));
+            }
+            return Ok(());
+        }
 
         // Termination keyword check. Accept either:
         //   - `[CONSENSUS]` on a line by itself (the original v1 form,

@@ -85,6 +85,50 @@ pub fn run(
         );
     }
 
+    // v2.3.46 Phase 6.x-K — ratchet pre-flight (soft warning).
+    // If the runtime has a locked floor AND the rolling window is
+    // already at-or-near the floor-tolerance, warn the user before
+    // we fire. Doesn't block — the gate is `ato ratchet check`, not
+    // this — but surfaces the risk in human mode where they can
+    // still cancel. Quiet in JSON output so scripts don't see
+    // unexpected stderr noise.
+    if opts.human {
+        if let Ok(ro_conn) = db::open_readonly(db_path) {
+            if let Ok(rows) = crate::commands::ratchet::compute_success_rate(
+                &ro_conn,
+                "runtime",
+                runtime_name,
+                7,
+            ) {
+                let (current, samples) = rows;
+                // Look up the locked floor for runtime:<name>.
+                let floor: Option<(f64, f64)> = ro_conn
+                    .query_row(
+                        "SELECT baseline_value, threshold FROM eval_ratchets
+                          WHERE target_kind = 'runtime' AND target_value = ?1
+                            AND metric = 'success_rate'",
+                        [runtime_name],
+                        |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+                    )
+                    .ok();
+                if let (Some(c), Some((baseline, threshold))) = (current, floor) {
+                    let floor_tol = (baseline - threshold).max(0.0);
+                    if c <= floor_tol + 0.01 && samples >= 3 {
+                        // Within 1pp of the floor — one more failure
+                        // could trip the CI gate.
+                        crate::output::emit_human(&format!(
+                            "⚠  Ratchet warning: runtime:{} current rate is {:.1}% (floor-tol {:.1}%, baseline {:.1}%). A failure on this dispatch may breach the lock.",
+                            runtime_name,
+                            c * 100.0,
+                            floor_tol * 100.0,
+                            baseline * 100.0,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // v2.3.32 Phase 6.x-J — SSH-backed remote runtime. The slug the
     // user typed (e.g. `claude-server`) may resolve to a row in
     // remote_runtimes, in which case we route over SSH instead of
