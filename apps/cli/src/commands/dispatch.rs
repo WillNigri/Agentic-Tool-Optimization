@@ -298,8 +298,11 @@ pub fn run(
     let now = chrono::Utc::now().to_rfc3339();
 
     let conn = db::open_readwrite(db_path)?;
+    // v2.3.41 — write session_id when present so the History panel
+    // can group multi-turn conversations under one header.
+    let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12)",
         rusqlite::params![
             id,
             runtime_name,
@@ -312,6 +315,7 @@ pub fn run(
             error_persisted,
             now,
             cost_usd,
+            session_id_for_log,
         ],
     ).context("Failed to write execution_logs row")?;
 
@@ -545,8 +549,11 @@ fn run_api(
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    // v2.3.41 — link the api-provider dispatch back to its session
+    // so History grouping works for cross-runtime conversations.
+    let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL, ?11)",
         rusqlite::params![
             id,
             provider.slug,
@@ -558,6 +565,7 @@ fn run_api(
             status,
             error_persisted,
             now,
+            session_id_for_log,
         ],
     )
     .context("Failed to write execution_logs row")?;

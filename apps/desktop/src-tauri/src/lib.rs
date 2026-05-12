@@ -265,6 +265,11 @@ pub struct ExecutionLog {
     pub error_message: Option<String>,
     pub skill_name: Option<String>,
     pub created_at: String,
+    /// v2.3.41 — links the row to a Phase 6 session. NULL for
+    /// standalone dispatches. The History panel groups rows that
+    /// share a session_id under one collapsible header so multi-turn
+    /// conversations read like a chat.
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -769,6 +774,15 @@ pub fn init_database(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN model TEXT", []);
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_execution_logs_agent_slug ON execution_logs(agent_slug, created_at DESC)",
+        [],
+    );
+    // v2.3.41 — session_id on execution_logs lets the History panel
+    // group multi-turn conversations under one collapsible header
+    // instead of scattering them. NULL for standalone (non --session)
+    // dispatches; populated by dispatch::run when --session is passed.
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN session_id TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_session_id ON execution_logs(session_id, created_at ASC)",
         [],
     );
     let _ = conn.execute(

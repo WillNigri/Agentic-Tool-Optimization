@@ -1618,6 +1618,10 @@ export interface ExecutionLog {
   errorMessage?: string;
   skillName?: string;
   createdAt: string;
+  /** v2.3.41 — when set, this log was part of a multi-turn session.
+   *  The History panel groups consecutive logs with the same id under
+   *  one collapsible header so a conversation reads as one chat. */
+  sessionId?: string | null;
 }
 
 /**
