@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod bridge;
 pub mod compare;
 pub mod config_changes;
 pub mod cost;

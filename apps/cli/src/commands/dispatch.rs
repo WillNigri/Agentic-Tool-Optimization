@@ -48,14 +48,25 @@ pub fn run(
     // runtime matches, and (if we have a captured runtime_session_id)
     // tell claude to resume. claude --output-format json prints the
     // session_id in metadata; we capture + persist after the dispatch.
+    // v2.3.33 Phase 6 Slice B — sessions can now host turns from
+    // multiple runtimes (the whole point of the cross-runtime
+    // bridge). The session.runtime field stays as the *anchor*
+    // (the runtime that started the conversation, which keeps
+    // native --resume working for claude). When the active dispatch
+    // runtime differs, we fall back to history replay for that
+    // turn, and append the new turn tagged with the active runtime.
     let session = if let Some(ref sid) = session_id {
         let conn = db::open_readonly(db_path)?;
         let s = crate::commands::sessions::lookup(&conn, sid)?;
-        if s.runtime != runtime_name {
-            anyhow::bail!(
-                "Session {} is bound to runtime '{}', not '{}'. Sessions can't switch runtimes (Slice A); see Phase 6 Slice B for cross-runtime bridging.",
+        if s.runtime != runtime_name && opts.human {
+            // Informational only — Slice B intentionally allows
+            // cross-runtime continuation. The note helps the user
+            // realize that --resume won't be used here (history
+            // replay covers it instead).
+            crate::output::emit_human(&format!(
+                "Note: session {} is anchored to '{}'; this turn runs '{}' via history replay (Phase 6 Slice B).",
                 sid, s.runtime, runtime_name
-            );
+            ));
         }
         Some(s)
     } else {
@@ -127,10 +138,43 @@ pub fn run(
     );
     let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
 
+    // v2.3.33 Phase 6 Slice B — when this CLI dispatch is part of a
+    // cross-runtime session (session anchored to a different runtime),
+    // claude --resume / codex --continue aren't usable. Build a
+    // text-transcript prefix from session_turns and prepend it so the
+    // runtime sees the conversation so far. For claude-on-claude
+    // sessions, native --resume still owns continuity — we skip the
+    // prefix to avoid duplicating context.
+    let effective_prompt: String = if let Some(s) = &session {
+        if s.runtime == runtime_name {
+            prompt.to_string()
+        } else {
+            match db::open_readonly(db_path)
+                .and_then(|c| crate::commands::sessions::fetch_turns(&c, &s.id))
+            {
+                Ok(turns) if !turns.is_empty() => {
+                    let mut buf = String::from("=== Previous conversation ===\n");
+                    for t in turns {
+                        buf.push_str(&format!(
+                            "[{} @{}] {}\n\n",
+                            t.role, t.runtime, t.text
+                        ));
+                    }
+                    buf.push_str("=== End previous conversation ===\n\n");
+                    buf.push_str(prompt);
+                    buf
+                }
+                _ => prompt.to_string(),
+            }
+        }
+    } else {
+        prompt.to_string()
+    };
+
     let mut cmd = Command::new(&cli_path);
     match runtime_name {
         "claude" => {
-            cmd.arg("--print").arg(prompt);
+            cmd.arg("--print").arg(&effective_prompt);
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
@@ -140,9 +184,15 @@ pub fn run(
             // first-turn capture. Without --output-format json, claude
             // emits plain text and we can't reliably attribute the
             // turn to its session.
-            if session.is_some() {
+            //
+            // v2.3.33 Slice B — only use --resume if the session is
+            // *anchored* to claude. A session anchored to e.g. minimax
+            // that's bridging to claude shouldn't try to resume — there
+            // is no claude-native session id to resume from. The
+            // text-transcript prefix above covers that case.
+            if let Some(s) = &session {
                 cmd.arg("--output-format").arg("json");
-                if let Some(s) = &session {
+                if s.runtime == "claude" {
                     if let Some(rsid) = &s.runtime_session_id {
                         cmd.arg("--resume").arg(rsid);
                     }
@@ -156,23 +206,23 @@ pub fn run(
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
-            cmd.arg(prompt);
+            cmd.arg(&effective_prompt);
         }
         "gemini" => {
-            cmd.arg("-p").arg(prompt);
+            cmd.arg("-p").arg(&effective_prompt);
             if let Some(m) = &model {
                 cmd.arg("-m").arg(m);
             }
         }
         "hermes" => {
-            cmd.arg("--execute").arg(prompt);
+            cmd.arg("--execute").arg(&effective_prompt);
         }
         "openclaw" => {
             // OpenClaw's local CLI just takes `exec <prompt>` directly
             // when invoked without SSH. SSH-style remote dispatch is
             // a desktop-only feature for now (needs the ssh_config the
             // desktop loads from agent records).
-            cmd.arg("exec").arg(prompt);
+            cmd.arg("exec").arg(&effective_prompt);
         }
         other => {
             anyhow::bail!("Unsupported runtime: {}", other);

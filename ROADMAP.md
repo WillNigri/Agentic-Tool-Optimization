@@ -401,7 +401,7 @@ already covers ~80% of the practical use case (most people want to
 *invoke* a beefy remote machine, not have the remote initiate back).
 Worth scoping the moment a real user asks for the reverse direction.
 
-## Phase 6 — Cross-runtime agent conversations (Planned)
+## Phase 6 — Cross-runtime agent conversations (Slice A + B shipped v2.3.33)
 
 The activity feed (Phase 5) is async broadcast — anyone posts, anyone
 reads. Phase 6 adds the synchronous conversation primitive: two LLMs
@@ -447,6 +447,29 @@ budgeting (cap at N round-trips), termination keywords. The
 *judgment* — when is the discussion converging vs spinning —
 is the harder design question and probably starts as
 "human-in-the-loop after 3 rounds."
+
+**Shipped (v2.3.33):**
+- `ato dispatch <runtime> "..." --session <id> --tag-bridge` —
+  after the primary response, scan for `@<token>` mentions, resolve
+  through remote_runtimes → api_providers → CLI runtimes, and
+  dispatch the next round into the same session. Loops until
+  `[CONSENSUS]` on a line by itself, no mention found, or
+  `--max-rounds` (default 3).
+- `ato bridge --session <id> --max-rounds N` for manual re-triggers.
+- Self-reference guard, code-fence stripping in the mention parser.
+- Session-runtime constraint relaxed: a session can host turns
+  from multiple runtimes; the original anchor stays in
+  `sessions.runtime` for native --resume.
+- CLI runtimes (claude, codex, gemini, hermes, openclaw) get a
+  transcript prefix when continuing a non-anchored session, so
+  cross-runtime history is visible without native session resume.
+
+**Still open:**
+- Smarter consensus detection (currently exact line-match). Could
+  let the model emit a structured tag like `<consensus/>`.
+- "Spinning" detector — when N rounds pass without progress, escalate
+  to a human via activity feed rather than just hitting the round cap.
+- Multi-mention round-robin (today: first resolvable mention wins).
 
 ### Why it lives after Phase 5
 

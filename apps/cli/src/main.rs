@@ -89,6 +89,16 @@ enum Commands {
         /// `ato sessions new` returns the id to pass here.
         #[arg(long)]
         session: Option<String>,
+        /// v2.3.33 Phase 6 Slice B — after the response, scan for
+        /// `@<runtime>` mentions and bridge the conversation to that
+        /// runtime, then loop until `[CONSENSUS]` or --max-rounds.
+        /// Requires --session.
+        #[arg(long, default_value_t = false)]
+        tag_bridge: bool,
+        /// v2.3.33 Phase 6 Slice B — max bridge round-trips before
+        /// the loop bails (default 3).
+        #[arg(long, default_value_t = 3)]
+        max_rounds: u32,
     },
     /// Replay an existing dispatch against a different runtime/model
     Replay {
@@ -164,6 +174,19 @@ enum Commands {
     Sessions {
         #[command(subcommand)]
         sub: SessionsSub,
+    },
+    /// Cross-runtime conversation bridge (Phase 6 Slice B). Scans the
+    /// latest assistant turn of a session for `@<runtime>` mentions and
+    /// loops dispatches between runtimes until `[CONSENSUS]` or the
+    /// round cap. Useful for manual re-triggers after a transient
+    /// failure mid-loop.
+    Bridge {
+        /// Session id (from `ato sessions list`).
+        #[arg(long)]
+        session: String,
+        /// Max bridge round-trips before bailing.
+        #[arg(long, default_value_t = 3)]
+        max_rounds: u32,
     },
 }
 
@@ -589,7 +612,38 @@ fn main() -> Result<()> {
             model,
             agent,
             session,
-        } => commands::dispatch::run(&runtime, &prompt, model, agent, session, &db_path, &opts),
+            tag_bridge,
+            max_rounds,
+        } => {
+            if tag_bridge && session.is_none() {
+                anyhow::bail!(
+                    "--tag-bridge requires --session (the bridge loop appends to that session's turn history)."
+                );
+            }
+            // Run the primary dispatch first. dispatch::run handles
+            // session-turn persistence so by the time we return,
+            // session_turns has the assistant's reply.
+            commands::dispatch::run(
+                &runtime,
+                &prompt,
+                model,
+                agent,
+                session.clone(),
+                &db_path,
+                &opts,
+            )?;
+            // v2.3.33 Phase 6 Slice B — kick off the cross-runtime
+            // bridge loop. Always Ok() — failures inside the loop are
+            // surfaced via emit_human + execution_logs but don't
+            // propagate, because the user already got a successful
+            // primary response.
+            if tag_bridge {
+                if let Some(sid) = session {
+                    commands::bridge::run_loop(&sid, max_rounds, &db_path, &opts)?;
+                }
+            }
+            Ok(())
+        }
         Commands::Replay { sub } => match sub {
             ReplaySub::Start {
                 source_id,
@@ -725,6 +779,10 @@ fn main() -> Result<()> {
                 commands::sessions::delete(&conn, &id, &opts)
             }
         },
+        Commands::Bridge {
+            session,
+            max_rounds,
+        } => commands::bridge::run_loop(&session, max_rounds, &db_path, &opts),
         Commands::Runtimes { sub } => match sub {
             RuntimesSub::Status => {
                 let rows = quota::list_all(&db_path)?;

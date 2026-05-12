@@ -1,0 +1,314 @@
+// v2.3.33 Phase 6 Slice B — Cross-runtime conversation bridge.
+//
+// What this does: after a session-bound dispatch returns, scan the
+// assistant's reply for `@<token>` mentions. If a mention resolves to
+// a known runtime (remote_runtimes / api_providers / local CLI), kick
+// off a bridged dispatch using the same session — so the two LLMs
+// effectively talk to each other through ATO, sharing the same
+// history substrate (session_turns). Stops on `[CONSENSUS]`, when no
+// mention is found, or after `max_rounds` round-trips.
+//
+// Why it lives next to dispatch.rs: the loop body is just "dispatch
+// again with a different runtime, same session." All persistence and
+// runtime routing already exists in dispatch::run. The bridge module
+// only owns mention parsing, target resolution, and termination.
+//
+// Design choices for v1:
+//   - Bridge cue is fixed: "You were tagged by @<prev_runtime> in the
+//     previous turn. Continue the conversation. Reply [CONSENSUS]
+//     when you agree." Appended as a user turn so the responding
+//     runtime sees full history + a clear hand-off.
+//   - First resolvable mention wins. Multi-mention "@codex @gemini"
+//     bridges to codex; gemini can be tagged in a follow-up turn.
+//   - Self-reference guard: if the responder tagged itself, stop.
+//   - Code-fence stripping: the parser ignores text inside ``` blocks
+//     so example prompts in a reply don't trigger spurious bridges.
+
+use anyhow::{Context, Result};
+use rusqlite::Connection;
+
+use crate::commands::sessions::Turn;
+use crate::output::{emit_human, Opts};
+
+/// Parse @-mentions out of an assistant reply.
+///
+/// Conservative: only matches `@\w+` at word boundary, lowercased,
+/// and strips fenced code blocks first so example prompts don't fire
+/// spurious bridges. Returns mentions in first-seen order, deduped.
+pub fn parse_mentions(text: &str) -> Vec<String> {
+    let stripped = strip_code_fences(text);
+    let mut seen: Vec<String> = Vec::new();
+    let bytes = stripped.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' {
+            // word boundary: previous char is start-of-string or non-word
+            let prev_ok = i == 0
+                || !matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_');
+            if !prev_ok {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < bytes.len()
+                && matches!(
+                    bytes[j],
+                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-'
+                )
+            {
+                j += 1;
+            }
+            if j > i + 1 {
+                let slug = stripped[i + 1..j].to_ascii_lowercase();
+                if !seen.contains(&slug) {
+                    seen.push(slug);
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    seen
+}
+
+/// Strip fenced code blocks (```...```) so @-mentions inside example
+/// code don't trigger a real bridge. Inline backticks aren't stripped
+/// because they're more often used for emphasizing words than
+/// quoting agent prompts.
+fn strip_code_fences(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_fence = false;
+    for line in s.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Resolve a mention slug to a dispatchable runtime, using the same
+/// fall-through dispatch::run uses: remote_runtimes (Phase 6.x-J) →
+/// api_providers (MiniMax / Grok / etc.) → local CLI runtimes.
+/// Returns the canonical slug to pass to dispatch::run, or None if
+/// the mention doesn't resolve to anything we know how to dispatch.
+pub fn resolve_target(conn: &Connection, mention: &str) -> Option<String> {
+    // Remote runtimes first: user explicitly named them, intent is
+    // strongest.
+    if let Ok(Some(r)) = crate::remote_runtime::lookup(conn, mention) {
+        return Some(r.slug);
+    }
+    // API providers (minimax, grok, deepseek, qwen, openrouter, ...).
+    if crate::api_dispatch::is_api_provider(mention) {
+        return Some(mention.to_string());
+    }
+    // Local CLI runtimes — only a closed set today. Mirrors
+    // resolve_runtime_cli's match arm so we don't accept "@foobar"
+    // and then bail on dispatch.
+    if matches!(mention, "claude" | "codex" | "gemini" | "openclaw" | "hermes") {
+        return Some(mention.to_string());
+    }
+    None
+}
+
+/// Fetch the most-recent assistant turn for a session. Returns None
+/// if the session has no assistant turns yet (only user) — caller
+/// treats that as "nothing to bridge from."
+pub fn last_assistant_turn(conn: &Connection, session_id: &str) -> Result<Option<Turn>> {
+    let row = conn
+        .query_row(
+            "SELECT session_id, turn_index, role, text, runtime, created_at
+               FROM session_turns
+              WHERE session_id = ?1 AND role = 'assistant'
+              ORDER BY turn_index DESC
+              LIMIT 1",
+            [session_id],
+            |r| {
+                Ok(Turn {
+                    session_id: r.get(0)?,
+                    turn_index: r.get(1)?,
+                    role: r.get(2)?,
+                    text: r.get(3)?,
+                    runtime: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            },
+        )
+        .ok();
+    Ok(row)
+}
+
+/// Run the bridge loop for a session that just received an assistant
+/// turn. The caller (dispatch::run) already persisted the primary
+/// turn; this picks up from there.
+///
+/// Returns Ok(()) on every termination condition — bridge failures
+/// are surfaced via emit_human + execution_logs rows, not bubbled up,
+/// because a failed bridge shouldn't fail the primary dispatch the
+/// user already saw a response from.
+pub fn run_loop(
+    primary_session_id: &str,
+    max_rounds: u32,
+    db_path: &std::path::PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = crate::db::open_readonly(db_path)?;
+    let mut round = 0u32;
+
+    loop {
+        let last = match last_assistant_turn(&conn, primary_session_id)? {
+            Some(t) => t,
+            None => {
+                if opts.human {
+                    emit_human("Bridge: no assistant turn to read from; stopping.");
+                }
+                return Ok(());
+            }
+        };
+
+        // Termination keyword check. Require `[CONSENSUS]` on a line
+        // by itself so a runtime quoting the rules of the cue ("reply
+        // [CONSENSUS] if you agree") doesn't trigger a false positive.
+        // The cue explicitly asks for the standalone form.
+        let consensus_reached = last
+            .text
+            .lines()
+            .any(|l| l.trim() == "[CONSENSUS]");
+        if consensus_reached {
+            if opts.human {
+                emit_human(&format!(
+                    "Bridge: ✓ [CONSENSUS] reached by @{} (round {}).",
+                    last.runtime, round
+                ));
+            }
+            return Ok(());
+        }
+
+        let mentions = parse_mentions(&last.text);
+        let target_slug = mentions
+            .iter()
+            .filter(|m| *m != &last.runtime) // self-reference guard
+            .find_map(|m| resolve_target(&conn, m));
+
+        let Some(target_slug) = target_slug else {
+            if opts.human {
+                if mentions.is_empty() {
+                    emit_human("Bridge: no @-mention in last turn; conversation ended.");
+                } else {
+                    emit_human(&format!(
+                        "Bridge: mention(s) {:?} didn't resolve to a known runtime; stopping.",
+                        mentions
+                    ));
+                }
+            }
+            return Ok(());
+        };
+
+        round += 1;
+        if round > max_rounds {
+            if opts.human {
+                emit_human(&format!(
+                    "Bridge: round cap ({}) reached without [CONSENSUS].",
+                    max_rounds
+                ));
+            }
+            return Ok(());
+        }
+
+        if opts.human {
+            emit_human(&format!(
+                "\n--- Bridge round {} of {}: @{} → @{} ---",
+                round, max_rounds, last.runtime, target_slug
+            ));
+        }
+
+        let bridge_cue = format!(
+            "You were tagged by @{} in the previous turn of this conversation. \
+             Continue the conversation. Reply [CONSENSUS] on a line by itself \
+             when you agree with the resolution and have nothing to add.",
+            last.runtime
+        );
+
+        // Re-enter dispatch::run with the bridged runtime and the same
+        // session. dispatch::run handles all routing (remote / api /
+        // CLI), persistence, and appending the user-prompt+assistant
+        // turn pair. Errors don't fail the loop — they're logged via
+        // execution_logs and we still try the next round.
+        if let Err(e) = crate::commands::dispatch::run(
+            &target_slug,
+            &bridge_cue,
+            None, // model override is per-mention, future work
+            None, // no agent label
+            Some(primary_session_id.to_string()),
+            db_path,
+            opts,
+        ) {
+            if opts.human {
+                emit_human(&format!(
+                    "Bridge: dispatch to @{} failed: {}. Stopping loop.",
+                    target_slug, e
+                ));
+            }
+            return Ok(());
+        }
+    }
+}
+
+/// Smoke-test helper used by `ato bridge dry-run <text>` (not wired
+/// into the CLI by default, but useful when debugging the parser).
+#[allow(dead_code)]
+pub fn debug_parse(text: &str) -> Vec<String> {
+    parse_mentions(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_basic_mention() {
+        let m = parse_mentions("hey @codex what do you think?");
+        assert_eq!(m, vec!["codex".to_string()]);
+    }
+
+    #[test]
+    fn ignores_email_like_at() {
+        let m = parse_mentions("contact me at foo@example.com");
+        assert!(m.is_empty(), "got: {:?}", m);
+    }
+
+    #[test]
+    fn dedupes_and_preserves_order() {
+        let m = parse_mentions("@claude please ping @codex and then @claude again");
+        assert_eq!(m, vec!["claude".to_string(), "codex".to_string()]);
+    }
+
+    #[test]
+    fn strips_code_fences() {
+        let text = "first response\n\n```\nuse @internal-helper\n```\n\nbut for real @codex please review";
+        let m = parse_mentions(text);
+        assert_eq!(m, vec!["codex".to_string()]);
+    }
+
+    #[test]
+    fn handles_dashes_in_slug() {
+        // Phase 6.x-J remote runtimes commonly have hyphenated slugs.
+        let m = parse_mentions("delegate to @claude-server");
+        assert_eq!(m, vec!["claude-server".to_string()]);
+    }
+
+    #[test]
+    fn consensus_must_be_on_own_line() {
+        // Documents the termination contract used by run_loop: the
+        // keyword has to stand alone on a line. Quoting the cue
+        // ("reply [CONSENSUS] if you agree") must NOT terminate.
+        let standalone = "i agree with the resolution\n[CONSENSUS]";
+        let quoted = "Reply [CONSENSUS] if you agree.";
+        assert!(standalone.lines().any(|l| l.trim() == "[CONSENSUS]"));
+        assert!(!quoted.lines().any(|l| l.trim() == "[CONSENSUS]"));
+    }
+}
