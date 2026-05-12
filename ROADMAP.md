@@ -287,6 +287,30 @@ Triggered by Will noticing during the v2.3.21 MiniMax benchmark
 that ATO's own review dispatches via `ato dispatch minimax` were
 invisible to the Live tab while they were running.
 
+## Phase 6.x-I — Runtime-binary health check (Planned, small)
+
+When ATO tries to spawn a runtime CLI whose Developer ID cert has
+been revoked (or which is unsigned / quarantined), macOS pops a
+generic malware dialog and silently kills the parent app. The user
+sees ATO crash and a confusing "codex contains malware" message,
+with no actionable path back.
+
+### Surface
+
+At startup, after `detect_agent_runtimes` finds a CLI, run
+`spctl -a -vv <path>` and parse the result. For each rejected
+runtime, surface an in-app banner pinned to the top of Home /
+Settings → Runtimes with:
+- Specific reason (`CSSMERR_TP_CERT_REVOKED`, `no usable
+  signature`, `quarantine`)
+- The exact fix command (`npm install -g @openai/codex@latest`,
+  `xattr -d com.apple.quarantine ...`)
+- A "Run fix" button that executes it via the sidecar shell
+
+Triggered today (2026-05-12) when Will's codex install hit a
+cert-revoked block mid-session. ~50 LOC; would have replaced
+30 minutes of diagnostic back-and-forth with a one-click resolution.
+
 ## Phase 6.x — Runtime quota visibility (Planned, small)
 
 Rate-limit info is only visible when you try a dispatch and it fails.
