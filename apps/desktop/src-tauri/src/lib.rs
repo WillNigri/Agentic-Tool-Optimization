@@ -947,6 +947,31 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_activity_posts_kind_created ON activity_posts(kind, created_at DESC)",
         [],
     );
+    // v2.3.31 Phase 6 Slice A — sticky multi-turn sessions per runtime.
+    // ATO assigns its own session id; the dispatch path passes it
+    // through to the runtime CLI via --resume (claude) / similar.
+    // runtime_session_id is the runtime's NATIVE token (captured from
+    // claude's --output-format json metadata on the first dispatch);
+    // the ATO id is a stable handle users + agents can refer to.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id                  TEXT PRIMARY KEY,
+            runtime             TEXT NOT NULL,
+            agent_slug          TEXT,
+            runtime_session_id  TEXT,
+            title               TEXT,
+            created_at          TEXT NOT NULL,
+            last_used_at        TEXT NOT NULL,
+            turn_count          INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_runtime_lastused
+            ON sessions(runtime, last_used_at DESC)",
+        [],
+    );
+
     // v2.3.27 Phase 6.x — Runtime quota visibility. Stores parsed
     // "rate limit until X" timestamps surfaced from dispatch errors.
     // One row per runtime; UPSERT on new captures. The dispatch

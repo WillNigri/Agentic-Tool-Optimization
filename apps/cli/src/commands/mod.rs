@@ -9,6 +9,7 @@ pub mod files_touched;
 pub mod kill;
 pub mod posts;
 pub mod recipes;
+pub mod sessions;
 pub mod regressions;
 pub mod replay;
 pub mod replays;

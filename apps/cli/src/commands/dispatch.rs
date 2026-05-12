@@ -39,9 +39,28 @@ pub fn run(
     prompt: &str,
     model: Option<String>,
     agent_slug_for_event: Option<String>,
+    session_id: Option<String>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // v2.3.31 Phase 6 Slice A — sticky session resolution.
+    // If --session was passed, look up the session, validate the
+    // runtime matches, and (if we have a captured runtime_session_id)
+    // tell claude to resume. claude --output-format json prints the
+    // session_id in metadata; we capture + persist after the dispatch.
+    let session = if let Some(ref sid) = session_id {
+        let conn = db::open_readonly(db_path)?;
+        let s = crate::commands::sessions::lookup(&conn, sid)?;
+        if s.runtime != runtime_name {
+            anyhow::bail!(
+                "Session {} is bound to runtime '{}', not '{}'. Sessions can't switch runtimes (Slice A); see Phase 6 Slice B for cross-runtime bridging.",
+                sid, s.runtime, runtime_name
+            );
+        }
+        Some(s)
+    } else {
+        None
+    };
     // v2.3.27 Phase 6.x — quota pre-flight. If we previously parsed
     // a "try again at <ts>" out of an error and the ts is still
     // future, short-circuit without burning another dispatch attempt.
@@ -89,6 +108,20 @@ pub fn run(
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
+            // v2.3.31 Slice A — wire claude --resume when the session
+            // has a captured runtime_session_id, and switch output to
+            // JSON so we can read back the session id metadata for
+            // first-turn capture. Without --output-format json, claude
+            // emits plain text and we can't reliably attribute the
+            // turn to its session.
+            if session.is_some() {
+                cmd.arg("--output-format").arg("json");
+                if let Some(s) = &session {
+                    if let Some(rsid) = &s.runtime_session_id {
+                        cmd.arg("--resume").arg(rsid);
+                    }
+                }
+            }
         }
         "codex" => {
             // Codex requires `exec` + skip-git-repo-check (mirrors the
@@ -130,9 +163,32 @@ pub fn run(
 
     let response_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+
+    // v2.3.31 Slice A — when claude was invoked with --output-format
+    // json (because --session was passed), the stdout is a JSON
+    // envelope, not the raw model text. Pull `.result` for the
+    // user-visible response and `.session_id` for sticky tracking.
+    // For other runtimes (or no --session), stdout is the model
+    // text directly.
+    let (extracted_response, captured_runtime_session_id) = if session.is_some()
+        && runtime_name == "claude"
+        && output.status.success()
+    {
+        match serde_json::from_str::<serde_json::Value>(response_text.trim()) {
+            Ok(v) => {
+                let r = v["result"].as_str().map(|s| s.to_string());
+                let sid = v["session_id"].as_str().map(|s| s.to_string());
+                (r.unwrap_or_else(|| response_text.clone()), sid)
+            }
+            Err(_) => (response_text.clone(), None),
+        }
+    } else {
+        (response_text.clone(), None)
+    };
+
     let (status, response_persisted, error_persisted): (&str, Option<String>, Option<String>) =
         if output.status.success() {
-            ("success", Some(truncate(&response_text)), None)
+            ("success", Some(truncate(&extracted_response)), None)
         } else {
             let msg = if stderr_text.is_empty() {
                 format!("{} exited with status {}", runtime_name, output.status)
@@ -227,6 +283,20 @@ pub fn run(
             duration_ms,
             &now,
         );
+    }
+
+    // v2.3.31 Slice A — if this dispatch belongs to a sticky session,
+    // bump turn_count + last_used_at, and persist the captured
+    // runtime_session_id when it's the first turn. COALESCE in the
+    // UPDATE keeps the original session id stable across turns.
+    if let Some(s) = &session {
+        if let Err(e) = crate::commands::sessions::record_turn(
+            &conn,
+            &s.id,
+            captured_runtime_session_id.as_deref(),
+        ) {
+            eprintln!("ato dispatch: failed to record session turn: {}", e);
+        }
     }
 
     let result = DispatchResult {

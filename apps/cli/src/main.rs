@@ -84,6 +84,10 @@ enum Commands {
         /// Optional agent slug — for labeling only in this Phase 1 cut
         #[arg(long)]
         agent: Option<String>,
+        /// v2.3.31 Phase 6 Slice A — resume an existing sticky session.
+        /// `ato sessions new` returns the id to pass here.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Replay an existing dispatch against a different runtime/model
     Replay {
@@ -155,6 +159,36 @@ enum Commands {
         #[command(subcommand)]
         sub: RuntimesSub,
     },
+    /// Sticky multi-turn conversations (Phase 6 Slice A — claude only for now)
+    Sessions {
+        #[command(subcommand)]
+        sub: SessionsSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionsSub {
+    /// Create a new sticky session
+    New {
+        /// Runtime backing this session (claude — Slice A only)
+        #[arg(long)]
+        runtime: String,
+        /// Optional agent slug attached to this session
+        #[arg(long = "as")]
+        agent_slug: Option<String>,
+        /// Optional human-readable title for `ato sessions list`
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// List sessions newest-first
+    List {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Get a single session by id
+    Get { id: String },
+    /// Delete a session (does NOT clean up the underlying runtime's history)
+    Delete { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -512,7 +546,8 @@ fn main() -> Result<()> {
             prompt,
             model,
             agent,
-        } => commands::dispatch::run(&runtime, &prompt, model, agent, &db_path, &opts),
+            session,
+        } => commands::dispatch::run(&runtime, &prompt, model, agent, session, &db_path, &opts),
         Commands::Replay { sub } => match sub {
             ReplaySub::Start {
                 source_id,
@@ -628,6 +663,24 @@ fn main() -> Result<()> {
             }
             PostsSub::Pending { limit } => {
                 commands::posts::pending(&ro_conn()?, limit, &opts)
+            }
+        },
+        Commands::Sessions { sub } => match sub {
+            SessionsSub::New {
+                runtime,
+                agent_slug,
+                title,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::sessions::new(&conn, runtime, agent_slug, title, &opts)
+            }
+            SessionsSub::List { limit } => {
+                commands::sessions::list(&ro_conn()?, limit, &opts)
+            }
+            SessionsSub::Get { id } => commands::sessions::get(&ro_conn()?, &id, &opts),
+            SessionsSub::Delete { id } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::sessions::delete(&conn, &id, &opts)
             }
         },
         Commands::Runtimes { sub } => match sub {
