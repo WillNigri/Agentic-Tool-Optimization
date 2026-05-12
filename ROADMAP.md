@@ -321,13 +321,20 @@ cert-revoked block mid-session. ~50 LOC; would have replaced
   com.apple.quarantine <path>`.
 - 4 unit tests on the parser + install-map.
 
-**Still open (Phase 6.x-I.2):**
-- Desktop banner reading the same shape — pinned to Home / Settings
-  → Runtimes when any row has status != ok && != missing.
-- "Run fix" button executing the canned command via Tauri's shell
-  sidecar.
+**Shipped (Phase 6.x-I.2, v2.3.36):**
+- Desktop banner pinned to Home above the "Connect a runtime" prompt.
+  Renders only when at least one row has status `revoked` /
+  `quarantined` / `unsigned` / `unknown`. Auto-refetches every 5min.
+- One-click "Run fix" button — `runtime_health_run_fix` Tauri command
+  re-parses the fix string against an allowlist (only `npm install -g
+  <pkg>@latest` and `xattr -d com.apple.quarantine <path>` shapes
+  pass) and executes via Command::new with split args. No `sh -c` of
+  untrusted strings.
+
+**Still open:**
 - Walk through JS-shim CLIs (like the npm `codex`) to verify their
-  bundled Mach-O sidecars, not just the shim itself.
+  bundled Mach-O sidecars, not just the shim itself. The shim is
+  unsigned but benign; the underlying binary is what gets revoked.
 
 ## Phase 6.x — Runtime quota visibility (Planned, small)
 

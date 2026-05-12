@@ -4,6 +4,7 @@ mod health_poller;
 mod telemetry;
 mod file_attribution;
 mod active_runs;
+mod runtime_health;
 pub mod pty;
 pub mod local_insights;
 pub mod events;
@@ -1281,6 +1282,9 @@ pub fn run() {
             compute_regressions_local,
             compute_cost_recommendations_local,
             record_local_config_change,
+            // v2.3.36 Phase 6.x-I.2 — runtime-binary health
+            runtime_health::runtime_health_check,
+            runtime_health::runtime_health_run_fix,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,

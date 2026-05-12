@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Sparkles, Bot, Activity, AlertCircle, ArrowRight, Plus, Settings, Play } from "lucide-react";
 import CreateAgentWizard, { type WizardPath } from "@/components/CreateAgentWizard";
+import RuntimeHealthBanner from "@/components/RuntimeHealthBanner";
 import { queryAllAgentStatuses } from "@/lib/api";
 import { listAgents, type Agent } from "@/lib/agents";
 import RunAgentDialog from "@/components/MyAgentsList/RunAgentDialog";
@@ -125,6 +126,7 @@ export default function Home({
 
   return (
     <div className="max-w-5xl mx-auto space-y-8">
+      <RuntimeHealthBanner />
       {!detectedReady && (
         <section className="flex items-start gap-3 rounded-lg border border-cs-warning/40 bg-cs-warning/10 p-4">
           <Settings size={18} className="text-cs-warning shrink-0" />
