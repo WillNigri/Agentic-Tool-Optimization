@@ -220,6 +220,10 @@ enum RuntimesSub {
     /// Show known runtime quotas: which runtimes are rate-limited
     /// and until when (parsed from previous dispatch errors).
     Status,
+    /// Phase 6.x-I — check whether each detected runtime binary is
+    /// signed / non-quarantined / non-revoked. Surfaces the specific
+    /// reason and a fix command when something is broken.
+    Health,
     /// Register a remote machine that runs a runtime CLI. Once added,
     /// `ato dispatch <slug> "..."` routes over SSH instead of spawning
     /// a local binary. Phase 6.x-J — laptop ↔ server bridging.
@@ -808,6 +812,7 @@ fn main() -> Result<()> {
                 }
                 Ok(())
             }
+            RuntimesSub::Health => commands::runtimes::run_health_check(&opts),
             RuntimesSub::AddRemote {
                 name,
                 host,

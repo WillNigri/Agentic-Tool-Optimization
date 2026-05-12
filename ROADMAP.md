@@ -287,7 +287,7 @@ Triggered by Will noticing during the v2.3.21 MiniMax benchmark
 that ATO's own review dispatches via `ato dispatch minimax` were
 invisible to the Live tab while they were running.
 
-## Phase 6.x-I — Runtime-binary health check (Planned, small)
+## Phase 6.x-I — Runtime-binary health check (CLI shipped v2.3.34)
 
 When ATO tries to spawn a runtime CLI whose Developer ID cert has
 been revoked (or which is unsigned / quarantined), macOS pops a
@@ -310,6 +310,24 @@ Settings → Runtimes with:
 Triggered today (2026-05-12) when Will's codex install hit a
 cert-revoked block mid-session. ~50 LOC; would have replaced
 30 minutes of diagnostic back-and-forth with a one-click resolution.
+
+**Shipped (v2.3.34, CLI piece):**
+- `ato runtimes health` runs `codesign --verify --verbose=2` and
+  reads `com.apple.quarantine` xattr for each detected runtime. Per
+  row: `runtime, binary_path, status, detail, fix_command`. Status
+  values: `ok / missing / revoked / quarantined / unsigned / unknown`.
+- Canned fix commands for `revoked`/`missing`: `npm install -g
+  <pkg>@latest` per known runtime; for `quarantined`: `xattr -d
+  com.apple.quarantine <path>`.
+- 4 unit tests on the parser + install-map.
+
+**Still open (Phase 6.x-I.2):**
+- Desktop banner reading the same shape — pinned to Home / Settings
+  → Runtimes when any row has status != ok && != missing.
+- "Run fix" button executing the canned command via Tauri's shell
+  sidecar.
+- Walk through JS-shim CLIs (like the npm `codex`) to verify their
+  bundled Mach-O sidecars, not just the shim itself.
 
 ## Phase 6.x — Runtime quota visibility (Planned, small)
 

@@ -15,5 +15,6 @@ pub mod regressions;
 pub mod replay;
 pub mod replays;
 pub mod runs;
+pub mod runtimes;
 pub mod setup_path;
 pub mod skills;
