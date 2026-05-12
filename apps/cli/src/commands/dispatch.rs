@@ -42,6 +42,19 @@ pub fn run(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // v2.3.27 Phase 6.x — quota pre-flight. If we previously parsed
+    // a "try again at <ts>" out of an error and the ts is still
+    // future, short-circuit without burning another dispatch attempt.
+    // Caller sees a stable, scriptable error early instead of a real
+    // 4xx with the same info.
+    if let Ok(Some(resets_at)) = crate::quota::lookup_future(db_path, runtime_name) {
+        anyhow::bail!(
+            "Runtime '{}' is rate-limited until {} (cached from previous error). Try again after that time.",
+            runtime_name,
+            resets_at
+        );
+    }
+
     // v2.3.21 Phase 6.x — API-key providers (MiniMax, Grok, Qwen, ...)
     // take a different path: no CLI binary to resolve, key comes from
     // env var or llm_api_keys, response over HTTPS. Persistence and
@@ -170,6 +183,36 @@ pub fn run(
         ],
     ).context("Failed to write execution_logs row")?;
 
+    // v2.3.27 Phase 6.x — quota capture. On error, try to parse a
+    // reset time from the message and persist it so the next
+    // dispatch's pre-flight can short-circuit. On success, clear
+    // any stale quota row (the runtime is obviously not blocked).
+    if status == "error" {
+        if let Some(msg) = error_persisted.as_deref() {
+            if let Some((resets_at, source)) = crate::quota::parse_reset_time(msg) {
+                // MiniMax round-1 6.x: log instead of silently
+                // swallowing. If upsert fails, future pre-flights
+                // probe the API instead of short-circuiting — the
+                // user should know why.
+                if let Err(e) =
+                    crate::quota::upsert(db_path, runtime_name, &resets_at, source)
+                {
+                    eprintln!(
+                        "ato dispatch: failed to persist quota for '{}': {}",
+                        runtime_name, e
+                    );
+                }
+            }
+        }
+    } else if status == "success" {
+        if let Err(e) = crate::quota::clear(db_path, runtime_name) {
+            eprintln!(
+                "ato dispatch: failed to clear quota for '{}': {}",
+                runtime_name, e
+            );
+        }
+    }
+
     // v2.3.9 Phase 4.3 — publish a DispatchFailed event to events_log
     // so the desktop's engine poll loop can pick it up and run matching
     // recipes. CLI dispatches don't go through the in-memory bus
@@ -249,6 +292,14 @@ fn run_api(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // Quota pre-flight (same shape as the CLI-runtime path).
+    if let Ok(Some(resets_at)) = crate::quota::lookup_future(db_path, provider.slug) {
+        anyhow::bail!(
+            "Provider '{}' is rate-limited until {} (cached). Try again after.",
+            provider.slug,
+            resets_at
+        );
+    }
     let conn = db::open_readwrite(db_path)?;
 
     // v2.3.25 Phase 6.x — register in live_runs so the desktop's
@@ -332,6 +383,25 @@ fn run_api(
             duration_ms,
             &now,
         );
+        if let Some(msg) = error_persisted.as_deref() {
+            if let Some((resets_at, source)) = crate::quota::parse_reset_time(msg) {
+                if let Err(e) =
+                    crate::quota::upsert(db_path, provider.slug, &resets_at, source)
+                {
+                    eprintln!(
+                        "ato dispatch: failed to persist quota for '{}': {}",
+                        provider.slug, e
+                    );
+                }
+            }
+        }
+    } else if status == "success" {
+        if let Err(e) = crate::quota::clear(db_path, provider.slug) {
+            eprintln!(
+                "ato dispatch: failed to clear quota for '{}': {}",
+                provider.slug, e
+            );
+        }
     }
 
     let result = DispatchResult {

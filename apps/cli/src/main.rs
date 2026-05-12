@@ -16,6 +16,7 @@ mod db;
 mod events_publisher;
 mod live_runs;
 mod output;
+mod quota;
 mod runtime;
 
 #[derive(Parser, Debug)]
@@ -149,6 +150,18 @@ enum Commands {
         #[command(subcommand)]
         sub: PostsSub,
     },
+    /// Runtime status / quota visibility
+    Runtimes {
+        #[command(subcommand)]
+        sub: RuntimesSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RuntimesSub {
+    /// Show known runtime quotas: which runtimes are rate-limited
+    /// and until when (parsed from previous dispatch errors).
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -615,6 +628,32 @@ fn main() -> Result<()> {
             }
             PostsSub::Pending { limit } => {
                 commands::posts::pending(&ro_conn()?, limit, &opts)
+            }
+        },
+        Commands::Runtimes { sub } => match sub {
+            RuntimesSub::Status => {
+                let rows = quota::list_all(&db_path)?;
+                if opts.human {
+                    if rows.is_empty() {
+                        output::emit_human("No quota information captured yet.");
+                    } else {
+                        output::emit_human(&format!("{} runtime quotas:", rows.len()));
+                        let now = chrono::Utc::now();
+                        for r in &rows {
+                            let active = chrono::DateTime::parse_from_rfc3339(&r.resets_at)
+                                .map(|t| t > now)
+                                .unwrap_or(false);
+                            let tag = if active { "rate-limited" } else { "expired" };
+                            output::emit_human(&format!(
+                                "  {:12} {} until {}  (source: {})",
+                                r.runtime, tag, r.resets_at, r.source
+                            ));
+                        }
+                    }
+                } else {
+                    output::emit_json(&rows)?;
+                }
+                Ok(())
             }
         },
         Commands::Agents { sub } => {

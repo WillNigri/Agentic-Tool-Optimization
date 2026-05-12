@@ -947,6 +947,20 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_activity_posts_kind_created ON activity_posts(kind, created_at DESC)",
         [],
     );
+    // v2.3.27 Phase 6.x — Runtime quota visibility. Stores parsed
+    // "rate limit until X" timestamps surfaced from dispatch errors.
+    // One row per runtime; UPSERT on new captures. The dispatch
+    // pre-flight reads this to short-circuit "try again at <ts>"
+    // without burning another quota probe.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS runtime_quotas (
+            runtime     TEXT PRIMARY KEY,
+            resets_at   TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        )",
+        [],
+    );
     // v2.3.18 Phase 5.3 — partial UNIQUE index enforcing
     // one-ApprovalDecision-per-ApprovalRequest at the storage layer.
     // Codex 5.3 round-1 caught that the CLI's check-then-insert was
