@@ -190,7 +190,14 @@ pub fn dispatch(
         .send()
         .with_context(|| format!("POST {}", url))?;
     let http_status = resp.status();
-    let body_text = resp.text().unwrap_or_default();
+    // MiniMax-as-reviewer flagged that unwrap_or_default() here would
+    // silently swallow a body-read error after a successful response
+    // (e.g. connection reset mid-body) and then surface as "not valid
+    // JSON" downstream. Propagate the read error instead so the audit
+    // shows the actual root cause.
+    let body_text = resp
+        .text()
+        .with_context(|| format!("read response body from {}", url))?;
     let duration_ms = start.elapsed().as_millis() as i64;
 
     if !http_status.is_success() {

@@ -268,6 +268,25 @@ Items that previously sat in this section (federated agent network, kubectl-for-
 
 ---
 
+## Phase 6.x — CLI dispatches visible in Live Runs (Planned)
+
+Today, the **Live** tab in Runs only shows GUI-driven dispatches.
+The reason: `active_runs` is an in-memory map inside the desktop
+process; CLI runs (`ato dispatch ...`) execute in a separate
+process and can't write to that map.
+
+After Phase 4.3 we have the `events_log` cross-process channel.
+The fix: CLI publishes `dispatch_started` / `dispatch_finished`
+events on every dispatch; a new desktop watcher mirrors them into
+`active_runs::begin_run` / `finish_run`. Killing remains tricky
+across processes (active_runs holds the actual process handle) —
+v1 makes CLI runs visible-but-unkillable; v2 adds PID-tracking
+for cross-process kill.
+
+Triggered by Will noticing during the v2.3.21 MiniMax benchmark
+that ATO's own review dispatches via `ato dispatch minimax` were
+invisible to the Live tab while they were running.
+
 ## Phase 6.x — Runtime quota visibility (Planned, small)
 
 Rate-limit info is only visible when you try a dispatch and it fails.

@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop"
-version = "2.3.20"
+version = "2.3.22"
 dependencies = [
  "ato-posts",
  "ato-recipes",

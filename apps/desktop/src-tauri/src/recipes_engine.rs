@@ -1121,7 +1121,17 @@ async fn post_webhook(
             }
         },
     };
+    // v2.3.22 — disable redirect following. MiniMax-as-reviewer caught
+    // (and codex round-1 mentioned in passing) that a webhook URL the
+    // user authored could 302-redirect to an internal-IP / cloud-
+    // metadata endpoint, bypassing the SSRF-acceptable threat model
+    // entirely. Recipes are user-authored, but a single typo'd or
+    // shared URL that goes through a redirector is a real foot-gun.
+    // The recipe author can construct an explicit URL; legitimate
+    // webhook endpoints (Slack, Discord, custom dashboards) don't
+    // need redirects.
     let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
     {
