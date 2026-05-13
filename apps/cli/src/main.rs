@@ -211,11 +211,30 @@ enum Commands {
         sub: RatchetSub,
     },
     /// Phase 7.0 — bi-directional LAN mesh daemon (scaffold).
-    /// Step 1 ships start / stop / status only; mDNS broadcast,
-    /// WS+JSON-RPC protocol, and pairing land in subsequent slices.
+    /// Step 1 ships start / stop / status; step 2 (v2.4.1) adds mDNS
+    /// discovery on `_ato._tcp.local` and the `mesh discovered`
+    /// surface. WS+JSON-RPC protocol, pairing, and the GUI Mesh tab
+    /// land in subsequent slices.
     Daemon {
         #[command(subcommand)]
         sub: DaemonSub,
+    },
+    /// Phase 7.0 mesh — list discovered peers, manage pairing (once
+    /// step 4 ships).
+    Mesh {
+        #[command(subcommand)]
+        sub: MeshSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshSub {
+    /// List peers found on the local network via mDNS. Discovery
+    /// does NOT mean trust — promoting a discovered peer into the
+    /// allowlist will require the pairing handshake (step 4).
+    Discovered {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -933,7 +952,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Daemon { sub } => match sub {
-            DaemonSub::Start => daemon::start(),
+            DaemonSub::Start => daemon::start(db_path.clone()),
             DaemonSub::Stop => daemon::stop(),
             DaemonSub::Status => {
                 let s = daemon::status()?;
@@ -949,6 +968,34 @@ fn main() -> Result<()> {
                     ));
                 } else {
                     output::emit_json(&s)?;
+                }
+                Ok(())
+            }
+        },
+        Commands::Mesh { sub } => match sub {
+            MeshSub::Discovered { limit } => {
+                let rows = daemon::mdns::list_discovered(&db_path)?;
+                let truncated: Vec<_> = rows.into_iter().take(limit).collect();
+                if opts.human {
+                    if truncated.is_empty() {
+                        output::emit_human(
+                            "No peers discovered yet. Start the daemon (`ato daemon start`) and wait ~10s for mDNS to converge.",
+                        );
+                    } else {
+                        output::emit_human(&format!("{} discovered peer(s):", truncated.len()));
+                        for p in &truncated {
+                            output::emit_human(&format!(
+                                "  {:20}  peer_id={:.16}…  {}  v{}  last_seen={}",
+                                p.name,
+                                p.peer_id,
+                                p.addr,
+                                p.version.as_deref().unwrap_or("?"),
+                                p.last_seen_at
+                            ));
+                        }
+                    }
+                } else {
+                    output::emit_json(&truncated)?;
                 }
                 Ok(())
             }

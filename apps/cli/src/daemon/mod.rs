@@ -37,7 +37,10 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+
+pub mod mdns;
 
 /// Default TCP port the daemon binds to. Localhost-only in step 1;
 /// will become the LAN-advertised port once mDNS lands in step 2.
@@ -214,7 +217,7 @@ unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
 /// `ato daemon start` — runs the daemon in the foreground. Spawning
 /// it under launchd / systemd is the deployment path; for now we
 /// support `ato daemon start &` for ad-hoc dev work too.
-pub fn start() -> Result<()> {
+pub fn start(db_path: PathBuf) -> Result<()> {
     // Refuse to start twice. The pidfile is the canonical lock.
     if let Some(pid) = current_pid()? {
         anyhow::bail!(
@@ -296,6 +299,52 @@ pub fn start() -> Result<()> {
         // Drop the keypair var to silence the unused-warning while
         // we don't sign anything yet. Step 3 reuses it.
         let _ = signing;
+
+        // v2.4.1 — register on mDNS and start the discovery browser.
+        // Errors here don't bring the daemon down; mesh discovery is
+        // best-effort (some networks block mDNS) and the local TCP
+        // listener still works for direct-pair scenarios.
+        let db_path_arc = Arc::new(db_path.clone());
+        // Held until shutdown so its Drop fires unregister() on the
+        // way out — peers see a goodbye packet instead of TTL-ing us
+        // out of their list. Prefixed with `_` to silence the
+        // unused-binding warning; the binding's lifetime is the
+        // whole point.
+        let _mdns_handle = match mdns::start_mdns(
+            db_path_arc.clone(),
+            &peer_id,
+            DEFAULT_DAEMON_PORT,
+            env!("CARGO_PKG_VERSION"),
+        ) {
+            Ok(h) => {
+                println!(
+                    "ato daemon: mdns registered as _ato._tcp.local (broadcasting + browsing)"
+                );
+                Some(h)
+            }
+            Err(e) => {
+                eprintln!(
+                    "ato daemon: mdns disabled — {}. Local TCP still up; pair via invite code instead.",
+                    e
+                );
+                None
+            }
+        };
+
+        // Prune stale discoveries every 60s. Anything not refreshed
+        // within 5 minutes drops off the list — a peer that went
+        // offline or moved networks should disappear, not linger.
+        let db_path_for_prune = db_path_arc.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.tick().await; // skip the immediate first tick
+            loop {
+                tick.tick().await;
+                if let Err(e) = mdns::prune_stale(&db_path_for_prune, 300) {
+                    eprintln!("ato daemon: prune_stale failed: {}", e);
+                }
+            }
+        });
 
         // Signal handling: SIGTERM / SIGINT cleanly stops the loop.
         // tokio::select! doesn't accept #[cfg] attrs on match arms, so

@@ -1093,6 +1093,26 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.4.1 Phase 7.0 step 2 — mDNS-discovered peers (transient).
+    // Separate from mesh_peers (which holds *trusted* peers post-
+    // pairing). Discoveries are upserted by peer_id as the daemon's
+    // mDNS browser sees them; rows older than ~5 min get pruned so
+    // a stale discovery doesn't survive a peer going offline.
+    //
+    // Discovery DOES NOT imply trust — `ato mesh discovered` shows
+    // "what's on the network"; promoting a row to mesh_peers
+    // happens via the pairing handshake in step 4.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS mesh_discovered (
+            peer_id      TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            version      TEXT,
+            addr         TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )",
+        [],
+    );
+
     // v2.3.39 Phase 6.x-K — Eval-score ratchet.
     //
     // Inspired by Garry Tan's "AI Agent Complexity Ratchet" (2026-05).
