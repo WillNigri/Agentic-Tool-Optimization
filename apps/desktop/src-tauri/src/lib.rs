@@ -8,6 +8,7 @@ mod ratchet_view;
 mod remote_runtimes_view;
 mod runtime_health;
 mod sessions_view;
+mod mesh_view;
 pub mod pty;
 pub mod local_insights;
 pub mod events;
@@ -1419,6 +1420,13 @@ pub fn run() {
             remote_runtimes_view::add_remote_runtime,
             remote_runtimes_view::remove_remote_runtime,
             remote_runtimes_view::list_ssh_key_candidates,
+            // Phase 7.0 step 5 — Settings → Mesh (invite-code pairing GUI)
+            mesh_view::mesh_list_discovered,
+            mesh_view::mesh_list_peers,
+            mesh_view::mesh_list_invites,
+            mesh_view::mesh_create_invite,
+            mesh_view::mesh_consume_invite,
+            mesh_view::mesh_remove_peer,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,
