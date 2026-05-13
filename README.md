@@ -2,7 +2,7 @@
 
 **ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.** Local-first. MIT. Bring your own keys.
 
-Open a session. Drop Claude, Gemini, and MiniMax into the same conversation. Have them argue a decision while you push back. Every claim gets cited against the live repo (or any local files); every tool call is logged. You walk out with a signed transcript instead of a screenshot of three browser tabs.
+Open a session. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, DeepSeek, or any of [20+ supported runtimes](#supported-runtimes) — and have them argue a decision while you push back. Every claim gets cited against the live repo (or any local files); every tool call is logged. You walk out with a signed transcript instead of a screenshot of N browser tabs.
 
 ### What you'd use it for
 
@@ -11,7 +11,7 @@ Open a session. Drop Claude, Gemini, and MiniMax into the same conversation. Hav
 | **Strategy debates** | *"Should we narrow to enterprise customers? Argue both sides with citations from our last 6 retros."* |
 | **Pre-mortems** | *"This launch ships in two weeks. Each of you find the one thing most likely to break."* |
 | **Architecture decisions** | *"Postgres + queue vs. event-sourced — debate it against our existing services."* |
-| **Code review** | `ato review --against main` — three LLMs read your diff, push back on each other, cite the files they checked. |
+| **Code review** | `ato review --against main` — as many LLMs as you want read your diff, push back on each other, cite the files they checked. |
 | **Security & compliance audits** | Same primitive, scoped to threat-model files and historical incidents. |
 
 The decision-making engine and the audit trail are the same across all of them. Code review is the most-validated workflow today; the rest of the use cases ride the same rails.
@@ -43,7 +43,7 @@ Two group types make agents collaborate:
 - **Routed groups** — single prompt → router picks the right specialist child (keyword rules + LLM-classifier fallback).
 - **Sequential automations** — single prompt → children run in order, each agent's output flows into the next as input. **Each child runs on its own runtime**, so you can chain Claude → Codex → Gemini in a single pipeline.
 
-Supported: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, **Ollama** as native CLIs — plus 15+ API providers including Anthropic, OpenAI, Google AI, Mistral, Groq, **xAI/Grok**, Together, Fireworks, DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi.
+<a id="supported-runtimes"></a>**Supported runtimes**: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, **Ollama** as native CLIs — plus 15+ API providers including Anthropic, OpenAI, Google AI, Mistral, Groq, **xAI/Grok**, Together, Fireworks, DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi.
 
 ### Three audiences, one app
 

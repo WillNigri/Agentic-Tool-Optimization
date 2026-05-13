@@ -173,7 +173,7 @@ export default function Home({
             <p className="mt-2 text-cs-muted max-w-2xl">
               {t(
                 "home.heroSubtitle",
-                "Decide together, call real tools, walk out with a signed audit trail. Drop Claude, Gemini, and MiniMax into the same conversation. Push back on them. Cite the repo. Ship the decision."
+                "Decide together, call real tools, walk out with a signed audit trail. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, and 15+ more. Push back on them. Cite the repo. Ship the decision."
               )}
             </p>
             <p className="mt-3 text-xs text-cs-muted">
