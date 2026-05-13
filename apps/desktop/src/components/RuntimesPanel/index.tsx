@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import AuthMethodMatrix from "./AuthMethodMatrix";
 import RuntimeComparison from "./RuntimeComparison";
+import RemoteRuntimes from "./RemoteRuntimes";
 
 // Settings → Runtimes panel.
 // v1.4.0 Polish-T5 — Adds a "Compare" sub-tab that surfaces the per-runtime
@@ -16,14 +17,14 @@ interface Props {
   onOpenApiKeys?: () => void;
 }
 
-type RuntimesTab = "setup" | "compare";
+type RuntimesTab = "setup" | "compare" | "remote";
 
 const STORAGE_KEY = "ato.subtab.settings.runtimes";
 
 function loadInitialTab(): RuntimesTab {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "setup" || stored === "compare") return stored;
+    if (stored === "setup" || stored === "compare" || stored === "remote") return stored;
   } catch {
     // ignore
   }
@@ -46,6 +47,7 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
   const tabs: { id: RuntimesTab; label: string }[] = [
     { id: "setup", label: t("subnav.runtimesSetup", "Setup") },
     { id: "compare", label: t("subnav.runtimesCompare", "Compare") },
+    { id: "remote", label: t("subnav.runtimesRemote", "Remote") },
   ];
 
   return (
@@ -88,6 +90,8 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
       )}
 
       {active === "compare" && <RuntimeComparison />}
+
+      {active === "remote" && <RemoteRuntimes />}
     </div>
   );
 }

@@ -5,6 +5,7 @@ mod telemetry;
 mod file_attribution;
 mod active_runs;
 mod ratchet_view;
+mod remote_runtimes_view;
 mod runtime_health;
 mod sessions_view;
 pub mod pty;
@@ -1345,6 +1346,11 @@ pub fn run() {
             // v2.3.49 — ratchet lock/unlock from the GUI
             ratchet_view::lock_ratchet,
             ratchet_view::unlock_ratchet,
+            // v2.3.52 — Settings → Runtimes → Remote (Phase 6.x-J GUI)
+            remote_runtimes_view::list_remote_runtimes,
+            remote_runtimes_view::add_remote_runtime,
+            remote_runtimes_view::remove_remote_runtime,
+            remote_runtimes_view::list_ssh_key_candidates,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,
