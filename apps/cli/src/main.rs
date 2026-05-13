@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 mod api_dispatch;
 mod commands;
+mod daemon;
 mod db;
 mod events_publisher;
 mod live_runs;
@@ -209,6 +210,26 @@ enum Commands {
         #[command(subcommand)]
         sub: RatchetSub,
     },
+    /// Phase 7.0 — bi-directional LAN mesh daemon (scaffold).
+    /// Step 1 ships start / stop / status only; mDNS broadcast,
+    /// WS+JSON-RPC protocol, and pairing land in subsequent slices.
+    Daemon {
+        #[command(subcommand)]
+        sub: DaemonSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonSub {
+    /// Run the daemon in the foreground. Spawn under launchd /
+    /// systemd in deployments; ok to background with `&` for ad-hoc
+    /// development.
+    Start,
+    /// Send SIGTERM to the running daemon (pid recorded at
+    /// ~/.ato/daemon/daemon.pid).
+    Stop,
+    /// Report daemon state: running / not, pid, peer_id, public key.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -909,6 +930,27 @@ fn main() -> Result<()> {
             RatchetSub::Unlock { target } => {
                 let (kind, value) = commands::ratchet::parse_target(&target)?;
                 commands::ratchet::unlock(&db_path, &kind, &value, &opts)
+            }
+        },
+        Commands::Daemon { sub } => match sub {
+            DaemonSub::Start => daemon::start(),
+            DaemonSub::Stop => daemon::stop(),
+            DaemonSub::Status => {
+                let s = daemon::status()?;
+                if opts.human {
+                    output::emit_human(&format!(
+                        "running: {}\npid:     {}\npeer_id: {}\npubkey:  {}\nport:    {}\nkeys:    {}",
+                        s.running,
+                        s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                        s.peer_id,
+                        s.public_key_b64,
+                        s.port,
+                        s.keys_path
+                    ));
+                } else {
+                    output::emit_json(&s)?;
+                }
+                Ok(())
             }
         },
         Commands::Runtimes { sub } => match sub {

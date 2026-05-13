@@ -1,6 +1,6 @@
 [package]
 name = "ato"
-version = "2.3.52"
+version = "2.4.0"
 edition = "2021"
 description = "ATO CLI — local-first developer-workflow operations platform for multi-runtime AI agents"
 license = "MIT"
@@ -33,3 +33,11 @@ ato-api-providers = { path = "../../packages/ato-api-providers" }
 # dispatch.rs synchronous like the existing shell-out path.
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 base64 = "0.22"
+# v2.4.0 Phase 7.0 — daemon for LAN mesh.
+# tokio = async runtime for the WS server + peer connections.
+# ed25519-dalek = peer identity / signed messages.
+# rand_core / rand = keygen entropy. Pinned via dalek's feature flags.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "fs"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"

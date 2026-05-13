@@ -1055,6 +1055,44 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.4.0 Phase 7.0 — Bi-directional mesh: peer registry +
+    // pending invites. Each peer has an Ed25519 public key; messages
+    // (post_completion) are signed by the sender and verified before
+    // the recipient writes them into session_turns / events_log.
+    //
+    // mesh_invites are short-lived (5 min) single-use codes used for
+    // the initial pairing handshake when mDNS doesn't discover the
+    // peer (typical for VLAN-isolated setups). After consumption,
+    // the row stays around with `consumed=1` for auditability.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS mesh_peers (
+            peer_id      TEXT PRIMARY KEY,
+            public_key   TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            paired_at    TEXT NOT NULL,
+            last_seen_at TEXT,
+            notes        TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS mesh_invites (
+            code         TEXT PRIMARY KEY,
+            issued_at    TEXT NOT NULL,
+            expires_at   TEXT NOT NULL,
+            consumed     INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    );
+    // session_turns.sender_peer_id distinguishes a turn that landed
+    // via the mesh (sender_peer_id matches a mesh_peers row) from a
+    // locally-dispatched turn (NULL). The History panel + transcripts
+    // render a peer badge when set.
+    let _ = conn.execute(
+        "ALTER TABLE session_turns ADD COLUMN sender_peer_id TEXT",
+        [],
+    );
+
     // v2.3.39 Phase 6.x-K — Eval-score ratchet.
     //
     // Inspired by Garry Tan's "AI Agent Complexity Ratchet" (2026-05).
