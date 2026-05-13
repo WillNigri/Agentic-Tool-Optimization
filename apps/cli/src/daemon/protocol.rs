@@ -110,7 +110,12 @@ pub fn canonical_signing_bytes(p: &PostCompletionParams) -> Vec<u8> {
         "summary": p.summary,
     });
     let sorted = canonicalize_value(&v);
-    serde_json::to_vec(&sorted).unwrap_or_default()
+    // serde_json::to_vec on a Value we just constructed can only fail
+    // for non-string Map keys, which serde_json::json! can't produce.
+    // expect() makes that invariant load-bearing instead of silently
+    // signing an empty body (which would produce a valid-but-useless
+    // signature). Tier 1 review finding from v2.4.5 dogfood.
+    serde_json::to_vec(&sorted).expect("canonical_signing_bytes: serializing JSON we built can't fail")
 }
 
 fn canonicalize_value(v: &serde_json::Value) -> serde_json::Value {
@@ -159,7 +164,7 @@ pub fn verify_signature(p: &PostCompletionParams, pubkey: &VerifyingKey) -> Resu
 
 /// Look up a peer's pubkey from mesh_peers. None = unknown peer
 /// (recipient should refuse the message).
-pub fn lookup_peer_pubkey(db_path: &PathBuf, peer_id: &str) -> Result<Option<VerifyingKey>> {
+pub fn lookup_peer_pubkey(db_path: &std::path::Path, peer_id: &str) -> Result<Option<VerifyingKey>> {
     let conn = rusqlite::Connection::open(db_path).context("open ato db")?;
     let pub_b64: Option<String> = conn
         .query_row(
@@ -188,10 +193,13 @@ pub fn lookup_peer_pubkey(db_path: &PathBuf, peer_id: &str) -> Result<Option<Ver
 
 /// Apply an accepted post_completion message: write the
 /// session_turn, emit the event, bump mesh_peers.last_seen_at.
-/// Best-effort — if the DB write fails we still ack the message so
-/// the sender doesn't retry into a loop, but log the error loudly.
-pub fn apply_completion(db_path: &PathBuf, p: &PostCompletionParams) -> Result<()> {
-    let conn = rusqlite::Connection::open(db_path).context("open ato db")?;
+/// Wrapped in a single SQLite transaction so a mid-way panic or
+/// I/O failure leaves no partial state (no session_turn written
+/// with no matching event, no UPDATE without the INSERT, etc.).
+/// Tier 1 review finding from v2.4.5 dogfood.
+pub fn apply_completion(db_path: &std::path::Path, p: &PostCompletionParams) -> Result<()> {
+    let mut conn = rusqlite::Connection::open(db_path).context("open ato db")?;
+    let tx = conn.transaction().context("begin transaction")?;
 
     // v2.4.3 review finding #4 (MiniMax) — turn_index race fix.
     // Two concurrent peers each computing MAX(turn_index)+1 against
@@ -208,14 +216,14 @@ pub fn apply_completion(db_path: &PathBuf, p: &PostCompletionParams) -> Result<(
     );
     let mut last_err: Option<rusqlite::Error> = None;
     for _attempt in 0..5 {
-        let next_idx: i64 = conn
+        let next_idx: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(turn_index), -1) + 1 FROM session_turns WHERE session_id = ?1",
                 [&p.session_id],
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        match conn.execute(
+        match tx.execute(
             "INSERT INTO session_turns (session_id, turn_index, role, text, runtime, created_at, sender_peer_id)
              VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6)",
             params![
@@ -232,8 +240,6 @@ pub fn apply_completion(db_path: &PathBuf, p: &PostCompletionParams) -> Result<(
                 break;
             }
             Err(e) => {
-                // Detect the specific "UNIQUE constraint failed"
-                // error and retry; anything else is a real failure.
                 let msg = e.to_string();
                 if msg.contains("UNIQUE constraint failed") {
                     last_err = Some(e);
@@ -250,18 +256,19 @@ pub fn apply_completion(db_path: &PathBuf, p: &PostCompletionParams) -> Result<(
         );
     }
 
-    let _ = conn.execute(
+    tx.execute(
         "UPDATE mesh_peers SET last_seen_at = ?1 WHERE peer_id = ?2",
         params![chrono::Utc::now().to_rfc3339(), p.from_peer_id],
-    );
+    )
+    .context("UPDATE mesh_peers.last_seen_at")?;
 
     // Emit a peer_completion event so ops recipes / `ato events
-    // watch` / the activity feed all see this. Best-effort —
-    // events_log may not exist on very old DBs.
-    let _ = crate::events_publisher::publish_ratchet_breach; // ensures the module compiles even if unused below
-    let _ = emit_peer_completion_event(&conn, p);
+    // watch` / the activity feed all see this. Inside the same
+    // transaction: either both the turn and the event land, or
+    // neither does.
+    emit_peer_completion_event(&tx, p)?;
 
-    Ok(())
+    tx.commit().context("commit apply_completion transaction")
 }
 
 fn emit_peer_completion_event(conn: &rusqlite::Connection, p: &PostCompletionParams) -> Result<()> {
@@ -275,28 +282,47 @@ fn emit_peer_completion_event(conn: &rusqlite::Connection, p: &PostCompletionPar
     if table_exists == 0 {
         return Ok(());
     }
-    // Read MAX(event_seq) + 1, then insert. The collision-retry
-    // pattern from events_publisher.rs is overkill here because the
-    // peer-completion path is rare; one attempt is fine.
-    let max: i64 = conn
-        .query_row("SELECT COALESCE(MAX(event_seq), 0) FROM events_log", [], |r| r.get(0))
-        .unwrap_or(0);
-    let seq = max + 1;
-    let payload = serde_json::json!({
-        "type": "peer_completion",
-        "event_seq": seq,
-        "from_peer_id": p.from_peer_id,
-        "from_machine_name": p.from_machine_name,
-        "session_id": p.session_id,
-        "status": p.status,
-        "summary": p.summary,
-        "occurred_at": p.occurred_at,
-    });
-    conn.execute(
-        "INSERT INTO events_log (event_seq, event_type, payload, occurred_at) VALUES (?1, 'peer_completion', ?2, ?3)",
-        params![seq, payload.to_string(), p.occurred_at],
-    )
-    .context("INSERT events_log")?;
+    // MAX(event_seq)+1 has the same race as turn_index above — two
+    // concurrent peer completions or one peer completion + one
+    // regular publish_* call can collide. Retry on UNIQUE up to 5
+    // attempts; Tier 1 review finding from v2.4.5 dogfood replaced
+    // the prior "one attempt is fine" comment.
+    let mut last_err: Option<rusqlite::Error> = None;
+    for _attempt in 0..5 {
+        let max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(event_seq), 0) FROM events_log", [], |r| r.get(0))
+            .unwrap_or(0);
+        let seq = max + 1;
+        let payload = serde_json::json!({
+            "type": "peer_completion",
+            "event_seq": seq,
+            "from_peer_id": p.from_peer_id,
+            "from_machine_name": p.from_machine_name,
+            "session_id": p.session_id,
+            "status": p.status,
+            "summary": p.summary,
+            "occurred_at": p.occurred_at,
+        });
+        match conn.execute(
+            "INSERT INTO events_log (event_seq, event_type, payload, occurred_at) VALUES (?1, 'peer_completion', ?2, ?3)",
+            params![seq, payload.to_string(), p.occurred_at],
+        ) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if e.to_string().contains("UNIQUE constraint failed") {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(anyhow!("INSERT events_log: {}", e));
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(anyhow!(
+            "INSERT events_log gave up after 5 attempts on UNIQUE race: {}",
+            e
+        ));
+    }
     Ok(())
 }
 
@@ -431,31 +457,34 @@ async fn handle_post_completion(
     // (combined): validate occurred_at is within a tight window of
     // the recipient's wall clock. Rejects messages with timestamps
     // that are absurd (year 2099, year 1970) AND limits the replay
-    // window an attacker has even if they capture a signed message —
-    // a captured message is only re-playable for 5 minutes after the
-    // sender emitted it.
+    // window an attacker has even if they capture a signed message.
     //
-    // Tolerance: -5 min (clock skew + WAN delay) to +1 min (sender's
-    // clock slightly ahead). Bounds wider than typical NTP drift,
-    // narrow enough that a replay attacker has to be present in
-    // real-time.
+    // Tolerance: symmetric ±90s. Wider than typical NTP drift (the
+    // largest cluster of well-synced clocks runs <50ms apart, and
+    // commodity NTP daemons hold drift under ±30s easily), narrow
+    // enough that a captured signed message is only re-playable for
+    // ~3 minutes total round-trip. The previous -60..+300s window
+    // was asymmetric for no defensive reason — Tier 1 review
+    // (v2.4.5 dogfood) flagged the 5-minute past-tolerance as a
+    // gratuitously wide replay window.
     //
     // True replay-within-the-window defense (nonce tracking) is
     // deferred to a follow-up because it needs a "recently seen
     // signatures" table with TTL eviction; documented in
     // PHASE-7-PLAN.md as a step-3.1 follow-up.
+    const TIMESTAMP_WINDOW_SECS: i64 = 90;
     match chrono::DateTime::parse_from_rfc3339(&p.occurred_at) {
         Ok(t) => {
             let now = chrono::Utc::now();
             let delta = (now - t.with_timezone(&chrono::Utc)).num_seconds();
-            if !(-60..=300).contains(&delta) {
+            if delta.abs() > TIMESTAMP_WINDOW_SECS {
                 return Some(
                     error_reply(
                         id,
                         -32003,
                         &format!(
-                            "occurred_at outside acceptable window (delta {}s; must be -60..300s)",
-                            delta
+                            "occurred_at outside acceptable window (delta {}s; must be within ±{}s)",
+                            delta, TIMESTAMP_WINDOW_SECS
                         ),
                     )
                     .to_string(),
@@ -622,12 +651,4 @@ mod tests {
         let canon2 = canonical_signing_bytes(&p2);
         assert_eq!(canon1, canon2);
     }
-}
-
-// Suppress the unused warning on the events_publisher import — the
-// reference inside apply_completion is a `let _ =` keep-alive that
-// will become a real call when step 4's pairing flow needs it.
-#[allow(dead_code)]
-fn _force_link_events_publisher() {
-    let _ = crate::events_publisher::publish_ratchet_breach;
 }
