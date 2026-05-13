@@ -41,6 +41,22 @@ pub struct ApiDispatchOutcome {
     pub duration_ms: i64,
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
+    /// Tier 2 tool-call audit. None for normal dispatches that don't
+    /// involve function-calling; Some(vec) when api_dispatch_tools
+    /// produced the outcome — empty vec means "tools were offered
+    /// but the model chose not to use them" which is itself signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallAudit>>,
+}
+
+/// One row of the tool-call audit log written into execution_logs.
+/// Kept small on purpose so a long review with 10 tool calls stays
+/// under a few KB of TEXT.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallAudit {
+    pub name: String,
+    pub args_brief: String, // truncated args, ~120 chars
+    pub is_error: bool,
 }
 
 /// Resolve an API key for the given provider. Looks at the env var
@@ -211,6 +227,7 @@ pub fn dispatch_with_history(
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            tool_calls: None,
         });
     }
 
@@ -307,6 +324,7 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            tool_calls: None,
         });
     }
 
@@ -382,6 +400,7 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            tool_calls: None,
         });
     }
     if minimax_status.is_some() {
@@ -398,6 +417,7 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            tool_calls: None,
         });
     }
     if full_response.is_empty() {
@@ -408,6 +428,7 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            tool_calls: None,
         });
     }
 
@@ -425,6 +446,7 @@ where
         duration_ms,
         tokens_in,
         tokens_out,
+        tool_calls: None,
     })
 }
 
@@ -448,6 +470,7 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+            tool_calls: None,
             });
         }
         // Success: candidates[0].content.parts is an array of {text:"..."}.
@@ -475,6 +498,7 @@ fn parse_response(
                     duration_ms,
                     tokens_in: None,
                     tokens_out: None,
+            tool_calls: None,
                 });
             }
         };
@@ -489,6 +513,7 @@ fn parse_response(
             duration_ms,
             tokens_in,
             tokens_out,
+            tool_calls: None,
         });
     }
 
@@ -513,6 +538,7 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+            tool_calls: None,
             });
         }
     }
@@ -554,6 +580,7 @@ fn parse_response(
                     duration_ms,
                     tokens_in: None,
                     tokens_out: None,
+            tool_calls: None,
                 });
             }
             return Ok(ApiDispatchOutcome {
@@ -567,6 +594,7 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+            tool_calls: None,
             });
         }
     };
@@ -593,6 +621,7 @@ fn parse_response(
         duration_ms,
         tokens_in,
         tokens_out,
+        tool_calls: None,
     })
 }
 

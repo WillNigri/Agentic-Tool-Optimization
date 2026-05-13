@@ -22,6 +22,7 @@ import {
   startLogWatcher,
   stopLogWatcher,
   isLogWatcherRunning,
+  parseToolCallsSummary,
   type ExecutionLog,
 } from "@/lib/api";
 
@@ -499,6 +500,29 @@ export default function LogViewer() {
                     {formatTokens(log.tokensIn, log.tokensOut)}
                   </span>
 
+                  {/* v2.4.5 — Tier 2 audit badge. Null = no tools offered;
+                       0 = tools offered but model chose prompt-only;
+                       >0 = model verified via N tool calls. */}
+                  {log.toolCallsCount != null && (
+                    <span
+                      className={cn(
+                        "text-[10px] font-mono px-1.5 py-0.5 rounded border",
+                        log.toolCallsCount === 0
+                          ? "border-amber-500/40 text-amber-400 bg-amber-500/10"
+                          : "border-cs-accent/40 text-cs-accent bg-cs-accent/10"
+                      )}
+                      title={
+                        log.toolCallsCount === 0
+                          ? "Prompt-only: tools were offered but the model didn't use them"
+                          : `Verified via ${log.toolCallsCount} tool call(s)`
+                      }
+                    >
+                      {log.toolCallsCount === 0
+                        ? "prompt-only"
+                        : `${log.toolCallsCount}×tools`}
+                    </span>
+                  )}
+
                   <span className="text-xs text-cs-muted w-20 text-right">
                     {formatTime(log.createdAt)}
                   </span>
@@ -533,6 +557,48 @@ export default function LogViewer() {
                         </pre>
                       </div>
                     ) : null}
+
+                    {/* v2.4.5 — Tool-call audit (Tier 2 reviews).
+                         Lists every read_file / grep / git_log invocation
+                         the LLM made before producing its reply, so the
+                         human can tell "verified" from "guessed". */}
+                    {log.toolCallsCount != null && (() => {
+                      const entries = parseToolCallsSummary(log.toolCallsSummary);
+                      return (
+                        <div>
+                          <label className="text-xs text-cs-muted uppercase font-medium">
+                            Tool calls ({log.toolCallsCount})
+                          </label>
+                          {entries.length === 0 ? (
+                            <p className="mt-1 text-xs text-amber-400">
+                              Tools were offered but the model didn't invoke any —
+                              its reply is based on the prompt alone.
+                            </p>
+                          ) : (
+                            <ol className="mt-1 space-y-1">
+                              {entries.map((e, i) => (
+                                <li
+                                  key={i}
+                                  className={cn(
+                                    "text-xs font-mono p-2 rounded border",
+                                    e.isError
+                                      ? "border-red-500/30 bg-red-500/5 text-red-300"
+                                      : "border-cs-border bg-cs-card text-cs-muted"
+                                  )}
+                                >
+                                  <span className="text-cs-accent">{e.name}</span>
+                                  {" "}
+                                  <span className="opacity-75">{e.argsBrief}</span>
+                                  {e.isError && (
+                                    <span className="ml-2 text-red-400">ERROR</span>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* Metadata */}
                     <div className="flex items-center gap-6 text-xs text-cs-muted">

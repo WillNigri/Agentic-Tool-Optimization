@@ -11,7 +11,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod api_dispatch;
+mod api_dispatch_tools;
 mod commands;
+mod review_tools;
 mod daemon;
 mod db;
 mod events_publisher;
@@ -246,6 +248,14 @@ enum Commands {
         /// and which from others they want to push back on.
         #[arg(long)]
         consensus: bool,
+        /// Strip per-file content from the bundle. The reviewer
+        /// gets the diff + a list of touched file paths + recent
+        /// log, and is expected to call `read_file` / `grep` to
+        /// examine the live code. Useful for "force the LLM to
+        /// behave like a human reviewer" experiments and for
+        /// extremely large diffs that overflow the prompt cap.
+        #[arg(long)]
+        lean: bool,
     },
     /// Phase 7.0 — bi-directional LAN mesh daemon (scaffold).
     /// Step 1 ships start / stop / status; step 2 (v2.4.1) adds mDNS
@@ -796,6 +806,7 @@ fn main() -> Result<()> {
                 session.clone(),
                 stream,
                 stream_jsonl,
+                false, // ato dispatch top-level — no tools; that's ato review's surface
                 &db_path,
                 &opts,
             )?;
@@ -1006,6 +1017,7 @@ fn main() -> Result<()> {
             skip_build,
             skip_tests,
             consensus,
+            lean,
         } => commands::review::run(
             against.as_deref(),
             reviewers,
@@ -1013,6 +1025,7 @@ fn main() -> Result<()> {
             skip_build,
             skip_tests,
             consensus,
+            lean,
             &db_path,
             &opts,
         ),

@@ -77,6 +77,7 @@ pub fn run(
     skip_build: bool,
     skip_tests: bool,
     consensus: bool,
+    lean: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -120,7 +121,7 @@ pub fn run(
         ));
     }
 
-    let mut transcript = run_review(&ctx, &configured, db_path, opts)?;
+    let mut transcript = run_review(&ctx, &configured, lean, db_path, opts)?;
 
     // Consensus pass — only meaningful with 2+ reviewers. Asks each
     // reviewer (in the same session) to push back on the prior
@@ -382,6 +383,7 @@ pub struct ContextSummary {
 fn run_review(
     ctx: &ReviewContext,
     reviewers: &[String],
+    lean: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<ReviewTranscript> {
@@ -402,7 +404,7 @@ fn run_review(
 
     let mut turns: Vec<ReviewerTurn> = Vec::with_capacity(reviewers.len());
     for (idx, reviewer) in reviewers.iter().enumerate() {
-        let prompt = build_prompt_for(reviewer, idx, ctx, reviewers);
+        let prompt = build_prompt_for(reviewer, idx, ctx, reviewers, lean);
         if opts.human {
             emit_human(&format!(
                 "\n--- Reviewer #{} ({}) — {} char prompt ---",
@@ -420,6 +422,7 @@ fn run_review(
             Some(session_id.clone()),
             false, // no streaming for review (we want the full reply)
             false, // no JSONL
+            true,  // Tier 2 — reviewers get function-calling tools when their flavor supports it
             db_path,
             opts,
         );
@@ -509,6 +512,7 @@ fn run_consensus_pass(
             Some(session_id.clone()),
             false,
             false,
+            true, // tools enabled — consensus reviewers may want to re-check claims
             db_path,
             opts,
         );
@@ -553,6 +557,7 @@ fn build_prompt_for(
     idx: usize,
     ctx: &ReviewContext,
     all_reviewers: &[String],
+    lean: bool,
 ) -> String {
     let role = if idx == 0 {
         format!(
@@ -578,6 +583,20 @@ fn build_prompt_for(
         ctx.base_ref, ctx.head_ref
     ));
 
+    // Tools section moved to the top so the reviewer reads the
+    // contract before deciding what to do. In lean mode we make
+    // tool use mandatory; in default mode it's strongly encouraged.
+    body.push_str("## Tools available — use these to verify\n\n");
+    body.push_str("You have function-calling access to these tools. Real human reviewers go to the code; do the same:\n\n");
+    body.push_str("- `read_file(path, start_line?, end_line?)` — read any file in the repo.\n");
+    body.push_str("- `grep(pattern, glob?)` — search tracked files for a symbol or pattern.\n");
+    body.push_str("- `git_log(path, n?)` — recent commits touching a file.\n\n");
+    if lean {
+        body.push_str("**Lean mode**: the bundle below contains the DIFF and a list of touched files — but NOT their full content. To examine a function, the surrounding context, or related callers, you MUST call `read_file` / `grep`. Plan two passes: (1) explore — read each touched file's relevant region; (2) verify — grep for callers of any symbol you flag. Don't write findings from the diff alone.\n\n");
+    } else {
+        body.push_str("**Required**: Before writing your final findings, call at least one tool to verify something in the live repo. The bundle below is a starting point, not the whole truth.\n\n");
+    }
+
     if let Some(b) = &ctx.build {
         body.push_str(&format!(
             "## Build status: exit {}\n\n```\n{}\n```\n\n",
@@ -593,43 +612,6 @@ fn build_prompt_for(
         ));
     }
 
-    body.push_str("## Touched files (full current text after change)\n\n");
-    for f in &ctx.touched_files {
-        // Skip the content section if we're already getting close
-        // to the cap — diff + log alone may overflow on large PRs.
-        if body.len() > PROMPT_CAP_BYTES * 3 / 4 {
-            body.push_str(&format!(
-                "- `{}` (content omitted: prompt cap)\n",
-                f.path
-            ));
-            continue;
-        }
-        body.push_str(&format!("### `{}`\n\n", f.path));
-        if !f.recent_log.is_empty() {
-            body.push_str(&format!(
-                "Recent commits touching this file:\n```\n{}\n```\n\n",
-                f.recent_log
-            ));
-        }
-        if let Some(content) = &f.content_after {
-            // Best-effort fence language. We don't try to be clever:
-            // markdown clients render fenced code as-is regardless.
-            let lang = match std::path::Path::new(&f.path)
-                .extension()
-                .and_then(|s| s.to_str())
-            {
-                Some("rs") => "rust",
-                Some("ts" | "tsx") => "typescript",
-                Some("js" | "mjs") => "javascript",
-                Some("py") => "python",
-                Some("md") => "markdown",
-                Some("json") => "json",
-                _ => "",
-            };
-            body.push_str(&format!("```{}\n{}\n```\n\n", lang, content));
-        }
-    }
-
     body.push_str("## Diff\n\n```diff\n");
     let diff_budget = PROMPT_CAP_BYTES.saturating_sub(body.len() + 2048);
     if ctx.diff.len() <= diff_budget {
@@ -640,12 +622,66 @@ fn build_prompt_for(
     }
     body.push_str("\n```\n\n");
 
+    if lean {
+        // Lean mode — paths + recent log only, no content. Reviewer
+        // is expected to call read_file / grep to examine code.
+        body.push_str("## Touched files (paths only — call `read_file` to inspect)\n\n");
+        for f in &ctx.touched_files {
+            let size_hint = f
+                .content_after
+                .as_ref()
+                .map(|c| format!(" ({} bytes)", c.len()))
+                .unwrap_or_default();
+            body.push_str(&format!("- `{}`{}\n", f.path, size_hint));
+            if !f.recent_log.is_empty() {
+                let log_line = f.recent_log.lines().next().unwrap_or("");
+                body.push_str(&format!("  - latest: `{}`\n", log_line));
+            }
+        }
+        body.push_str("\nTo see what these files look like now: `read_file(path)`. To see history: `git_log(path)`.\n\n");
+    } else {
+        // Default mode — full file content bundled (legacy behavior).
+        body.push_str("## Touched files (full current text after change)\n\n");
+        for f in &ctx.touched_files {
+            if body.len() > PROMPT_CAP_BYTES * 3 / 4 {
+                body.push_str(&format!(
+                    "- `{}` (content omitted: prompt cap — call `read_file` to inspect)\n",
+                    f.path
+                ));
+                continue;
+            }
+            body.push_str(&format!("### `{}`\n\n", f.path));
+            if !f.recent_log.is_empty() {
+                body.push_str(&format!(
+                    "Recent commits touching this file:\n```\n{}\n```\n\n",
+                    f.recent_log
+                ));
+            }
+            if let Some(content) = &f.content_after {
+                let lang = match std::path::Path::new(&f.path)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                {
+                    Some("rs") => "rust",
+                    Some("ts" | "tsx") => "typescript",
+                    Some("js" | "mjs") => "javascript",
+                    Some("py") => "python",
+                    Some("md") => "markdown",
+                    Some("json") => "json",
+                    _ => "",
+                };
+                body.push_str(&format!("```{}\n{}\n```\n\n", lang, content));
+            }
+        }
+    }
+
     body.push_str("## Your review\n\n");
     body.push_str("Reply with a numbered list of findings, severity-tagged (HIGH / MEDIUM / LOW / INFO). For each:\n");
     body.push_str("- N. **SEVERITY — short title**\n");
     body.push_str("  - Description: what's wrong and why it matters\n");
-    body.push_str("  - Location: file + line (use the touched-files content above to be precise)\n");
-    body.push_str("  - Fix: a concrete change\n\n");
+    body.push_str("  - Location: file + line\n");
+    body.push_str("  - Fix: a concrete change\n");
+    body.push_str("  - Verified-via: which tool calls you used to confirm this (e.g. `read_file foo.rs:120-160`, `grep canonical_signing_bytes`). If you didn't verify in the repo, write `prompt-only` — but expect that finding to be weighted lower.\n\n");
     body.push_str("5–10 findings max. Skip the obvious. If a candidate finding turns out not to apply on closer look, say so explicitly. Don't pad.\n");
 
     body

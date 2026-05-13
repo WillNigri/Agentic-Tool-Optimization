@@ -273,6 +273,14 @@ pub struct ExecutionLog {
     /// share a session_id under one collapsible header so multi-turn
     /// conversations read like a chat.
     pub session_id: Option<String>,
+    /// v2.4.5 — Tier 2 review audit. Number of function-calling tool
+    /// invocations this dispatch made (read_file / grep / git_log).
+    /// NULL for non-tool dispatches. 0 means "tools were offered but
+    /// the model declined." The GUI badges this so reviewers can see
+    /// at a glance "verified via N tool calls" vs "prompt-only."
+    pub tool_calls_count: Option<i64>,
+    /// JSON array of {name, args_brief, is_error} for each call.
+    pub tool_calls_summary: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -788,6 +796,13 @@ pub fn init_database(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_execution_logs_session_id ON execution_logs(session_id, created_at ASC)",
         [],
     );
+    // v2.4.5 — tool-call telemetry for Tier 2 review. Lets the GUI
+    // distinguish "this reviewer verified findings via N tool calls"
+    // from "prompt-only". tool_calls_summary is a JSON array of
+    // {name, args_brief, is_error} so the Runs panel can render a
+    // chronological list without re-parsing the response text.
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN tool_calls_count INTEGER", []);
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN tool_calls_summary TEXT", []);
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_config_changes (
             id          TEXT PRIMARY KEY,
