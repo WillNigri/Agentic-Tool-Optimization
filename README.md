@@ -1,6 +1,20 @@
 # ATO — Agentic Tool Optimization
 
-**Run a code review through three LLMs in one session. See where Claude, Gemini, and MiniMax disagree, what each one verified in your repo, and paste a single audit trail into your PR.** Local-first. MIT. Bring your own keys.
+**ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.** Local-first. MIT. Bring your own keys.
+
+Open a session. Drop Claude, Gemini, and MiniMax into the same conversation. Have them argue a decision while you push back. Every claim gets cited against the live repo (or any local files); every tool call is logged. You walk out with a signed transcript instead of a screenshot of three browser tabs.
+
+### What you'd use it for
+
+| Use case | Example |
+|---|---|
+| **Strategy debates** | *"Should we narrow to enterprise customers? Argue both sides with citations from our last 6 retros."* |
+| **Pre-mortems** | *"This launch ships in two weeks. Each of you find the one thing most likely to break."* |
+| **Architecture decisions** | *"Postgres + queue vs. event-sourced — debate it against our existing services."* |
+| **Code review** | `ato review --against main` — three LLMs read your diff, push back on each other, cite the files they checked. |
+| **Security & compliance audits** | Same primitive, scoped to threat-model files and historical incidents. |
+
+The decision-making engine and the audit trail are the same across all of them. Code review is the most-validated workflow today; the rest of the use cases ride the same rails.
 
 ```bash
 ato review --against main \
@@ -10,9 +24,7 @@ ato review --against main \
   --out review.md
 ```
 
-Each reviewer runs in the same session — reviewer #2 sees #1's findings via history replay, no prompt re-pasting. Function-calling tools (`read_file`, `grep`, `git_log`) let the model walk the live repo instead of guessing from the diff. The audit log records which tool calls each LLM made, so the GUI can badge a reply `verified via 2 tool calls` vs `prompt-only`.
-
-That's the wedge. The rest of the platform — agents, skills, runtime status, traces, ops recipes — exists to make the review primitive richer, and to give you a place to run multi-LLM dispatches that *aren't* code review (war-room debates, cross-runtime A/B replay, scheduled regression checks).
+Each reviewer (or debate participant, or pre-mortem voice) runs in the same session — turn #2 sees #1's findings via history replay, no prompt re-pasting. Function-calling tools (`read_file`, `grep`, `git_log`) let the model walk the live repo instead of guessing. The audit log records which tool calls each LLM made, so the GUI can badge a reply `verified via 2 tool calls` vs `prompt-only`.
 
 > **Coding agent? Read [`AGENTS.md`](./AGENTS.md) first.** ATO is built to be driven by both humans (via the GUI) and AI coding agents (via CLI and MCP). The AGENTS.md doc covers everything an AI agent needs to know to operate ATO on a developer's behalf.
 

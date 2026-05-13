@@ -153,22 +153,33 @@ export default function Home({
         </section>
       )}
 
-      {/* Hero — Multi-LLM code review wedge.
-          v2.4.7 — repositioned around `ato review` after Tier 1+2 + agents-as-reviewers landed.
-          The "Build an agent" framing wasn't a comparison anchor (any LLM tool can claim it).
-          This headline names what only ATO does: one session, multiple LLMs, audited tool calls.
-          Building/managing agents is still here as a secondary CTA — it's how you make the
-          reviewers richer, not the elevator pitch. */}
+      {/* Hero — local war room positioning (v2.4.7 final).
+          Settled via a 5-round Gemini+MiniMax+human debate session itself —
+          session id 1379b231-9d2b-4e06-a974-e9eb9217fbb6, recorded as live demo.
+          Strategy: use-case-first marketing (war room) for 0-90 days, primitive
+          narrative seeded 90-180 days under an ATO Core sub-brand.
+          Use cases ride underneath the headline (strategy · pre-mortem ·
+          architecture · code review · security audits) — code review is the
+          most-validated, not the elevator pitch. */}
       <section className="rounded-2xl border border-cs-border bg-cs-card p-8">
         <div className="flex items-start justify-between gap-6 flex-wrap">
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-semibold text-cs-text">
-              {t("home.heroTitle", "Three LLMs review your code. One session. Receipts.")}
+              {t(
+                "home.heroTitle",
+                "Your local war room for humans and LLMs."
+              )}
             </h1>
             <p className="mt-2 text-cs-muted max-w-2xl">
               {t(
                 "home.heroSubtitle",
-                "Run your diff through Claude, Gemini, and MiniMax at once. They see each other's findings, push back where they disagree, and cite every file they checked. One audit trail per review — paste into your PR."
+                "Decide together, call real tools, walk out with a signed audit trail. Drop Claude, Gemini, and MiniMax into the same conversation. Push back on them. Cite the repo. Ship the decision."
+              )}
+            </p>
+            <p className="mt-3 text-xs text-cs-muted">
+              {t(
+                "home.heroUseCases",
+                "Strategy debates · Pre-mortems · Architecture decisions · Code review · Security audits"
               )}
             </p>
           </div>
@@ -179,7 +190,7 @@ export default function Home({
               onClick={() => launch("guided")}
             >
               <Sparkles size={16} />
-              {t("home.startGuided", "Start with chat")}
+              {t("home.startGuided", "Open a war room")}
             </button>
             <button
               type="button"
@@ -189,13 +200,13 @@ export default function Home({
               onMouseLeave={() => setHoveringQuick(false)}
             >
               <Plus size={16} />
-              {t("home.startQuick", "Build a reviewer agent")}
+              {t("home.startQuick", "Build a specialist agent")}
             </button>
           </div>
         </div>
         {hoveringQuick && (
           <p className="mt-3 text-xs text-cs-muted">
-            {t("home.quickHint", "Specialist persona on top of any runtime — @security-specialist on Gemini, @perf-reviewer on MiniMax, etc.")}
+            {t("home.quickHint", "Persona on top of any runtime — @security-specialist on Gemini, @perf-reviewer on MiniMax, etc. Drop them into a war room session.")}
           </p>
         )}
       </section>
