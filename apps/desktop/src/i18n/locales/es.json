@@ -68,11 +68,12 @@
     "signInForPro": "Iniciar sesion para Pro"
   },
   "home": {
-    "heroTitle": "Crea un agente.",
-    "heroSubtitle": "Describe lo que necesitas, elige un runtime, y ATO escribe los archivos. Sin JSON. Sin memorizar comandos.",
-    "startGuided": "Comenzar con chat",
-    "startQuick": "Configuracion rapida",
-    "quickHint": "Formulario de una pagina para usuarios avanzados — nombre, runtime, modelo, skills, MCPs.",
+    "heroTitle": "Tu sala de guerra local para humanos y LLMs.",
+    "heroSubtitle": "Decidan juntos, llamen herramientas reales, salgan con un audit trail firmado. Pon a tus LLMs en la misma conversacion — Claude, GPT, Gemini, Grok, MiniMax, y mas de 15 mas. Empuja de vuelta. Cita el repo. Toma la decision.",
+    "heroUseCases": "Debates estrategicos · Pre-mortems · Decisiones de arquitectura · Code review · Auditorias de seguridad",
+    "startGuided": "Abrir una war room",
+    "startQuick": "Crear un agente especialista",
+    "quickHint": "Persona sobre cualquier runtime — @security-specialist en Gemini, @perf-reviewer en MiniMax, etc. Ponlos en una war room.",
     "recentAgents": "Agentes recientes",
     "recentRuns": "Ejecuciones recientes",
     "seeAll": "Ver todos",

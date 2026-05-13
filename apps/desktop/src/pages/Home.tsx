@@ -161,16 +161,19 @@ export default function Home({
           Use cases ride underneath the headline (strategy · pre-mortem ·
           architecture · code review · security audits) — code review is the
           most-validated, not the elevator pitch. */}
-      <section className="rounded-2xl border border-cs-border bg-cs-card p-8">
-        <div className="flex items-start justify-between gap-6 flex-wrap">
+      <section className="rounded-2xl border border-cs-border bg-cs-card p-6 sm:p-8">
+        {/* Stack vertically by default; only go side-by-side at >= md so the
+            text never gets squeezed into one-word-per-line columns when the
+            sidebar is wide or the window is narrow (v2.4.7 layout fix). */}
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-6">
           <div className="flex-1 min-w-0">
-            <h1 className="text-2xl font-semibold text-cs-text">
+            <h1 className="text-xl sm:text-2xl font-semibold text-cs-text leading-tight">
               {t(
                 "home.heroTitle",
                 "Your local war room for humans and LLMs."
               )}
             </h1>
-            <p className="mt-2 text-cs-muted max-w-2xl">
+            <p className="mt-2 text-sm sm:text-base text-cs-muted max-w-2xl">
               {t(
                 "home.heroSubtitle",
                 "Decide together, call real tools, walk out with a signed audit trail. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, and 15+ more. Push back on them. Cite the repo. Ship the decision."
@@ -183,10 +186,12 @@ export default function Home({
               )}
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          {/* Buttons wrap to a row of their own on narrow viewports; stack
+              vertically only when even one button doesn't fit per row. */}
+          <div className="flex flex-wrap items-center gap-2 md:gap-3 md:flex-shrink-0">
             <button
               type="button"
-              className="inline-flex items-center gap-2 rounded-lg bg-cs-accent px-5 py-3 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover transition"
+              className="inline-flex items-center gap-2 rounded-lg bg-cs-accent px-4 py-2.5 sm:px-5 sm:py-3 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover transition whitespace-nowrap"
               onClick={() => launch("guided")}
             >
               <Sparkles size={16} />
@@ -194,7 +199,7 @@ export default function Home({
             </button>
             <button
               type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-cs-border bg-cs-bg-raised px-5 py-3 text-sm font-medium text-cs-text hover:border-cs-hover transition"
+              className="inline-flex items-center gap-2 rounded-lg border border-cs-border bg-cs-bg-raised px-4 py-2.5 sm:px-5 sm:py-3 text-sm font-medium text-cs-text hover:border-cs-hover transition whitespace-nowrap"
               onClick={() => launch("quick")}
               onMouseEnter={() => setHoveringQuick(true)}
               onMouseLeave={() => setHoveringQuick(false)}

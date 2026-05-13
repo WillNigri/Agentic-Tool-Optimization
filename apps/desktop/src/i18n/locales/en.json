@@ -75,11 +75,12 @@
     "signInForPro": "Sign in for Pro"
   },
   "home": {
-    "heroTitle": "Build an agent.",
-    "heroSubtitle": "Describe what you want, pick a runtime, and ATO writes the files. No JSON. No CLI memorization.",
-    "startGuided": "Start with chat",
-    "startQuick": "Quick setup",
-    "quickHint": "One-page form for power users — name, runtime, model, skills, MCPs.",
+    "heroTitle": "Your local war room for humans and LLMs.",
+    "heroSubtitle": "Decide together, call real tools, walk out with a signed audit trail. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, and 15+ more. Push back on them. Cite the repo. Ship the decision.",
+    "heroUseCases": "Strategy debates · Pre-mortems · Architecture decisions · Code review · Security audits",
+    "startGuided": "Open a war room",
+    "startQuick": "Build a specialist agent",
+    "quickHint": "Persona on top of any runtime — @security-specialist on Gemini, @perf-reviewer on MiniMax, etc. Drop them into a war room session.",
     "recentAgents": "Recent agents",
     "recentRuns": "Recent runs",
     "seeAll": "See all",
