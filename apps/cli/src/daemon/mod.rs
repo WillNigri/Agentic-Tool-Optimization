@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod mdns;
+pub mod protocol;
 
 /// Default TCP port the daemon binds to. Localhost-only in step 1;
 /// will become the LAN-advertised port once mDNS lands in step 2.
@@ -377,11 +378,38 @@ pub fn start(db_path: PathBuf) -> Result<()> {
                 accepted = listener.accept() => {
                     match accepted {
                         Ok((sock, peer_addr)) => {
-                            // Step 1 stub — accept and immediately close
-                            // with a marker log. Step 3 wires the WS
-                            // upgrade + JSON-RPC dispatcher here.
-                            eprintln!("ato daemon: accepted connection from {} (no protocol yet)", peer_addr);
-                            drop(sock);
+                            // v2.4.3 step 3 — WS+JSON-RPC handler.
+                            // Each connection runs on its own task so
+                            // a slow / hostile peer can't block the
+                            // accept loop. The task takes ownership of
+                            // the socket; the db_path Arc lets it
+                            // hit SQLite without borrowing across .await.
+                            //
+                            // Review finding #9 (Gemini): tokio::spawn
+                            // swallows panics from the spawned future
+                            // silently. JoinHandle::await surfaces
+                            // them as a JoinError; we log it so a
+                            // crash inside protocol handling is
+                            // visible in launchctl / systemd logs.
+                            let db_for_task = db_path_arc.clone();
+                            let join = tokio::spawn(async move {
+                                protocol::handle_connection(sock, db_for_task).await;
+                            });
+                            tokio::spawn(async move {
+                                if let Err(e) = join.await {
+                                    if e.is_panic() {
+                                        eprintln!(
+                                            "ato daemon: ws handler for {} PANICKED: {:?}",
+                                            peer_addr, e
+                                        );
+                                    } else if e.is_cancelled() {
+                                        eprintln!(
+                                            "ato daemon: ws handler for {} cancelled",
+                                            peer_addr
+                                        );
+                                    }
+                                }
+                            });
                         }
                         Err(e) => {
                             eprintln!("ato daemon: accept error: {}", e);
