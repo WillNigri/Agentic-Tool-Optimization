@@ -4,44 +4,44 @@
 
 **Critical**: Tweet 1 must have **media attached** (image or video). Twitter de-prioritizes link-only / text-only posts. The recorded war-room positioning session is the alpha asset — attach the full video (or a 30–60s cut) to tweet 1. **No link in tweet 1** (Twitter penalizes link-out in lead tweet; link goes in tweet 5).
 
-**Tag**: `@karpathy` in tweet 1 only. Don't re-tag in every reply — looks spammy. He's known to engage with thoughtful technical work; if he likes or quote-tweets, the thread will travel.
+**Tag strategy**: `@karpathy` appears in tweet 1 only, but as *parallel work* / *peer prior art* — **not** as "we maintain his thing." His work is referenced as the validating peer; ato is the thing being launched. The tag gives distribution; the framing keeps our identity our own.
 
 ---
 
 ## Tweet 1 (lead — attach video)
 
 ```
-I rebuilt @karpathy's LLM Council with tool calls and an audit trail.
+ato — drop multiple LLMs into one shared session. They argue with you, call real tools (read_file / grep / git_log) to verify claims in your repo, and cite every file they checked.
 
-ato — local war room where multiple LLMs argue with you, call real tools to verify claims in your repo, and cite every file they checked.
+Same primitive as @karpathy's llm-council, different shape: multi-provider, tool-calling, audit trail.
 
-Maintained. Multi-provider. MIT.
+Local war room. MIT.
 
 [VIDEO: the war-room session that decided ato's positioning, recorded live]
 ```
 
-— *247 chars, fits in 280 with room. The phrase "rebuilt Karpathy's LLM Council" earns the click; the verbs (argue, call, verify, cite) name what's actually different; "Maintained. Multi-provider. MIT." closes three loops at once.*
+— *~280 chars, the wider Twitter limit. Lead with what ato does. Karpathy gets a single line as "same primitive, different shape" — credits him as peer prior art without saying we are his maintained code. The tag still earns the distribution.*
 
 ## Tweet 2 (the context — reply)
 
 ```
-The trigger: Karpathy shipped llm-council in November. 18.7k stars in 6 months, then he explicitly walked away —
+The pattern Karpathy shipped in November:
 
-"Code is ephemeral now and libraries are over, ask your LLM to change it."
+Multiple LLMs answer the same question. Each ranks the others. A chairman LLM synthesizes a verdict. 18.7k stars in 6 months — clearly a real pattern.
 
-What was missing for actual daily use:
-• Tool calls
-• Multi-provider auth
-• An audit trail
-• Persistent specialists
+What ato adds for daily use:
+• Tool calls (read_file / grep / git_log) — LLMs verify claims, not just shuffle text
+• Multi-provider auth — Claude Max / Codex CLI / Gemini CLI subscriptions you already have, not OpenRouter-only
+• Per-turn audit log: which LLM made which tool call with what args
+• Persistent specialist agents (@security-specialist, @perf-reviewer, etc.)
 ```
 
-— *No image. Quotes Karpathy. Bullet list survives on phone, looks structured.*
+— *No image. Credits Karpathy's prior art with specifics, then immediately pivots to what ato does that's different. Removes the "maintained version" subtext.*
 
 ## Tweet 3 (the shipped shape — reply)
 
 ```
-The CLI that does it:
+The CLI:
 
 $ ato review --against main \
     --reviewer @security-specialist \
@@ -53,7 +53,7 @@ $ ato review --against main \
 Three LLMs, two specialist personas, one shared session, history replay, function-calling tools. Paste the markdown into your PR.
 ```
 
-— *Mono-font screenshot of the CLI in a terminal would land better than text. If you have a clean terminal screenshot of an actual run, attach it.*
+— *Mono-font screenshot of the CLI in a real terminal would land better than text. If you have a clean terminal screenshot of an actual run, attach it.*
 
 ## Tweet 4 (the dogfood story — reply, attach screenshot)
 
@@ -67,7 +67,7 @@ The headline now on the website was *produced by the product, on camera*.
 [SCREENSHOT: the session tab in the desktop app showing both LLM responses + your moderator turns]
 ```
 
-— *This is the most retweetable single tweet in the thread. The "I let my product decide its own positioning" angle has a meta-dogfooding hook that does well on indie-dev Twitter.*
+— *This is the most retweetable single tweet in the thread. The "I let my product decide its own positioning" angle has a meta-dogfooding hook that does well on indie-dev Twitter. Stands entirely on its own — no Karpathy framing at all.*
 
 ## Tweet 5 (the install — reply)
 
@@ -77,20 +77,20 @@ brew install --cask ato
 
 Or grab the DMG / AppImage / Windows installer from releases.
 
-🔗 Blog (full Karpathy comparison): https://agentictool.ai/posts/llm-council-tool-calls.html
+🔗 Blog: https://agentictool.ai/posts/llm-council-tool-calls.html
 🔗 GitHub: https://github.com/WillNigri/Agentic-Tool-Optimization
 
 Bring your own keys. Local-first. MIT.
 ```
 
-— *Links land here, not in tweet 1. The brew block is intentionally at the top — it's the friction-free install for the audience most likely to convert.*
+— *Links land here, not in tweet 1. The brew block is intentionally at the top — it's the friction-free install for the audience most likely to convert. Blog link goes to the council-comparison post; the post is editorial content about the landscape, not a "we are the maintained X" pitch.*
 
 ## Tweet 6 (optional — engagement hook, reply)
 
 ```
-The 4 things this fixes from the council pattern:
+What ato brings to multi-LLM debate:
 
-1. LLMs can read your actual repo (read_file / grep / git_log), not just shuffle text
+1. LLMs actually read your repo (read_file / grep / git_log) — not just shuffle text
 2. Bring your existing Claude Max / Codex / Gemini CLI subscriptions — OpenRouter optional
 3. Per-turn audit log: which LLM made which tool call with what args
 4. Specialist agents you define once, compose into reviews
@@ -98,13 +98,18 @@ The 4 things this fixes from the council pattern:
 Bug reports welcome.
 ```
 
-— *Closes the thread with a recap + an explicit invitation to test. The "Bug reports welcome" line softens the launch tone — it says "I'm not done, help me."*
+— *Closes the thread with a recap + an explicit invitation to test. The "Bug reports welcome" line softens the launch tone — it says "I'm not done, help me." No "fixes the council pattern" framing — ato stands on its own contributions.*
 
 ---
 
 ## After posting — within 30 min
 
-- **DM Karpathy on X** (one short message, NOT a public reply): *"Hey Andrej — built a maintained, tool-equipped version of llm-council; posted a thread about it. If the framing feels off, tell me and I'll restructure. Thanks for shipping the primitive."*
+- **DM Karpathy on X** (one short, NOT a public reply):
+
+  > *"Hey Andrej — saw llm-council, ended up building parallel work in the same space (multi-provider, tool-calling, audit trail). Posted a thread tagging you; if the reference feels off, happy to restructure. Thanks for shipping the primitive."*
+
+  Note: "parallel work in the same space" — credits without subordinating. Not "the maintained version of."
+
 - **Reply to your own thread** with the live demo URL if/when you record one specifically for socials.
 - **Pin tweet 1** to your profile for the next 7 days.
 
@@ -112,10 +117,11 @@ Bug reports welcome.
 
 - **DM 5 mutuals** (not 50 — five) and ask them to engage genuinely if it resonates. Don't ask for upvotes / retweets explicitly; ask for honest thoughts. The replies you get are signal AND distribution.
 - **Cross-post tweet 1 + 4 as separate posts on LinkedIn** if you have an active LinkedIn. Different audience, different conversion shape — LinkedIn pulls in PMs and engineering managers who would never see Twitter dev launches.
-- **Reddit post in r/LocalLLaMA** linking the blog post (NOT the GitHub repo — that reads as self-promo). Title: *"Maintained version of Karpathy's LLM Council (multi-provider + tool calls)"*. Be present in the comments for 2 hours after.
+- **Reddit post in r/LocalLLaMA** linking the blog post (NOT the GitHub repo — that reads as self-promo). Title: *"Multi-LLM debate sessions with tool calls and audit trail — local, multi-provider, MIT"*. Be present in the comments for 2 hours after.
 
 ## What NOT to do
 
+- **Don't lead any post with "we maintain X's project."** That framing was retired. Karpathy is a peer/anchor for distribution, not a parent we forked.
 - **Don't tag Anthropic / OpenAI / Google official accounts.** They won't engage; tagging looks needy.
 - **Don't post during US evening.** Karpathy's audience is mostly US-pacific; engagement drops 60% after 6 PM ET.
 - **Don't apologize for the rough edges in the launch tweet.** Save that for the reply chain. The lead has to be confident.
