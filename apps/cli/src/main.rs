@@ -266,6 +266,35 @@ enum MeshInviteSub {
         #[arg(long, default_value_t = false)]
         all: bool,
     },
+    /// Redeem an invite issued by another daemon. Connects to the
+    /// issuer over WebSocket + JSON-RPC, sends our identity, and
+    /// stores the issuer's identity locally on success. After this
+    /// completes both sides have each other in their `mesh_peers`.
+    ///
+    /// `--expect-peer-id` is critical: it pins the issuer you THINK
+    /// you're dialing. If the daemon at <host:port> answers with a
+    /// different peer_id, the consume aborts BEFORE we store the
+    /// pairing. Defense against MitM / DNS-poison / wrong-host typos.
+    /// The issuer prints their peer_id on `mesh invite create`;
+    /// share it together with the code via the same out-of-band
+    /// channel.
+    Consume {
+        /// The invite code (ATO-XXXX-XXXX-XXXX).
+        code: String,
+        /// Host or IP of the issuer's daemon.
+        #[arg(long)]
+        host: String,
+        /// TCP port of the issuer's daemon (default: 7755).
+        #[arg(long, default_value_t = 7755)]
+        port: u16,
+        /// Required: the issuer's peer_id, shared out-of-band with
+        /// the code. Pinning this defeats redirect attacks.
+        #[arg(long = "expect-peer-id")]
+        expect_peer_id: String,
+        /// Optional friendly note saved on the local mesh_peers row.
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1058,6 +1087,21 @@ fn main() -> Result<()> {
                 MeshInviteSub::List { all } => {
                     commands::mesh::invite_list(&db_path, all, &opts)
                 }
+                MeshInviteSub::Consume {
+                    code,
+                    host,
+                    port,
+                    expect_peer_id,
+                    note,
+                } => commands::mesh::invite_consume(
+                    &db_path,
+                    &code,
+                    &host,
+                    port,
+                    &expect_peer_id,
+                    note.as_deref(),
+                    &opts,
+                ),
             },
             MeshSub::Peers { sub } => match sub {
                 MeshPeersSub::List => commands::mesh::peers_list(&db_path, &opts),

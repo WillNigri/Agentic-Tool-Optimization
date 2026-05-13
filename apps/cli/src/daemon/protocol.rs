@@ -423,11 +423,232 @@ async fn process_text_frame(text: &str, db_path: &Arc<PathBuf>) -> Option<String
             };
             handle_post_completion(req.id, params, db_path).await
         }
+        "consume_invite" => {
+            let params: ConsumeInviteParams = match serde_json::from_value(req.params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Some(
+                        error_reply(req.id, -32602, &format!("invalid params: {}", e))
+                            .to_string(),
+                    );
+                }
+            };
+            handle_consume_invite(req.id, params, db_path).await
+        }
         other => Some(
             error_reply(req.id, -32601, &format!("method not found: {}", other))
                 .to_string(),
         ),
     }
+}
+
+/// `consume_invite` RPC params — sent by the consumer to the issuer.
+/// Critically NOT signed: at this point the issuer doesn't know the
+/// consumer's pubkey yet (that's what this message is delivering).
+/// Defense is: (1) the invite code is one-shot + TTL-bounded + 60-bit
+/// entropy, (2) `try_consume_invite` claims the row atomically, (3)
+/// the consumer pins the issuer's expected peer_id on their side
+/// before accepting the reply, (4) all reject paths return the same
+/// generic "invalid invite" error so attackers can't probe.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConsumeInviteParams {
+    pub code: String,
+    pub sender_peer_id: String,
+    pub sender_public_key_b64: String,
+    pub sender_machine_name: String,
+}
+
+/// `consume_invite` RPC result — the issuer's identity, returned to
+/// the consumer on a successful claim so the consumer can insert the
+/// issuer into its own `mesh_peers` table.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConsumeInviteResult {
+    pub peer_id: String,
+    pub public_key_b64: String,
+    pub machine_name: String,
+}
+
+async fn handle_consume_invite(
+    id: serde_json::Value,
+    p: ConsumeInviteParams,
+    db_path: &Arc<PathBuf>,
+) -> Option<String> {
+    // Bound input sizes. Defense against a hostile sender filling
+    // SQLite with garbage strings. Matches post_completion's pattern.
+    // machine_name 256 is generous; pubkey b64 of 32 bytes is 44
+    // chars; peer_id is 64 hex chars.
+    if p.sender_machine_name.len() > 256 {
+        return Some(generic_invalid_invite(id));
+    }
+    if p.sender_peer_id.len() != 64
+        || !p.sender_peer_id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Some(generic_invalid_invite(id));
+    }
+    if p.sender_public_key_b64.is_empty() || p.sender_public_key_b64.len() > 128 {
+        return Some(generic_invalid_invite(id));
+    }
+    // Decode + validate the consumer's pubkey BEFORE we claim the
+    // invite. If their pubkey is malformed, fail fast without
+    // burning the one-shot.
+    let consumer_pubkey_bytes = match base64::engine::general_purpose::STANDARD
+        .decode(p.sender_public_key_b64.as_bytes())
+    {
+        Ok(b) if b.len() == 32 => b,
+        _ => return Some(generic_invalid_invite(id)),
+    };
+    // Verify the claimed peer_id actually matches the claimed pubkey
+    // (peer_id = sha256(pubkey) lowercase hex). An attacker who lies
+    // about either gets rejected at this gate. Without this check,
+    // a peer could send a pubkey + an unrelated peer_id and trick us
+    // into storing a peer_id we couldn't actually verify signatures
+    // against later.
+    let derived_id = peer_id_from_pubkey_bytes(&consumer_pubkey_bytes);
+    if derived_id != p.sender_peer_id {
+        return Some(generic_invalid_invite(id));
+    }
+
+    // chunk-2 review (claude, MEDIUM): read our own identity BEFORE
+    // claiming the invite. If `status()` or hostname resolution
+    // fails AFTER `try_consume_invite` already committed, we'd
+    // orphan-pair: the issuer's DB has the consumer, but the
+    // consumer hears "invalid invite" and never stores the issuer.
+    // Resolve identity up front so any failure short-circuits
+    // before any state change.
+    let st = match crate::daemon::status() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ato daemon: consume_invite cannot read local identity: {}", e);
+            return Some(generic_invalid_invite(id));
+        }
+    };
+    let machine_name = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "unknown-host".into());
+    let our_reply = ConsumeInviteResult {
+        peer_id: st.peer_id.clone(),
+        public_key_b64: st.public_key_b64.clone(),
+        machine_name,
+    };
+    let our_pubkey_for_check = st.public_key_b64.clone();
+
+    // Spawn-blocking the DB half. The closure runs the atomic claim
+    // and the mesh_peers INSERT inside one tx. Anything that can
+    // fail (identity, network) is now ABOVE this block.
+    let db_path_owned = db_path.clone();
+    let p_owned = p;
+    let claim_result: Result<Option<ConsumeInviteResult>, String> =
+        tokio::task::spawn_blocking(move || {
+            let mut conn = rusqlite::Connection::open(&*db_path_owned)
+                .map_err(|e| format!("open db: {}", e))?;
+            let result = crate::commands::mesh::try_consume_invite(
+                &mut conn,
+                &p_owned.code,
+                |tx, invite| {
+                    // chunk-2 review (claude, LOW): defense-in-depth.
+                    // Verify the invite was issued by US, not by a
+                    // different daemon whose DB got copied here.
+                    // The consumer-side `--expect-peer-id` pin is
+                    // the operational defense; this is the
+                    // server-side mirror so a stolen DB on a
+                    // different machine doesn't accidentally pair.
+                    if let Some(stored) = invite.issuer_pubkey.as_deref() {
+                        if stored != our_pubkey_for_check {
+                            // Aborting inside the closure rolls
+                            // back the UPDATE consumed=1, so the
+                            // invite stays usable for the right
+                            // issuer.
+                            return Err(anyhow::anyhow!(
+                                "issuer_pubkey mismatch (DB copied between machines?)"
+                            ));
+                        }
+                    }
+                    // INSERT the consumer as a paired peer. ON
+                    // CONFLICT preserves prior notes / last_seen_at
+                    // on re-pair instead of nuking them via
+                    // INSERT OR REPLACE (chunk-2 review, claude LOW).
+                    let now = chrono::Utc::now().to_rfc3339();
+                    tx.execute(
+                        "INSERT INTO mesh_peers
+                           (peer_id, public_key, name, paired_at, last_seen_at, notes)
+                         VALUES (?1, ?2, ?3, ?4, NULL, NULL)
+                         ON CONFLICT(peer_id) DO UPDATE SET
+                           public_key = excluded.public_key,
+                           name       = excluded.name,
+                           paired_at  = excluded.paired_at",
+                        rusqlite::params![
+                            p_owned.sender_peer_id,
+                            p_owned.sender_public_key_b64,
+                            p_owned.sender_machine_name,
+                            now,
+                        ],
+                    )?;
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("try_consume_invite: {}", e))?;
+            if result.is_none() {
+                return Ok(None);
+            }
+            // Caller already prepared the reply pre-tx. Just hand
+            // it back; the tx is already committed at this point.
+            Ok(Some(our_reply))
+        })
+        .await
+        .map_err(|join| format!("internal join: {}", join))
+        .and_then(|r| r);
+
+    match claim_result {
+        Ok(Some(result)) => Some(
+            JsonRpcResponse {
+                jsonrpc: "2.0".into(),
+                id,
+                result: Some(serde_json::to_value(&result).unwrap_or(serde_json::Value::Null)),
+                error: None,
+            }
+            .to_json_string(),
+        ),
+        // Invite missing/expired/consumed — single generic error so
+        // an attacker can't probe which condition failed.
+        Ok(None) => Some(generic_invalid_invite(id)),
+        Err(msg) => {
+            // Internal error — log to stderr, return generic to the
+            // wire so we don't leak DB error shapes.
+            eprintln!("ato daemon: consume_invite internal error: {}", msg);
+            Some(generic_invalid_invite(id))
+        }
+    }
+}
+
+/// Single canonical "invalid invite" reply used for every reject
+/// path on consume_invite. Don't leak whether the code was missing,
+/// expired, already consumed, or malformed — an attacker shouldn't
+/// be able to distinguish those by reply.
+fn generic_invalid_invite(id: serde_json::Value) -> String {
+    error_reply(id, -32004, "invalid invite").to_string()
+}
+
+/// Compute peer_id (sha256 hex) from raw pubkey bytes. Used by the
+/// consume handler to verify the consumer's claimed peer_id matches
+/// the claimed pubkey. Mirrors `daemon::peer_id_for` (which takes a
+/// VerifyingKey) — kept here as raw-byte form to skip the parse
+/// step when we just need the id.
+fn peer_id_from_pubkey_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let digest = simple_sha256_bytes(bytes);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
+fn simple_sha256_bytes(input: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(input);
+    h.finalize().into()
 }
 
 async fn handle_post_completion(

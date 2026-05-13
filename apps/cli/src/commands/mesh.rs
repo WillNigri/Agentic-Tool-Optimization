@@ -37,20 +37,26 @@
 //     matching the expected shape before we ever touch the DB. The
 //     parameterized query is the real defense; this is a second
 //     layer that also helps with operator typos.
-//   - Issuer impersonation: the invite row stores `issuer_pubkey`
-//     at creation; the consume_invite handler (chunk 2) compares
-//     that against the expected issuer the consumer thinks they're
-//     dialing. A peer who captures a code but consumes it against a
-//     different daemon doesn't get a usable pairing.
+//   - Wrong-daemon redirect: the consumer pins `--expect-peer-id`
+//     when running `mesh invite consume`. If the daemon they dial
+//     replies with a different peer_id (DNS poison, MitM, typo),
+//     the pairing aborts BEFORE writing local mesh_peers.
+//   - Database transplant: the invite row stores `issuer_pubkey` at
+//     creation time. The daemon-side consume handler verifies that
+//     value still matches the daemon's current pubkey before
+//     committing. Prevents a copied DB from accidentally accepting
+//     invites that were originally issued by a different machine.
 //   - Information leakage on bad codes: the "invalid code" reply
 //     doesn't say WHY (expired vs. unknown vs. already-consumed)
 //     so an attacker can't probe to learn which prefixes are valid.
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use rand::RngCore;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::daemon::DEFAULT_DAEMON_PORT;
 use crate::output::{emit_human, emit_json, Opts};
@@ -396,23 +402,23 @@ pub fn peers_remove(db_path: &Path, peer_id: &str, opts: &Opts) -> Result<()> {
 }
 
 /// Atomically claim an invite code and run the caller's pairing
-/// step inside the same transaction. This is the entry point chunk
-/// 2's `consume_invite` JSON-RPC handler will use.
+/// step inside the same transaction. Used by the `consume_invite`
+/// JSON-RPC handler in `daemon/protocol.rs`.
 ///
-/// Why a callback instead of returning the row + a tx handle: the
-/// caller's job is to INSERT into mesh_peers using fields from the
-/// consumer's RPC payload PLUS the invite row's `issuer_pubkey`
-/// (which lets us reject a spoofed consumer that doesn't match the
-/// invite). Running that INSERT inside the same `tx` keeps the
-/// whole "code claimed AND peer paired" transition atomic. If the
-/// closure returns Err, the tx rolls back and the invite returns to
-/// the unconsumed pool.
+/// The closure receives the SELECTed `InviteRow` (including the
+/// stored `issuer_pubkey`) so the caller can verify the invite was
+/// issued by the current daemon (defense against a copied DB from a
+/// different machine accepting an invite that wasn't really its
+/// own). The closure then INSERTs the consumer into mesh_peers
+/// using fields from the RPC payload. The whole "code claimed +
+/// peer paired" transition is atomic.
 ///
 /// Returns `Ok(Some(T))` when the code was claimed and the closure
 /// succeeded; `Ok(None)` when the code is missing/expired/consumed
 /// (single error path — no leakage about which condition failed);
-/// `Err` only for actual DB failures (not "no such code").
-#[allow(dead_code)] // Wired in chunk 2 (consume_invite handler).
+/// `Err` only for actual DB failures or when the closure itself
+/// rejects (and the tx rolls back, returning the invite to the
+/// unconsumed pool).
 pub fn try_consume_invite<F, T>(
     conn: &mut Connection,
     code: &str,
@@ -462,6 +468,247 @@ where
     let out = on_claimed(&tx, &row)?;
     tx.commit().context("commit try_consume_invite tx")?;
     Ok(Some(out))
+}
+
+/// CLI: `ato mesh invite consume <code> --host H --port P --expect-peer-id X`.
+///
+/// The consumer side of the pairing. Opens a WebSocket client to
+/// the issuer's daemon, sends a `consume_invite` JSON-RPC request
+/// carrying our own identity, validates the issuer's reply against
+/// the pinned peer_id, and stores the issuer into our local
+/// `mesh_peers` only after the pin check passes.
+///
+/// Bounded by a 10s overall wall clock (connect + write + read).
+/// The issuer's daemon does the actual atomic claim inside
+/// `try_consume_invite`; this side is purely the network client +
+/// "store after verify" half.
+pub fn invite_consume(
+    db_path: &Path,
+    code: &str,
+    host: &str,
+    port: u16,
+    expect_peer_id: &str,
+    note: Option<&str>,
+    opts: &Opts,
+) -> Result<()> {
+    // Fast-fail input validation BEFORE we dial anything.
+    if !validate_code_format(code) {
+        anyhow::bail!(
+            "code must match ATO-XXXX-XXXX-XXXX with Crockford base32 chars (no I/L/O/U)"
+        );
+    }
+    if !validate_peer_id_format(expect_peer_id) {
+        anyhow::bail!(
+            "--expect-peer-id must be a 64-character lowercase hex string (the issuer prints theirs on `mesh invite create`)"
+        );
+    }
+    if host.is_empty() {
+        anyhow::bail!("--host is required");
+    }
+
+    // Read our own identity so we can announce ourselves to the
+    // issuer. status() loads (or generates on first use) the
+    // daemon keys at ~/.ato/daemon/keys/.
+    let me = crate::daemon::status()
+        .context("read local daemon identity (run `ato daemon start` once if first-time setup)")?;
+    let machine_name = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "unknown-host".into());
+
+    // Build the request locally — minimal, no Tokio touches yet.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "consume-1",
+        "method": "consume_invite",
+        "params": {
+            "code": code,
+            "sender_peer_id": me.peer_id,
+            "sender_public_key_b64": me.public_key_b64,
+            "sender_machine_name": machine_name,
+        }
+    });
+
+    // Spin up a tokio runtime for the duration of the dial. Single
+    // thread is enough — one outbound WS, sub-second total. We avoid
+    // making the entire CLI async just for this one network call.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?;
+    let url = format!("ws://{}:{}", host, port);
+    let reply: ConsumeInviteWireReply = rt
+        .block_on(async {
+            // 10s overall budget: connect + send + receive.
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                ws_consume_invite_call(&url, &req),
+            )
+            .await
+            .map_err(|_| anyhow!("timed out talking to {} (10s)", url))?
+        })
+        .with_context(|| format!("consume_invite roundtrip to {}", url))?;
+
+    // Server-side errors come back as a JSON-RPC error object. The
+    // issuer's daemon collapses every reject reason into a single
+    // -32004 "invalid invite" so we can't probe what's wrong.
+    if let Some(err) = reply.error {
+        anyhow::bail!(
+            "issuer rejected consume_invite: {} (code {}). Common causes: code was already consumed, code expired, code typed wrong.",
+            err.message,
+            err.code
+        );
+    }
+    let result = reply.result.ok_or_else(|| {
+        anyhow!("issuer returned no result and no error — protocol violation")
+    })?;
+
+    // PIN CHECK: the issuer's claimed peer_id MUST match what the
+    // user expected via --expect-peer-id. This is the defense
+    // against dialing the wrong daemon (DNS poison, MitM, typo).
+    if result.peer_id != expect_peer_id {
+        anyhow::bail!(
+            "issuer peer_id mismatch — expected {} but got {}. ABORTING pairing. If you trust the issuer's actual peer_id, re-run with the correct --expect-peer-id.",
+            expect_peer_id,
+            result.peer_id
+        );
+    }
+    // Derived peer_id must match the returned pubkey too (peer_id =
+    // sha256(pubkey)). Catches a daemon that lies about either.
+    let returned_pubkey = base64::engine::general_purpose::STANDARD
+        .decode(result.public_key_b64.as_bytes())
+        .context("decode issuer pubkey b64")?;
+    if returned_pubkey.len() != 32 {
+        anyhow::bail!(
+            "issuer pubkey wrong length: {} bytes (expected 32 for Ed25519)",
+            returned_pubkey.len()
+        );
+    }
+    let derived = peer_id_hex_from_bytes(&returned_pubkey);
+    if derived != result.peer_id {
+        anyhow::bail!(
+            "issuer peer_id does not match the sha256 of their returned pubkey. ABORTING pairing."
+        );
+    }
+
+    // chunk-2 review (claude, LOW): bound the issuer's reply
+    // before we commit it to local storage. Trust boundary
+    // asymmetry — we opted in to this peer, but a hostile or
+    // buggy issuer shouldn't be able to write a multi-MB string
+    // into our mesh_peers.name column. Matches the daemon-side
+    // 256 limit for symmetry.
+    if result.machine_name.len() > 256 {
+        anyhow::bail!(
+            "issuer machine_name is {} bytes (max 256) — refusing to store",
+            result.machine_name.len()
+        );
+    }
+    // All checks passed — store the issuer into local mesh_peers.
+    // chunk-2 review (claude, LOW): use ON CONFLICT DO UPDATE so a
+    // re-pair preserves prior `notes` / `last_seen_at` rather than
+    // nuking them via INSERT OR REPLACE. The caller-supplied --note
+    // only overrides when explicitly passed.
+    let conn = open_db_strict(db_path)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO mesh_peers
+           (peer_id, public_key, name, paired_at, last_seen_at, notes)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)
+         ON CONFLICT(peer_id) DO UPDATE SET
+           public_key = excluded.public_key,
+           name       = excluded.name,
+           paired_at  = excluded.paired_at,
+           notes      = COALESCE(excluded.notes, mesh_peers.notes)",
+        params![
+            result.peer_id,
+            result.public_key_b64,
+            result.machine_name,
+            now,
+            note,
+        ],
+    )?;
+
+    if opts.human {
+        emit_human(&format!(
+            "Paired with {}\n  peer_id:    {}\n  pubkey:     {}\n  via:        ws://{}:{}\n",
+            result.machine_name, result.peer_id, result.public_key_b64, host, port
+        ));
+    } else {
+        emit_json(&result)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsumeInviteWireReply {
+    #[serde(default)]
+    result: Option<ConsumeInviteReplyResult>,
+    #[serde(default)]
+    error: Option<JsonRpcErrorObject>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ConsumeInviteReplyResult {
+    peer_id: String,
+    public_key_b64: String,
+    machine_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcErrorObject {
+    code: i32,
+    message: String,
+}
+
+/// Internal: open the WS connection, send the request, read one
+/// reply text frame, decode it. Bounded by the caller's timeout.
+async fn ws_consume_invite_call(
+    url: &str,
+    req: &serde_json::Value,
+) -> Result<ConsumeInviteWireReply> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .with_context(|| format!("connect_async {}", url))?;
+    let body = serde_json::to_string(req).context("serialize consume_invite request")?;
+    ws.send(Message::Text(body.into()))
+        .await
+        .context("send consume_invite frame")?;
+    // Read until we get a text frame (skipping pings / close).
+    let mut reply: Option<ConsumeInviteWireReply> = None;
+    while let Some(frame) = ws.next().await {
+        let m = frame.context("read ws frame")?;
+        match m {
+            Message::Text(t) => {
+                let parsed: ConsumeInviteWireReply =
+                    serde_json::from_str(&t).context("decode consume_invite reply")?;
+                reply = Some(parsed);
+                break;
+            }
+            Message::Close(_) => anyhow::bail!("peer closed before reply"),
+            _ => continue, // pings, binary — ignore
+        }
+    }
+    // Send a proper Close frame so the issuer's daemon log doesn't
+    // see a "Connection reset without closing handshake" every
+    // single pairing. Best-effort: if the close itself errors,
+    // the reply we already captured is what matters.
+    let _ = ws.send(Message::Close(None)).await;
+    reply.ok_or_else(|| anyhow!("peer disconnected without sending a reply"))
+}
+
+fn peer_id_hex_from_bytes(pubkey: &[u8]) -> String {
+    use std::fmt::Write as _;
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(pubkey);
+    let digest: [u8; 32] = h.finalize().into();
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
 }
 
 /// Read an invite without claiming it. Used only for display /
