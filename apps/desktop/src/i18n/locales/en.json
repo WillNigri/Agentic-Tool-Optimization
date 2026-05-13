@@ -63,6 +63,7 @@
     "settingsEnv": "Environment",
     "settingsCloud": "Cloud",
     "settingsProjects": "Projects",
+    "settingsMesh": "Mesh",
     "cloudAuth": "Account",
     "cloudTeams": "Teams",
     "cloudSync": "Sync",
