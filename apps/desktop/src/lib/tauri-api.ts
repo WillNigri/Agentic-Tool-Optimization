@@ -1622,6 +1622,44 @@ export interface ExecutionLog {
    *  The History panel groups consecutive logs with the same id under
    *  one collapsible header so a conversation reads as one chat. */
   sessionId?: string | null;
+  /** v2.4.5 — Tier 2 review audit. How many function-calling tool
+   *  invocations this dispatch made (read_file / grep / git_log).
+   *  null = dispatch didn't involve tool-calling. 0 = tools were
+   *  offered but the model declined. >0 = "verified via N tool calls". */
+  toolCallsCount?: number | null;
+  /** JSON-encoded array of {name, argsBrief, isError} per call. */
+  toolCallsSummary?: string | null;
+  /** v2.4.6 — agent persona driving this dispatch (`security-specialist`).
+   *  The GUI renders `@<slug> · runtime/model` so persona never reads
+   *  as expert validation — it's a frame on top of the same LLM. */
+  agentSlug?: string | null;
+  /** Model id passed to the runtime (e.g. `gemini-2.5-flash`). */
+  model?: string | null;
+}
+
+/** Parsed shape of ExecutionLog.toolCallsSummary. */
+export interface ToolCallAuditEntry {
+  name: string;
+  argsBrief: string;
+  isError: boolean;
+}
+
+/** Parse the JSON summary stored in execution_logs.tool_calls_summary
+ *  into structured entries. Returns [] for null/empty/malformed input
+ *  so callers can render unconditionally. */
+export function parseToolCallsSummary(raw?: string | null): ToolCallAuditEntry[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.map((r) => ({
+      name: String(r.name ?? ""),
+      argsBrief: String(r.args_brief ?? r.argsBrief ?? ""),
+      isError: Boolean(r.is_error ?? r.isError ?? false),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /**

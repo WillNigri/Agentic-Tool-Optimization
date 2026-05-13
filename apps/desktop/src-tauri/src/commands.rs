@@ -9283,10 +9283,10 @@ pub fn get_execution_logs(
     // v2.3.41 — include session_id so the History panel can group
     // multi-turn conversations under one collapsible header.
     let sql = match (&runtime, &status) {
-        (Some(_), Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id FROM execution_logs WHERE runtime = ?1 AND status = ?2 ORDER BY created_at DESC LIMIT ?3",
-        (Some(_), None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id FROM execution_logs WHERE runtime = ?1 ORDER BY created_at DESC LIMIT ?2",
-        (None, Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id FROM execution_logs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
-        (None, None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id FROM execution_logs ORDER BY created_at DESC LIMIT ?1",
+        (Some(_), Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE runtime = ?1 AND status = ?2 ORDER BY created_at DESC LIMIT ?3",
+        (Some(_), None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE runtime = ?1 ORDER BY created_at DESC LIMIT ?2",
+        (None, Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
+        (None, None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs ORDER BY created_at DESC LIMIT ?1",
     };
 
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
@@ -9315,6 +9315,10 @@ pub fn map_execution_log(row: &rusqlite::Row) -> Result<ExecutionLog, rusqlite::
         skill_name: row.get(9)?,
         created_at: row.get(10)?,
         session_id: row.get(11).ok(),
+        tool_calls_count: row.get(12).ok(),
+        tool_calls_summary: row.get(13).ok(),
+        agent_slug: row.get(14).ok(),
+        model: row.get(15).ok(),
     })
 }
 
@@ -9354,6 +9358,10 @@ pub fn add_execution_log(
         skill_name,
         created_at: now,
         session_id: None,
+        tool_calls_count: None,
+        tool_calls_summary: None,
+        agent_slug: None,
+        model: None,
     })
 }
 
