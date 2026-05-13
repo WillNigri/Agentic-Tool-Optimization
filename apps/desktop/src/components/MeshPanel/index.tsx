@@ -358,19 +358,37 @@ interface PairModalProps {
   onPaired: () => void;
 }
 
+// Crockford base32 invite code shape (mirror of CLI's
+// validate_code_format). Matches ATO-XXXX-XXXX-XXXX where each X is
+// a Crockford base32 char (no I, L, O, U). Mirrored here so the
+// modal can reject malformed input before paying for the subprocess
+// roundtrip + an ugly stderr error string. (claude #6)
+const INVITE_CODE_RE = /^ATO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
+
+// Pull host + port out of a mDNS-stored address. IPv6 addresses get
+// stored bare ("fe80::1:7474"), so splitting on the first `:` would
+// chop the address; use the last colon as the host/port separator
+// and strip any brackets. (claude #4)
+function splitHostPort(addr: string): { host: string; port: number } {
+  const idx = addr.lastIndexOf(":");
+  if (idx <= 0 || idx === addr.length - 1) {
+    return { host: addr, port: 7474 };
+  }
+  const rawHost = addr.slice(0, idx);
+  const portStr = addr.slice(idx + 1);
+  const port = parseInt(portStr, 10);
+  const host = rawHost.replace(/^\[|\]$/g, "");
+  return {
+    host,
+    port: Number.isNaN(port) ? 7474 : port,
+  };
+}
+
 function PairModal({ prefill, onClose, onPaired }: PairModalProps) {
   const [code, setCode] = useState("");
-  const [host, setHost] = useState(() =>
-    prefill ? prefill.addr.split(":")[0] : "",
-  );
-  const [port, setPort] = useState<number>(() => {
-    if (prefill) {
-      const parts = prefill.addr.split(":");
-      const p = parseInt(parts[parts.length - 1], 10);
-      if (!Number.isNaN(p)) return p;
-    }
-    return 7474;
-  });
+  const initial = prefill ? splitHostPort(prefill.addr) : { host: "", port: 7474 };
+  const [host, setHost] = useState<string>(initial.host);
+  const [port, setPort] = useState<number>(initial.port);
   const [peerId, setPeerId] = useState(prefill?.peerId ?? "");
   const [note, setNote] = useState("");
   const [pairing, setPairing] = useState(false);
@@ -383,6 +401,10 @@ function PairModal({ prefill, onClose, onPaired }: PairModalProps) {
     const trimmedPeer = peerId.trim().toLowerCase();
     if (!trimmedCode || !trimmedHost || !trimmedPeer) {
       setError("Code, host, and peer ID are required.");
+      return;
+    }
+    if (!INVITE_CODE_RE.test(trimmedCode)) {
+      setError("Invite code must be ATO-XXXX-XXXX-XXXX (Crockford base32 — no I, L, O, U).");
       return;
     }
     if (trimmedPeer.length !== 64 || !/^[0-9a-f]+$/.test(trimmedPeer)) {

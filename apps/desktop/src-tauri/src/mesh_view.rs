@@ -20,11 +20,20 @@
 // running `ato mesh` from the CLI.
 
 use rand::RngCore;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::State;
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
+
+// Overall deadline for `ato mesh invite consume` shell-out. The CLI
+// itself wraps `ws_consume_invite_call` in a 10s timeout but the
+// subprocess can still wait on SQLite busy_timeout + tokio runtime
+// boot before reaching that call. 30s is comfortably above the
+// observed worst case in dev (~3-4s) without leaving a Tauri command
+// hanging forever if the remote daemon is unreachable. (claude #1)
+const CONSUME_INVITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::DbState;
 
@@ -215,9 +224,10 @@ pub fn mesh_create_invite(
         ));
     }
     // Read the local daemon's pubkey so the row is bound to the
-    // issuer (same defense as the CLI's invite_create). On a fresh
-    // install where the daemon never ran, the keypair is generated
-    // here by the locate helper; that matches the CLI behavior.
+    // issuer (same defense as the CLI's invite_create). The daemon
+    // module owns key-creation policy (0600 perms, atomic write); if
+    // the keypair doesn't exist yet we fail fast and tell the user
+    // to run `ato daemon start` rather than generate it from here.
     let issuer_pubkey = read_daemon_pubkey_b64()
         .map_err(|e| format!("read daemon identity: {}", e))?;
 
@@ -272,7 +282,7 @@ pub fn mesh_remove_peer(db: State<'_, DbState>, peer_id: String) -> Result<bool,
 }
 
 #[tauri::command]
-pub fn mesh_consume_invite(
+pub async fn mesh_consume_invite(
     code: String,
     host: String,
     port: u16,
@@ -282,8 +292,14 @@ pub fn mesh_consume_invite(
     // Shell out to the CLI's `ato mesh invite consume` — same WS
     // client, same pin check, same atomic INSERT into mesh_peers.
     // The CLI prints the result as JSON when --human is omitted.
+    //
+    // Wrapped in a wall-clock timeout so a hung subprocess (remote
+    // daemon down, network black hole) doesn't leave the Pair modal
+    // spinner stuck. The CLI's own 10s WS timeout doesn't cover
+    // startup + SQLite busy_timeout, hence the outer 30s. (claude #1)
     let ato = find_ato_binary()?;
     let mut cmd = Command::new(&ato);
+    cmd.kill_on_drop(true);
     cmd.args(&[
         "mesh",
         "invite",
@@ -299,9 +315,24 @@ pub fn mesh_consume_invite(
     if let Some(n) = note.as_deref() {
         cmd.args(&["--note", n]);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("spawn `{} mesh invite consume`: {}", ato.display(), e))?;
+    let out = match timeout(CONSUME_INVITE_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(format!(
+                "spawn `{} mesh invite consume`: {}",
+                ato.display(),
+                e
+            ));
+        }
+        Err(_) => {
+            return Err(format!(
+                "ato mesh invite consume timed out after {}s (remote {}:{} unreachable?)",
+                CONSUME_INVITE_TIMEOUT.as_secs(),
+                host,
+                port,
+            ));
+        }
+    };
     if !out.status.success() {
         return Err(format!(
             "ato mesh invite consume failed (exit {}): {}",
@@ -321,7 +352,10 @@ pub fn mesh_consume_invite(
 /// Locate the `ato` CLI binary. Production path: bundled as a Tauri
 /// sidecar at `Contents/Resources/binaries/ato-<target-triple>`.
 /// Dev path: fall back to `apps/cli/target/release/ato` relative to
-/// the project root, then `which ato`.
+/// the project root, then `which ato` (debug builds only — a PATH
+/// hijack of `ato` in release builds would let an attacker run
+/// arbitrary code under the user's shell when they Pair, so the
+/// release binary refuses to use $PATH at all). (security-specialist #1)
 fn find_ato_binary() -> Result<PathBuf, String> {
     // 1. Bundled sidecar (production).
     let target_triple = current_target_triple();
@@ -346,9 +380,12 @@ fn find_ato_binary() -> Result<PathBuf, String> {
             p = p.parent().unwrap().to_path_buf();
         }
     }
-    // 3. PATH fallback.
-    if let Ok(p) = which::which("ato") {
-        return Ok(p);
+    // 3. PATH fallback — debug builds only.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(p) = which::which("ato") {
+            return Ok(p);
+        }
     }
     Err("ato binary not found. Install via `brew install --cask ato` or run from a dev tree with apps/cli/target/release/ato built.".into())
 }
