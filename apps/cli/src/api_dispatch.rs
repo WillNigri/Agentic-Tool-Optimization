@@ -121,33 +121,66 @@ pub fn dispatch_with_history(
         (_, default) => default.to_string(),
     };
 
-    let url = format!("{}{}", provider.base_url, provider.path);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .context("build reqwest client")?;
 
-    // Build messages = [...history, {role:'user', content:prompt}]
-    let mut messages: Vec<serde_json::Value> = history
-        .iter()
-        .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
-        .collect();
-    messages.push(serde_json::json!({"role": "user", "content": prompt}));
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-        // 4k cap is generous for a review reply; users can extend by
-        // adding a flag later if they need long-form output. Keeps
-        // us under cost/latency surprises on most providers.
-        "max_tokens": 4096,
-    });
+    // v2.4.2 — Gemini-flavored providers (slug=google) use a
+    // structurally different request: model interpolated into the
+    // URL path, API key as `?key=` query param, `contents[]` body
+    // with role values user/model (not user/assistant), and
+    // `generationConfig.maxOutputTokens` instead of `max_tokens`.
+    // Branch here rather than at parse-time so a single request
+    // builder doesn't have to satisfy two unrelated schemas.
+    let (url, body, use_bearer_auth) = if provider.flavor == "gemini" {
+        let path = provider.path.replace("{model}", &model);
+        let url = format!("{}{}?key={}", provider.base_url, path, urlencode(&key));
+        // Translate {role, content} messages → Gemini's {role, parts:[{text}]}.
+        // Gemini calls the assistant role "model".
+        let mut contents: Vec<serde_json::Value> = history
+            .iter()
+            .map(|m| {
+                let role = if m.role == "assistant" { "model" } else { &m.role };
+                serde_json::json!({
+                    "role": role,
+                    "parts": [{"text": m.content}],
+                })
+            })
+            .collect();
+        contents.push(serde_json::json!({
+            "role": "user",
+            "parts": [{"text": prompt}],
+        }));
+        let body = serde_json::json!({
+            "contents": contents,
+            "generationConfig": { "maxOutputTokens": 4096 },
+        });
+        (url, body, false)
+    } else {
+        let url = format!("{}{}", provider.base_url, provider.path);
+        let mut messages: Vec<serde_json::Value> = history
+            .iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect();
+        messages.push(serde_json::json!({"role": "user", "content": prompt}));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            // 4k cap is generous for a review reply; users can extend by
+            // adding a flag later if they need long-form output. Keeps
+            // us under cost/latency surprises on most providers.
+            "max_tokens": 4096,
+        });
+        (url, body, true)
+    };
 
     let start = std::time::Instant::now();
-    let resp = client
-        .post(&url)
-        .bearer_auth(&key)
-        .header("Content-Type", "application/json")
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+    if use_bearer_auth {
+        req = req.bearer_auth(&key);
+    }
+    let resp = req
         .json(&body)
         .send()
         .with_context(|| format!("POST {}", url))?;
@@ -397,6 +430,64 @@ fn parse_response(
     model: String,
     duration_ms: i64,
 ) -> Result<ApiDispatchOutcome> {
+    // v2.4.2 — Gemini-flavored response shape is fundamentally
+    // different from OpenAI/MiniMax. Branch first; the OpenAI/MiniMax
+    // path below assumes choices[].message.content.
+    if provider.flavor == "gemini" {
+        // Error shape: `{"error": {"code": N, "message": "..."}}` at top.
+        if let Some(err) = payload.get("error") {
+            let msg = err["message"].as_str().unwrap_or("(no error.message)");
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!("Gemini error: {}", msg)),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+            });
+        }
+        // Success: candidates[0].content.parts is an array of {text:"..."}.
+        // We concatenate all text parts so multi-segment replies aren't truncated.
+        let text = payload["candidates"][0]["content"]["parts"]
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .filter(|s| !s.is_empty());
+        let response = match text {
+            Some(s) => s,
+            None => {
+                return Ok(ApiDispatchOutcome {
+                    response: None,
+                    error_message: Some(format!(
+                        "no candidates[0].content.parts[].text in Gemini response: {}",
+                        truncate_for_audit(&payload.to_string(), 600)
+                    )),
+                    model_used: model,
+                    duration_ms,
+                    tokens_in: None,
+                    tokens_out: None,
+                });
+            }
+        };
+        // usageMetadata = {promptTokenCount, candidatesTokenCount, totalTokenCount}.
+        let usage = &payload["usageMetadata"];
+        let tokens_in = usage["promptTokenCount"].as_i64();
+        let tokens_out = usage["candidatesTokenCount"].as_i64();
+        return Ok(ApiDispatchOutcome {
+            response: Some(response),
+            error_message: None,
+            model_used: model,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+        });
+    }
+
     // MiniMax flavor: 200 OK but check base_resp.status_code.
     // 0 = success, 2061 = "your token plan doesn't support this model",
     // 2013 = invalid params, etc.
@@ -459,6 +550,25 @@ fn parse_response(
         tokens_in,
         tokens_out,
     })
+}
+
+/// Minimal percent-encoder for the API-key query parameter. Only
+/// touches the chars that matter for query-string safety; pulling
+/// in a full urlencoding crate for this single use case isn't worth
+/// the dep.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 fn truncate_for_audit(s: &str, max_chars: usize) -> String {

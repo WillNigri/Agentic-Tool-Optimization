@@ -9,6 +9,7 @@ pub mod events;
 pub mod files_touched;
 pub mod kill;
 pub mod posts;
+pub mod providers;
 pub mod ratchet;
 pub mod recipes;
 pub mod sessions;

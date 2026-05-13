@@ -24,8 +24,17 @@ pub struct ApiProvider {
     pub flavor: &'static str,
 }
 
+// Each entry below carries a `// last verified:` comment with the
+// most recent date the smoke test (`ato runtimes test-providers`)
+// actually round-tripped a dispatch against this entry. Bump it on
+// every verification. Entries without a key configured on the dev
+// machine carry `UNVERIFIED` — they're registered based on the
+// vendor's published API shape but haven't been roundtripped end-
+// to-end. Treat UNVERIFIED entries as "best-effort"; the smoke test
+// surfaces drift before users hit it.
 pub fn registry() -> &'static [ApiProvider] {
     &[
+        // last verified: 2026-05-13 ✓ (dispatch returned 2-char reply)
         ApiProvider {
             slug: "minimax",
             base_url: "https://api.minimax.io",
@@ -38,6 +47,11 @@ pub fn registry() -> &'static [ApiProvider] {
             env_var: "MINIMAX_API_KEY",
             flavor: "minimax",
         },
+        // last verified: UNVERIFIED (no GROK_API_KEY on dev machine
+        // as of 2026-05-13). xAI keeps `-latest` aliases pointed at
+        // their current production model so this default is unlikely
+        // to drift, but the smoke test should be run on a machine
+        // with a real key before claiming this works.
         ApiProvider {
             slug: "grok",
             base_url: "https://api.x.ai",
@@ -46,6 +60,10 @@ pub fn registry() -> &'static [ApiProvider] {
             env_var: "GROK_API_KEY",
             flavor: "openai",
         },
+        // last verified: UNVERIFIED (no DEEPSEEK_API_KEY on dev
+        // machine as of 2026-05-13). `deepseek-chat` is DeepSeek's
+        // long-standing alias for their current production chat
+        // model.
         ApiProvider {
             slug: "deepseek",
             base_url: "https://api.deepseek.com",
@@ -54,6 +72,11 @@ pub fn registry() -> &'static [ApiProvider] {
             env_var: "DEEPSEEK_API_KEY",
             flavor: "openai",
         },
+        // last verified: UNVERIFIED (no DASHSCOPE_API_KEY on dev
+        // machine as of 2026-05-13). Going through Alibaba's
+        // dashscope-intl endpoint; the OpenAI-compatible path under
+        // /compatible-mode/ is the documented entry point for
+        // non-China users.
         ApiProvider {
             slug: "qwen",
             base_url: "https://dashscope-intl.aliyuncs.com",
@@ -62,16 +85,47 @@ pub fn registry() -> &'static [ApiProvider] {
             env_var: "DASHSCOPE_API_KEY",
             flavor: "openai",
         },
+        // last verified: UNVERIFIED (no OPENROUTER_API_KEY on dev
+        // machine as of 2026-05-13). Meta-provider — no default
+        // model since the user has to pick from OpenRouter's full
+        // catalogue.
         ApiProvider {
             slug: "openrouter",
             base_url: "https://openrouter.ai",
             path: "/api/v1/chat/completions",
-            // OpenRouter is a meta-provider — no default makes
-            // sense, so we require --model. Empty string is the
-            // sentinel for "must be overridden."
             default_model: "",
             env_var: "OPENROUTER_API_KEY",
             flavor: "openai",
+        },
+        // last verified: 2026-05-13 ✓ (dispatch returned 2-char reply
+        //                                with model gemini-2.5-flash)
+        // v2.4.2 — Google Gemini API. Slug intentionally `google`
+        // (vendor name) rather than `gemini` to avoid colliding with
+        // the existing `gemini` CLI runtime; users with the Gemini
+        // CLI installed keep that path, users with only an API key
+        // dispatch via `ato dispatch google "..."`.
+        //
+        // Gemini's REST API is structurally different from OpenAI's:
+        // - Auth is `?key=<API_KEY>` query parameter, not Bearer.
+        // - Request body uses `contents[]` not `messages[]`, with
+        //   role values `user` / `model` (not `user` / `assistant`).
+        // - URL embeds the model name as a path segment, not a
+        //   field in the body.
+        // The "gemini" flavor in api_dispatch handles all three.
+        ApiProvider {
+            slug: "google",
+            base_url: "https://generativelanguage.googleapis.com",
+            // Model is interpolated into the path at dispatch time
+            // because Gemini's URL shape requires it; the literal
+            // `{model}` token is the placeholder the dispatcher
+            // substitutes.
+            path: "/v1beta/models/{model}:generateContent",
+            // gemini-2.0-flash was deprecated for new users 2026-Q1.
+            // gemini-2.5-flash is the current low-latency default;
+            // users on Pro plans override with --model gemini-2.5-pro.
+            default_model: "gemini-2.5-flash",
+            env_var: "GEMINI_API_KEY",
+            flavor: "gemini",
         },
     ]
 }
@@ -107,6 +161,7 @@ pub fn label_for(slug: &str) -> Option<&'static str> {
         "deepseek" => Some("DeepSeek"),
         "qwen" => Some("Qwen"),
         "openrouter" => Some("OpenRouter"),
+        "google" => Some("Google (Gemini)"),
         _ => None,
     }
 }
@@ -125,7 +180,23 @@ mod tests {
     #[test]
     fn registry_has_expected_providers() {
         let slugs: Vec<&str> = registry().iter().map(|p| p.slug).collect();
-        assert_eq!(slugs, vec!["minimax", "grok", "deepseek", "qwen", "openrouter"]);
+        assert_eq!(
+            slugs,
+            vec!["minimax", "grok", "deepseek", "qwen", "openrouter", "google"]
+        );
+    }
+
+    #[test]
+    fn google_uses_gemini_flavor_and_model_path_template() {
+        let p = find_provider("google").unwrap();
+        assert_eq!(p.flavor, "gemini");
+        assert!(p.path.contains("{model}"));
+        // The default model is verified live by `ato runtimes
+        // test-providers`; this test only asserts it's non-empty so
+        // a future model bump (when Google deprecates the current
+        // default again) doesn't have to also touch this test.
+        assert!(!p.default_model.is_empty());
+        assert!(p.default_model.starts_with("gemini-"));
     }
 
     #[test]

@@ -104,6 +104,17 @@ Build once before this section: `cargo build --manifest-path apps/cli/Cargo.toml
 - [ ] Missing runtimes get `status: "missing"` + an install fix_command when known (claude/codex/gemini) or none for hermes/openclaw.
 - [ ] `cargo test runtimes` — 4 unit tests pass.
 
+### §1.5b Provider smoke test (v2.4.2+)
+
+Mandatory before any release that touches `packages/ato-api-providers/` or `apps/cli/src/api_dispatch.rs`.
+
+- [ ] `ato runtimes test-providers --human` — runs a 1-token roundtrip against every api-provider that has a configured key.
+- [ ] Every provider with a key returns `✓ ok`. Providers without keys show `—  no key` and don't fail the check.
+- [ ] If any provider reports `✗ HTTP error`, the failure detail names the model that broke (most common cause: vendor deprecated the default model). Update `packages/ato-api-providers/src/lib.rs`'s `default_model` AND the `last verified:` date comment in the same commit.
+- [ ] Adding a new provider to the registry is NOT done until this command shows it as `✓ ok` for at least one machine — the `last verified:` comment is the audit record. UNVERIFIED entries are allowed but documented as such.
+
+This catches the failure mode that bit us when `google` first landed: registry entries pass `cargo build` but the actual API rejects them. Never again.
+
 ### §1.6 Runtime quotas
 
 - [ ] `ato runtimes status --human` — runs without error (may be empty if no quota events captured).
