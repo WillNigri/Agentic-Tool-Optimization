@@ -231,10 +231,51 @@ enum Commands {
 enum MeshSub {
     /// List peers found on the local network via mDNS. Discovery
     /// does NOT mean trust — promoting a discovered peer into the
-    /// allowlist will require the pairing handshake (step 4).
+    /// allowlist requires the pairing handshake (`mesh invite`).
     Discovered {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Manage one-shot invite codes used to pair two daemons.
+    /// The issuer creates a code, hands it to the peer out-of-band,
+    /// and the peer redeems it via the consume RPC (chunk 2 wires
+    /// `mesh invite consume`; this slice ships create + list).
+    Invite {
+        #[command(subcommand)]
+        sub: MeshInviteSub,
+    },
+    /// Manage already-paired peers.
+    Peers {
+        #[command(subcommand)]
+        sub: MeshPeersSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshInviteSub {
+    /// Issue a new one-shot invite code. Default TTL 15 minutes.
+    /// Share the printed code with the peer out-of-band.
+    Create {
+        /// Minutes the code remains valid (1–1440; default 15).
+        #[arg(long, default_value_t = 15)]
+        expires: i64,
+    },
+    /// List active (unconsumed, unexpired) invites. Pass `--all` to
+    /// include consumed/expired entries.
+    List {
+        #[arg(long, default_value_t = false)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshPeersSub {
+    /// List paired peers.
+    List,
+    /// Drop a paired peer by its full peer_id (sha256 hex of pubkey).
+    Remove {
+        /// peer_id of the row to delete.
+        peer_id: String,
     },
 }
 
@@ -1010,6 +1051,20 @@ fn main() -> Result<()> {
                 }
                 Ok(())
             }
+            MeshSub::Invite { sub } => match sub {
+                MeshInviteSub::Create { expires } => {
+                    commands::mesh::invite_create(&db_path, expires, &opts)
+                }
+                MeshInviteSub::List { all } => {
+                    commands::mesh::invite_list(&db_path, all, &opts)
+                }
+            },
+            MeshSub::Peers { sub } => match sub {
+                MeshPeersSub::List => commands::mesh::peers_list(&db_path, &opts),
+                MeshPeersSub::Remove { peer_id } => {
+                    commands::mesh::peers_remove(&db_path, &peer_id, &opts)
+                }
+            },
         },
         Commands::Runtimes { sub } => match sub {
             RuntimesSub::Status => {

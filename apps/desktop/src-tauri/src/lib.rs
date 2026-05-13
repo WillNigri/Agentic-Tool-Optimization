@@ -1077,11 +1077,21 @@ pub fn init_database(conn: &Connection) {
     );
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS mesh_invites (
-            code         TEXT PRIMARY KEY,
-            issued_at    TEXT NOT NULL,
-            expires_at   TEXT NOT NULL,
-            consumed     INTEGER NOT NULL DEFAULT 0
+            code           TEXT PRIMARY KEY,
+            issued_at      TEXT NOT NULL,
+            expires_at     TEXT NOT NULL,
+            consumed       INTEGER NOT NULL DEFAULT 0,
+            issuer_pubkey  TEXT
         )",
+        [],
+    );
+    // v2.4.4-phase7 review finding (MiniMax) — bind invites to the
+    // issuer's pubkey so a consumer can verify the invite came from
+    // who they think, not just any peer who guesses the code. The
+    // consume RPC handler (chunk 2) will check sender_pubkey against
+    // the stored issuer_pubkey before completing the pairing.
+    let _ = conn.execute(
+        "ALTER TABLE mesh_invites ADD COLUMN issuer_pubkey TEXT",
         [],
     );
     // session_turns.sender_peer_id distinguishes a turn that landed

@@ -8,6 +8,7 @@ pub mod dispatches;
 pub mod events;
 pub mod files_touched;
 pub mod kill;
+pub mod mesh;
 pub mod posts;
 pub mod providers;
 pub mod ratchet;
