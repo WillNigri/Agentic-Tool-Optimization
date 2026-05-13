@@ -608,11 +608,16 @@ jobs:
           echo "x64_sha=$(curl -sL "$X64_URL" | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew cask
+        id: brew_update
         env:
           # Tap PAT enables cross-repo push; without it the in-repo
-          # GITHUB_TOKEN can clone but NOT push (403). Skip cleanly when
-          # the secret isn't configured rather than running through the
-          # whole sed pipeline only to fail at git push.
+          # GITHUB_TOKEN can clone but NOT push (403). When the secret
+          # is missing we now FAIL the step (loudly) instead of silent
+          # exit-0 — too many releases shipped while the cask sat at
+          # v1.2 because the warning was buried in a "success" job.
+          # The job-level `continue-on-error: true` still keeps the
+          # rest of the release pipeline alive; this just guarantees
+          # the failure is visible in the run summary.
           HOMEBREW_TAP_TOKEN_PRESENT: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
@@ -621,12 +626,14 @@ jobs:
           X64_SHA: ${{ steps.sha.outputs.x64_sha }}
         run: |
           if [ "${HOMEBREW_TAP_TOKEN_PRESENT}" != "true" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping Homebrew cask update. Create a fine-grained PAT with Contents:Read+Write on WillNigri/homebrew-ato and add it as a secret to enable."
-            exit 0
+            echo "::error title=Homebrew cask NOT updated::HOMEBREW_TAP_TOKEN secret is not configured. Users on brew install --cask ato will get a stale version (currently pinned at whatever the last successful push wrote). Fix: 1) Create a fine-grained PAT at https://github.com/settings/personal-access-tokens/new with Contents:Read+Write on WillNigri/homebrew-ato (and 1+ year expiry). 2) Add it as repo secret HOMEBREW_TAP_TOKEN at https://github.com/WillNigri/Agentic-Tool-Optimization/settings/secrets/actions. 3) Re-run this job."
+            echo "brew_status=missing_token" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
           if ! git clone https://x-access-token:${GH_TOKEN}@github.com/WillNigri/homebrew-ato.git /tmp/homebrew-ato 2>/dev/null; then
-            echo "::warning::Cannot clone homebrew-ato. Verify HOMEBREW_TAP_TOKEN scope/expiration."
-            exit 0
+            echo "::error title=Homebrew cask NOT updated::Cannot clone homebrew-ato. The HOMEBREW_TAP_TOKEN PAT is either expired or lacks Contents:Read on WillNigri/homebrew-ato. Rotate the PAT and re-run this job."
+            echo "brew_status=clone_failed" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
           cat > /tmp/homebrew-ato/Casks/ato.rb << 'CASK'
           cask "ato" do
@@ -665,6 +672,33 @@ jobs:
           git add Casks/ato.rb
           git commit -m "chore: bump ATO to ${TAG}"
           if ! git push 2>&1; then
-            echo "::warning::git push to homebrew-ato failed — PAT may lack Contents:Write. Cask not updated for ${TAG}."
-            exit 0
+            echo "::error title=Homebrew cask push failed::git push to WillNigri/homebrew-ato failed for ${TAG}. The PAT in HOMEBREW_TAP_TOKEN lacks Contents:Write on that repo. Rotate to a fine-grained PAT with the right scope and re-run this job."
+            echo "brew_status=push_failed" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
+          echo "brew_status=ok" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Homebrew cask updated::WillNigri/homebrew-ato bumped to ${TAG}."
+          {
+            echo "## Homebrew cask"
+            echo ""
+            echo "✅ Cask updated to **${TAG}**."
+            echo ""
+            echo "Users on \`brew install --cask ato\` will pick up this version on next \`brew upgrade\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # If the brew step failed, surface that fact at the JOB level
+      # too, so anyone looking at the release run sees the red X
+      # next to update-homebrew even though continue-on-error keeps
+      # the rest of the pipeline alive.
+      - name: Confirm brew status visible in run summary
+        if: failure() && steps.brew_update.outputs.brew_status != 'ok'
+        run: |
+          {
+            echo "## ⚠️  Homebrew cask NOT updated for ${{ github.ref_name }}"
+            echo ""
+            echo "Reason: \`${{ steps.brew_update.outputs.brew_status }}\`"
+            echo ""
+            echo "Users on \`brew install --cask ato\` will continue to receive the previously-published version (see https://github.com/WillNigri/homebrew-ato/blob/main/Casks/ato.rb)."
+            echo ""
+            echo "**Fix**: configure the \`HOMEBREW_TAP_TOKEN\` repo secret (fine-grained PAT with Contents:Read+Write on WillNigri/homebrew-ato), then re-run this job from the Actions tab."
+          } >> "$GITHUB_STEP_SUMMARY"

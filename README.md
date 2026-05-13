@@ -1,6 +1,18 @@
 # ATO — Agentic Tool Optimization
 
-**The local-first developer-workflow operations platform for multi-runtime AI agents — used by humans and their coding agents together.** Static system prompts are the floor, not the ceiling. ATO makes it trivial to build agents whose prompts resolve from files, env vars, databases, or other LLMs at fire time. Multi-runtime by protocol. Local-first. MIT.
+**Run a code review through three LLMs in one session. See where Claude, Gemini, and MiniMax disagree, what each one verified in your repo, and paste a single audit trail into your PR.** Local-first. MIT. Bring your own keys.
+
+```bash
+ato review --against main \
+  --reviewer @security-specialist \
+  --reviewer @perf-reviewer \
+  --reviewer google \
+  --out review.md
+```
+
+Each reviewer runs in the same session — reviewer #2 sees #1's findings via history replay, no prompt re-pasting. Function-calling tools (`read_file`, `grep`, `git_log`) let the model walk the live repo instead of guessing from the diff. The audit log records which tool calls each LLM made, so the GUI can badge a reply `verified via 2 tool calls` vs `prompt-only`.
+
+That's the wedge. The rest of the platform — agents, skills, runtime status, traces, ops recipes — exists to make the review primitive richer, and to give you a place to run multi-LLM dispatches that *aren't* code review (war-room debates, cross-runtime A/B replay, scheduled regression checks).
 
 > **Coding agent? Read [`AGENTS.md`](./AGENTS.md) first.** ATO is built to be driven by both humans (via the GUI) and AI coding agents (via CLI and MCP). The AGENTS.md doc covers everything an AI agent needs to know to operate ATO on a developer's behalf.
 

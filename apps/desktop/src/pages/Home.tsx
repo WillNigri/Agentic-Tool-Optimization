@@ -153,17 +153,22 @@ export default function Home({
         </section>
       )}
 
-      {/* Hero — Create Agent */}
+      {/* Hero — Multi-LLM code review wedge.
+          v2.4.7 — repositioned around `ato review` after Tier 1+2 + agents-as-reviewers landed.
+          The "Build an agent" framing wasn't a comparison anchor (any LLM tool can claim it).
+          This headline names what only ATO does: one session, multiple LLMs, audited tool calls.
+          Building/managing agents is still here as a secondary CTA — it's how you make the
+          reviewers richer, not the elevator pitch. */}
       <section className="rounded-2xl border border-cs-border bg-cs-card p-8">
         <div className="flex items-start justify-between gap-6 flex-wrap">
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-semibold text-cs-text">
-              {t("home.heroTitle", "Build an agent.")}
+              {t("home.heroTitle", "Three LLMs review your code. One session. Receipts.")}
             </h1>
             <p className="mt-2 text-cs-muted max-w-2xl">
               {t(
                 "home.heroSubtitle",
-                "Describe what you want, pick a runtime, and ATO writes the files. No JSON. No CLI memorization."
+                "Run your diff through Claude, Gemini, and MiniMax at once. They see each other's findings, push back where they disagree, and cite every file they checked. One audit trail per review — paste into your PR."
               )}
             </p>
           </div>
@@ -184,13 +189,13 @@ export default function Home({
               onMouseLeave={() => setHoveringQuick(false)}
             >
               <Plus size={16} />
-              {t("home.startQuick", "Quick setup")}
+              {t("home.startQuick", "Build a reviewer agent")}
             </button>
           </div>
         </div>
         {hoveringQuick && (
           <p className="mt-3 text-xs text-cs-muted">
-            {t("home.quickHint", "One-page form for power users — name, runtime, model, skills, MCPs.")}
+            {t("home.quickHint", "Specialist persona on top of any runtime — @security-specialist on Gemini, @perf-reviewer on MiniMax, etc.")}
           </p>
         )}
       </section>
