@@ -222,7 +222,14 @@ pub fn dispatch_with_tools(
 }
 
 pub fn provider_supports_tools(p: &ApiProvider) -> bool {
-    matches!(p.flavor, "openai" | "gemini")
+    // MiniMax-M2+ exposes the same OpenAI-style `tools` field, `tool_choice`,
+    // and `choices[0].message.tool_calls[]` response shape as the openai
+    // flavor — the only structural difference between the two is MiniMax's
+    // URL path (`/v1/text/chatcompletion_v2`) and its `base_resp.status_code`
+    // success wrapper, neither of which the tool-call protocol cares about.
+    // So we let minimax fall through the same openai branch in build_url /
+    // build_request_body / parse_tool_calls / extract_final_text.
+    matches!(p.flavor, "openai" | "gemini" | "minimax")
 }
 
 fn resolve_model(provider: &ApiProvider, override_: Option<&str>) -> Result<String> {
@@ -429,10 +436,35 @@ impl Conversation {
                     Some(texts.join(""))
                 }
             }
-            _ => payload["choices"][0]["message"]["content"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(String::from),
+            // OpenAI-shape responses (openai-flavored providers + minimax).
+            // Standard path: choices[0].message.content. MiniMax has a
+            // quirk where if its response is truncated at max_tokens, the
+            // main `content` arrives empty and the actual text lands in
+            // `reasoning_content`. Mirror the same fallback we use in the
+            // non-tool dispatch path (api_dispatch.rs) so a length-capped
+            // MiniMax tool-loop reply isn't dropped silently.
+            _ => {
+                let msg = &payload["choices"][0]["message"];
+                if let Some(c) = msg["content"].as_str() {
+                    if !c.is_empty() {
+                        return Some(c.to_string());
+                    }
+                }
+                let finish_reason = payload["choices"][0]["finish_reason"].as_str().unwrap_or("");
+                if finish_reason == "length" {
+                    if let Some(r) = msg["reasoning_content"].as_str() {
+                        if !r.is_empty() {
+                            eprintln!(
+                                "  [tools] {} finish_reason=length, falling back to reasoning_content ({} chars)",
+                                provider.slug,
+                                r.len()
+                            );
+                            return Some(r.to_string());
+                        }
+                    }
+                }
+                None
+            }
         }
     }
 
