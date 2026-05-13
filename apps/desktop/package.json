@@ -1,6 +1,6 @@
 {
   "name": "@ato/desktop",
-  "version": "2.4.4",
+  "version": "2.4.6",
   "private": true,
   "type": "module",
   "scripts": {
