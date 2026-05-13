@@ -30,9 +30,71 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::commands::sessions;
+use crate::commands::{agents, sessions};
 use crate::db;
 use crate::output::{emit_human, emit_json, Opts};
+
+/// One resolved reviewer for a review pass. Two flavors:
+///
+/// - **Runtime**: a raw api-provider slug like `google` or `minimax`.
+///   No persona, no system prompt, just the model. Use case: "what
+///   does Gemini think of this diff?".
+///
+/// - **Agent**: a specialist agent stored in the `agents` table
+///   (`@security-specialist`, `@perf-reviewer`). The agent's
+///   system_prompt is prepended to the review prompt as a `## Persona`
+///   section, the agent's bound runtime + model drive dispatch, and
+///   the agent's slug is threaded through to execution_logs.agent_slug
+///   so the GUI can render `@<slug> · runtime/model · N×tools`.
+///
+/// Persona is text-only on top of the same underlying LLM — it doesn't
+/// give the model new knowledge. The audit signal (tool calls, line
+/// citations) stays the real currency.
+#[derive(Debug, Clone)]
+pub enum Reviewer {
+    Runtime { slug: String },
+    Agent(agents::AgentRef),
+}
+
+impl Reviewer {
+    /// The runtime ATO dispatches against. For an agent that's the
+    /// agent's bound runtime (often an api-provider like `google`);
+    /// for a bare runtime reviewer it's the slug itself.
+    pub fn dispatch_runtime(&self) -> &str {
+        match self {
+            Reviewer::Runtime { slug } => slug,
+            Reviewer::Agent(a) => &a.runtime,
+        }
+    }
+
+    /// Human-friendly label for transcripts / GUI. Agents render as
+    /// `@<slug>` so the reader can tell persona reviewers apart from
+    /// raw-runtime reviewers at a glance.
+    pub fn label(&self) -> String {
+        match self {
+            Reviewer::Runtime { slug } => slug.clone(),
+            Reviewer::Agent(a) => format!("@{}", a.slug),
+        }
+    }
+
+    /// Model to dispatch with — only the Agent variant overrides;
+    /// runtime-only reviewers fall through to the provider default.
+    pub fn dispatch_model(&self) -> Option<String> {
+        match self {
+            Reviewer::Runtime { .. } => None,
+            Reviewer::Agent(a) => a.model.clone(),
+        }
+    }
+
+    /// Agent slug for execution_logs labeling — None for bare
+    /// runtime reviewers (no persona to log).
+    pub fn agent_slug(&self) -> Option<String> {
+        match self {
+            Reviewer::Runtime { .. } => None,
+            Reviewer::Agent(a) => Some(a.slug.clone()),
+        }
+    }
+}
 
 /// Max bytes of file content we include per touched file. Keeps the
 /// overall prompt under ~100KB even when several large files are
@@ -115,10 +177,18 @@ pub fn run(
         );
     }
     if opts.human {
-        emit_human(&format!(
-            "Reviewers: {}",
-            configured.join(" → ")
-        ));
+        let label_chain: Vec<String> = configured
+            .iter()
+            .map(|r| match r {
+                Reviewer::Runtime { slug } => slug.clone(),
+                Reviewer::Agent(a) => format!("@{} (→ {}/{})",
+                    a.slug,
+                    a.runtime,
+                    a.model.as_deref().unwrap_or("default")
+                ),
+            })
+            .collect();
+        emit_human(&format!("Reviewers: {}", label_chain.join(" → ")));
     }
 
     let mut transcript = run_review(&ctx, &configured, lean, db_path, opts)?;
@@ -318,10 +388,24 @@ fn git_str(args: &[&str]) -> Result<String> {
 /// Default reviewer order: the first two API providers that have a
 /// key configured, prioritizing minimax + google when both exist
 /// because they're the only ones we've smoke-tested. Explicit
-/// --reviewer flags override.
-fn resolve_reviewers(explicit: Vec<String>, db_path: &PathBuf) -> Result<Vec<String>> {
+/// `--reviewer` flags override.
+///
+/// v2.4.6 — explicit reviewer strings now have a syntax:
+///   - `<slug>`        → bare runtime / api-provider reviewer
+///   - `@<slug>`       → specialist agent from the `agents` table
+///                       (uses the agent's bound runtime + model,
+///                       prepends the agent's system_prompt as
+///                       persona)
+///   - `@<slug>:<rt>`  → same but disambiguates when the same agent
+///                       slug exists on multiple runtimes
+fn resolve_reviewers(explicit: Vec<String>, db_path: &PathBuf) -> Result<Vec<Reviewer>> {
     if !explicit.is_empty() {
-        return Ok(explicit);
+        let conn = db::open_readonly(db_path)?;
+        let mut out = Vec::with_capacity(explicit.len());
+        for raw in explicit {
+            out.push(resolve_one(&conn, &raw)?);
+        }
+        return Ok(out);
     }
     let conn = db::open_readonly(db_path)?;
     let preferred = [
@@ -342,15 +426,58 @@ fn resolve_reviewers(explicit: Vec<String>, db_path: &PathBuf) -> Result<Vec<Str
             )
             .is_ok();
         if has_key && out.len() < 2 {
-            out.push(slug.to_string());
+            out.push(Reviewer::Runtime { slug: slug.to_string() });
         }
     }
     Ok(out)
 }
 
+/// Parse one `--reviewer` token into a Reviewer. `@<slug>` (and the
+/// `@<slug>:<runtime>` disambiguator) hit the agents table; bare
+/// strings are passed through as runtime/api-provider reviewers.
+fn resolve_one(conn: &rusqlite::Connection, raw: &str) -> Result<Reviewer> {
+    let raw = raw.trim();
+    if let Some(rest) = raw.strip_prefix('@') {
+        let (slug, runtime_hint) = match rest.split_once(':') {
+            Some((s, r)) => (s, Some(r)),
+            None => (rest, None),
+        };
+        if slug.is_empty() {
+            anyhow::bail!("reviewer '@' with no slug — expected `@<agent-slug>`");
+        }
+        let agent = agents::lookup_by_slug(conn, slug, runtime_hint)?
+            .ok_or_else(|| {
+                let scope = runtime_hint
+                    .map(|r| format!(" on runtime '{}'", r))
+                    .unwrap_or_default();
+                anyhow!(
+                    "Agent '@{}' not found{}. Create it in the GUI or with `ato agents create`.",
+                    slug,
+                    scope
+                )
+            })?;
+        return Ok(Reviewer::Agent(agent));
+    }
+    Ok(Reviewer::Runtime { slug: raw.to_string() })
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReviewerTurn {
+    /// Human-friendly label — `@<slug>` for agents, bare slug for
+    /// runtime reviewers. What the transcript / GUI show.
     pub reviewer: String,
+    /// The actual runtime ATO dispatched against (always set, even
+    /// for agent reviewers — agents are personas on top of runtimes).
+    pub runtime: String,
+    /// Model override if the reviewer pinned one (typically agents
+    /// pin a model; bare runtime reviewers fall through to the
+    /// provider default and leave this None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Agent slug when this turn was driven by a specialist agent,
+    /// so the transcript can be filtered/badged later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_slug: Option<String>,
     pub status: String,
     pub response: Option<String>,
     pub error: Option<String>,
@@ -382,22 +509,22 @@ pub struct ContextSummary {
 
 fn run_review(
     ctx: &ReviewContext,
-    reviewers: &[String],
+    reviewers: &[Reviewer],
     lean: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<ReviewTranscript> {
-    // Open a fresh session anchored to the first reviewer. The
-    // anchor is just a label; history replay will carry context to
-    // every other runtime in the chain regardless.
-    let anchor_runtime = reviewers
+    // Open a fresh session anchored to the first reviewer's dispatch
+    // runtime. The anchor is just a label; history replay carries
+    // context across runtime swaps within the session.
+    let first = reviewers
         .first()
-        .ok_or_else(|| anyhow!("no reviewers"))?
-        .clone();
+        .ok_or_else(|| anyhow!("no reviewers"))?;
+    let anchor_runtime = first.dispatch_runtime().to_string();
     let session = sessions::create_inner(
         &db::open_readwrite(db_path)?,
         &anchor_runtime,
-        None,
+        first.agent_slug().as_deref(),
         Some(&format!("review/{}", short_head(ctx))),
     )?;
     let session_id = session.id.clone();
@@ -409,16 +536,16 @@ fn run_review(
             emit_human(&format!(
                 "\n--- Reviewer #{} ({}) — {} char prompt ---",
                 idx + 1,
-                reviewer,
+                reviewer.label(),
                 prompt.chars().count()
             ));
         }
         let started = std::time::Instant::now();
         let outcome = crate::commands::dispatch::run(
-            reviewer,
+            reviewer.dispatch_runtime(),
             &prompt,
-            None,
-            None,
+            reviewer.dispatch_model(),
+            reviewer.agent_slug(),
             Some(session_id.clone()),
             false, // no streaming for review (we want the full reply)
             false, // no JSONL
@@ -443,14 +570,20 @@ fn run_review(
             .ok();
         match outcome {
             Ok(()) => turns.push(ReviewerTurn {
-                reviewer: reviewer.clone(),
+                reviewer: reviewer.label(),
+                runtime: reviewer.dispatch_runtime().to_string(),
+                model: reviewer.dispatch_model(),
+                agent_slug: reviewer.agent_slug(),
                 status: "ok".into(),
                 response,
                 error: None,
                 duration_ms: Some(duration_ms),
             }),
             Err(e) => turns.push(ReviewerTurn {
-                reviewer: reviewer.clone(),
+                reviewer: reviewer.label(),
+                runtime: reviewer.dispatch_runtime().to_string(),
+                model: reviewer.dispatch_model(),
+                agent_slug: reviewer.agent_slug(),
                 status: "error".into(),
                 response: None,
                 error: Some(format!("{}", e)),
@@ -481,7 +614,7 @@ fn run_review(
 /// the full prior conversation so they see who said what.
 fn run_consensus_pass(
     transcript: &ReviewTranscript,
-    reviewers: &[String],
+    reviewers: &[Reviewer],
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<Vec<ReviewerTurn>> {
@@ -489,26 +622,26 @@ fn run_consensus_pass(
     let mut out: Vec<ReviewerTurn> = Vec::with_capacity(reviewers.len());
     for (idx, reviewer) in reviewers.iter().enumerate() {
         let prompt = format!(
-            "@{} — consensus round. You can see all prior reviewer turns above in this session's history. \
+            "{} — consensus round. You can see all prior reviewer turns above in this session's history. \
              Reply briefly to TWO questions:\n\
              1. Which of YOUR OWN findings would you withdraw or down-grade after reading the other reviewer(s)?\n\
              2. Which findings from the OTHER reviewer(s) do you actively disagree with, and why? Cite the file/line.\n\n\
              Don't repeat the original findings — just the deltas. If you have nothing to push back on, say so in one line.",
-            reviewer
+            reviewer.label()
         );
         if opts.human {
             emit_human(&format!(
                 "\n--- Consensus round, reviewer #{} ({}) ---",
                 idx + 1,
-                reviewer
+                reviewer.label()
             ));
         }
         let started = std::time::Instant::now();
         let outcome = crate::commands::dispatch::run(
-            reviewer,
+            reviewer.dispatch_runtime(),
             &prompt,
-            None,
-            None,
+            reviewer.dispatch_model(),
+            reviewer.agent_slug(),
             Some(session_id.clone()),
             false,
             false,
@@ -530,14 +663,20 @@ fn run_consensus_pass(
             .ok();
         out.push(match outcome {
             Ok(()) => ReviewerTurn {
-                reviewer: reviewer.clone(),
+                reviewer: reviewer.label(),
+                runtime: reviewer.dispatch_runtime().to_string(),
+                model: reviewer.dispatch_model(),
+                agent_slug: reviewer.agent_slug(),
                 status: "ok".into(),
                 response,
                 error: None,
                 duration_ms: Some(duration_ms),
             },
             Err(e) => ReviewerTurn {
-                reviewer: reviewer.clone(),
+                reviewer: reviewer.label(),
+                runtime: reviewer.dispatch_runtime().to_string(),
+                model: reviewer.dispatch_model(),
+                agent_slug: reviewer.agent_slug(),
                 status: "error".into(),
                 response: None,
                 error: Some(format!("{}", e)),
@@ -553,17 +692,19 @@ fn short_head(ctx: &ReviewContext) -> String {
 }
 
 fn build_prompt_for(
-    reviewer: &str,
+    reviewer: &Reviewer,
     idx: usize,
     ctx: &ReviewContext,
-    all_reviewers: &[String],
+    all_reviewers: &[Reviewer],
     lean: bool,
 ) -> String {
+    let later_labels: Vec<String> =
+        all_reviewers[idx + 1..].iter().map(|r| r.label()).collect();
     let role = if idx == 0 {
         format!(
             "You are reviewer #1 of {}. Reviewers after you: {}.",
             all_reviewers.len(),
-            all_reviewers[idx + 1..].join(", ")
+            later_labels.join(", ")
         )
     } else {
         format!(
@@ -575,9 +716,39 @@ fn build_prompt_for(
 
     let mut body = String::with_capacity(PROMPT_CAP_BYTES);
     body.push_str(&format!(
-        "# Code review request for `@{}`\n\n{}\n\n",
-        reviewer, role
+        "# Code review request for `{}`\n\n{}\n\n",
+        reviewer.label(),
+        role
     ));
+
+    // v2.4.6 — when an agent reviewer is in play, prepend its
+    // persona (system_prompt). The persona doesn't give the LLM
+    // new knowledge, but it shapes WHICH aspects of the diff the
+    // reviewer attends to — a `@security-specialist` will lean
+    // toward auth/input-validation findings, a `@perf-reviewer`
+    // toward allocation/loop-shape findings. The runtime + model
+    // line is rendered next to it so the human can never confuse
+    // "@security-specialist found nothing" for "the model knows
+    // security" — it's just framing on top of the same LLM.
+    if let Reviewer::Agent(a) = reviewer {
+        body.push_str(&format!(
+            "**Reviewer**: `@{}` (running on `{}`{})\n\n",
+            a.slug,
+            a.runtime,
+            a.model
+                .as_deref()
+                .map(|m| format!(" model `{}`", m))
+                .unwrap_or_default()
+        ));
+        if let Some(sp) = a.system_prompt.as_deref() {
+            let trimmed = sp.trim();
+            if !trimmed.is_empty() {
+                body.push_str("## Persona (from your agent definition)\n\n");
+                body.push_str(trimmed);
+                body.push_str("\n\nReview this diff through that persona — but the audit (tool calls, line citations) is what makes findings credible, not the persona itself.\n\n");
+            }
+        }
+    }
     body.push_str(&format!(
         "**Base**: `{}`\n**Head**: `{}`\n\n",
         ctx.base_ref, ctx.head_ref
@@ -700,13 +871,15 @@ fn write_transcript_markdown(t: &ReviewTranscript, path: &str) -> Result<()> {
     let mut f = std::fs::File::create(path)?;
     writeln!(f, "# Multi-LLM review — {} → {}", short(&t.base_ref), short(&t.head_ref))?;
     writeln!(f)?;
+    // reviewer is already a display label — agents come in as
+    // `@<slug>`, bare runtimes as `<slug>`. Don't prepend a second @.
     writeln!(
         f,
         "Session: `{}`. Reviewers in order: {}.",
         t.session_id,
         t.reviewers
             .iter()
-            .map(|r| format!("@{}", r.reviewer))
+            .map(|r| r.reviewer.clone())
             .collect::<Vec<_>>()
             .join(" → ")
     )?;
@@ -723,11 +896,20 @@ fn write_transcript_markdown(t: &ReviewTranscript, path: &str) -> Result<()> {
     )?;
     writeln!(f)?;
     for (i, r) in t.reviewers.iter().enumerate() {
+        // Render: "Reviewer 1: @security-specialist · google/gemini-2.5-flash (ok, 39000ms)"
+        // The runtime/model suffix is the honest signal for agent
+        // reviewers — persona is on top of an underlying LLM.
+        let model_suffix = match (&r.model, r.agent_slug.is_some()) {
+            (Some(m), true) => format!(" · {}/{}", r.runtime, m),
+            (None, true) => format!(" · {}", r.runtime),
+            _ => String::new(),
+        };
         writeln!(
             f,
-            "## Reviewer {}: @{} ({}, {}ms)",
+            "## Reviewer {}: {}{} ({}, {}ms)",
             i + 1,
             r.reviewer,
+            model_suffix,
             r.status,
             r.duration_ms.unwrap_or(0)
         )?;

@@ -1629,6 +1629,12 @@ export interface ExecutionLog {
   toolCallsCount?: number | null;
   /** JSON-encoded array of {name, argsBrief, isError} per call. */
   toolCallsSummary?: string | null;
+  /** v2.4.6 — agent persona driving this dispatch (`security-specialist`).
+   *  The GUI renders `@<slug> · runtime/model` so persona never reads
+   *  as expert validation — it's a frame on top of the same LLM. */
+  agentSlug?: string | null;
+  /** Model id passed to the runtime (e.g. `gemini-2.5-flash`). */
+  model?: string | null;
 }
 
 /** Parsed shape of ExecutionLog.toolCallsSummary. */

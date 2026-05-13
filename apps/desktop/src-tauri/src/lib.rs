@@ -281,6 +281,13 @@ pub struct ExecutionLog {
     pub tool_calls_count: Option<i64>,
     /// JSON array of {name, args_brief, is_error} for each call.
     pub tool_calls_summary: Option<String>,
+    /// v2.4.6 — agent persona when this dispatch was driven by a
+    /// specialist agent (e.g. `@security-specialist`). The GUI
+    /// renders persona + the underlying runtime/model together so a
+    /// "no findings from @security-specialist" reads as "Gemini in a
+    /// security frame found nothing," not as expert validation.
+    pub agent_slug: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -153,6 +153,67 @@ pub fn create(
     Ok(())
 }
 
+/// v2.4.6 — resolved agent record for downstream consumers like
+/// `ato review --reviewer @<slug>`. We don't return the full row
+/// (skills/mcps/permissions/etc. aren't needed for the persona-prepend
+/// flow); only the fields the dispatch path actually consumes.
+#[derive(Debug, Clone)]
+pub struct AgentRef {
+    pub slug: String,
+    pub display_name: String,
+    pub runtime: String,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+}
+
+/// Look up an agent by slug. The agents table has a UNIQUE(runtime,
+/// slug) constraint so the same slug can exist on multiple runtimes;
+/// when that happens we prefer the most-recently-used one (typical
+/// human intent when they just type `@reviewer-bot` without
+/// disambiguating). Returns None when the slug doesn't match.
+///
+/// Callers that need the disambiguated variant can pass an explicit
+/// `runtime` to scope the lookup. None means "any runtime, prefer
+/// last_used_at."
+pub fn lookup_by_slug(
+    conn: &Connection,
+    slug: &str,
+    runtime: Option<&str>,
+) -> Result<Option<AgentRef>> {
+    let row: Option<(String, String, String, Option<String>, Option<String>)> = match runtime {
+        Some(rt) => conn
+            .query_row(
+                "SELECT slug, display_name, runtime, model, system_prompt
+                   FROM agents
+                  WHERE runtime = ?1 AND slug = ?2
+                  LIMIT 1",
+                [rt, slug],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?,
+        None => conn
+            .query_row(
+                "SELECT slug, display_name, runtime, model, system_prompt
+                   FROM agents
+                  WHERE slug = ?1
+                  ORDER BY COALESCE(last_used_at, created_at) DESC
+                  LIMIT 1",
+                [slug],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?,
+    };
+    Ok(row.map(|(slug, display_name, runtime, model, system_prompt)| {
+        AgentRef {
+            slug,
+            display_name,
+            runtime,
+            model,
+            system_prompt,
+        }
+    }))
+}
+
 /// v2.3.0 — write the per-runtime agent config file so the runtime's
 /// own discovery (`claude /agents`, codex @-mention, etc.) can see the
 /// agent. Mirrors the format the desktop's `render_<runtime>_agent`

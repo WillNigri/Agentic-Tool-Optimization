@@ -76,6 +76,14 @@ pub fn dispatch_with_tools(
     // calls" instead of guessing from response text. Always populated
     // (empty vec is itself signal: "tools were offered, model declined").
     let mut audit: Vec<ToolCallAudit> = Vec::new();
+    // v2.4.6 — Gemini specifically can return finishReason=STOP with
+    // no tool calls AND no text parts when its private thinking
+    // tokens consume all the generation budget on a tool-use round.
+    // We retry ONCE with an explicit "please write your final reply
+    // now" nudge before giving up; more attempts would just burn the
+    // budget on more thinking with no return.
+    let mut empty_response_retries = 0usize;
+    const MAX_EMPTY_RETRIES: usize = 1;
 
     eprintln!(
         "  [tools] dispatch_with_tools provider={} flavor={} model={}",
@@ -169,6 +177,24 @@ pub fn dispatch_with_tools(
         }
         let duration_ms = start.elapsed().as_millis() as i64;
         if accumulated_text.trim().is_empty() {
+            // Gemini-on-thinking-budget escape hatch: one retry with
+            // an explicit "write your reply now" nudge. If we've
+            // already used the retry OR we've used no tools (so the
+            // model never had a chance to reason productively), give
+            // up and surface the diagnostic.
+            if empty_response_retries < MAX_EMPTY_RETRIES && !audit.is_empty() {
+                empty_response_retries += 1;
+                eprintln!(
+                    "  [tools] empty response after round {}; nudging model to write final reply (retry {}/{})",
+                    rounds, empty_response_retries, MAX_EMPTY_RETRIES
+                );
+                conv.append_user_text(
+                    provider,
+                    "You returned no text. Please write your final review now in plain markdown, using the tool-call results from earlier rounds. Do not call any more tools.",
+                );
+                rounds += 1;
+                continue;
+            }
             return Ok(ApiDispatchOutcome {
                 response: None,
                 error_message: Some(format!(

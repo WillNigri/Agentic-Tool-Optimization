@@ -199,14 +199,21 @@ fn sandbox_path(root: &Path, raw: &str) -> Result<PathBuf> {
 
 fn truncate_output(s: String) -> String {
     if s.len() <= TOOL_OUTPUT_CAP {
-        s
-    } else {
-        format!(
-            "{}\n\n[... truncated to first {} bytes; call the tool again with a narrower range if you need more]",
-            &s[..TOOL_OUTPUT_CAP],
-            TOOL_OUTPUT_CAP
-        )
+        return s;
     }
+    // Naive `&s[..TOOL_OUTPUT_CAP]` panics when the cap lands inside
+    // a multi-byte UTF-8 codepoint (e.g. an em-dash, common in our
+    // own source comments). Walk back to the nearest char boundary
+    // so the slice is always valid.
+    let mut cut = TOOL_OUTPUT_CAP;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}\n\n[... truncated to first {} bytes; call the tool again with a narrower range if you need more]",
+        &s[..cut],
+        TOOL_OUTPUT_CAP
+    )
 }
 
 pub fn execute_call(call: &ToolCall) -> ToolResult {

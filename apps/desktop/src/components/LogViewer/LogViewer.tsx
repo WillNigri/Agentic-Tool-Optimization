@@ -500,6 +500,22 @@ export default function LogViewer() {
                     {formatTokens(log.tokensIn, log.tokensOut)}
                   </span>
 
+                  {/* v2.4.6 — agent persona badge. Renders before the
+                       tool-call badge so the eye reads "@security-specialist
+                       · 2×tools". Title surfaces the underlying runtime so
+                       the persona never reads as expert validation. */}
+                  {log.agentSlug && (
+                    <span
+                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-purple-400/40 text-purple-300 bg-purple-400/10"
+                      title={`Persona on top of ${log.runtime}${log.model ? "/" + log.model : ""}`}
+                    >
+                      @{log.agentSlug}
+                      {log.model && (
+                        <span className="opacity-60"> · {log.model}</span>
+                      )}
+                    </span>
+                  )}
+
                   {/* v2.4.5 — Tier 2 audit badge. Null = no tools offered;
                        0 = tools offered but model chose prompt-only;
                        >0 = model verified via N tool calls. */}
