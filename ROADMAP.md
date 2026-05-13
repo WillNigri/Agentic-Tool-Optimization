@@ -472,7 +472,18 @@ mesh in Phase 7+.
 extend the runtime registry to look up remote slugs and route
 through the SSH executor instead of `Command::new`.
 
-## Phase 7+ — Bi-directional ATO daemon mesh (Blue-sky)
+## Phase 7 — Bi-directional ATO daemon mesh (Planned, two-tier)
+
+**Status**: scoped 2026-05-13. Full plan in [`PHASE-7-PLAN.md`](PHASE-7-PLAN.md).
+
+Packaging decision (locked):
+
+- **Phase 7.0 — free, LAN-only**: mDNS discovery + invite-code pairing on the same network. Server-side ATO daemon can post completion notifications to the laptop's daemon over WebSocket + JSON-RPC with Ed25519-signed messages. No bi-directional dispatch in v1 — only the narrow `post_completion(session_id, status, payload)` surface that closes the @iamknownasfesal "server finish → agent pc" gap.
+- **Phase 7.1+ — Pro / Team tier on ato-cloud**: cloud relay daemon for NAT traversal + full bi-directional dispatch (server can ask laptop to run any allowed runtime). Multi-machine session topologies. Per-peer ACLs.
+
+The packaging matters: free users get a real working LAN mesh, not a teaser. The Pro upgrade is "stop fighting your firewall + unlock the full mesh." Aligns with the existing free-desktop / paid-cloud ladder.
+
+
 
 The full version of Phase 6.x-J's remote runtime story: every machine
 runs an `ato daemon` that registers itself with a peer ATO daemon
