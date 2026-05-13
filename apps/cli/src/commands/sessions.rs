@@ -146,19 +146,21 @@ pub fn append_turn(
     Ok(())
 }
 
-pub fn new(
+/// Programmatic session creation — no stdout side effects. Used by
+/// callers like `ato review` that orchestrate sessions on the user's
+/// behalf and shouldn't double-emit the "created session X" line.
+pub fn create_inner(
     conn: &Connection,
-    runtime: String,
-    agent_slug: Option<String>,
-    title: Option<String>,
-    opts: &Opts,
-) -> Result<()> {
+    runtime: &str,
+    agent_slug: Option<&str>,
+    title: Option<&str>,
+) -> Result<Session> {
     if !has_table(conn) {
         return Err(anyhow!(
             "sessions table not found. Launch the ATO desktop (v2.3.31+) once to apply the migration."
         ));
     }
-    validate_runtime(&runtime)?;
+    validate_runtime(runtime)?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -167,16 +169,26 @@ pub fn new(
         rusqlite::params![id, runtime, agent_slug, title, now],
     )
     .context("insert session row")?;
-    let s = Session {
-        id: id.clone(),
-        runtime,
-        agent_slug,
+    Ok(Session {
+        id,
+        runtime: runtime.to_string(),
+        agent_slug: agent_slug.map(String::from),
         runtime_session_id: None,
-        title,
+        title: title.map(String::from),
         created_at: now.clone(),
         last_used_at: now,
         turn_count: 0,
-    };
+    })
+}
+
+pub fn new(
+    conn: &Connection,
+    runtime: String,
+    agent_slug: Option<String>,
+    title: Option<String>,
+    opts: &Opts,
+) -> Result<()> {
+    let s = create_inner(conn, &runtime, agent_slug.as_deref(), title.as_deref())?;
     if opts.human {
         let title_part = s
             .title

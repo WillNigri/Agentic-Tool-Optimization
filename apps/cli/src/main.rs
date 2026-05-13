@@ -210,6 +210,43 @@ enum Commands {
         #[command(subcommand)]
         sub: RatchetSub,
     },
+    /// Multi-LLM code review with rich context. Captures the diff
+    /// against `--against <ref>` (default: merge base with main),
+    /// the full text of every touched file, recent git log per file,
+    /// and build/test output. Dispatches that bundle to N reviewers
+    /// in a shared session so the second reviewer sees the first's
+    /// findings via history replay (no diff re-paste). Optional
+    /// `--consensus` round surfaces real disagreements that
+    /// polite-agreement bias otherwise hides. Saves a markdown
+    /// transcript ready to paste into a PR description.
+    Review {
+        /// Base ref to diff against. Defaults to the merge base
+        /// with `origin/main` (or `main` if no remote), or `HEAD~1`
+        /// as a last resort.
+        #[arg(long)]
+        against: Option<String>,
+        /// Reviewer runtime slug; repeatable. Defaults to the first
+        /// two configured of (minimax, google, grok, deepseek, qwen,
+        /// openrouter).
+        #[arg(long = "reviewer")]
+        reviewers: Vec<String>,
+        /// Write the transcript to this markdown file. Otherwise
+        /// emits structured JSON to stdout (or prints inline in
+        /// --human mode).
+        #[arg(long)]
+        out: Option<String>,
+        /// Skip running `cargo build` even if Rust files changed.
+        #[arg(long)]
+        skip_build: bool,
+        /// Skip running `cargo test` even if Rust files changed.
+        #[arg(long)]
+        skip_tests: bool,
+        /// After the initial review, run a consensus round where
+        /// each reviewer is asked which findings they'd withdraw
+        /// and which from others they want to push back on.
+        #[arg(long)]
+        consensus: bool,
+    },
     /// Phase 7.0 — bi-directional LAN mesh daemon (scaffold).
     /// Step 1 ships start / stop / status; step 2 (v2.4.1) adds mDNS
     /// discovery on `_ato._tcp.local` and the `mesh discovered`
@@ -962,6 +999,23 @@ fn main() -> Result<()> {
                 commands::ratchet::unlock(&db_path, &kind, &value, &opts)
             }
         },
+        Commands::Review {
+            against,
+            reviewers,
+            out,
+            skip_build,
+            skip_tests,
+            consensus,
+        } => commands::review::run(
+            against.as_deref(),
+            reviewers,
+            out.as_deref(),
+            skip_build,
+            skip_tests,
+            consensus,
+            &db_path,
+            &opts,
+        ),
         Commands::Daemon { sub } => match sub {
             DaemonSub::Start => daemon::start(db_path.clone()),
             DaemonSub::Stop => daemon::stop(),

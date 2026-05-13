@@ -154,7 +154,7 @@ pub fn dispatch_with_history(
         }));
         let body = serde_json::json!({
             "contents": contents,
-            "generationConfig": { "maxOutputTokens": 4096 },
+            "generationConfig": { "maxOutputTokens": 8192 },
         });
         (url, body, false)
     } else {
@@ -170,7 +170,11 @@ pub fn dispatch_with_history(
             // 4k cap is generous for a review reply; users can extend by
             // adding a flag later if they need long-form output. Keeps
             // us under cost/latency surprises on most providers.
-            "max_tokens": 4096,
+            // Bumped from 4096 to 8192 (v2.4.4) — the `ato review`
+            // command surfaces 30k+-char prompts where a 4096-token
+            // reply caps out mid-sentence. 8192 stays under most
+            // providers' free-tier cost cliffs.
+            "max_tokens": 8192,
         });
         (url, body, true)
     };
@@ -515,17 +519,48 @@ fn parse_response(
 
     // Standard OpenAI-compatible shape: choices[0].message.content
     let choices = payload["choices"].as_array();
-    let content = choices
-        .and_then(|arr| arr.first())
+    let first_choice = choices.and_then(|arr| arr.first());
+    let content = first_choice
         .and_then(|c| c["message"]["content"].as_str())
         .map(|s| s.to_string());
+    let finish_reason = first_choice
+        .and_then(|c| c["finish_reason"].as_str())
+        .unwrap_or("");
     let response = match content {
         Some(s) if !s.is_empty() => s,
         _ => {
+            // v2.4.4 — MiniMax has a separate `reasoning_content` for
+            // chain-of-thought; when the model burns its budget on
+            // reasoning and never emits a final reply (finish_reason
+            // == "length"), `content` is empty but `reasoning_content`
+            // holds the partial work. Fall back to that so callers
+            // get SOMETHING instead of an opaque error. Mark the
+            // response with a marker so audit can tell.
+            let reasoning = first_choice
+                .and_then(|c| c["message"]["reasoning_content"].as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(r) = reasoning {
+                return Ok(ApiDispatchOutcome {
+                    response: Some(format!(
+                        "[truncated by max_tokens — showing reasoning_content fallback]\n\n{}",
+                        r
+                    )),
+                    error_message: Some(format!(
+                        "finish_reason={}; the model used its output budget on reasoning and didn't emit a final reply. Consider --max-tokens override (when implemented) or shorter prompt.",
+                        finish_reason
+                    )),
+                    model_used: model,
+                    duration_ms,
+                    tokens_in: None,
+                    tokens_out: None,
+                });
+            }
             return Ok(ApiDispatchOutcome {
                 response: None,
                 error_message: Some(format!(
-                    "no choices[0].message.content in response: {}",
+                    "no choices[0].message.content (finish_reason={}): {}",
+                    finish_reason,
                     truncate_for_audit(&payload.to_string(), 600)
                 )),
                 model_used: model,
@@ -535,6 +570,15 @@ fn parse_response(
             });
         }
     };
+
+    // v2.4.4 — Even on success, surface a warning when the model
+    // hit its output cap. Callers (especially `ato review`) need to
+    // know the reply is incomplete.
+    if finish_reason == "length" {
+        eprintln!(
+            "ato dispatch: warning — provider truncated response at max_tokens (finish_reason=length). Reply may be incomplete."
+        );
+    }
 
     // usage shape: most providers do {prompt_tokens, completion_tokens,
     // total_tokens}. MiniMax does {total_tokens, total_characters}.

@@ -12,6 +12,7 @@ pub mod posts;
 pub mod providers;
 pub mod ratchet;
 pub mod recipes;
+pub mod review;
 pub mod sessions;
 pub mod regressions;
 pub mod replay;
