@@ -51,6 +51,18 @@ jobs:
             libssl-dev \
             libgtk-3-dev
 
+      # The desktop's tauri.conf.json declares the `ato` CLI as a
+      # sidecar via `"externalBin": ["binaries/ato"]`, so cargo check
+      # on the desktop fails until that binary exists on disk.
+      # Pre-build the CLI and stage it at the expected sidecar path
+      # before checking the desktop crate.
+      - name: Build ato CLI for Tauri sidecar
+        working-directory: apps/cli
+        run: |
+          cargo build --release
+          mkdir -p ../desktop/src-tauri/binaries
+          cp target/release/ato ../desktop/src-tauri/binaries/ato-x86_64-unknown-linux-gnu
+
       - name: Check Rust
         working-directory: apps/desktop/src-tauri
         run: cargo check
