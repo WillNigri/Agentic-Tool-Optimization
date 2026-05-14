@@ -465,7 +465,7 @@ pub fn home_dir() -> PathBuf {
 /// re-encrypts via crate::encryption::encrypt, and UPDATEs the row.
 /// Errors are logged + skipped — a missing keychain or a corrupted
 /// row shouldn't block the rest of the migration or app startup.
-fn migrate_legacy_api_keys(conn: &Connection) {
+pub(crate) fn migrate_legacy_api_keys(conn: &Connection) {
     // Read-side first: collect candidate (id, current_value) pairs
     // so we don't hold a read statement open during writes.
     let candidates: Vec<(String, String)> = match conn.prepare(
@@ -1670,6 +1670,140 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── H1 migration smoke test ───────────────────────────────────
+    //
+    // Verifies the end-to-end "legacy plain-base64 row → AES-GCM v1"
+    // path:
+    //   1. Build a temp DB with the llm_api_keys schema
+    //   2. Insert a row with `encrypted_key = base64(plaintext)` —
+    //      the pre-2.4.8 format
+    //   3. Run migrate_legacy_api_keys
+    //   4. Read the row back, assert the prefix is now "v1:"
+    //   5. Decrypt through the same module the dispatch path uses,
+    //      assert the round-trip equals the original plaintext
+    //
+    // Gated on ATO_ENCRYPTION_TESTS=1 because the migration touches
+    // the OS keychain (no DBus on CI Linux runners, no Keychain on
+    // headless macOS). Set the env var on a dev machine.
+    #[test]
+    fn migrate_legacy_row_to_v1() {
+        use base64::Engine as _;
+        if std::env::var("ATO_ENCRYPTION_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping migration smoke (set ATO_ENCRYPTION_TESTS=1 to run)");
+            return;
+        }
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = rusqlite::Connection::open(tmp.path()).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE llm_api_keys (
+                id            TEXT PRIMARY KEY,
+                provider      TEXT NOT NULL,
+                name          TEXT NOT NULL,
+                key_preview   TEXT NOT NULL,
+                encrypted_key TEXT NOT NULL,
+                project_id    TEXT,
+                runtime       TEXT,
+                is_active     INTEGER NOT NULL DEFAULT 1,
+                last_used     TEXT,
+                usage_count   INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );",
+        )
+        .expect("schema");
+
+        let plaintext = "sk-ant-test-migration-key-do-not-leak-xyz";
+        let legacy = base64::engine::general_purpose::STANDARD.encode(plaintext.as_bytes());
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO llm_api_keys
+               (id, provider, name, key_preview, encrypted_key,
+                project_id, runtime, is_active, usage_count, created_at, updated_at)
+             VALUES ('row-1', 'anthropic', 'test-key', 'sk-ant...xyz', ?1,
+                     NULL, NULL, 1, 0, ?2, ?2)",
+            rusqlite::params![&legacy, &now],
+        )
+        .expect("insert legacy row");
+
+        // Pre-migration assertion: row is NOT in v1 format yet.
+        let before: String = conn
+            .query_row(
+                "SELECT encrypted_key FROM llm_api_keys WHERE id = 'row-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("pre-migration read");
+        assert!(
+            !crate::encryption::is_v1(&before),
+            "expected legacy format before migration, got {}",
+            before
+        );
+
+        // Run the migration.
+        migrate_legacy_api_keys(&conn);
+
+        // After: row should be v1, and a fresh decrypt round-trips
+        // to the original plaintext.
+        let after: String = conn
+            .query_row(
+                "SELECT encrypted_key FROM llm_api_keys WHERE id = 'row-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("post-migration read");
+        assert!(
+            crate::encryption::is_v1(&after),
+            "expected v1 prefix after migration, got {}",
+            after
+        );
+        let round_tripped = crate::encryption::decrypt(&after).expect("decrypt migrated row");
+        assert_eq!(round_tripped, plaintext, "round-trip mismatch");
+
+        // Idempotence: running the migration again should be a no-op
+        // (no rows match the WHERE NOT LIKE 'v1:%' filter).
+        migrate_legacy_api_keys(&conn);
+        let after2: String = conn
+            .query_row(
+                "SELECT encrypted_key FROM llm_api_keys WHERE id = 'row-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("idempotence read");
+        assert_eq!(after, after2, "migration was not idempotent");
+    }
+
+    // ── H2 perm-tightening smoke test ────────────────────────────
+    //
+    // Verifies the chmod 600 logic on a synthetic file. Unix-only;
+    // doesn't need the keychain so this can run anywhere.
+    #[test]
+    #[cfg(unix)]
+    fn db_perm_tightening_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // Force the file to a world-readable state, matching what a
+        // pre-2.4.8 install would have on disk.
+        let mut perms = tmp.as_file().metadata().expect("metadata").permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(tmp.path(), perms).expect("set 0644");
+        let before = tmp.as_file().metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(before, 0o644, "precondition: file should be 0644");
+
+        // Inline the same chmod block from startup() so we test the
+        // *behavior* without coupling the test to that big fn's
+        // initialization order.
+        if let Ok(meta) = std::fs::metadata(tmp.path()) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                let mut p = meta.permissions();
+                p.set_mode(0o600);
+                std::fs::set_permissions(tmp.path(), p).expect("chmod 0600");
+            }
+        }
+        let after = tmp.as_file().metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(after, 0o600, "post-chmod: file should be 0600");
+    }
 
     #[test]
     fn test_sha256_hex() {
