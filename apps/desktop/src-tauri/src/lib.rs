@@ -1,5 +1,6 @@
 mod openclaw_ws;
 mod byok;
+mod encryption;
 mod log_watcher;
 mod health_poller;
 mod telemetry;
@@ -455,6 +456,65 @@ pub fn home_dir() -> PathBuf {
         PathBuf::from(profile)
     } else {
         PathBuf::from(".")
+    }
+}
+
+/// v2.4.8 audit H1 — migrate legacy plain-base64 llm_api_keys rows
+/// into AES-GCM v1 format. Scans rows that don't start with the
+/// v1 prefix; for each, decrypts as legacy (= base64-decode),
+/// re-encrypts via crate::encryption::encrypt, and UPDATEs the row.
+/// Errors are logged + skipped — a missing keychain or a corrupted
+/// row shouldn't block the rest of the migration or app startup.
+fn migrate_legacy_api_keys(conn: &Connection) {
+    // Read-side first: collect candidate (id, current_value) pairs
+    // so we don't hold a read statement open during writes.
+    let candidates: Vec<(String, String)> = match conn.prepare(
+        "SELECT id, encrypted_key FROM llm_api_keys WHERE encrypted_key NOT LIKE 'v1:%'",
+    ) {
+        Ok(mut stmt) => stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[security] migrate_legacy_api_keys: prepare failed: {}", e);
+            return;
+        }
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    let mut migrated = 0usize;
+    for (id, legacy) in &candidates {
+        let plain = match crate::encryption::decrypt(legacy) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[security] migrate_legacy_api_keys: skip id={} (legacy decode failed: {})", id, e);
+                continue;
+            }
+        };
+        let v1 = match crate::encryption::encrypt(&plain) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[security] migrate_legacy_api_keys: encrypt failed (keychain unavailable?): {}", e);
+                // No point trying further rows; they'll all fail.
+                return;
+            }
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = conn.execute(
+            "UPDATE llm_api_keys SET encrypted_key = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![v1, now, id],
+        ) {
+            eprintln!("[security] migrate_legacy_api_keys: UPDATE failed id={}: {}", id, e);
+            continue;
+        }
+        migrated += 1;
+    }
+    if migrated > 0 {
+        eprintln!(
+            "[security] migrated {} legacy llm_api_keys row(s) to AES-GCM v1",
+            migrated
+        );
     }
 }
 
@@ -1227,6 +1287,26 @@ pub fn run() {
     // same DB, overlap is common; without this, both sides see
     // transient "database is locked" errors on first contention.
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    // v2.4.8 audit H2 — restrict DB file perms to 600 on Unix. The
+    // file contains llm_api_keys (now AES-encrypted, but other rows
+    // like cloud_traces hold prompt content), execution_logs, and
+    // session data. World-readable was the default until this
+    // commit; existing files are chmod'd on every startup so the
+    // upgrade lands without user action.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&db_path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                if let Err(e) = std::fs::set_permissions(&db_path, perms) {
+                    eprintln!("[security] could not chmod 600 {}: {}", db_path.display(), e);
+                }
+            }
+        }
+    }
     // v2.3.8 Phase 4.2 — seed the in-memory event sequence counter
     // from the highest event_seq already persisted, so the counter
     // stays strictly increasing across desktop restarts. Must happen
@@ -1234,6 +1314,13 @@ pub fn run() {
     // table, before any event is published.
     events::bus::init_seq_from_db(&db_path);
     init_database(&conn);
+    // v2.4.8 audit H1 migration — re-encrypt legacy plain-base64
+    // llm_api_keys rows into AES-GCM v1. Best-effort: a keychain
+    // miss (e.g. headless / first launch ever) means we leave the
+    // rows as-is for now; the next launch with a working keychain
+    // will migrate them. Old rows stay decryptable in the meantime
+    // via the encryption module's legacy fallback path.
+    migrate_legacy_api_keys(&conn);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

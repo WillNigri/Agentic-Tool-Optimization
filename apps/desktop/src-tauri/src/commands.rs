@@ -10696,16 +10696,31 @@ pub fn mask_api_key(key: &str) -> String {
     format!("{}...{}", prefix, suffix)
 }
 
+// v2.4.8 — real encryption. Pre-2.4.8 the name `simple_encrypt`
+// hid the fact that we were just base64-encoding; the column
+// `encrypted_key` was effectively plaintext for any local user
+// with read access. Now AES-256-GCM under a master key in the OS
+// keychain. The function names stay for caller compat; both wrap
+// crate::encryption. Legacy plain-base64 rows still decrypt
+// (decrypt() falls back) and get migrated to v1 on next write.
+//
+// See audit H1 in SECURITY.md.
 pub fn simple_encrypt(key: &str) -> String {
-    use base64::{Engine as _, engine::general_purpose};
-    general_purpose::STANDARD.encode(key.as_bytes())
+    match crate::encryption::encrypt(key) {
+        Ok(v1) => v1,
+        Err(e) => {
+            // Fail-loud rather than silently fall back to legacy
+            // base64 — silent legacy regression is exactly the bug
+            // we're fixing. Returning an empty string makes the
+            // caller's INSERT visibly broken instead.
+            eprintln!("[encryption] FATAL: encrypt failed ({}). Stored key will be unusable.", e);
+            String::new()
+        }
+    }
 }
 
 pub fn simple_decrypt(encrypted: &str) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose};
-    let bytes = general_purpose::STANDARD.decode(encrypted)
-        .map_err(|e| format!("Decryption failed: {}", e))?;
-    String::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8: {}", e))
+    crate::encryption::decrypt(encrypted)
 }
 
 #[tauri::command]

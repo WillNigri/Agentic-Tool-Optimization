@@ -47,10 +47,11 @@ fn read_active_key(conn: &Connection, provider: &str) -> Option<String> {
             |r| r.get(0),
         )
         .ok()?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encrypted.as_bytes())
-        .ok()?;
-    String::from_utf8(bytes).ok()
+    // v2.4.8 audit H1 — handles both v1 (AES-GCM) and legacy
+    // (plain base64) rows. Silent .ok()? matches the previous
+    // fail-open behavior on this path; the dispatch falls through
+    // to subscription auth rather than blocking on a corrupt row.
+    crate::encryption::decrypt(&encrypted).ok()
 }
 
 /// Per-runtime auth-mode setting key in the `settings` table. Mirror

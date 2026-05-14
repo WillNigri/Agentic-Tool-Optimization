@@ -52,9 +52,8 @@ pub fn runtime_supports_byok(runtime_name: &str) -> bool {
 
 /// Resolve the active key for a provider slug as stored in the desktop's
 /// `llm_api_keys` table. Returns the base64-decoded plaintext on success.
-/// Mirrors `api_dispatch::resolve_api_key` so the two code paths agree on
-/// the encoding (plain base64, no real encryption — the GUI banner says
-/// so explicitly).
+/// v2.4.8 audit H1 — uses crate::encryption::decrypt to handle both
+/// AES-GCM v1 rows and the legacy plain-base64 format pre-2.4.8.
 fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
     let conn = crate::db::open_readonly(db_path)?;
     let encrypted: String = conn
@@ -66,10 +65,8 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
             |r| r.get(0),
         )
         .map_err(|e| anyhow!("no active key for provider '{}': {}", provider, e))?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encrypted.as_bytes())
-        .context("decode llm_api_keys.encrypted_key (base64)")?;
-    String::from_utf8(bytes).context("decoded key is not UTF-8")
+    crate::encryption::decrypt(&encrypted)
+        .context("decrypt llm_api_keys.encrypted_key")
 }
 
 /// Per-runtime auth-mode preference, stored in `settings` as

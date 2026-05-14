@@ -86,13 +86,13 @@ pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<Stri
             provider.env_var,
         )
     })?;
-    // The desktop's simple_encrypt is plain base64 — the GUI's banner
-    // says so explicitly. Match that decoding here so the CLI doesn't
-    // need to call out to the desktop.
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encrypted.as_bytes())
-        .context("decode llm_api_keys.encrypted_key (base64)")?;
-    String::from_utf8(bytes).context("decoded key is not UTF-8")
+    // v2.4.8 audit H1 — route through the shared encryption module
+    // which handles both AES-GCM v1 rows AND legacy plain-base64
+    // rows (the pre-2.4.8 format). The CLI hits the same OS keychain
+    // entry the desktop uses, so a row written by either is
+    // decryptable by either.
+    crate::encryption::decrypt(&encrypted)
+        .context("decrypt llm_api_keys.encrypted_key")
 }
 
 /// One message in the chat-completions `messages` array. `role` is

@@ -158,15 +158,38 @@ fn remote_command_string(remote: &RemoteRuntime, prompt: &str, model: Option<&st
         _ => quoted,
     };
 
+    // v2.4.8 audit M4 — shell-quote binary_path and extra_args.
+    // Pre-2.4.8 these were concatenated verbatim, so a malicious
+    // row in remote_runtimes (imported config, marketplace,
+    // support paste) could inject shell metachars onto the remote
+    // host. The prompt + model are already quoted above; this
+    // closes the symmetry gap.
+    //
+    // extra_args supports multiple whitespace-separated args
+    // (e.g. "--no-update-check --verbose"); we split + quote each.
+    let bin_q = shell_quote(&remote.binary_path);
     let extra = remote
         .extra_args
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .map(|s| format!(" {}", s))
+        .map(|s| {
+            let parts: Vec<String> = s.split_whitespace().map(shell_quote).collect();
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", parts.join(" "))
+            }
+        })
         .unwrap_or_default();
 
-    format!("{}{} {}", remote.binary_path, extra, runtime_args)
+    format!("{}{} {}", bin_q, extra, runtime_args)
+}
+
+/// Single-quote escape: `it's` → `'it'\''s'`. Same shape used for
+/// the prompt + model values above; this helper centralizes it.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Execute a dispatch against a remote runtime over SSH. Returns the

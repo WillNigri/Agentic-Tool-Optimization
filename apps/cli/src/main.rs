@@ -14,6 +14,7 @@ mod api_dispatch;
 mod api_dispatch_tools;
 mod byok;
 mod commands;
+mod encryption;
 mod review_tools;
 mod daemon;
 mod db;

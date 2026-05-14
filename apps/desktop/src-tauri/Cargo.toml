@@ -41,6 +41,12 @@ reqwest = { version = "0.11", features = ["json"] }
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
 base64 = "0.22"
 sha2 = "0.10"
+rand = "0.8"
+which = "6"
+# v2.4.8 security — AES-256-GCM for llm_api_keys.encrypted_key.
+# Pre-2.4.8 the column was plain base64 (no cipher); a master key
+# stored in the OS keychain now wraps the stored values.
+aes-gcm = "0.10"
 portable-pty = "0.8"
 ato-recipes = { path = "../../../packages/ato-recipes" }
 ato-posts = { path = "../../../packages/ato-posts" }

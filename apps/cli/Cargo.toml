@@ -33,6 +33,13 @@ ato-api-providers = { path = "../../packages/ato-api-providers" }
 # dispatch.rs synchronous like the existing shell-out path.
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 base64 = "0.22"
+# v2.4.8 security — AES-256-GCM for llm_api_keys.encrypted_key.
+# Mirror of the desktop encryption module so the CLI can decrypt
+# rows the GUI wrote (and re-encrypt legacy plain-base64 rows on
+# first access). Master key lives in the OS keychain; both binaries
+# look at the same service+account name.
+aes-gcm = "0.10"
+keyring = "2"
 # v2.4.4 Phase 7.0 — daemon for LAN mesh.
 # tokio = async runtime for the WS server + peer connections.
 # ed25519-dalek = peer identity / signed messages.
