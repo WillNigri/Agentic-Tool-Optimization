@@ -2901,6 +2901,115 @@ pub fn get_runtime_path(runtime: String) -> Result<Option<String>, String> {
     Ok(read_file_lossy(&file_path).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
+// ─── v2.5.1 monitored-runtimes preference ────────────────────────────
+//
+// Will surfaced 2026-05-14: Hermes (never installed) shows "Down" red
+// and OpenClaw (uninstalled long ago) still lingers — both because
+// the Health panel renders every known runtime regardless of whether
+// the user uses it. The fix is a per-runtime monitored flag in a new
+// `runtime_preferences` table; the panel filters on this flag.
+
+#[derive(serde::Serialize)]
+pub struct RuntimePreference {
+    pub runtime: String,
+    pub monitored: bool,
+}
+
+const KNOWN_RUNTIMES: [&str; 5] = ["claude", "codex", "gemini", "openclaw", "hermes"];
+
+/// First-launch seed: for every known runtime not yet in the
+/// preferences table, set monitored = (which_cli detected it).
+/// Idempotent — re-running never overwrites an existing row.
+fn ensure_runtime_preferences_seeded(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    for &runtime in &KNOWN_RUNTIMES {
+        // v2.5.1 review Tier 1 — Finding 3: previously `SELECT COUNT(*)
+        // … .unwrap_or(0)` mapped both "row missing" and "DB error" to
+        // 0, causing repeated INSERTs whenever the DB was locked. The
+        // SELECT-1-OR-FALSE pattern distinguishes the two: rusqlite
+        // returns Err(QueryReturnedNoRows) for missing rows (→ false,
+        // safe to insert) and Err(other) for real DB errors. We bail
+        // out of the entire seed on a real error rather than blindly
+        // retrying.
+        let exists: bool = match conn.query_row(
+            "SELECT 1 FROM runtime_preferences WHERE runtime = ?1",
+            [runtime],
+            |_| Ok(true),
+        ) {
+            Ok(_) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(e),
+        };
+        if exists {
+            continue;
+        }
+        let detected = which_cli(runtime).is_some();
+        conn.execute(
+            "INSERT INTO runtime_preferences (runtime, monitored, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![runtime, if detected { 1 } else { 0 }, now],
+        )?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_runtime_preferences() -> Result<Vec<RuntimePreference>, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let _ = ensure_runtime_preferences_seeded(&conn);
+    let mut stmt = conn
+        .prepare("SELECT runtime, monitored FROM runtime_preferences ORDER BY runtime")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(RuntimePreference {
+                runtime: r.get(0)?,
+                monitored: r.get::<_, i64>(1)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|x| x.ok())
+        .collect();
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn set_runtime_monitored(runtime: String, monitored: bool) -> Result<(), String> {
+    if !KNOWN_RUNTIMES.contains(&runtime.as_str()) {
+        return Err(format!("Unknown runtime: {}", runtime));
+    }
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO runtime_preferences (runtime, monitored, updated_at)
+              VALUES (?1, ?2, ?3)
+         ON CONFLICT(runtime) DO UPDATE SET monitored = excluded.monitored, updated_at = excluded.updated_at",
+        rusqlite::params![runtime, if monitored { 1 } else { 0 }, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Returns true if the runtime should be probed/displayed in the
+/// Health panel. Used by health_poller to skip un-monitored runtimes
+/// (no point probing Hermes if the user never installed it).
+pub fn is_runtime_monitored(runtime: &str) -> bool {
+    let db_path = crate::get_db_path();
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return true, // fail open — surface health if DB is unreadable
+    };
+    let _ = ensure_runtime_preferences_seeded(&conn);
+    conn.query_row(
+        "SELECT monitored FROM runtime_preferences WHERE runtime = ?1",
+        [runtime],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v != 0)
+    .unwrap_or(true)
+}
+
 // v2.3.23 Phase 6.x-B — unified runtime picker source.
 //
 // The PromptBar / agent-creation dropdowns previously hardcoded the
@@ -9441,6 +9550,26 @@ pub fn get_health_status(db: State<'_, DbState>) -> Result<Vec<RuntimeHealth>, S
     let mut health_list = Vec::new();
 
     for runtime in runtimes {
+        // v2.5.1 — un-monitored runtimes are completely hidden from
+        // the Health panel (no card at all). The poller already skips
+        // probing them; we also filter at the read site so any stale
+        // pre-toggle-off rows don't surface. Inlining the query
+        // (rather than calling is_runtime_monitored) so we reuse the
+        // already-held `db.0` lock and avoid a second Connection::open
+        // that could contend in WAL mode.
+        let monitored: bool = conn
+            .query_row(
+                "SELECT monitored FROM runtime_preferences WHERE runtime = ?1",
+                [runtime],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            // Default to true if the row is missing — first launch may
+            // have not seeded yet when this is called.
+            .unwrap_or(true);
+        if !monitored {
+            continue;
+        }
         // Get latest health check
         let latest: Option<HealthCheck> = conn.query_row(
             "SELECT id, runtime, status, latency_ms, error_message, checked_at FROM health_checks WHERE runtime = ?1 ORDER BY checked_at DESC LIMIT 1",

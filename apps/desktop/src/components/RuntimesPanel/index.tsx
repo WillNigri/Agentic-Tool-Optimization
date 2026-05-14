@@ -6,6 +6,7 @@ import AuthMethodMatrix from "./AuthMethodMatrix";
 import CreditBurnCard from "./CreditBurnCard";
 import RuntimeComparison from "./RuntimeComparison";
 import RemoteRuntimes from "./RemoteRuntimes";
+import MonitoringToggles from "./MonitoringToggles";
 
 // Settings → Runtimes panel.
 // v1.4.0 Polish-T5 — Adds a "Compare" sub-tab that surfaces the per-runtime
@@ -18,14 +19,21 @@ interface Props {
   onOpenApiKeys?: () => void;
 }
 
-type RuntimesTab = "setup" | "compare" | "remote";
+type RuntimesTab = "setup" | "monitoring" | "compare" | "remote";
 
 const STORAGE_KEY = "ato.subtab.settings.runtimes";
 
 function loadInitialTab(): RuntimesTab {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "setup" || stored === "compare" || stored === "remote") return stored;
+    if (
+      stored === "setup" ||
+      stored === "monitoring" ||
+      stored === "compare" ||
+      stored === "remote"
+    ) {
+      return stored;
+    }
   } catch {
     // ignore
   }
@@ -47,6 +55,7 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
 
   const tabs: { id: RuntimesTab; label: string }[] = [
     { id: "setup", label: t("subnav.runtimesSetup", "Setup") },
+    { id: "monitoring", label: t("subnav.runtimesMonitoring", "Monitoring") },
     { id: "compare", label: t("subnav.runtimesCompare", "Compare") },
     { id: "remote", label: t("subnav.runtimesRemote", "Remote") },
   ];
@@ -90,6 +99,8 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
           </Suspense>
         </div>
       )}
+
+      {active === "monitoring" && <MonitoringToggles />}
 
       {active === "compare" && <RuntimeComparison />}
 
