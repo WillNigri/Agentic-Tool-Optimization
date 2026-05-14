@@ -529,6 +529,17 @@ pub fn init_database(conn: &Connection) {
             file_path TEXT PRIMARY KEY,
             enabled   INTEGER NOT NULL DEFAULT 1
         );
+        -- v2.5.1 — per-runtime monitored toggle. The Insights → Health
+        -- panel only renders cards for runtimes the user opted into
+        -- monitoring. First launch seeds this table by detecting which
+        -- runtimes are installed (via which_cli) so the user doesn't
+        -- start with red cards for runtimes they've never touched.
+        -- Adding a new runtime is just a row with monitored=1.
+        CREATE TABLE IF NOT EXISTS runtime_preferences (
+            runtime   TEXT PRIMARY KEY,
+            monitored INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS cron_alerts (
             id         TEXT PRIMARY KEY,
             job_id     TEXT NOT NULL,
@@ -1393,6 +1404,8 @@ pub fn run() {
             detect_agent_runtimes,
             set_runtime_path,
             get_runtime_path,
+            list_runtime_preferences,
+            set_runtime_monitored,
             prompt_agent,
             query_agent_status,
             query_all_agent_statuses,

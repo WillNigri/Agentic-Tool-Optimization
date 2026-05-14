@@ -402,6 +402,79 @@ fn kill_via_pid(run_id: &str) -> bool {
     false
 }
 
+/// v2.5.1 — reaper for stale live_runs rows whose CLI process died
+/// via SIGKILL / Ctrl+C / panic / hard crash, so `LiveRunGuard::drop`
+/// never ran. Without this, those rows sit forever and the Live tab
+/// shows zombie dispatches indefinitely (Will saw two 1h-old CLAUDE
+/// rows from a killed `ato review` and asked why they were still
+/// there).
+///
+/// The check is `kill -0 <pid>` (POSIX "does this pid exist + may I
+/// signal it"). Three outcomes:
+///   - exit 0 → process exists → leave the row alone
+///   - stderr contains "No such process" (ESRCH) → process is dead →
+///     reap the row
+///   - any other failure (EPERM "Operation not permitted",
+///     parse failure, kill spawn failure) → conservative, leave row
+///     alone. EPERM means the process exists under a different uid,
+///     which only happens if the user dispatched as a different user
+///     — far better to leave a stale row than to silently delete a
+///     live dispatch we just can't signal.
+///
+/// Grace window: rows newer than 30 seconds are skipped even if the
+/// PID lookup says "dead". Avoids racing with a freshly-inserted row
+/// whose CLI hasn't actually spawned the long-lived child yet — the
+/// initial `live_runs::insert` writes the CLI's OWN pid, then the
+/// dispatcher may fork/exec and update later. 30s is well above any
+/// legitimate dispatch-prelude window.
+fn reap_dead_live_runs(conn: &rusqlite::Connection) {
+    let now = chrono::Utc::now();
+    let candidates = match conn
+        .prepare(
+            "SELECT run_id, child_pid, started_at
+               FROM live_runs
+              WHERE child_pid IS NOT NULL",
+        )
+        .and_then(|mut stmt| {
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
+                .filter_map(|x| x.ok())
+                .collect::<Vec<_>>();
+            Ok(rows)
+        }) {
+        Ok(rows) => rows,
+        Err(_) => return, // schema missing or DB locked — skip silently
+    };
+    for (run_id, pid, started_at) in candidates {
+        if pid <= 0 {
+            continue;
+        }
+        // Grace window — skip rows < 30s old.
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&started_at) {
+            if (now - parsed.with_timezone(&chrono::Utc)).num_seconds() < 30 {
+                continue;
+            }
+        }
+        let probe = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output();
+        let dead = match probe {
+            Ok(o) if o.status.success() => false,
+            Ok(o) => String::from_utf8_lossy(&o.stderr).contains("No such process"),
+            Err(_) => false, // spawn failure, be conservative
+        };
+        if dead {
+            let _ = conn.execute("DELETE FROM live_runs WHERE run_id = ?1", [&run_id]);
+        }
+    }
+}
+
 // ─── Tauri commands ─────────────────────────────────────────────────
 
 #[tauri::command]
@@ -416,6 +489,11 @@ pub fn list_active_runs() -> Vec<ActiveRun> {
         runs.iter().map(|r| r.run_id.clone()).collect();
     let db_path = crate::get_db_path();
     if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        // v2.5.1 — sweep zombie rows whose CLI process is dead. Cheap
+        // (one kill -0 per non-null child_pid > 30s old); runs on
+        // every Live-tab render so the panel self-heals over time.
+        reap_dead_live_runs(&conn);
+
         if let Ok(mut stmt) = conn.prepare(
             "SELECT run_id, agent_slug, runtime, workspace, source, started_at, status
                FROM live_runs",

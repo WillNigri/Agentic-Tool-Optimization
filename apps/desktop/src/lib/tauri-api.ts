@@ -504,6 +504,26 @@ export async function getRuntimePath(runtime: AgentRuntime): Promise<string | nu
   }
 }
 
+// ---- v2.5.1 monitored-runtimes preference ----
+//
+// Per-runtime opt-in to the Insights → Health panel. Will surfaced
+// (2026-05-14): Hermes shown as "Down" though he never installed it;
+// OpenClaw lingered from a long-uninstalled state. The toggle lets
+// the user hide runtimes they don't use.
+
+export interface RuntimePreference {
+  runtime: string;
+  monitored: boolean;
+}
+
+export async function listRuntimePreferences(): Promise<RuntimePreference[]> {
+  return invoke<RuntimePreference[]>('list_runtime_preferences');
+}
+
+export async function setRuntimeMonitored(runtime: string, monitored: boolean): Promise<void> {
+  await invoke('set_runtime_monitored', { runtime, monitored });
+}
+
 // ---- Agent Status (Inbound / Two-Way) ----
 
 export interface AgentStatus {

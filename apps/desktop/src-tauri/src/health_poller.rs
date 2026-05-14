@@ -85,6 +85,14 @@ fn check_all_runtimes() -> Vec<HealthCheckResult> {
     let mut results = Vec::new();
 
     for runtime in runtimes {
+        // v2.5.1 — respect the per-runtime monitored preference. A
+        // runtime the user toggled off (e.g. Hermes they never
+        // installed) skips probing and contributes nothing to the
+        // Health panel. The panel reads health_checks from SQLite, so
+        // stopping at the source means no row written, no card shown.
+        if !crate::commands::is_runtime_monitored(runtime) {
+            continue;
+        }
         let result = check_runtime_health(runtime);
         results.push(result);
     }
@@ -120,51 +128,74 @@ fn check_runtime_health(runtime: &str) -> HealthCheckResult {
     }
 }
 
+/// v2.5.1 — generic runtime health probe.
+///
+/// Previously each runtime's check_*_health hardcoded `Command::new("claude")`
+/// which only sees the GUI app's inherited PATH. On a Mac launched from
+/// Finder, that PATH typically misses `~/.nvm/versions/node/*/bin/` (where
+/// `npm i -g @anthropic-ai/claude-code` actually installs the binary), so
+/// the panel reported "Claude not found" while the user was actively using
+/// Claude Code from a terminal.
+///
+/// The fix routes through `commands::which_cli` which:
+/// 1. Honors the per-runtime user override at `~/.ato/<runtime>-path`
+/// 2. Tries a fixed allowlist of common install dirs
+/// 3. Scans the npx cache
+/// 4. Falls back to `which` with the user's login-+-interactive shell PATH
+///    (so NVM-managed nodes resolve correctly)
+fn probe_cli_runtime(runtime: &str) -> (String, Option<String>) {
+    let resolved = crate::commands::which_cli(runtime);
+    let Some(path) = resolved else {
+        // Use "not installed" wording (not "not found") so the
+        // HealthDashboard's effectiveStatus() maps this to the neutral
+        // "Not configured" pill instead of red "Down". Reserve "Down"
+        // for runtimes we KNOW used to work and just stopped.
+        return (
+            "down".to_string(),
+            Some(format!("{} not installed on this machine", runtime)),
+        );
+    };
+    // The resolved value may be a wrapper string (e.g. on Windows
+    // `wsl.exe -e /home/user/.local/bin/claude`). For probing, run
+    // through sh -c on Unix / cmd /c on Windows when the resolved
+    // value contains a space. Otherwise call the path directly.
+    let probe = if path.contains(' ') {
+        #[cfg(target_os = "windows")]
+        {
+            Command::new("cmd")
+                .args(["/c", &format!("{} --version", path)])
+                .output()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new("sh")
+                .args(["-c", &format!("{} --version", path)])
+                .output()
+        }
+    } else {
+        Command::new(&path).arg("--version").output()
+    };
+    match probe {
+        Ok(output) if output.status.success() => ("healthy".to_string(), None),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            ("degraded".to_string(), Some(stderr))
+        }
+        Err(e) => (
+            "down".to_string(),
+            Some(format!("{} resolved at {} but probe failed: {}", runtime, path, e)),
+        ),
+    }
+}
+
 /// Check Claude Code CLI health
 fn check_claude_health() -> (String, Option<String>) {
-    // Try to run 'claude --version' to check if it's available
-    match Command::new("claude").arg("--version").output() {
-        Ok(output) => {
-            if output.status.success() {
-                ("healthy".to_string(), None)
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                ("degraded".to_string(), Some(stderr))
-            }
-        }
-        Err(e) => {
-            // Try npx
-            match Command::new("npx")
-                .args(["@anthropic/claude-code", "--version"])
-                .output()
-            {
-                Ok(output) if output.status.success() => ("healthy".to_string(), None),
-                _ => ("down".to_string(), Some(format!("Claude not found: {}", e))),
-            }
-        }
-    }
+    probe_cli_runtime("claude")
 }
 
 /// Check Codex CLI health
 fn check_codex_health() -> (String, Option<String>) {
-    // Try to run 'codex --version' or 'npx codex --version'
-    match Command::new("codex").arg("--version").output() {
-        Ok(output) => {
-            if output.status.success() {
-                ("healthy".to_string(), None)
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                ("degraded".to_string(), Some(stderr))
-            }
-        }
-        Err(e) => {
-            // Try npx
-            match Command::new("npx").args(["codex", "--version"]).output() {
-                Ok(output) if output.status.success() => ("healthy".to_string(), None),
-                _ => ("down".to_string(), Some(format!("Codex not found: {}", e))),
-            }
-        }
-    }
+    probe_cli_runtime("codex")
 }
 
 /// Check Hermes health (local server)
@@ -176,12 +207,28 @@ fn check_hermes_health() -> (String, Option<String>) {
     ) {
         Ok(_) => ("healthy".to_string(), None),
         Err(_) => {
-            // Try alternative command
-            match Command::new("hermes").arg("--version").output() {
-                Ok(output) if output.status.success() => {
-                    ("degraded".to_string(), Some("Hermes installed but server not running".to_string()))
-                }
-                _ => ("down".to_string(), Some("Hermes not available".to_string())),
+            // v2.5.1 — try `which_cli("hermes")` (was hardcoded `Command::new`
+            // which misses NVM-managed installs) before declaring it absent.
+            // Message wording is critical: "not installed" matches the
+            // HealthDashboard's effectiveStatus() neutral-pill rule, so
+            // never-installed Hermes shows as "Not configured" (grey) instead
+            // of "Down" (red). Will saw red Hermes on a machine he'd never
+            // installed it on — wrong framing.
+            match crate::commands::which_cli("hermes") {
+                Some(p) => match Command::new(&p).arg("--version").output() {
+                    Ok(output) if output.status.success() => (
+                        "degraded".to_string(),
+                        Some("Hermes installed but server not running".to_string()),
+                    ),
+                    _ => (
+                        "down".to_string(),
+                        Some(format!("Hermes resolved at {} but probe failed", p)),
+                    ),
+                },
+                None => (
+                    "down".to_string(),
+                    Some("Hermes not installed on this machine".to_string()),
+                ),
             }
         }
     }
