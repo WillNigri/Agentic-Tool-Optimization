@@ -2545,6 +2545,8 @@ pub async fn prompt_claude(prompt: String) -> Result<String, String> {
         Ok(response)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // Redact BYOK secrets before stderr surfaces to the user. (minimax #1)
+        let stderr = crate::byok::redact_byok_secrets(&stderr, "claude", None);
         if stderr.contains("not logged in") || stderr.contains("authentication") {
             Err("Not logged in to Claude Code. Run `claude` in your terminal first to authenticate.".to_string())
         } else if stderr.is_empty() {
@@ -3133,6 +3135,16 @@ async fn dispatch_command_killable(
         if let Some(mut stderr) = child.stderr.take() {
             let _ = stderr.read_to_string(&mut stderr_text).await;
         }
+        // Redact BYOK secrets before stderr reaches the frontend / DB —
+        // some vendors echo the bad key in auth failures. Caller is
+        // already past the spawn step, so we look up the env-var key
+        // from ATO's own env and the stored key by re-checking the
+        // path (small extra read, only on the error path). The applied
+        // key isn't tracked here because dispatch_command_killable
+        // doesn't know which env vars were set — see the caller's
+        // own redaction at byok_env_value_from_path. (minimax #1)
+        let stderr_text =
+            crate::byok::redact_byok_secrets(&stderr_text, runtime, None);
         Err(if stderr_text.is_empty() {
             format!("{} exited with status {}", runtime_label, status)
         } else {
@@ -4744,9 +4756,21 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                 // the binary's presence + `--version` exit as the health
                 // signal. Stale-credential detection moves to first-real-
                 // dispatch surfacing instead of polling.
-                let byok = crate::byok::byok_env_value_from_path(&crate::get_db_path(), "claude");
-                healthy = byok.is_some() || version.is_some();
+                let has_key =
+                    crate::byok::has_byok_key_from_path(&crate::get_db_path(), "claude");
+                healthy = has_key || version.is_some();
             }
+            // Resolve the badge once — was double-counted before (one call
+            // to compute `healthy`, another inside the JSON literal).
+            // `has_byok_key_from_path` reports the right semantic for the
+            // badge: true when the user has either env-var or stored key
+            // (claude #1 + #2).
+            let auth_mode =
+                if crate::byok::has_byok_key_from_path(&crate::get_db_path(), "claude") {
+                    "api_key"
+                } else {
+                    "subscription"
+                };
 
             Ok(AgentStatus {
                 runtime: "claude".into(),
@@ -4756,11 +4780,7 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                 path,
                 details: serde_json::json!({
                     "authenticated": healthy,
-                    "auth_mode": if crate::byok::byok_env_value_from_path(&crate::get_db_path(), "claude").is_some() {
-                        "api_key"
-                    } else {
-                        "subscription"
-                    },
+                    "auth_mode": auth_mode,
                 }),
             })
         }
@@ -4781,7 +4801,14 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                 }
             }
 
+            // BYOK badge: covers env var OR stored key, same semantic as
+            // the claude branch — was previously env-var-only, ignoring
+            // anything users had pasted into Settings → API Keys.
+            // (claude #4 / minimax #2)
+            let has_key =
+                crate::byok::has_byok_key_from_path(&crate::get_db_path(), "codex");
             let api_key_set = std::env::var("OPENAI_API_KEY").is_ok();
+            let auth_mode = if has_key { "api_key" } else { "subscription" };
 
             Ok(AgentStatus {
                 runtime: "codex".into(),
@@ -4789,7 +4816,10 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                 healthy,
                 version,
                 path,
-                details: serde_json::json!({ "apiKeyEnv": if api_key_set { "set" } else { "not set" } }),
+                details: serde_json::json!({
+                    "apiKeyEnv": if api_key_set { "set" } else { "not set" },
+                    "auth_mode": auth_mode,
+                }),
             })
         }
         "openclaw" => {
@@ -15596,6 +15626,9 @@ async fn spawn_streaming_dispatch(
         if let Some(mut stderr) = child.stderr.take() {
             let _ = stderr.read_to_string(&mut err_text).await;
         }
+        // Redact BYOK secrets before stderr lands in execution_logs +
+        // gets emitted to the frontend. (minimax #1)
+        let err_text = crate::byok::redact_byok_secrets(&err_text, runtime, None);
         let final_msg = if err_text.is_empty() {
             format!("{} exited with status {}", runtime, status)
         } else {

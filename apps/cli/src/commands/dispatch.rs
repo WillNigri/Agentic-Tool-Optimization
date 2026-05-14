@@ -227,7 +227,16 @@ pub fn run(
     // so the subprocess authenticates against the API account directly
     // (pay-as-you-go) instead of drawing from the subscription's Agent
     // SDK credit. No-op for runtimes without a BYOK mapping.
-    crate::byok::apply_byok_env(&mut cmd, db_path, runtime_name);
+    //
+    // We capture the forwarded key so we can redact it from any stderr
+    // we persist downstream — a vendor error message that echoes the
+    // bad key must not land in execution_logs.error_message. (See
+    // byok::redact_byok_secrets at the persist point below.)
+    let byok_applied_key: Option<String> = crate::byok::byok_env_value(db_path, runtime_name)
+        .map(|(env_var, key)| {
+            cmd.env(env_var, &key);
+            key
+        });
     match runtime_name {
         "claude" => {
             cmd.arg("--print").arg(&effective_prompt);
@@ -318,6 +327,15 @@ pub fn run(
         (response_text.clone(), None)
     };
 
+    // Redact any forwarded BYOK key (and the user's env-var key, if
+    // any) from stderr before it lands in execution_logs.error_message.
+    // The stderr text is also what gets returned via DispatchResult, so
+    // CLI/UI consumers see the redacted form too. (minimax #1, HIGH)
+    let stderr_text = crate::byok::redact_byok_secrets(
+        &stderr_text,
+        runtime_name,
+        byok_applied_key.as_deref(),
+    );
     let (status, response_persisted, error_persisted): (&str, Option<String>, Option<String>) =
         if output.status.success() {
             ("success", Some(truncate(&extracted_response)), None)
@@ -325,7 +343,7 @@ pub fn run(
             let msg = if stderr_text.is_empty() {
                 format!("{} exited with status {}", runtime_name, output.status)
             } else {
-                stderr_text
+                stderr_text.clone()
             };
             ("error", None, Some(truncate(&msg)))
         };
@@ -867,6 +885,12 @@ fn run_remote(
 
     let response_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    // SSH BYOK forwarding isn't wired yet, but the user's local
+    // ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY env vars
+    // could still surface in stderr via SendEnv-style escapes or
+    // remote logging. Defensive redaction either way. (minimax #1)
+    let stderr_text =
+        crate::byok::redact_byok_secrets(&stderr_text, &remote.slug, None);
 
     let (status, response_persisted, error_persisted): (&str, Option<String>, Option<String>) =
         if output.status.success() {

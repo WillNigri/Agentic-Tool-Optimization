@@ -97,7 +97,8 @@ pub fn start(
     // one (so it's queryable like any other dispatch) — that means
     // we actually DO want to reuse dispatch::run + then UPDATE the
     // replay_jobs row with the resulting trace data.
-    let dispatch_result = run_replay_dispatch(target_runtime, &prompt, target_model.clone())?;
+    let dispatch_result =
+        run_replay_dispatch(target_runtime, &prompt, target_model.clone(), db_path)?;
 
     let finished_at = chrono::Utc::now().to_rfc3339();
     let final_status = if dispatch_result.error_message.is_some() {
@@ -249,11 +250,20 @@ fn run_replay_dispatch(
     runtime_name: &str,
     prompt: &str,
     model: Option<String>,
+    db_path: &std::path::Path,
 ) -> Result<dispatch::DispatchResult> {
     let cli_path = runtime::resolve_runtime_cli(runtime_name)?;
     let mut cmd = Command::new(&cli_path);
-    // BYOK: forward stored API key as the runtime's env var if configured.
-    crate::byok::apply_byok_env(&mut cmd, &crate::db::default_db_path(), runtime_name);
+    // BYOK: forward stored API key as the runtime's env var, threading
+    // the actual db_path so `ato --db /tmp/foo.db replay ...` honors the
+    // override instead of silently sourcing from ~/.ato/local.db. (claude #3)
+    let byok_applied_key: Option<String> = crate::byok::byok_env_value(db_path, runtime_name)
+        .map(|(env_var, key)| {
+            cmd.env(env_var, &key);
+            key
+        });
+    // Capture for stderr redaction in case the subprocess echoes the key.
+    let _ = &byok_applied_key;
     match runtime_name {
         "claude" => {
             cmd.arg("--print").arg(prompt);
@@ -291,6 +301,13 @@ fn run_replay_dispatch(
 
     let response_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    // Redact any forwarded BYOK key before stderr lands in
+    // replay_jobs.error_message. (minimax #1)
+    let stderr_text = crate::byok::redact_byok_secrets(
+        &stderr_text,
+        runtime_name,
+        byok_applied_key.as_deref(),
+    );
     let (status, response_persisted, error_persisted): (&str, Option<String>, Option<String>) =
         if output.status.success() {
             ("success", Some(truncate(&response_text)), None)

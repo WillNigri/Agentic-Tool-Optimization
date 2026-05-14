@@ -64,22 +64,31 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
     String::from_utf8(bytes).context("decoded key is not UTF-8")
 }
 
-/// Apply BYOK env var to a subprocess `Command` if (a) the runtime has
-/// a BYOK mapping, (b) the user has stored a key for that vendor in
-/// llm_api_keys, and (c) the env var isn't already populated in ATO's
-/// own process environment. No-op for unsupported runtimes — those fall
-/// through to their existing auth path.
-pub fn apply_byok_env(cmd: &mut Command, db_path: &Path, runtime_name: &str) {
-    let Some((env_var, provider_slug)) = runtime_byok_env(runtime_name) else {
-        return;
-    };
+/// Resolve the BYOK env var + key for a runtime. Returns None when the
+/// runtime has no mapping, the process env var is already set (so we
+/// let it inherit naturally), or no stored key is found.
+///
+/// The CLI caller forwards this to the subprocess AND keeps a copy of
+/// `key` so it can redact stderr before persisting — vendor error
+/// messages sometimes echo the bad key back, and that can't reach
+/// execution_logs.error_message.
+pub fn byok_env_value(db_path: &Path, runtime_name: &str) -> Option<(&'static str, String)> {
+    let (env_var, provider_slug) = runtime_byok_env(runtime_name)?;
     if std::env::var(env_var)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
     {
-        return;
+        return None;
     }
-    if let Ok(key) = read_active_key(db_path, provider_slug) {
+    let key = read_active_key(db_path, provider_slug).ok()?;
+    Some((env_var, key))
+}
+
+/// Convenience: set the env var if BYOK applies. Most callers want
+/// `byok_env_value` instead so they can capture the key for redaction.
+#[allow(dead_code)] // kept for callers that don't need to redact stderr
+pub fn apply_byok_env(cmd: &mut Command, db_path: &Path, runtime_name: &str) {
+    if let Some((env_var, key)) = byok_env_value(db_path, runtime_name) {
         cmd.env(env_var, key);
     }
 }
@@ -87,6 +96,7 @@ pub fn apply_byok_env(cmd: &mut Command, db_path: &Path, runtime_name: &str) {
 /// True iff a BYOK key is configured for the given runtime (either via
 /// env var or stored in llm_api_keys). Used by UI badges and `ato
 /// runtimes status` to surface auth mode without exposing the key.
+#[allow(dead_code)] // wired in follow-up commit alongside per-runtime badge
 pub fn has_byok_key(db_path: &Path, runtime_name: &str) -> bool {
     let Some((env_var, provider_slug)) = runtime_byok_env(runtime_name) else {
         return false;
@@ -98,4 +108,80 @@ pub fn has_byok_key(db_path: &Path, runtime_name: &str) -> bool {
         return true;
     }
     read_active_key(db_path, provider_slug).is_ok()
+}
+
+/// Redact any BYOK secret material from a string before it lands in a
+/// log / DB row / UI surface. Two sources are checked: the key we just
+/// forwarded via `apply_byok_env` (caller passes it in via `applied_key`),
+/// and the env var the user may have set in ATO's shell. We redact
+/// exact-substring matches only — no regex on prefixes — to keep the
+/// blast radius narrow and avoid mangling unrelated bytes that happen
+/// to look like a key. (minimax #1, HIGH)
+pub fn redact_byok_secrets(text: &str, runtime_name: &str, applied_key: Option<&str>) -> String {
+    let mut out = text.to_string();
+    if let Some(k) = applied_key {
+        if !k.trim().is_empty() {
+            out = out.replace(k, "[REDACTED:API_KEY]");
+        }
+    }
+    if let Some((env_var, _)) = runtime_byok_env(runtime_name) {
+        if let Ok(v) = std::env::var(env_var) {
+            if !v.trim().is_empty() && Some(v.as_str()) != applied_key {
+                out = out.replace(&v, "[REDACTED:API_KEY]");
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_byok_env_known_runtimes() {
+        assert_eq!(
+            runtime_byok_env("claude"),
+            Some(("ANTHROPIC_API_KEY", "anthropic"))
+        );
+        assert_eq!(
+            runtime_byok_env("codex"),
+            Some(("OPENAI_API_KEY", "openai"))
+        );
+        assert_eq!(
+            runtime_byok_env("gemini"),
+            Some(("GEMINI_API_KEY", "google"))
+        );
+    }
+
+    #[test]
+    fn runtime_byok_env_unknown_returns_none() {
+        assert_eq!(runtime_byok_env("hermes"), None);
+        assert_eq!(runtime_byok_env("openclaw"), None);
+        assert_eq!(runtime_byok_env(""), None);
+    }
+
+    #[test]
+    fn redact_strips_applied_key() {
+        let text = "auth failed: invalid key sk-ant-abc123 try again";
+        let redacted = redact_byok_secrets(text, "claude", Some("sk-ant-abc123"));
+        assert!(!redacted.contains("sk-ant-abc123"));
+        assert!(redacted.contains("[REDACTED:API_KEY]"));
+    }
+
+    #[test]
+    fn redact_handles_empty_applied_key() {
+        // Empty key shouldn't cause `String::replace("", ...)` chaos
+        // (which would expand to insert between every char).
+        let text = "no key here";
+        let redacted = redact_byok_secrets(text, "claude", Some(""));
+        assert_eq!(redacted, text);
+    }
+
+    #[test]
+    fn redact_no_op_for_unknown_runtime() {
+        let text = "boring text";
+        let redacted = redact_byok_secrets(text, "hermes", None);
+        assert_eq!(redacted, text);
+    }
 }
