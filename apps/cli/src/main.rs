@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 mod api_dispatch;
 mod api_dispatch_tools;
+mod byok;
 mod commands;
 mod review_tools;
 mod daemon;

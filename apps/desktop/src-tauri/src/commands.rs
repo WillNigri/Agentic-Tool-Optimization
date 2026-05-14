@@ -2527,12 +2527,16 @@ pub async fn prompt_claude(prompt: String) -> Result<String, String> {
         "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code".to_string()
     })?;
 
-    // Run claude with --print flag (non-interactive, uses subscription)
+    // Run claude with --print flag. After 2026-06-15 this counts against
+    // the Agent SDK credit (programmatic) instead of subscription unless
+    // the user has stored an Anthropic API key — in which case BYOK
+    // forwards ANTHROPIC_API_KEY and Anthropic bills the key directly.
     // Use the user's full PATH so claude can find node, npm, etc.
     let user_path = get_user_path();
-    let output = Command::new(&claude_path)
-        .args(["--print", &prompt])
-        .env("PATH", &user_path)
+    let mut cmd = Command::new(&claude_path);
+    cmd.args(["--print", &prompt]).env("PATH", &user_path);
+    crate::byok::apply_byok_env_from_path(&mut cmd, &crate::get_db_path(), "claude");
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run claude: {}", e))?;
 
@@ -3258,6 +3262,14 @@ async fn prompt_agent_inner(
         other => return Err(format!("Unknown runtime: {}", other)),
     };
     cmd.env("PATH", &user_path);
+    // BYOK: forward stored anthropic/openai/google key as the runtime's
+    // env var. No-op for openclaw/hermes and for users without a stored
+    // key (subprocess falls through to its own OAuth credentials).
+    if let Some((var, key)) =
+        crate::byok::byok_env_value_from_path(&crate::get_db_path(), &runtime)
+    {
+        cmd.env(var, key);
+    }
 
     let started = std::time::Instant::now();
     let result = dispatch_command_killable(
@@ -4724,11 +4736,16 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                         version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
                     }
                 }
-                // Auth check — run a minimal prompt
-                if let Ok(output) = wrapper_command(cli).args(["--print", "respond with OK"]).output() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    healthy = output.status.success() && !stderr.contains("not logged in");
-                }
+                // Auth check — was previously `claude --print "respond
+                // with OK"` per check, which after 2026-06-15 burns Agent
+                // SDK credit on every health poll. Now: BYOK key present
+                // → trust it (claude --print with ANTHROPIC_API_KEY does
+                // its own auth check on real dispatches); otherwise treat
+                // the binary's presence + `--version` exit as the health
+                // signal. Stale-credential detection moves to first-real-
+                // dispatch surfacing instead of polling.
+                let byok = crate::byok::byok_env_value_from_path(&crate::get_db_path(), "claude");
+                healthy = byok.is_some() || version.is_some();
             }
 
             Ok(AgentStatus {
@@ -4737,7 +4754,14 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                 healthy,
                 version,
                 path,
-                details: serde_json::json!({ "authenticated": healthy }),
+                details: serde_json::json!({
+                    "authenticated": healthy,
+                    "auth_mode": if crate::byok::byok_env_value_from_path(&crate::get_db_path(), "claude").is_some() {
+                        "api_key"
+                    } else {
+                        "subscription"
+                    },
+                }),
             })
         }
         "codex" => {
@@ -15423,6 +15447,11 @@ async fn spawn_streaming_dispatch(
         // is aborted before we get to wait — important for keeping the
         // registry honest about what's actually running.
         .kill_on_drop(true);
+    // BYOK: same env-var forwarding as the non-streaming dispatch path.
+    if let Some((var, key)) = crate::byok::byok_env_value_from_path(&crate::get_db_path(), runtime)
+    {
+        cmd.env(var, key);
+    }
 
     // Register BEFORE spawn so that even a spawn failure lights up
     // the registry briefly (next finish_run cleans it up). Beatriz's

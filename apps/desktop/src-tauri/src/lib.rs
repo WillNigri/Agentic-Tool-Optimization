@@ -1,4 +1,5 @@
 mod openclaw_ws;
+mod byok;
 mod log_watcher;
 mod health_poller;
 mod telemetry;

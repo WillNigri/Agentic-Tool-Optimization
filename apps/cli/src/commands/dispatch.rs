@@ -222,6 +222,12 @@ pub fn run(
     };
 
     let mut cmd = Command::new(&cli_path);
+    // BYOK: if the user stored an Anthropic/OpenAI/Gemini key in
+    // Settings → API Keys, forward it as the runtime's standard env var
+    // so the subprocess authenticates against the API account directly
+    // (pay-as-you-go) instead of drawing from the subscription's Agent
+    // SDK credit. No-op for runtimes without a BYOK mapping.
+    crate::byok::apply_byok_env(&mut cmd, db_path, runtime_name);
     match runtime_name {
         "claude" => {
             cmd.arg("--print").arg(&effective_prompt);

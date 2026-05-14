@@ -252,6 +252,8 @@ fn run_replay_dispatch(
 ) -> Result<dispatch::DispatchResult> {
     let cli_path = runtime::resolve_runtime_cli(runtime_name)?;
     let mut cmd = Command::new(&cli_path);
+    // BYOK: forward stored API key as the runtime's env var if configured.
+    crate::byok::apply_byok_env(&mut cmd, &crate::db::default_db_path(), runtime_name);
     match runtime_name {
         "claude" => {
             cmd.arg("--print").arg(prompt);
