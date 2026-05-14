@@ -216,4 +216,18 @@ mod tests {
         let redacted = redact_byok_secrets(text, "hermes", None);
         assert_eq!(redacted, text);
     }
+
+    #[test]
+    fn runtime_supports_byok_truth_table() {
+        // Lock in the None-for-non-BYOK contract that the
+        // credit-burn meter depends on. Changing this means changing
+        // historical attribution and would need a data migration.
+        assert!(runtime_supports_byok("claude"));
+        assert!(runtime_supports_byok("codex"));
+        assert!(runtime_supports_byok("gemini"));
+        assert!(!runtime_supports_byok("hermes"));
+        assert!(!runtime_supports_byok("openclaw"));
+        assert!(!runtime_supports_byok(""));
+        assert!(!runtime_supports_byok("CLAUDE")); // case-sensitive
+    }
 }
