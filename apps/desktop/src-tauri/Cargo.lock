@@ -277,7 +277,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ato-desktop"
-version = "2.4.6"
+version = "2.4.7"
 dependencies = [
  "ato-api-providers",
  "ato-posts",
