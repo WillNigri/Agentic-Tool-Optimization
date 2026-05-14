@@ -16,10 +16,14 @@ function renderHome(props: Parameters<typeof Home>[0] = {}) {
 }
 
 describe("Home (T1+T9)", () => {
-  it("renders the Create Agent CTAs in the hero", () => {
+  it("renders the war-room + specialist-agent CTAs in the hero", () => {
+    // v2.4.6 positioning rewrite — the hero CTAs moved from
+    // "Start with chat" / "Quick setup" (v1.4.0) to the war-room
+    // framing. Keep matching loose enough that copy tweaks to the
+    // subhint don't break this.
     renderHome();
-    expect(screen.getByRole("button", { name: /Start with chat/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Quick setup/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open a war room/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Build a specialist agent/i })).toBeInTheDocument();
   });
 
   it("shows empty states when no agents and no runs are passed", () => {
