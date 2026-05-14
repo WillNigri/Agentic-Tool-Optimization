@@ -409,6 +409,15 @@ fn kill_via_pid(run_id: &str) -> bool {
 /// rows from a killed `ato review` and asked why they were still
 /// there).
 ///
+/// Platform note: uses POSIX `kill -0` (mac/Linux). On Windows the
+/// `kill` command doesn't exist so the spawn fails — we fall through
+/// to the conservative "leave row alone" branch, which means Windows
+/// users will accumulate zombie rows. This matches the existing
+/// `kill_via_pid` pattern in this file (which also shells out to
+/// POSIX `kill`) and the v2.4.x documented stance that Windows isn't
+/// a release platform yet. When Windows ships, add a `#[cfg(windows)]`
+/// branch using `tasklist /FI` or `OpenProcess` via the `windows` crate.
+///
 /// The check is `kill -0 <pid>` (POSIX "does this pid exist + may I
 /// signal it"). Three outcomes:
 ///   - exit 0 → process exists → leave the row alone
@@ -455,11 +464,20 @@ fn reap_dead_live_runs(conn: &rusqlite::Connection) {
         if pid <= 0 {
             continue;
         }
-        // Grace window — skip rows < 30s old.
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&started_at) {
-            if (now - parsed.with_timezone(&chrono::Utc)).num_seconds() < 30 {
-                continue;
-            }
+        // Grace window — skip rows < 30s old. v2.5.1 review Tier 1
+        // Finding 4: previously this used `if let Ok(parsed) = …` which
+        // only skipped when parsing succeeded; a malformed started_at
+        // would FALL THROUGH and the row would be reaped on its first
+        // poll, defeating the safety window. Fail-safe: treat parse
+        // failure as "this row is too suspect to reap, skip it." A
+        // legitimate stuck row will just sit a bit longer until either
+        // the timestamp gets cleaned up or a separate maintenance task
+        // handles it.
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&started_at) else {
+            continue;
+        };
+        if (now - parsed.with_timezone(&chrono::Utc)).num_seconds() < 30 {
+            continue;
         }
         let probe = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])

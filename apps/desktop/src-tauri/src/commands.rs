@@ -2923,14 +2923,24 @@ const KNOWN_RUNTIMES: [&str; 5] = ["claude", "codex", "gemini", "openclaw", "her
 fn ensure_runtime_preferences_seeded(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     for &runtime in &KNOWN_RUNTIMES {
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_preferences WHERE runtime = ?1",
-                [runtime],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if exists > 0 {
+        // v2.5.1 review Tier 1 — Finding 3: previously `SELECT COUNT(*)
+        // … .unwrap_or(0)` mapped both "row missing" and "DB error" to
+        // 0, causing repeated INSERTs whenever the DB was locked. The
+        // SELECT-1-OR-FALSE pattern distinguishes the two: rusqlite
+        // returns Err(QueryReturnedNoRows) for missing rows (→ false,
+        // safe to insert) and Err(other) for real DB errors. We bail
+        // out of the entire seed on a real error rather than blindly
+        // retrying.
+        let exists: bool = match conn.query_row(
+            "SELECT 1 FROM runtime_preferences WHERE runtime = ?1",
+            [runtime],
+            |_| Ok(true),
+        ) {
+            Ok(_) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(e),
+        };
+        if exists {
             continue;
         }
         let detected = which_cli(runtime).is_some();

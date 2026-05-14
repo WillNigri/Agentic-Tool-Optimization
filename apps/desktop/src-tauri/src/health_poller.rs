@@ -81,7 +81,7 @@ pub struct HealthCheckResult {
 
 /// Check health of all configured runtimes
 fn check_all_runtimes() -> Vec<HealthCheckResult> {
-    let runtimes = vec!["claude", "codex", "hermes", "openclaw"];
+    let runtimes = vec!["claude", "codex", "gemini", "hermes", "openclaw"];
     let mut results = Vec::new();
 
     for runtime in runtimes {
@@ -108,6 +108,7 @@ fn check_runtime_health(runtime: &str) -> HealthCheckResult {
     let (status, error_message) = match runtime {
         "claude" => check_claude_health(),
         "codex" => check_codex_health(),
+        "gemini" => check_gemini_health(),
         "hermes" => check_hermes_health(),
         "openclaw" => check_openclaw_health(),
         _ => ("unknown".to_string(), Some("Unknown runtime".to_string())),
@@ -196,6 +197,14 @@ fn check_claude_health() -> (String, Option<String>) {
 /// Check Codex CLI health
 fn check_codex_health() -> (String, Option<String>) {
     probe_cli_runtime("codex")
+}
+
+/// Check Gemini CLI health. v2.5.1 review Tier 1 — Finding 2: was
+/// in KNOWN_RUNTIMES (so the Monitoring toggle showed it) but never
+/// probed, so toggling did nothing. Wiring through `probe_cli_runtime`
+/// gives the toggle real effect.
+fn check_gemini_health() -> (String, Option<String>) {
+    probe_cli_runtime("gemini")
 }
 
 /// Check Hermes health (local server)
