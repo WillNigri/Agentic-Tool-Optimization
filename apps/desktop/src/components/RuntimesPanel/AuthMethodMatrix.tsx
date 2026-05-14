@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { Terminal, Key, Check, X, ExternalLink, Cpu, Bot, Globe, Sparkles } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { queryAllAgentStatuses, listLlmApiKeys } from "@/lib/api";
 import type { AgentStatus, LlmApiKey } from "@/lib/tauri-api";
@@ -12,7 +13,16 @@ import {
   type RuntimeId,
   type AuthMethod,
   type RuntimeAuthState,
+  type RuntimeAuthInfo,
 } from "@/lib/runtimeAuth";
+
+// Per-runtime auth info — the badge that says "Subscription" /
+// "API Key (anthropic)" combines the user's explicit choice with the
+// stored-key signal. Driven by the same Tauri command the dispatch
+// path reads, so the badge can't drift from actual behavior.
+type RuntimeAuthInfoMap = Partial<Record<RuntimeId, RuntimeAuthInfo>>;
+
+const BYOK_RUNTIMES: RuntimeId[] = ["claude", "codex", "gemini"];
 
 // T6 — Dual-auth UI. Shows for each runtime:
 //   - "CLI subscription" card (✓ if CLI detected + healthy)
@@ -44,6 +54,30 @@ export default function AuthMethodMatrix({ onOpenApiKeys }: Props) {
   const { t } = useTranslation();
   const [authState, setAuthState] = useState<RuntimeAuthState>({});
 
+  // Per-runtime effective auth info from the backend. Refetches when
+  // the user changes the radio so the badge updates immediately.
+  const { data: authInfoMap = {}, refetch: refetchAuthInfo } = useQuery<RuntimeAuthInfoMap>({
+    queryKey: ["runtime-auth-info"],
+    queryFn: async () => {
+      const out: RuntimeAuthInfoMap = {};
+      await Promise.all(
+        BYOK_RUNTIMES.map(async (runtime) => {
+          try {
+            const info = await invoke<RuntimeAuthInfo>("get_runtime_auth_info", {
+              runtime,
+            });
+            out[runtime] = info;
+          } catch {
+            // ignore
+          }
+        }),
+      );
+      return out;
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
   useEffect(() => {
     let cancelled = false;
     loadRuntimeAuth().then((s) => {
@@ -72,8 +106,10 @@ export default function AuthMethodMatrix({ onOpenApiKeys }: Props) {
     try {
       const next = await setRuntimeAuthMethod(runtime, method);
       setAuthState(next);
+      // Effective-mode badge depends on the backend setting, so kick
+      // a refresh after the write lands.
+      refetchAuthInfo();
     } catch (e) {
-      // Persistence failed — roll back to whatever the backend says.
       const fresh = await loadRuntimeAuth();
       setAuthState(fresh);
       // eslint-disable-next-line no-console
@@ -103,6 +139,7 @@ export default function AuthMethodMatrix({ onOpenApiKeys }: Props) {
             cliStatus={findStatus(statuses, rt.id)}
             apiKeyForRuntime={findKey(keys, rt.id)}
             activeMethod={authState[rt.id]}
+            authInfo={authInfoMap[rt.id]}
             onSelect={(m) => handleSelect(rt.id, m)}
             onOpenApiKeys={onOpenApiKeys}
           />
@@ -117,6 +154,7 @@ function RuntimeAuthRow({
   cliStatus,
   apiKeyForRuntime,
   activeMethod,
+  authInfo,
   onSelect,
   onOpenApiKeys,
 }: {
@@ -124,6 +162,7 @@ function RuntimeAuthRow({
   cliStatus: AgentStatus | undefined;
   apiKeyForRuntime: LlmApiKey | undefined;
   activeMethod: AuthMethod | undefined;
+  authInfo: RuntimeAuthInfo | undefined;
   onSelect: (method: AuthMethod) => void;
   onOpenApiKeys?: () => void;
 }) {
@@ -153,6 +192,9 @@ function RuntimeAuthRow({
             <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-cs-muted/10 px-2 py-0.5 text-[10px] font-medium text-cs-muted">
               {t("runtimes.notReady", "Not configured")}
             </span>
+          )}
+          {authInfo?.supportsByok && eitherReady && (
+            <EffectiveModeBadge info={authInfo} />
           )}
         </div>
       </div>
@@ -277,4 +319,62 @@ function findKey(keys: LlmApiKey[], runtime: RuntimeId): LlmApiKey | undefined {
   const byRuntime = keys.find((k) => k.runtime?.toLowerCase() === runtime && k.isActive);
   if (byRuntime) return byRuntime;
   return keys.find((k) => isProviderForRuntime(k.provider, runtime) && k.isActive);
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "anthropic",
+  openai: "openai",
+  google: "google",
+};
+
+function EffectiveModeBadge({ info }: { info: RuntimeAuthInfo }) {
+  const isApiKey = info.effective === "api_key";
+  // When the effective mode disagrees with the user's explicit choice
+  // (e.g., user picked api_key but no key is stored), surface that
+  // tension with an "override" hint. Without this, the badge would
+  // silently misrepresent what's about to happen.
+  const userChoseApiKey = info.userChoice === "api_key";
+  const override = userChoseApiKey && !isApiKey;
+
+  const providerSlug = (() => {
+    const r = info.runtime;
+    if (r === "claude") return "anthropic";
+    if (r === "codex") return "openai";
+    if (r === "gemini") return "google";
+    return null;
+  })();
+  const providerLabel = providerSlug ? PROVIDER_LABELS[providerSlug] ?? providerSlug : null;
+
+  const label = isApiKey
+    ? providerLabel
+      ? `API Key (${providerLabel})`
+      : "API Key"
+    : "Subscription";
+
+  const tooltip = (() => {
+    if (override) {
+      return `You picked API Key but no key is stored for ${providerLabel ?? info.runtime} — falling back to subscription. Add a key in Settings → API Keys.`;
+    }
+    if (isApiKey) {
+      return `Next dispatch will use the stored ${providerLabel ?? "API"} key. Anthropic / OpenAI / Google bills the key account directly.`;
+    }
+    return "Next dispatch will use your CLI OAuth credentials (subscription).";
+  })();
+
+  return (
+    <span
+      title={tooltip}
+      className={cn(
+        "ml-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium border",
+        isApiKey
+          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+          : "bg-sky-500/10 text-sky-300 border-sky-500/30",
+        override && "ring-1 ring-amber-500/40",
+      )}
+    >
+      {isApiKey ? <Key size={10} /> : <Terminal size={10} />}
+      {label}
+      {override && <span className="text-amber-400" aria-hidden="true">!</span>}
+    </span>
+  );
 }
