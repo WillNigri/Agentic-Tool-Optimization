@@ -895,17 +895,21 @@ fn run_remote(
     let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
 
     let started = Instant::now();
-    let output = crate::remote_runtime::exec(&remote, prompt, model.as_deref())?;
+    let (output, applied_byok_key) =
+        crate::remote_runtime::exec(&remote, prompt, model.as_deref())?;
     let duration_ms = started.elapsed().as_millis() as i64;
 
     let response_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    // SSH BYOK forwarding isn't wired yet, but the user's local
-    // ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY env vars
-    // could still surface in stderr via SendEnv-style escapes or
-    // remote logging. Defensive redaction either way. (minimax #1)
-    let stderr_text =
-        crate::byok::redact_byok_secrets(&stderr_text, &remote.slug, None);
+    // Redact any BYOK key we inlined into the SSH command + any
+    // process-env-derived key for this runtime. Vendor auth-failure
+    // messages sometimes echo the bad key, and the encrypted SSH
+    // channel doesn't protect what gets persisted on this side.
+    let stderr_text = crate::byok::redact_byok_secrets(
+        &stderr_text,
+        &remote.runtime,
+        applied_byok_key.as_deref(),
+    );
 
     let (status, response_persisted, error_persisted): (&str, Option<String>, Option<String>) =
         if output.status.success() {

@@ -170,10 +170,49 @@ fn remote_command_string(remote: &RemoteRuntime, prompt: &str, model: Option<&st
 }
 
 /// Execute a dispatch against a remote runtime over SSH. Returns the
-/// raw `Output` so the caller can persist exit/stdout/stderr the same
-/// way local dispatches do.
-pub fn exec(remote: &RemoteRuntime, prompt: &str, model: Option<&str>) -> Result<std::process::Output> {
+/// raw `Output` plus, if BYOK was applied, the key that was inlined
+/// into the remote command — caller passes it to redact_byok_secrets
+/// when persisting stderr so an auth-failure echo can't leak it into
+/// execution_logs.error_message.
+pub fn exec(
+    remote: &RemoteRuntime,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<(std::process::Output, Option<String>)> {
     let remote_cmd = remote_command_string(remote, prompt, model);
+
+    // BYOK over SSH: rather than rely on the remote sshd's AcceptEnv
+    // config (which most users won't configure), inline the env var
+    // as a command prefix. SSH transports it over the encrypted
+    // channel; the remote shell parses `KEY=val cmd args` and the
+    // subprocess inherits the env var for that one invocation.
+    //
+    // Tradeoffs vs SendEnv:
+    //   + works on any standard sshd without server-side config
+    //   - the key briefly appears in the remote ps listing while the
+    //     subprocess is starting (until the shell consumes the
+    //     prefix). Brief, but real — comparable to SendEnv's
+    //     exposure surface, less than appending it to a config file
+    //     on the remote host
+    //   - HISTFILE-style remote shell history could log it; users
+    //     dispatching to a host with that audit on should prefer
+    //     SendEnv + AcceptEnv (not auto-configured here)
+    let db_path = crate::db::default_db_path();
+    let (final_cmd, applied_key): (String, Option<String>) =
+        match crate::byok::byok_env_value(&db_path, &remote.runtime) {
+            Some((env_var, key)) => {
+                // Defensive single-quote escape on the key. API keys
+                // shouldn't contain quotes, but a corrupted entry
+                // shouldn't be able to break shell parsing.
+                let key_quoted = format!("'{}'", key.replace('\'', "'\\''"));
+                (
+                    format!("{}={} {}", env_var, key_quoted, remote_cmd),
+                    Some(key),
+                )
+            }
+            None => (remote_cmd, None),
+        };
+
     let target = match &remote.ssh_user {
         Some(u) => format!("{}@{}", u, remote.host),
         None => remote.host.clone(),
@@ -195,13 +234,13 @@ pub fn exec(remote: &RemoteRuntime, prompt: &str, model: Option<&str>) -> Result
         "-p",
         &remote.port.to_string(),
         &target,
-        &remote_cmd,
+        &final_cmd,
     ]);
 
     let output = cmd
         .output()
         .with_context(|| format!("Failed to spawn ssh for remote runtime '{}'", remote.slug))?;
-    Ok(output)
+    Ok((output, applied_key))
 }
 
 /// Open a connection at the standard db path. Used by callers that
