@@ -40,6 +40,19 @@ pub struct ActiveRun {
     pub status: String,
     /// Optional human-readable summary. e.g. "PromptBar / Quick test"
     pub source: Option<String>,
+    /// v2.6 PR-A — observatory categorization. "active" = ATO fired
+    /// it; "passive_observation" = we watched another CLI fire it.
+    /// Defaults to "active" for legacy rows that pre-date the column.
+    #[serde(default = "default_dispatch_kind")]
+    pub dispatch_kind: String,
+    /// v2.6 PR-A — which billing surface this dispatch landed on.
+    /// None when unknown (older rows or runtimes we can't attribute).
+    pub billing_surface: Option<String>,
+}
+
+#[allow(dead_code)] // referenced by serde(default = …) attribute above
+fn default_dispatch_kind() -> String {
+    "active".to_string()
 }
 
 /// v2.1.0+ Concurrent attribution refinement — minimal evidence the
@@ -120,6 +133,8 @@ pub fn begin_run(
         started_at_unix: now_unix(),
         status: "running".to_string(),
         source: source.map(|s| s.to_string()),
+        dispatch_kind: "active".to_string(),
+        billing_surface: None,
     };
     if let Ok(mut map) = registry().inner.lock() {
         // v2.1.0+ concurrent attribution — when this run shares a
@@ -175,8 +190,16 @@ fn mirror_begin(run: &ActiveRun) {
         let started_at = chrono::DateTime::from_timestamp(run.started_at_unix as i64, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        // v2.6 PR-A — derive billing_surface from the same auth-mode
+        // signal persist_execution_log uses on completion, so the
+        // Live tab chip is consistent with the History row that the
+        // same dispatch will eventually produce. None for runtimes
+        // outside the BYOK matrix (openclaw, hermes) — chip will not
+        // render rather than mislead.
+        let auth_mode = crate::byok::effective_auth_mode_from_path(&db_path, &run.runtime);
+        let billing_surface = billing_surface_for_active(&run.runtime, auth_mode);
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO live_runs (run_id, agent_slug, runtime, workspace, source, started_at, status, child_pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            "INSERT OR REPLACE INTO live_runs (run_id, agent_slug, runtime, workspace, source, started_at, status, child_pid, dispatch_kind, billing_surface) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
             rusqlite::params![
                 run.run_id,
                 run.agent_slug,
@@ -185,8 +208,27 @@ fn mirror_begin(run: &ActiveRun) {
                 run.source,
                 started_at,
                 run.status,
+                "active",
+                billing_surface,
             ],
         );
+    }
+}
+
+/// Map (runtime, auth_mode) → billing_surface label string. The chip
+/// in the Live tab + the by-surface group-by in the Usage tab both
+/// key off this string, so the active path and passive path must
+/// agree on the vocabulary.
+fn billing_surface_for_active(runtime: &str, auth_mode: Option<&str>) -> Option<&'static str> {
+    match (runtime, auth_mode) {
+        ("claude", Some("api_key")) => Some("anthropic_api"),
+        ("claude", Some("subscription")) => Some("claude_code_subscription"),
+        ("codex", Some("api_key")) => Some("openai_api"),
+        ("codex", Some("subscription")) => Some("codex_cli_subscription"),
+        ("gemini", Some("api_key")) => Some("gemini_api"),
+        ("gemini", Some("subscription")) => Some("gemini_cli_subscription"),
+        // openclaw/hermes don't have BYOK auth modes today.
+        _ => None,
     }
 }
 
@@ -513,7 +555,8 @@ pub fn list_active_runs() -> Vec<ActiveRun> {
         reap_dead_live_runs(&conn);
 
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT run_id, agent_slug, runtime, workspace, source, started_at, status
+            "SELECT run_id, agent_slug, runtime, workspace, source, started_at, status, \
+                    dispatch_kind, billing_surface \
                FROM live_runs",
         ) {
             let mapped = stmt.query_map([], |r| {
@@ -525,11 +568,23 @@ pub fn list_active_runs() -> Vec<ActiveRun> {
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             });
             if let Ok(iter) = mapped {
                 for row in iter.flatten() {
-                    let (run_id, agent_slug, runtime, workspace, source, started_at, status) = row;
+                    let (
+                        run_id,
+                        agent_slug,
+                        runtime,
+                        workspace,
+                        source,
+                        started_at,
+                        status,
+                        dispatch_kind,
+                        billing_surface,
+                    ) = row;
                     if mem_ids.contains(&run_id) {
                         continue;
                     }
@@ -544,6 +599,8 @@ pub fn list_active_runs() -> Vec<ActiveRun> {
                         started_at_unix: started_unix,
                         status,
                         source,
+                        dispatch_kind: dispatch_kind.unwrap_or_else(|| "active".to_string()),
+                        billing_surface,
                     });
                 }
             }

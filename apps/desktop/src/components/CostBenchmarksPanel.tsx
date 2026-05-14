@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -11,6 +11,8 @@ import {
   Zap,
   Lightbulb,
   ArrowRight,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import {
   getCostBenchmarks,
@@ -21,7 +23,15 @@ import {
 // v2.3.2 Phase 2.x — local-mode fallback for cost recommendations.
 // Benchmarks (the per-(agent, runtime) cost table) stays cloud-only
 // for now since the local aggregator hasn't been ported yet.
-import { getCostRecommendationsLocal } from "@/lib/localInsights";
+// v2.6 PR-A — billing-surface summary is local-only (passive
+// observations only exist on this machine until PR-B ships cloud
+// polling).
+import {
+  getCostRecommendationsLocal,
+  getBillingSurfaceSummary,
+  type BillingSurfaceRow,
+} from "@/lib/localInsights";
+import { billingSurfaceLabel } from "@/lib/activeRuns";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { asNumber } from "@/lib/pricing";
@@ -97,6 +107,20 @@ export default function CostBenchmarksPanel() {
         ? "local-no-schema"
         : "local";
 
+  // v2.6 PR-A — local observatory summary. Always-on regardless of
+  // cloud auth because passive observations + ATO's own dispatches
+  // both land in execution_logs on this machine.
+  const summaryDays = days <= 7 ? 7 : 30;
+  const summaryQuery = useQuery({
+    queryKey: ["billing-surface-summary", summaryDays],
+    queryFn: () => getBillingSurfaceSummary({ days: summaryDays }),
+    staleTime: 30_000,
+  });
+  // Group-by toggle: by-agent (existing default) OR by-billing-surface
+  // (v2.6 PR-A new view). Persisted in component state only — short
+  // session-scoped pref, not worth a settings round-trip.
+  const [groupBy, setGroupBy] = useState<"agent" | "billing_surface">("agent");
+
   if (!isPro) {
     return (
       <Empty
@@ -143,6 +167,27 @@ export default function CostBenchmarksPanel() {
   const rows = query.data?.rows ?? [];
   const median = query.data?.medianCostPerOk ?? 0;
   const outliers = rows.filter((r) => r.is_outlier);
+  const summary = summaryQuery.data;
+  // Surface rows for the by-billing-surface view. Coalesce passive +
+  // active under the same surface so the user sees "Claude Code
+  // Subscription: 47 calls" regardless of who fired them.
+  const surfaceRows = useMemo(() => {
+    if (!summary) return [];
+    const map = new Map<string, BillingSurfaceRow>();
+    for (const r of summary.rows) {
+      const existing = map.get(r.billing_surface);
+      if (!existing) {
+        map.set(r.billing_surface, { ...r, dispatch_kind: "merged" });
+      } else {
+        existing.runs += r.runs;
+        existing.tokens_in += r.tokens_in;
+        existing.tokens_out += r.tokens_out;
+        existing.cost_usd += r.cost_usd;
+        existing.duration_seconds += r.duration_seconds;
+      }
+    }
+    return Array.from(map.values());
+  }, [summary]);
   // v2.1.9 — PG DECIMAL columns serialize as strings. Coerce on every
   // arithmetic/.toFixed read so the panel doesn't crash when real
   // cloud cost values land (was latent before v2.1.4 wired uploads).
@@ -186,6 +231,48 @@ export default function CostBenchmarksPanel() {
           ))}
         </div>
       </header>
+
+      {/* v2.6 PR-A — "Last 7 days at a glance" header card. Three big
+          numbers + the blind-spot caveat. Always rendered (even when
+          empty) because the candor about what we *can't* see is the
+          positioning differentiator. */}
+      <GlanceCard
+        days={summaryQuery.data?.days ?? summaryDays}
+        subscriptionHours={summaryQuery.data?.subscription_hours ?? 0}
+        apiSpend={summaryQuery.data?.api_spend_usd ?? 0}
+        totalRuns={summaryQuery.data?.total_runs ?? 0}
+        loading={summaryQuery.isLoading}
+      />
+
+      {/* Group-by toggle. By-agent = the v2.1 cloud benchmarks view
+          (unchanged below). By-billing-surface = v2.6 PR-A: local
+          rollup that includes passive observations alongside ATO's
+          own dispatches. */}
+      <div className="inline-flex rounded-md border border-cs-border bg-cs-bg-raised p-0.5 text-[11px]">
+        {(
+          [
+            ["agent", t("insights.cost.groupByAgent", "By agent")],
+            [
+              "billing_surface",
+              t("insights.cost.groupBySurface", "By billing surface"),
+            ],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setGroupBy(key)}
+            className={cn(
+              "rounded px-2.5 py-1 font-medium transition",
+              groupBy === key
+                ? "bg-cs-accent/15 text-cs-accent"
+                : "text-cs-muted hover:text-cs-text",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       {/* v2.1 Phase 5 — Cost recommendations. Surface above the
           benchmarks because they're the actionable bit. Render-nothing
@@ -231,7 +318,24 @@ export default function CostBenchmarksPanel() {
         )}
       </div>
 
-      {rows.length === 0 ? (
+      {groupBy === "billing_surface" ? (
+        surfaceRows.length === 0 ? (
+          <Empty
+            icon={<Eye size={20} />}
+            title={t("insights.cost.surfaceEmpty", "No observed sessions yet")}
+            body={t(
+              "insights.cost.surfaceEmptyBody",
+              "Fire a dispatch from ATO or run any supported CLI (Claude Code, Codex) in another terminal — rows will appear here as they happen.",
+            )}
+          />
+        ) : (
+          <ul className="space-y-1.5">
+            {surfaceRows.map((r) => (
+              <SurfaceRow key={r.billing_surface} row={r} />
+            ))}
+          </ul>
+        )
+      ) : rows.length === 0 ? (
         <Empty
           icon={<DollarSign size={20} />}
           title={t("insights.cost.empty", "No usage data yet")}
@@ -248,6 +352,154 @@ export default function CostBenchmarksPanel() {
         </ul>
       )}
     </div>
+  );
+}
+
+// v2.6 PR-A — "Last 7 days at a glance" header card.
+function GlanceCard({
+  days,
+  subscriptionHours,
+  apiSpend,
+  totalRuns,
+  loading,
+}: {
+  days: number;
+  subscriptionHours: number;
+  apiSpend: number;
+  totalRuns: number;
+  loading: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <section className="rounded-lg border border-cs-border bg-cs-bg-raised/30 p-3">
+      <header className="flex items-center justify-between">
+        <h4 className="flex items-center gap-1.5 text-[12px] font-medium text-cs-text">
+          <Eye size={12} className="text-cs-accent" />
+          {t("insights.cost.glanceTitle", "Last {{n}} days at a glance", { n: days })}
+        </h4>
+        {loading && <Loader2 size={11} className="animate-spin text-cs-muted" />}
+      </header>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+        <GlanceStat
+          label={t("insights.cost.glanceSubHours", "Subscription hours")}
+          value={subscriptionHours >= 1 ? `${subscriptionHours.toFixed(1)}h` : `${Math.round(subscriptionHours * 60)}m`}
+          hint={t(
+            "insights.cost.glanceSubHint",
+            "Wall-clock on flat-rate CLIs (Claude Code, Codex, Gemini CLI).",
+          )}
+        />
+        <GlanceStat
+          label={t("insights.cost.glanceApiSpend", "API spend")}
+          value={`$${apiSpend.toFixed(2)}`}
+          hint={t(
+            "insights.cost.glanceApiHint",
+            "Per-token spend across ATO + observed sessions on this machine.",
+          )}
+        />
+        <GlanceStat
+          label={t("insights.cost.glanceTotalRuns", "Total runs")}
+          value={totalRuns.toLocaleString()}
+          hint={t(
+            "insights.cost.glanceTotalHint",
+            "ATO dispatches + passively observed CLI turns.",
+          )}
+        />
+      </div>
+      {/* Blind-spot line. The candor IS the differentiator — surfaces
+          we can't observe, surfaced honestly so the user knows what
+          this number is NOT counting. */}
+      <p className="mt-2 flex items-start gap-1.5 text-[10px] text-cs-muted">
+        <EyeOff size={11} className="text-cs-muted/80 shrink-0 mt-0.5" />
+        <span>
+          {t(
+            "insights.cost.blindSpot",
+            "Blind spot: phone Claude / ChatGPT apps and claude.ai web on consumer plans don't surface a usage API — not observable from here. Connect provider keys in Settings → Cloud (Pro) for cross-device totals once v2.6 PR-B ships.",
+          )}
+        </span>
+      </p>
+    </section>
+  );
+}
+
+function GlanceStat({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <div
+      className="rounded-md border border-cs-border bg-cs-bg p-2"
+      title={hint}
+    >
+      <div className="text-[9px] uppercase tracking-wide text-cs-muted">{label}</div>
+      <div className="mt-0.5 font-mono text-base text-cs-text">{value}</div>
+    </div>
+  );
+}
+
+// v2.6 PR-A — by-billing-surface row. Subscription surfaces show
+// duration + call count + "—" for cost (no per-call $ to attribute);
+// API surfaces show spend + tokens.
+function SurfaceRow({ row }: { row: BillingSurfaceRow }) {
+  const { t } = useTranslation();
+  const isSubscription =
+    row.billing_surface.endsWith("_subscription") ||
+    row.billing_surface === "ollama_local";
+  return (
+    <li className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Cpu size={11} className="text-cs-muted shrink-0" />
+        <span className="text-sm text-cs-text font-medium">
+          {billingSurfaceLabel(
+            row.billing_surface as Parameters<typeof billingSurfaceLabel>[0],
+          )}
+        </span>
+        <span
+          className={cn(
+            "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
+            isSubscription
+              ? "border-cs-border bg-cs-bg-raised text-cs-muted"
+              : "border-cs-accent/30 bg-cs-accent/10 text-cs-accent",
+          )}
+        >
+          {isSubscription
+            ? t("insights.cost.surfaceFlat", "flat-rate")
+            : t("insights.cost.surfacePerToken", "per-token")}
+        </span>
+        <span className="ml-auto font-mono text-cs-muted text-[10px]">
+          {row.runs.toLocaleString()} {t("insights.cost.runsShort", "calls")}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-4 gap-2 text-[11px]">
+        <Stat
+          label={t("insights.cost.calls", "Calls")}
+          value={row.runs.toLocaleString()}
+        />
+        <Stat
+          label={t("insights.cost.tokensIn", "Tokens in")}
+          value={row.tokens_in.toLocaleString()}
+        />
+        <Stat
+          label={t("insights.cost.tokensOut", "Tokens out")}
+          value={row.tokens_out.toLocaleString()}
+        />
+        {isSubscription ? (
+          <Stat
+            label={t("insights.cost.spend", "Spend")}
+            value="—"
+          />
+        ) : (
+          <Stat
+            label={t("insights.cost.spend", "Spend")}
+            value={`$${row.cost_usd.toFixed(2)}`}
+          />
+        )}
+      </div>
+    </li>
   );
 }
 

@@ -54,3 +54,41 @@ export async function getCostRecommendationsLocal(opts?: {
     minRuns: opts?.minRuns ?? null,
   });
 }
+
+// v2.6 PR-A — billing-surface summary.
+
+export interface BillingSurfaceRow {
+  billing_surface: string;
+  dispatch_kind: string;
+  runs: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  duration_seconds: number;
+}
+
+export interface BillingSurfaceSummary {
+  days: number;
+  rows: BillingSurfaceRow[];
+  /** Total wall-clock hours the user has been on subscription
+   *  surfaces over the window. The "you'd be paying $X if billed at
+   *  API rates" story lives in CostBenchmarksPanel via a separate
+   *  derivation; this is just the time slice. */
+  subscription_hours: number;
+  /** USD spend on per-token billing surfaces (anthropic_api etc). */
+  api_spend_usd: number;
+  /** Sum of `runs` across all surfaces. */
+  total_runs: number;
+  source: "local";
+}
+
+/** v2.6 PR-A — last-N-days observatory summary computed locally
+ *  over execution_logs. Drives the "Last 7 days at a glance"
+ *  header card and the by-billing-surface group-by toggle. */
+export async function getBillingSurfaceSummary(opts?: {
+  days?: number;
+}): Promise<BillingSurfaceSummary> {
+  return invoke<BillingSurfaceSummary>("compute_billing_surface_summary", {
+    days: opts?.days ?? 7,
+  });
+}
