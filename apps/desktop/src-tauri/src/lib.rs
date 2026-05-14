@@ -2,6 +2,7 @@ mod openclaw_ws;
 mod byok;
 mod encryption;
 mod log_watcher;
+mod passive_observer;
 mod health_poller;
 mod telemetry;
 mod file_attribution;
@@ -26,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{State, Manager, Emitter};
 pub use log_watcher::LogWatcherState;
+pub use passive_observer::PassiveObserverState;
 pub use health_poller::HealthPollerState;
 pub use telemetry::TelemetryState;
 pub use pty::PtyState;
@@ -932,9 +934,76 @@ pub fn init_database(conn: &Connection) {
     // Backfill for installs that already created live_runs before the
     // child_pid column existed.
     let _ = conn.execute("ALTER TABLE live_runs ADD COLUMN child_pid INTEGER", []);
+    // v2.6 PR-A — observatory columns mirrored on live_runs so the chip
+    // in the Live tab can render for active dispatches without a join.
+    // Passive rows synthesized from the watcher are NOT written into
+    // live_runs (they aren't kill-able processes); they only land in
+    // execution_logs. Defaults make existing rows behave as before.
+    let _ = conn.execute(
+        "ALTER TABLE live_runs ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'active'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE live_runs ADD COLUMN billing_surface TEXT", []);
     // Clear stale rows from a previous desktop run. We're booting; if
     // any live_runs survived a prior crash, they're dead by definition.
     let _ = conn.execute("DELETE FROM live_runs", []);
+
+    // v2.6 PR-A — observatory columns on execution_logs so passive
+    // observations of foreign CLI sessions (claude code, codex, …) can
+    // be persisted alongside ATO's own dispatches.
+    //   dispatch_kind: 'active'  = ATO fired it
+    //                  'passive_observation' = watcher saw it happen
+    //   billing_surface: which auth path the upstream CLI used —
+    //     claude_code_subscription / anthropic_api / codex_cli_subscription
+    //     / openai_api / gemini_cli_subscription / gemini_api / ollama_local
+    //     / unknown
+    //   provider_session_id: upstream CLI's own session UUID; pairs
+    //     with sequence_within_session for INSERT OR IGNORE dedup.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'active'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN billing_surface TEXT", []);
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN provider_session_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN sequence_within_session INTEGER",
+        [],
+    );
+    // Dedup unique index — partial so non-watcher rows (NULL session id)
+    // don't conflict with each other.
+    let _ = conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_logs_session_seq \
+            ON execution_logs(provider_session_id, sequence_within_session) \
+            WHERE provider_session_id IS NOT NULL",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_dispatch_kind \
+            ON execution_logs(dispatch_kind, created_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_billing_surface \
+            ON execution_logs(billing_surface, created_at DESC)",
+        [],
+    );
+
+    // v2.6 PR-A — watcher_state. One row per (source, file_path).
+    // byte_offset = where the next read should start so re-ingest is
+    // idempotent across desktop restarts. last_seq = the largest
+    // sequence_within_session emitted from this file, so a hard crash
+    // mid-line never re-emits the prior turn.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS watcher_state (
+            source       TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            byte_offset  INTEGER NOT NULL DEFAULT 0,
+            last_seq     INTEGER NOT NULL DEFAULT 0,
+            updated_at   TEXT NOT NULL,
+            PRIMARY KEY (source, file_path)
+        )",
+        [],
+    );
 
     // v2.3.7 Phase 4 — Ops recipes (user-authored trigger→action
     // workflows). trigger_config / action_config are TEXT (JSON
@@ -1341,6 +1410,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(DbState(Mutex::new(conn)))
         .manage(LogWatcherState::new())
+        .manage(PassiveObserverState::new())
         .manage(HealthPollerState::new())
         .manage(TelemetryState::new())
         .manage(PtyState::new())
@@ -1354,6 +1424,18 @@ pub fn run() {
             // Tokio task lives for the duration of the desktop process,
             // subscribes to events::bus, runs matching recipe actions.
             recipes_engine::start();
+            // v2.6 PR-A — start the passive observer. Watches
+            // ~/.claude/projects + ~/.codex/sessions and turns every
+            // user→assistant turn from external CLI sessions into a
+            // `dispatch_kind='passive_observation'` execution_logs row.
+            // Missing directories aren't an error — the watcher
+            // simply registers no source for that CLI and stays idle.
+            let observer_state = app.state::<PassiveObserverState>();
+            if let Ok(mut obs) = observer_state.0.lock() {
+                if let Err(e) = obs.start(get_db_path()) {
+                    eprintln!("passive_observer: start failed: {}", e);
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1516,6 +1598,8 @@ pub fn run() {
             compute_regressions_local,
             compute_cost_recommendations_local,
             record_local_config_change,
+            // v2.6 PR-A — observatory summary
+            compute_billing_surface_summary,
             // v2.3.36 Phase 6.x-I.2 — runtime-binary health
             runtime_health::runtime_health_check,
             runtime_health::runtime_health_run_fix,

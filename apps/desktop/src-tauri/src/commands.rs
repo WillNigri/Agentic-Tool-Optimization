@@ -3418,8 +3418,34 @@ async fn prompt_agent_inner(
         duration_ms,
         model_override.as_deref(),
         agent_slug.as_deref(),
+        None,
     );
     result
+}
+
+/// v2.6 PR-A — observatory tagging for execution_logs rows. Carries
+/// the dispatch-kind, billing surface, and provider session info so
+/// the watcher path can use the same persistence helper as the
+/// active dispatch path without duplicating insert logic. `active`
+/// dispatches pass `None` and accept the default (dispatch_kind =
+/// 'active', billing_surface = NULL — analytics treats NULL as
+/// "unknown" and the auth_mode column is the active-side signal).
+pub struct ObservationTag<'a> {
+    pub dispatch_kind: &'a str,
+    pub billing_surface: Option<&'a str>,
+    pub provider_session_id: Option<&'a str>,
+    pub sequence_within_session: Option<i64>,
+    /// Pre-counted tokens from the upstream JSONL when available
+    /// (Claude Code emits `usage.input_tokens` / `usage.output_tokens`;
+    /// Codex emits `token_count` events). When `None` the helper falls
+    /// back to the 4-char heuristic so this struct works for sources
+    /// that don't surface token counts.
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    /// ISO-8601 timestamp from the upstream session. When set the
+    /// row's created_at uses this instead of `now()` so the History
+    /// panel renders observed runs at the time they actually happened.
+    pub observed_at: Option<&'a str>,
 }
 
 /// Best-effort insert into the execution_logs table. Opens its own
@@ -3433,13 +3459,14 @@ async fn prompt_agent_inner(
 /// token counts from runtime SDK responses are a follow-up; estimation
 /// is honest enough that Compare/Cost Recs/Replay show real numbers
 /// instead of "—" for every model in the pricing table.
-fn persist_execution_log(
+pub(crate) fn persist_execution_log(
     runtime: &str,
     prompt: &str,
     result: &Result<String, String>,
     duration_ms: i32,
     model_override: Option<&str>,
     agent_slug: Option<&str>,
+    observation: Option<&ObservationTag<'_>>,
 ) {
     let db_path = crate::get_db_path();
     let conn = match rusqlite::Connection::open(&db_path) {
@@ -3447,7 +3474,9 @@ fn persist_execution_log(
         Err(_) => return,
     };
     let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = observation
+        .and_then(|o| o.observed_at.map(|s| s.to_string()))
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let (response, status, error_message): (Option<String>, &str, Option<String>) = match result {
         Ok(r) => (Some(truncate_for_log(r)), "success", None),
         Err(e) => (None, "error", Some(truncate_for_log(e))),
@@ -3473,8 +3502,16 @@ fn persist_execution_log(
         .filter(|s| !s.is_empty())
         .or_else(|| default_model_for_runtime(runtime));
     let response_text = response.as_deref().unwrap_or("");
-    let tokens_in = Some(estimate_text_tokens(prompt));
-    let tokens_out = Some(estimate_text_tokens(response_text));
+    // Prefer real token counts from the upstream source (Claude Code
+    // emits them in `usage.*`, Codex via token_count events). Fall
+    // back to the 4-char heuristic so callers that don't have them
+    // still record something useful.
+    let tokens_in = observation
+        .and_then(|o| o.tokens_in)
+        .or_else(|| Some(estimate_text_tokens(prompt)));
+    let tokens_out = observation
+        .and_then(|o| o.tokens_out)
+        .or_else(|| Some(estimate_text_tokens(response_text)));
     // Cost is now computed for every dispatch where the model is
     // known, regardless of auth path. For subscription rows it's the
     // "API-equivalent" amount Anthropic / OpenAI / Google would have
@@ -3491,8 +3528,15 @@ fn persist_execution_log(
     // None for hermes/openclaw — they have no BYOK mapping and
     // shouldn't pollute the credit-burn meter's subscription bucket.
     let auth_mode: Option<&str> = crate::byok::effective_auth_mode_from_path(&db_path, runtime);
+    // v2.6 PR-A — observatory columns. Active dispatches keep the
+    // default 'active' kind + NULL billing_surface; passive watcher
+    // rows pass an ObservationTag with full attribution.
+    let dispatch_kind: &str = observation.map(|o| o.dispatch_kind).unwrap_or("active");
+    let billing_surface: Option<&str> = observation.and_then(|o| o.billing_surface);
+    let provider_session_id: Option<&str> = observation.and_then(|o| o.provider_session_id);
+    let sequence_within_session: Option<i64> = observation.and_then(|o| o.sequence_within_session);
     let _ = conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT OR IGNORE INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model, auth_mode, dispatch_kind, billing_surface, provider_session_id, sequence_within_session) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             id,
             runtime,
@@ -3508,13 +3552,24 @@ fn persist_execution_log(
             agent_slug,
             effective_model,
             auth_mode,
+            dispatch_kind,
+            billing_surface,
+            provider_session_id,
+            sequence_within_session,
         ],
     );
 
     // v2.3.8 Phase 4.2 — Publish DispatchFailed on error. The events
     // bus subscriber (recipes engine) reacts; the table-bound audit
     // happens inside publish() via events_log.
-    if status == "error" {
+    //
+    // v2.6 PR-A — Passive observations are read-only echoes of other
+    // CLIs' sessions; firing ATO recipes off them would be a footgun
+    // (a Claude Code prompt failing in another terminal shouldn't
+    // trigger the user's ATO notification recipes). Skip the event
+    // bus for non-active rows.
+    let is_active = observation.map(|o| o.dispatch_kind == "active").unwrap_or(true);
+    if is_active && status == "error" {
         let event = crate::events::AtoEvent::DispatchFailed {
             event_seq: crate::events::next_seq(),
             run_id: id.clone(),
@@ -4135,6 +4190,20 @@ pub fn compute_cost_recommendations_local(
         min_runs.unwrap_or(10),
     )
     .map_err(|e| e.to_string())
+}
+
+// v2.6 PR-A — billing-surface summary feeding both the "Last 7 days
+// at a glance" header card and the by-surface group-by toggle in
+// CostBenchmarksPanel. Local-only (passive observations + ATO's own
+// dispatches both land in execution_logs).
+#[tauri::command]
+pub fn compute_billing_surface_summary(
+    days: Option<i64>,
+) -> Result<crate::local_insights::BillingSurfaceSummary, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    crate::local_insights::compute_billing_surface_summary(&conn, days.unwrap_or(7))
+        .map_err(|e| e.to_string())
 }
 
 // ── v2.1.0 Replay infra ─────────────────────────────────────────────────
@@ -15773,6 +15842,7 @@ async fn spawn_streaming_dispatch(
             duration_ms,
             model_override.as_deref(),
             agent_slug,
+            None,
         );
         let _ = on_event.send(StreamEvent::Done { full });
     } else {
@@ -15796,6 +15866,7 @@ async fn spawn_streaming_dispatch(
             duration_ms,
             model_override.as_deref(),
             agent_slug,
+            None,
         );
         let _ = on_event.send(StreamEvent::Error { message: final_msg });
     }

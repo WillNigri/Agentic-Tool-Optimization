@@ -435,3 +435,141 @@ pub fn compute_cost_recommendations_local(
         source: "local".to_string(),
     })
 }
+
+// ─── v2.6 PR-A — billing-surface summary ─────────────────────────────
+//
+// Powers the "Last 7 days at a glance" header card and the
+// by-billing-surface group-by toggle in CostBenchmarksPanel. Two
+// numbers the user actually cares about:
+//   - subscription hours: how long the user has *been on* CLIs that
+//     bill by month, not by token. Drawn from `duration_ms` on rows
+//     where billing_surface is *_subscription.
+//   - API spend: sum of `cost_usd_estimated` on rows that landed on
+//     a per-token billing surface.
+// Plus a per-surface breakdown so the toggle can render rows.
+//
+// Honesty stance: we report "—" for surfaces that don't surface
+// per-call cost (subscriptions), and we always render the blind-spot
+// caveat in the UI for the surfaces we *can't* observe at all (phone
+// apps, claude.ai web on consumer plans).
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BillingSurfaceRow {
+    pub billing_surface: String,
+    pub dispatch_kind: String,
+    pub runs: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// USD spend on this surface. Always 0 for subscription rows
+    /// (we don't fake an API-equivalent here — that lives elsewhere).
+    pub cost_usd: f64,
+    /// Total wall-clock duration on this surface in seconds. Useful
+    /// for subscriptions where call-count + duration matter and
+    /// dollars don't.
+    pub duration_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BillingSurfaceSummary {
+    pub days: i64,
+    pub rows: Vec<BillingSurfaceRow>,
+    /// Sum of `duration_seconds` over subscription rows, exposed as
+    /// hours for the glance card's "Subscription hours" stat.
+    pub subscription_hours: f64,
+    /// Sum of `cost_usd` over API rows, dollars.
+    pub api_spend_usd: f64,
+    /// Total observed runs (passive + active) in the window. Used
+    /// for the third glance stat.
+    pub total_runs: i64,
+    /// "local" — same convention as the other local_insights results.
+    pub source: String,
+}
+
+pub fn compute_billing_surface_summary(
+    conn: &Connection,
+    days: i64,
+) -> Result<BillingSurfaceSummary> {
+    let days = days.clamp(1, 365);
+    let since = Utc::now() - ChronoDuration::days(days);
+    let since_str = since.to_rfc3339();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                COALESCE(billing_surface, 'unknown') AS surface, \
+                COALESCE(dispatch_kind, 'active')    AS kind, \
+                COUNT(*)                              AS runs, \
+                COALESCE(SUM(tokens_in), 0)          AS t_in, \
+                COALESCE(SUM(tokens_out), 0)         AS t_out, \
+                COALESCE(SUM(cost_usd_estimated), 0) AS cost, \
+                COALESCE(SUM(duration_ms), 0)        AS dur \
+              FROM execution_logs \
+              WHERE created_at >= ?1 \
+              GROUP BY surface, kind",
+        )
+        .map_err(to_string_err)?;
+
+    let mut rows: Vec<BillingSurfaceRow> = Vec::new();
+    let mut iter = stmt
+        .query_map([&since_str], |r| {
+            Ok(BillingSurfaceRow {
+                billing_surface: r.get::<_, String>(0)?,
+                dispatch_kind: r.get::<_, String>(1)?,
+                runs: r.get::<_, i64>(2)?,
+                tokens_in: r.get::<_, i64>(3)?,
+                tokens_out: r.get::<_, i64>(4)?,
+                cost_usd: r.get::<_, f64>(5)?,
+                duration_seconds: r.get::<_, i64>(6)? / 1000,
+            })
+        })
+        .map_err(to_string_err)?;
+    while let Some(row) = iter.next() {
+        if let Ok(r) = row {
+            rows.push(r);
+        }
+    }
+
+    // Subscription bucket = anything ending in _subscription OR
+    // ollama_local (free local inference is conceptually a flat-rate
+    // surface — no per-call $). API bucket = everything else with a
+    // surface value, excluding "unknown".
+    let mut subscription_seconds: i64 = 0;
+    let mut api_spend: f64 = 0.0;
+    let mut total_runs: i64 = 0;
+    for row in &rows {
+        total_runs += row.runs;
+        let is_subscription = row.billing_surface.ends_with("_subscription")
+            || row.billing_surface == "ollama_local";
+        if is_subscription {
+            subscription_seconds += row.duration_seconds;
+        } else if row.billing_surface != "unknown" {
+            api_spend += row.cost_usd;
+        }
+    }
+
+    // Stable ordering for UI: subscriptions first (the dominant slice
+    // for most users), then API surfaces, then unknown last.
+    rows.sort_by(|a, b| {
+        let bucket = |s: &str| -> u8 {
+            if s.ends_with("_subscription") || s == "ollama_local" {
+                0
+            } else if s == "unknown" {
+                2
+            } else {
+                1
+            }
+        };
+        bucket(&a.billing_surface)
+            .cmp(&bucket(&b.billing_surface))
+            .then(b.runs.cmp(&a.runs))
+    });
+
+    Ok(BillingSurfaceSummary {
+        days,
+        rows,
+        subscription_hours: subscription_seconds as f64 / 3600.0,
+        api_spend_usd: api_spend,
+        total_runs,
+        source: "local".to_string(),
+    })
+}
