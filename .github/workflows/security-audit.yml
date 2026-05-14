@@ -1,0 +1,62 @@
+# Weekly cargo-audit + npm-audit run. Posts to the Actions tab; if
+# a CVE lands the next workflow run flags it. Doesn't block PRs —
+# that's intentional, since a transitively-affected dep can show up
+# in a CVE that nobody can fix locally. The signal is visibility:
+# we see the report, we triage, we either bump or document the
+# accept-with-rationale.
+
+name: Security audit
+
+on:
+  # Weekly on Monday at 09:00 UTC. Aligns with Dependabot's day so
+  # we see "here's the CVE landscape + here's what Dependabot can
+  # auto-bump" in the same morning.
+  schedule:
+    - cron: "0 9 * * 1"
+  # Manual trigger from the Actions tab for one-off runs after a
+  # public CVE drop.
+  workflow_dispatch:
+  # On any push to main that touches a dep manifest. Catches the
+  # "you just merged a PR that pinned a known-vulnerable version"
+  # case before the weekly run.
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/package.json"
+      - "**/package-lock.json"
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit CLI
+        working-directory: apps/cli
+        run: cargo audit
+        continue-on-error: true
+      - name: Audit Tauri backend
+        working-directory: apps/desktop/src-tauri
+        run: cargo audit
+        continue-on-error: true
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install deps (without scripts to avoid postinstall surprises)
+        run: npm ci --ignore-scripts
+      - name: npm audit (high+)
+        # Filter to high/critical. Moderate findings in transitive
+        # deps generate too much noise without enough actionable
+        # signal at this size of project.
+        run: npm audit --audit-level=high
+        continue-on-error: true

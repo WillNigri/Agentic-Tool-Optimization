@@ -1,0 +1,100 @@
+# Dependabot configuration — keeps the supply chain fresh.
+#
+# Three ecosystems live in this repo: npm (frontend), cargo (CLI +
+# Tauri backend), and github-actions (workflows). Each gets a weekly
+# scan; security updates go through whenever a CVE drops. We don't
+# enable auto-merge — every bump needs the same multi-LLM review as
+# any other PR (see CONTRIBUTING.md), and a dep bump can easily
+# regress the dispatch path.
+
+version: 2
+updates:
+  # ── npm (desktop + monorepo workspaces) ─────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "deps"
+    # Group minor + patch bumps into one PR per ecosystem to reduce
+    # review burden. Majors stay separate because they're more likely
+    # to need code changes.
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/desktop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "desktop"
+    commit-message:
+      prefix: "deps(desktop)"
+    groups:
+      desktop-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ── cargo (CLI + Tauri sidecar) ─────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/apps/cli"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+      - "cli"
+    commit-message:
+      prefix: "deps(cli)"
+    groups:
+      cli-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/apps/desktop/src-tauri"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+      - "desktop"
+    commit-message:
+      prefix: "deps(tauri)"
+    groups:
+      tauri-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ── GitHub Actions ──────────────────────────────────────────────
+  # Pinned action versions can rot silently — the @v3 → @v4 jumps
+  # often add OS-version updates we need for builds to keep working.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "deps(ci)"
