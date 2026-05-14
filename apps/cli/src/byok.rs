@@ -42,6 +42,14 @@ fn runtime_byok_env(runtime_name: &str) -> Option<(&'static str, &'static str)> 
     }
 }
 
+/// True iff this runtime has a BYOK env-var mapping at all. Used by
+/// callers that want to record `auth_mode` as `None` for hermes /
+/// openclaw rather than misattributing them to "subscription".
+/// (claude #2)
+pub fn runtime_supports_byok(runtime_name: &str) -> bool {
+    runtime_byok_env(runtime_name).is_some()
+}
+
 /// Resolve the active key for a provider slug as stored in the desktop's
 /// `llm_api_keys` table. Returns the base64-decoded plaintext on success.
 /// Mirrors `api_dispatch::resolve_api_key` so the two code paths agree on

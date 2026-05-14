@@ -158,19 +158,29 @@ pub fn has_byok_key_from_path(db_path: &std::path::Path, runtime_name: &str) -> 
 
 /// What mode would the dispatch path actually use right now? Combines
 /// stored key presence + user's explicit setting. Returns one of:
-///   "subscription" — no key OR user picked subscription
+///   "subscription" — runtime supports BYOK but no key OR user picked subscription
 ///   "api_key"      — key present AND (user picked api_key OR no preference set)
+///   None           — runtime has no BYOK mapping at all (hermes / openclaw).
+///                    Lets the credit-burn meter avoid misattributing
+///                    those dispatches to either bucket. (claude #2)
 ///
 /// Used by the UI badge and the AuthMethodMatrix radio so they show
 /// the *real* outcome of the next dispatch, not just user intent.
+///
+/// NOTE: the "subscription" default for unconfigured users is
+/// intentional — changing it would change historical attribution and
+/// would require a data migration to backfill existing rows.
 pub fn effective_auth_mode_from_path(
     db_path: &std::path::Path,
     runtime_name: &str,
-) -> &'static str {
+) -> Option<&'static str> {
+    if runtime_byok_env(runtime_name).is_none() {
+        return None;
+    }
     if byok_env_value_from_path(db_path, runtime_name).is_some() {
-        "api_key"
+        Some("api_key")
     } else {
-        "subscription"
+        Some("subscription")
     }
 }
 
@@ -208,7 +218,9 @@ pub fn get_runtime_auth_info(runtime: String) -> Result<RuntimeAuthInfo, String>
     Ok(RuntimeAuthInfo {
         runtime: runtime.clone(),
         user_choice: get_user_auth_mode_from_path(&db_path, &runtime),
-        effective: effective_auth_mode_from_path(&db_path, &runtime).to_string(),
+        effective: effective_auth_mode_from_path(&db_path, &runtime)
+            .unwrap_or("subscription")
+            .to_string(),
         has_key: has_byok_key_from_path(&db_path, &runtime),
         supports_byok: runtime_byok_env(&runtime).is_some(),
     })

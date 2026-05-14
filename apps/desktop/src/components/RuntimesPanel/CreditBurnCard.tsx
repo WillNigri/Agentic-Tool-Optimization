@@ -82,6 +82,17 @@ export default function CreditBurnCard() {
   const keyPct = data.totalCostUsd > 0
     ? Math.round((data.apiKeyCostUsd / data.totalCostUsd) * 100)
     : 0;
+  // Unattributed slice = pre-migration rows + rows from runtimes
+  // without a BYOK mapping (hermes/openclaw). Surfacing this stops
+  // the % labels from silently failing to add up to 100. (claude #3)
+  const unattributedCost = Math.max(
+    0,
+    data.totalCostUsd - data.subscriptionCostUsd - data.apiKeyCostUsd,
+  );
+  const unattributedPct = data.totalCostUsd > 0
+    ? Math.max(0, 100 - subPct - keyPct)
+    : 0;
+  const showUnattributed = unattributedCost > 0.0001;
 
   return (
     <section className="rounded-xl border border-cs-border bg-cs-card p-5 mb-4">
@@ -112,7 +123,12 @@ export default function CreditBurnCard() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          <div
+            className={cn(
+              "grid grid-cols-1 gap-3 mb-4",
+              showUnattributed ? "md:grid-cols-4" : "md:grid-cols-3",
+            )}
+          >
             <CostStat
               label={t("runtimes.burnTotal", "Total this month")}
               value={formatUsd(data.totalCostUsd)}
@@ -136,6 +152,15 @@ export default function CreditBurnCard() {
               tone="sky"
               detail={`${subPct}% of total · at API rates`}
             />
+            {showUnattributed && (
+              <CostStat
+                label={t("runtimes.burnUnattributed", "Unattributed")}
+                value={formatUsd(unattributedCost)}
+                icon={<Info size={14} />}
+                tone="muted"
+                detail={`${unattributedPct}% · pre-migration or non-BYOK runtime`}
+              />
+            )}
           </div>
 
           <table className="w-full text-xs">
@@ -194,13 +219,14 @@ function CostStat({
   label: string;
   value: string;
   icon: React.ReactNode;
-  tone: "accent" | "emerald" | "sky";
+  tone: "accent" | "emerald" | "sky" | "muted";
   detail?: string;
 }) {
   const toneCls = {
     accent: "bg-cs-accent/5 border-cs-accent/30 text-cs-accent",
     emerald: "bg-emerald-500/5 border-emerald-500/30 text-emerald-300",
     sky: "bg-sky-500/5 border-sky-500/30 text-sky-300",
+    muted: "bg-cs-muted/5 border-cs-border text-cs-muted",
   }[tone];
   return (
     <div className={cn("rounded-lg border p-3", toneCls)}>

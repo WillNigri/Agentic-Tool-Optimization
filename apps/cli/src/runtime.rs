@@ -79,14 +79,21 @@ pub fn estimate_text_tokens(text: &str) -> i64 {
 }
 
 /// Estimate cost. Returns None when the model isn't in our pricing table.
-///
-/// v2.3.6 — unused inside the CLI's dispatch / replay paths (those use
-/// runtime-CLI subscriptions). Kept for the future direct-API path.
-#[allow(dead_code)]
 pub fn estimate_cost_usd(model: &str, prompt: &str, response: &str) -> Option<f64> {
     let (in_per_m, out_per_m) = pricing_for_model(model)?;
     let in_tokens = estimate_text_tokens(prompt) as f64;
     let out_tokens = estimate_text_tokens(response) as f64;
     let cost = (in_tokens / 1_000_000.0) * in_per_m + (out_tokens / 1_000_000.0) * out_per_m;
+    Some((cost * 1_000_000.0).round() / 1_000_000.0)
+}
+
+/// Cost from real token counts (when the provider returned a usage
+/// block). Prefer this over `estimate_cost_usd` for api-provider
+/// dispatches since the actual numbers are billable, not the
+/// chars/4 heuristic.
+pub fn cost_from_tokens(model: &str, tokens_in: i64, tokens_out: i64) -> Option<f64> {
+    let (in_per_m, out_per_m) = pricing_for_model(model)?;
+    let cost = (tokens_in as f64 / 1_000_000.0) * in_per_m
+        + (tokens_out as f64 / 1_000_000.0) * out_per_m;
     Some((cost * 1_000_000.0).round() / 1_000_000.0)
 }

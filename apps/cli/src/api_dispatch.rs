@@ -574,6 +574,11 @@ fn parse_response(
                 tool_calls: None,
             });
         }
+        // Content is a typed-block array. Concatenate every text
+        // block; legitimate empty strings pass through (refusals,
+        // tool-only responses, stop_reason=max_tokens with no text).
+        // Don't filter — that misreports legitimate stops as parse
+        // errors. (claude #4)
         let text = payload["content"]
             .as_array()
             .map(|blocks| {
@@ -589,30 +594,25 @@ fn parse_response(
                     .collect::<Vec<_>>()
                     .join("")
             })
-            .filter(|s| !s.is_empty());
-        let response = match text {
-            Some(s) => s,
-            None => {
-                return Ok(ApiDispatchOutcome {
-                    response: None,
-                    error_message: Some(format!(
-                        "no content[type=text] in Anthropic response: {}",
-                        truncate_for_audit(&payload.to_string(), 600)
-                    )),
-                    model_used: model,
-                    duration_ms,
-                    tokens_in: None,
-                    tokens_out: None,
-                    tool_calls: None,
-                });
-            }
-        };
+            .unwrap_or_default();
         let usage = &payload["usage"];
         let tokens_in = usage["input_tokens"].as_i64();
         let tokens_out = usage["output_tokens"].as_i64();
+        // Surface non-end_turn stop reasons as informational so the
+        // operator can tell a truncation/tool-use from a normal
+        // completion. (minimax #3) max_tokens specifically is the
+        // "your output got cut off" signal callers like `ato review`
+        // need to act on.
+        let stop_reason = payload["stop_reason"].as_str().unwrap_or("");
+        let mut error_message = None;
+        if stop_reason == "max_tokens" {
+            error_message = Some(
+                "Anthropic warning: stop_reason=max_tokens — response truncated. Increase max_tokens or split the prompt.".to_string(),
+            );
+        }
         return Ok(ApiDispatchOutcome {
-            response: Some(response),
-            error_message: None,
+            response: Some(text),
+            error_message,
             model_used: model,
             duration_ms,
             tokens_in,

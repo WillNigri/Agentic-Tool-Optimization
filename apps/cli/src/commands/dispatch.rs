@@ -374,11 +374,15 @@ pub fn run(
         .and_then(|m| runtime::estimate_cost_usd(m, prompt, response_for_cost));
     // Record which auth path this dispatch took so the meter can
     // split api_key (real billing) from subscription (Agent SDK
-    // credit pool after 2026-06-15).
-    let auth_mode = if byok_applied_key.is_some() {
-        "api_key"
+    // credit pool after 2026-06-15). hermes/openclaw have no BYOK
+    // concept at all — emit None so they don't pollute the
+    // subscription bucket in the credit-burn meter. (claude #2)
+    let auth_mode: Option<&str> = if byok_applied_key.is_some() {
+        Some("api_key")
+    } else if crate::byok::runtime_supports_byok(runtime_name) {
+        Some("subscription")
     } else {
-        "subscription"
+        None
     };
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -724,13 +728,24 @@ fn run_api(
     let response_for_cost = response_persisted.as_deref().unwrap_or("");
     let tokens_out = tokens_out.or_else(|| Some(runtime::estimate_text_tokens(response_for_cost)));
 
+    // api-provider dispatches are always BYOK (resolve_api_key
+    // requires a stored key or env var to even reach run_api), so
+    // auth_mode is unconditionally "api_key" here. Cost: prefer real
+    // tokens from the provider's usage block over the chars/4
+    // heuristic — these are the billable numbers. (claude #1, minimax #1)
+    let cost_usd: Option<f64> = model_used.as_deref().and_then(|m| match (tokens_in, tokens_out) {
+        (Some(ti), Some(to)) => runtime::cost_from_tokens(m, ti, to),
+        _ => runtime::estimate_cost_usd(m, prompt, response_for_cost),
+    });
+    let auth_mode = "api_key";
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     // v2.3.41 — link the api-provider dispatch back to its session
     // so History grouping works for cross-runtime conversations.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL, ?11, ?12, ?13)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             id,
             provider.slug,
@@ -742,9 +757,12 @@ fn run_api(
             status,
             error_persisted,
             now,
+            cost_usd,
             session_id_for_log,
             tool_calls_count,
             tool_calls_summary,
+            model_used,
+            auth_mode,
         ],
     )
     .context("Failed to write execution_logs row")?;
@@ -926,19 +944,37 @@ fn run_remote(
             ("error", None, Some(truncate(&msg)))
         };
 
+    let response_for_cost = response_persisted.as_deref().unwrap_or("");
     let tokens_in = Some(crate::runtime::estimate_text_tokens(prompt));
-    let tokens_out = Some(crate::runtime::estimate_text_tokens(
-        response_persisted.as_deref().unwrap_or(""),
-    ));
-    let cost_usd: Option<f64> = None;
+    let tokens_out = Some(crate::runtime::estimate_text_tokens(response_for_cost));
+    // Model defaults to runtime's standard model since the remote
+    // dispatch doesn't surface a runtime-specific override path.
+    // Pricing is then known and the credit-burn meter can attribute
+    // SSH dispatches to the same provider account as local. (claude #1)
+    let effective_model =
+        crate::runtime::default_model_for_runtime(&remote.runtime).map(String::from);
+    let cost_usd: Option<f64> = effective_model
+        .as_deref()
+        .and_then(|m| crate::runtime::estimate_cost_usd(m, prompt, response_for_cost));
+    // auth_mode reflects whether BYOK was actually inlined into the
+    // SSH command. For runtimes outside the BYOK map (hermes /
+    // openclaw) this stays None — those aren't credit-burn relevant
+    // and shouldn't pollute the subscription bucket. (claude #2)
+    let auth_mode: Option<&str> = if applied_byok_key.is_some() {
+        Some("api_key")
+    } else if crate::byok::runtime_supports_byok(&remote.runtime) {
+        Some("subscription")
+    } else {
+        None
+    };
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let conn = db::open_readwrite(db_path)?;
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             id,
             remote.slug,
@@ -951,6 +987,8 @@ fn run_remote(
             error_persisted,
             now,
             cost_usd,
+            effective_model,
+            auth_mode,
         ],
     )
     .context("Failed to write execution_logs row (remote)")?;

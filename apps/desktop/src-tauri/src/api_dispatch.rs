@@ -178,6 +178,10 @@ fn parse_response(
                 tokens_out: None,
             });
         }
+        // Concatenate text blocks without filtering empty strings —
+        // legitimate refusals / tool-only responses / max_tokens stops
+        // can produce empty text, and treating those as parse errors
+        // misreports outcomes. (claude #4)
         let text = payload["content"]
             .as_array()
             .map(|blocks| {
@@ -193,28 +197,23 @@ fn parse_response(
                     .collect::<Vec<_>>()
                     .join("")
             })
-            .filter(|s| !s.is_empty());
-        return match text {
-            Some(s) => Ok(ApiDispatchOutcome {
-                response: Some(s),
-                error_message: None,
-                model_used: model,
-                duration_ms,
-                tokens_in: payload["usage"]["input_tokens"].as_i64(),
-                tokens_out: payload["usage"]["output_tokens"].as_i64(),
-            }),
-            None => Ok(ApiDispatchOutcome {
-                response: None,
-                error_message: Some(format!(
-                    "no content[type=text] in Anthropic response: {}",
-                    truncate_for_audit(&payload.to_string(), 600)
-                )),
-                model_used: model,
-                duration_ms,
-                tokens_in: None,
-                tokens_out: None,
-            }),
+            .unwrap_or_default();
+        let stop_reason = payload["stop_reason"].as_str().unwrap_or("");
+        let error_message = if stop_reason == "max_tokens" {
+            Some(
+                "Anthropic warning: stop_reason=max_tokens — response truncated.".to_string(),
+            )
+        } else {
+            None
         };
+        return Ok(ApiDispatchOutcome {
+            response: Some(text),
+            error_message,
+            model_used: model,
+            duration_ms,
+            tokens_in: payload["usage"]["input_tokens"].as_i64(),
+            tokens_out: payload["usage"]["output_tokens"].as_i64(),
+        });
     }
     if provider.flavor == "minimax" {
         let br = &payload["base_resp"];

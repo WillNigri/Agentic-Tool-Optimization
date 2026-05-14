@@ -3379,7 +3379,9 @@ fn persist_execution_log(
     // user's explicit choice + stored-key availability + env-var
     // presence. Same fn the runtime card badge reads, so the per-
     // dispatch attribution can't drift from the displayed mode.
-    let auth_mode = crate::byok::effective_auth_mode_from_path(&db_path, runtime);
+    // None for hermes/openclaw — they have no BYOK mapping and
+    // shouldn't pollute the credit-burn meter's subscription bucket.
+    let auth_mode: Option<&str> = crate::byok::effective_auth_mode_from_path(&db_path, runtime);
     let _ = conn.execute(
         "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
@@ -4774,11 +4776,14 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
             // Use `effective_auth_mode_from_path` so the badge reflects the
             // user's explicit choice (subscription/api_key toggle) plus
             // any env-var / stored-key signal — i.e., what the NEXT
-            // dispatch will actually use.
+            // dispatch will actually use. Falls back to "subscription"
+            // string when the helper returns None for a non-BYOK
+            // runtime (shouldn't happen for "claude" but defensive).
             let auth_mode = crate::byok::effective_auth_mode_from_path(
                 &crate::get_db_path(),
                 "claude",
-            );
+            )
+            .unwrap_or("subscription");
 
             Ok(AgentStatus {
                 runtime: "claude".into(),
@@ -4813,7 +4818,8 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
             // user's explicit subscription/api_key toggle wins.
             let api_key_set = std::env::var("OPENAI_API_KEY").is_ok();
             let auth_mode =
-                crate::byok::effective_auth_mode_from_path(&crate::get_db_path(), "codex");
+                crate::byok::effective_auth_mode_from_path(&crate::get_db_path(), "codex")
+                    .unwrap_or("subscription");
 
             Ok(AgentStatus {
                 runtime: "codex".into(),
