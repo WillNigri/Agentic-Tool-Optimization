@@ -1,5 +1,11 @@
 # ATO Roadmap
 
+## North star (re-centered 2026-05-14)
+
+**ATO is the place users go to view *everything* multi-LLM** — what ATO fires AND what the user fires themselves from any other CLI on the same machine. The product started life as an observatory; the war-rooms / mesh / orchestration layers are *one of* the things ATO does on top of that DNA, but the unifying frame is observability.
+
+When prioritising features, ask: *"does this strengthen ATO as the single pane of glass for the user's multi-LLM activity?"* Features that fragment the picture (silos, agent-specific dashboards that don't roll up) work against the north star. Features that ingest more signals (passive session observation, billing-surface tagging, cross-runtime regression comparison) reinforce it. v2.6 is the explicit refocus milestone.
+
 ## Released
 
 ### v0.3.0 — Multi-LLM Platform
@@ -240,6 +246,43 @@ Patch on `2.0.0`. All fixes for things broken-as-shipped, plus two Phase 5 bulle
 - **CI fix** — extracted `queryClient` from `main.tsx` to `lib/queryClient.ts` so non-React callers (the demo store) don't drag in `ReactDOM.createRoot(...)` at module load. Vitest's jsdom env was crashing on every CI run since v2.0.0-alpha.x.
 - **Diagnostic on Pipelines empty state** + console-logged trace upload failures, so the next "panel says empty" mystery is a 30-second diagnosis instead of a 30-minute one.
 
+### v2.5.0 — Phase 7 cloud-relay (Released 2026-05-14)
+
+The paid Pro/Team counterpart to the free LAN-only mesh (Phase 7.0, OSS). Same protocol; adds a cloud relay so two daemons behind different NATs can talk over the internet.
+
+- **`services/mesh-relay/` (new service, port 3007)** in `ato-cloud` — WebSocket router with Ed25519 signatures preserved end-to-end between peers. Cloud is a dumb pipe — it cannot forge or read dispatches; it only proves "this connection belongs to a paying user."
+- **`mesh_daemons` + `mesh_tokens` tables** (migration 017) — `mesh_tokens` SHA-256 hashed at rest. `peer_id` CHECK constraint enforces `^[0-9a-f]{64}$`.
+- **REST endpoints** under `/api/mesh/daemons` (Pro-tier gated, JWT auth): register / list / revoke. Max 10 active daemons per user.
+- **Gateway WS upgrade** on `/api/mesh/relay` forwards to the relay service; daemons authenticate with a long-lived `mst_*` bearer token.
+- **Rate limit** 50 deliver-frames / 10s per source daemon; 64 KB payload cap; 90s idle timeout; self-loop refused.
+- Threat model + design notes in `docs/PHASE-7-CLOUD-RELAY-DESIGN.md`; multi-LLM review transcript in `docs/reviews/phase7-cloud-relay-2026-05-14.md`.
+
+Deferred to a later Phase 7 patch: offline queue, multi-instance relay (single-Railway today; horizontal scaling needs Redis or pg-LISTEN), and the OSS GUI for daemon registration.
+
+### v2.5.1 — Insights health-panel cleanup + live_runs zombie reaper (Released 2026-05-14)
+
+Four bugs Will surfaced in the Insights panel; all four about the panel reporting wrong things about runtimes.
+
+- **`live_runs` zombie reaper** — `reap_dead_live_runs` in `active_runs.rs` probes each row's `child_pid` via POSIX `kill -0` on every `list_active_runs` call. Rows whose PID is dead get reaped after a 30s grace window. Fixes the "ad-hoc CLAUDE row stuck for 1h+ after a SIGKILLed `ato review`" symptom — SIGKILL bypasses `LiveRunGuard::drop`, so until v2.5.1 those rows sat forever.
+- **Runtime detection (Claude / Codex / Gemini)** — `health_poller`'s checks now route through `which_cli` instead of bare `Command::new("claude")`. `which_cli` already honored the user's login-+-interactive shell PATH, so NVM-managed installs (`~/.nvm/versions/node/*/bin/`) now resolve and the cards flip green.
+- **"Not installed" ≠ "Down"** — Hermes (never installed) was rendering red "Down." Error messages now use "not installed on this machine" wording, which `HealthDashboard.effectiveStatus()` already maps to the neutral grey "Not configured" pill.
+- **Monitored-runtimes preference** — new `runtime_preferences` SQLite table (`runtime`, `monitored`, `updated_at`). New Tauri commands `list_runtime_preferences` + `set_runtime_monitored`. First-launch seed via `which_cli` so a fresh install only monitors detected runtimes. Health poller + `get_health_status` both filter on the toggle, so un-monitored runtimes never show up. New Settings → Runtimes → Monitoring sub-tab with per-runtime toggles.
+
+Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
+
+### v2.6 — Universal multi-LLM observatory (Planned, next milestone)
+
+The explicit refocus on the observatory north star. Plan locked 2026-05-14; full doc at `/Users/beatriznigri/.claude/plans/peaceful-strolling-kay.md`.
+
+Three tiers of observation, plus an honest Tier 4 callout:
+
+- **Tier 1 (PR-A, next ship)** — local watcher for terminal LLM CLIs. `execution_logs` gains `dispatch_kind` (`active` vs `passive_observation`), `billing_surface` (`claude_code_subscription` / `anthropic_api` / etc.), and `provider_session_id` (dedup key). New `passive_observer.rs` Rust module mirrors `log_watcher.rs`; parses Claude Code's `~/.claude/projects/<slug>/<uuid>.jsonl` and Codex CLI's `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Insights → Live gets a billing-surface chip + Source filter; Insights → Usage gets a group-by-billing-surface toggle + a "Last 7 days at a glance" header card.
+- **Tier 2 (PR-C, opt-in, Pro+, Team-admin gated)** — local mitmproxy-style traffic capture for power users / orgs. Bodies stored encrypted at rest under the existing AES-256-GCM-under-keychain scheme. Default off. Team-admin policy flag can require it on company PCs. Phase-2 cloud sync uses customer-managed keys.
+- **Tier 3 (PR-B)** — cloud-side polling of provider usage APIs (OpenAI `/v1/usage`, Anthropic org reports, Gemini billing, MiniMax, OpenRouter, DeepSeek, Groq, Together) using user-stored keys. New `provider_keys` table in ato-cloud, encrypted at rest. New `services/usage-poller/` on port 3008 (introduces `node-cron` to ato-cloud). Daily 03:00 UTC poll; results in a new `provider_usage` table aggregated by `(user, provider, period)`. New analytics endpoints `/api/analytics/provider-usage[/timeline]`. Desktop merges local-watched + cloud-polled data into the same Usage tab, deduped by `(provider, period)`.
+- **Tier 4 — out of scope** (phone apps, claude.ai web on consumer plans). Surfaced honestly in the Usage tab as a "blind spot" line. The candor is the differentiator vs competitors that silently undercount.
+
+PR-A and PR-B each ship with the standard multi-LLM `ato review --consensus` round pre-merge. PR-C ships with an extended threat-model round because TLS interception is its own risk class.
+
 ### v2.3.0 — Agent-driveable platform (Active, next 60 days)
 
 **Goal:** ATO becomes operable end-to-end by the developer's coding agent. Same data, same operations, same audit trail, accessible from three actor surfaces: GUI (humans), CLI (`ato <command>` shelling out, primary agent surface), MCP (stdio, in-harness agents). Pairs with the platform amendment in `ato-cloud/docs/STRATEGY.md` (2026-05-11).
@@ -472,14 +515,15 @@ mesh in Phase 7+.
 extend the runtime registry to look up remote slugs and route
 through the SSH executor instead of `Command::new`.
 
-## Phase 7 — Bi-directional ATO daemon mesh (Planned, two-tier)
+## Phase 7 — Bi-directional ATO daemon mesh (7.0 + 7.1 shipped; 7.2+ planned)
 
-**Status**: scoped 2026-05-13. Full plan in [`PHASE-7-PLAN.md`](PHASE-7-PLAN.md).
+**Status**: 7.0 (LAN) + 7.1 (cloud relay) shipped 2026-05-14. Full plan in [`PHASE-7-PLAN.md`](PHASE-7-PLAN.md).
 
 Packaging decision (locked):
 
-- **Phase 7.0 — free, LAN-only**: mDNS discovery + invite-code pairing on the same network. Server-side ATO daemon can post completion notifications to the laptop's daemon over WebSocket + JSON-RPC with Ed25519-signed messages. No bi-directional dispatch in v1 — only the narrow `post_completion(session_id, status, payload)` surface that closes the @iamknownasfesal "server finish → agent pc" gap.
-- **Phase 7.1+ — Pro / Team tier on ato-cloud**: cloud relay daemon for NAT traversal + full bi-directional dispatch (server can ask laptop to run any allowed runtime). Multi-machine session topologies. Per-peer ACLs.
+- **Phase 7.0 — free, LAN-only** *(shipped)*: mDNS discovery + invite-code pairing on the same network. Server-side ATO daemon can post completion notifications to the laptop's daemon over WebSocket + JSON-RPC with Ed25519-signed messages. Narrow `post_completion(session_id, status, payload)` surface that closes the @iamknownasfesal "server finish → agent pc" gap.
+- **Phase 7.1 — Pro / Team tier on ato-cloud** *(shipped 2026-05-14, ato-cloud v2.5.0)*: cloud relay WebSocket router on `wss://api.agentictool.ai/api/mesh/relay`. Daemons authenticate with long-lived `mst_*` mesh-tokens; cloud is a dumb pipe (Ed25519 signatures preserved end-to-end between peers). Pro-tier gated. Max 10 daemons per user. See ato-cloud's `services/mesh-relay/` + `docs/PHASE-7-CLOUD-RELAY-DESIGN.md`.
+- **Phase 7.2+ — full bi-directional dispatch + per-peer ACLs** *(planned)*: today's relay only forwards `post_completion`. The expansion lets a paired peer ask the other to run any allowed runtime, with per-peer scopes (e.g. server can call `claude` but not read `secrets`). Multi-machine session topologies. Needs OSS GUI for daemon registration + an extended threat-model review round.
 
 The packaging matters: free users get a real working LAN mesh, not a teaser. The Pro upgrade is "stop fighting your firewall + unlock the full mesh." Aligns with the existing free-desktop / paid-cloud ladder.
 
