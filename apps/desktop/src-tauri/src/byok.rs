@@ -187,6 +187,7 @@ pub fn get_user_auth_mode_from_path(
 // ─── Tauri commands ───────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeAuthInfo {
     pub runtime: String,
     /// User's explicit choice ("subscription" | "api_key") or None
@@ -217,6 +218,114 @@ pub fn get_runtime_auth_info(runtime: String) -> Result<RuntimeAuthInfo, String>
 pub fn set_runtime_auth_mode(runtime: String, mode: String) -> Result<(), String> {
     let db_path = crate::get_db_path();
     set_user_auth_mode_from_path(&db_path, &runtime, &mode)
+}
+
+// ─── Credit-burn meter ─────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCostRow {
+    pub runtime: String,
+    pub auth_mode: Option<String>, // "subscription" | "api_key" | NULL (pre-migration)
+    pub dispatch_count: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost_usd_estimated: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditBurnSummary {
+    pub since: String,
+    pub until: String,
+    pub total_cost_usd: f64,
+    pub total_dispatches: i64,
+    pub api_key_cost_usd: f64,    // real billing (user's API account)
+    pub subscription_cost_usd: f64, // API-equivalent of subscription-path dispatches
+    pub rows: Vec<RuntimeCostRow>,
+}
+
+/// Aggregate execution_logs cost for the current month (UTC). Splits
+/// by (runtime, auth_mode) so the UI can show "$X on API keys (real
+/// billing) and $Y subscription-equivalent (would be billed at API
+/// rates if BYOK was on)". Pre-migration rows with NULL auth_mode are
+/// reported separately as "unknown" — the UI surfaces them but doesn't
+/// attribute them.
+#[tauri::command]
+pub fn get_credit_burn_summary() -> Result<CreditBurnSummary, String> {
+    let db_path = crate::get_db_path();
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    // Calendar-month window in UTC. Anthropic's Agent SDK credit is a
+    // monthly pool, so this matches the natural billing rhythm.
+    use chrono::Datelike;
+    let now = chrono::Utc::now();
+    let nd = now.naive_utc().date();
+    let month_start_date = chrono::NaiveDate::from_ymd_opt(nd.year(), nd.month(), 1)
+        .ok_or_else(|| "month_start".to_string())?;
+    let month_start_naive = month_start_date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "month_start hms".to_string())?;
+    let month_start = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+        month_start_naive,
+        chrono::Utc,
+    );
+    let since = month_start.to_rfc3339();
+    let until = now.to_rfc3339();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT runtime, auth_mode,
+                    COUNT(*) AS n,
+                    COALESCE(SUM(tokens_in), 0) AS tin,
+                    COALESCE(SUM(tokens_out), 0) AS tout,
+                    COALESCE(SUM(cost_usd_estimated), 0) AS cost
+               FROM execution_logs
+              WHERE created_at >= ?1
+                AND created_at <  ?2
+                AND status = 'success'
+              GROUP BY runtime, auth_mode
+              ORDER BY cost DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows: Vec<RuntimeCostRow> = stmt
+        .query_map([&since, &until], |r| {
+            Ok(RuntimeCostRow {
+                runtime: r.get(0)?,
+                auth_mode: r.get(1).ok(),
+                dispatch_count: r.get(2)?,
+                tokens_in: r.get(3)?,
+                tokens_out: r.get(4)?,
+                cost_usd_estimated: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut api_key_cost = 0.0;
+    let mut subscription_cost = 0.0;
+    let mut total_cost = 0.0;
+    let mut total_n = 0i64;
+    for row in &rows {
+        total_cost += row.cost_usd_estimated;
+        total_n += row.dispatch_count;
+        match row.auth_mode.as_deref() {
+            Some("api_key") => api_key_cost += row.cost_usd_estimated,
+            Some("subscription") => subscription_cost += row.cost_usd_estimated,
+            _ => {} // NULL → unattributed, included in total but not split
+        }
+    }
+
+    Ok(CreditBurnSummary {
+        since,
+        until,
+        total_cost_usd: total_cost,
+        total_dispatches: total_n,
+        api_key_cost_usd: api_key_cost,
+        subscription_cost_usd: subscription_cost,
+        rows,
+    })
 }
 
 /// Write the user's preference. Validates the value to keep the

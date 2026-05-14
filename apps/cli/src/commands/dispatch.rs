@@ -366,7 +366,20 @@ pub fn run(
     let response_for_cost = response_persisted.as_deref().unwrap_or("");
     let tokens_in = Some(runtime::estimate_text_tokens(prompt));
     let tokens_out = Some(runtime::estimate_text_tokens(response_for_cost));
-    let cost_usd: Option<f64> = None;
+    // Cost estimate populated whenever we can resolve the model — the
+    // credit-burn meter needs values on both subscription and api_key
+    // rows. effective_model below is what dispatch actually used.
+    let cost_usd: Option<f64> = effective_model
+        .as_deref()
+        .and_then(|m| runtime::estimate_cost_usd(m, prompt, response_for_cost));
+    // Record which auth path this dispatch took so the meter can
+    // split api_key (real billing) from subscription (Agent SDK
+    // credit pool after 2026-06-15).
+    let auth_mode = if byok_applied_key.is_some() {
+        "api_key"
+    } else {
+        "subscription"
+    };
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -376,7 +389,7 @@ pub fn run(
     // can group multi-turn conversations under one header.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             id,
             runtime_name,
@@ -390,6 +403,8 @@ pub fn run(
             now,
             cost_usd,
             session_id_for_log,
+            effective_model,
+            auth_mode,
         ],
     ).context("Failed to write execution_logs row")?;
 

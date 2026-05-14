@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import AuthMethodMatrix from "./AuthMethodMatrix";
+import CreditBurnCard from "./CreditBurnCard";
 import RuntimeComparison from "./RuntimeComparison";
 import RemoteRuntimes from "./RemoteRuntimes";
 
@@ -76,6 +77,7 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
 
       {active === "setup" && (
         <div className="space-y-2">
+          <CreditBurnCard />
           <AuthMethodMatrix onOpenApiKeys={onOpenApiKeys} />
           <Suspense
             fallback={

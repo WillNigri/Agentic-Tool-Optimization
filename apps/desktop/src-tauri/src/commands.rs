@@ -3364,16 +3364,24 @@ fn persist_execution_log(
         .filter(|s| !s.is_empty())
         .or_else(|| default_model_for_runtime(runtime));
     let response_text = response.as_deref().unwrap_or("");
-    // Token estimation is char-count based — independent of pricing.
     let tokens_in = Some(estimate_text_tokens(prompt));
     let tokens_out = Some(estimate_text_tokens(response_text));
-    let cost_usd: Option<f64> = None;
-    // v2.3.2 — agent_slug + model columns make local-mode regressions
-    // and cost recommendations possible (they need to join + group by
-    // these). NULL stays valid for no-agent dispatches + ad-hoc runs
-    // that don't resolve a default model.
+    // Cost is now computed for every dispatch where the model is
+    // known, regardless of auth path. For subscription rows it's the
+    // "API-equivalent" amount Anthropic / OpenAI / Google would have
+    // charged — useful for the credit-burn meter ("you'd be paying
+    // $X if billed at API rates"). For api_key rows it's the actual
+    // billing estimate. The auth_mode column lets the analytics
+    // query split the two.
+    let cost_usd: Option<f64> = effective_model
+        .and_then(|m| estimate_cost_usd(m, prompt, response_text));
+    // Effective auth path = what dispatch actually used. Combines
+    // user's explicit choice + stored-key availability + env-var
+    // presence. Same fn the runtime card badge reads, so the per-
+    // dispatch attribution can't drift from the displayed mode.
+    let auth_mode = crate::byok::effective_auth_mode_from_path(&db_path, runtime);
     let _ = conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             id,
             runtime,
@@ -3388,6 +3396,7 @@ fn persist_execution_log(
             cost_usd,
             agent_slug,
             effective_model,
+            auth_mode,
         ],
     );
 

@@ -811,6 +811,13 @@ pub fn init_database(conn: &Connection) {
     // chronological list without re-parsing the response text.
     let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN tool_calls_count INTEGER", []);
     let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN tool_calls_summary TEXT", []);
+    // 2026-05-14 — record which auth path the dispatch used so the
+    // credit-burn meter can split "subscription" cost (counts against
+    // Anthropic's Agent SDK credit pool starting June 15) from
+    // "api_key" cost (billed directly to the user's API account).
+    // Pre-migration rows have NULL; the analytics query treats NULL
+    // as "unknown" rather than guessing.
+    let _ = conn.execute("ALTER TABLE execution_logs ADD COLUMN auth_mode TEXT", []);
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_config_changes (
             id          TEXT PRIMARY KEY,
@@ -1435,6 +1442,7 @@ pub fn run() {
             // BYOK per-runtime auth mode picker
             byok::get_runtime_auth_info,
             byok::set_runtime_auth_mode,
+            byok::get_credit_burn_summary,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,
