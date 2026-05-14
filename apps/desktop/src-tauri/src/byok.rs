@@ -53,14 +53,30 @@ fn read_active_key(conn: &Connection, provider: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// Per-runtime auth-mode setting key in the `settings` table. Mirror
+/// of the CLI's read_auth_mode_setting — "subscription" forces the
+/// OAuth path even when a key is stored; "api_key" forces BYOK;
+/// absent falls back to "use key if stored."
+fn read_auth_mode(conn: &Connection, runtime_name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [format!("runtime_auth_mode.{}", runtime_name)],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 /// Return (env_var_name, decoded_key) if BYOK applies for this runtime
 /// AND a key is configured. None means "fall through to subscription
-/// auth" (either runtime has no BYOK mapping, or the user has no
-/// stored key). Callers set the env on whichever Command flavor they
-/// hold (std vs tokio) — that's why this returns the pair instead of
-/// mutating a Command directly.
+/// auth" (either runtime has no BYOK mapping, the user chose
+/// subscription explicitly, the env var is already set, or no key
+/// stored).
 pub fn byok_env_value(conn: &Connection, runtime_name: &str) -> Option<(&'static str, String)> {
     let (env_var, provider_slug) = runtime_byok_env(runtime_name)?;
+    // User-chosen subscription mode wins over key-presence.
+    if read_auth_mode(conn, runtime_name).as_deref() == Some("subscription") {
+        return None;
+    }
     if std::env::var(env_var)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
@@ -138,6 +154,95 @@ pub fn has_byok_key_from_path(db_path: &std::path::Path, runtime_name: &str) -> 
         return true;
     }
     byok_env_value_from_path(db_path, runtime_name).is_some()
+}
+
+/// What mode would the dispatch path actually use right now? Combines
+/// stored key presence + user's explicit setting. Returns one of:
+///   "subscription" — no key OR user picked subscription
+///   "api_key"      — key present AND (user picked api_key OR no preference set)
+///
+/// Used by the UI badge and the AuthMethodMatrix radio so they show
+/// the *real* outcome of the next dispatch, not just user intent.
+pub fn effective_auth_mode_from_path(
+    db_path: &std::path::Path,
+    runtime_name: &str,
+) -> &'static str {
+    if byok_env_value_from_path(db_path, runtime_name).is_some() {
+        "api_key"
+    } else {
+        "subscription"
+    }
+}
+
+/// Read the user's stored preference, if any. None means "no
+/// preference set — fall through to default behavior."
+pub fn get_user_auth_mode_from_path(
+    db_path: &std::path::Path,
+    runtime_name: &str,
+) -> Option<String> {
+    let conn = Connection::open(db_path).ok()?;
+    read_auth_mode(&conn, runtime_name)
+}
+
+// ─── Tauri commands ───────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+pub struct RuntimeAuthInfo {
+    pub runtime: String,
+    /// User's explicit choice ("subscription" | "api_key") or None
+    /// when they haven't picked a side.
+    pub user_choice: Option<String>,
+    /// What dispatch would actually use right now.
+    pub effective: String,
+    /// True iff a stored key OR env var exists for this runtime.
+    pub has_key: bool,
+    /// True iff this runtime has a BYOK mapping at all (claude /
+    /// codex / gemini do; hermes / openclaw don't).
+    pub supports_byok: bool,
+}
+
+#[tauri::command]
+pub fn get_runtime_auth_info(runtime: String) -> Result<RuntimeAuthInfo, String> {
+    let db_path = crate::get_db_path();
+    Ok(RuntimeAuthInfo {
+        runtime: runtime.clone(),
+        user_choice: get_user_auth_mode_from_path(&db_path, &runtime),
+        effective: effective_auth_mode_from_path(&db_path, &runtime).to_string(),
+        has_key: has_byok_key_from_path(&db_path, &runtime),
+        supports_byok: runtime_byok_env(&runtime).is_some(),
+    })
+}
+
+#[tauri::command]
+pub fn set_runtime_auth_mode(runtime: String, mode: String) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    set_user_auth_mode_from_path(&db_path, &runtime, &mode)
+}
+
+/// Write the user's preference. Validates the value to keep the
+/// settings table from filling with typos.
+pub fn set_user_auth_mode_from_path(
+    db_path: &std::path::Path,
+    runtime_name: &str,
+    mode: &str,
+) -> Result<(), String> {
+    if !matches!(mode, "subscription" | "api_key" | "clear") {
+        return Err(format!("invalid auth mode '{}'", mode));
+    }
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let key = format!("runtime_auth_mode.{}", runtime_name);
+    if mode == "clear" {
+        conn.execute("DELETE FROM settings WHERE key = ?1", [&key])
+            .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&key, &mode.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Read-only variant: returns the provider slug used to look up the

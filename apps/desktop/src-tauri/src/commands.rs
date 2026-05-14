@@ -4762,15 +4762,14 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
             }
             // Resolve the badge once — was double-counted before (one call
             // to compute `healthy`, another inside the JSON literal).
-            // `has_byok_key_from_path` reports the right semantic for the
-            // badge: true when the user has either env-var or stored key
-            // (claude #1 + #2).
-            let auth_mode =
-                if crate::byok::has_byok_key_from_path(&crate::get_db_path(), "claude") {
-                    "api_key"
-                } else {
-                    "subscription"
-                };
+            // Use `effective_auth_mode_from_path` so the badge reflects the
+            // user's explicit choice (subscription/api_key toggle) plus
+            // any env-var / stored-key signal — i.e., what the NEXT
+            // dispatch will actually use.
+            let auth_mode = crate::byok::effective_auth_mode_from_path(
+                &crate::get_db_path(),
+                "claude",
+            );
 
             Ok(AgentStatus {
                 runtime: "claude".into(),
@@ -4801,14 +4800,11 @@ pub async fn query_agent_status(runtime: String, config: Option<String>) -> Resu
                 }
             }
 
-            // BYOK badge: covers env var OR stored key, same semantic as
-            // the claude branch — was previously env-var-only, ignoring
-            // anything users had pasted into Settings → API Keys.
-            // (claude #4 / minimax #2)
-            let has_key =
-                crate::byok::has_byok_key_from_path(&crate::get_db_path(), "codex");
+            // BYOK badge: same as claude — use effective mode so the
+            // user's explicit subscription/api_key toggle wins.
             let api_key_set = std::env::var("OPENAI_API_KEY").is_ok();
-            let auth_mode = if has_key { "api_key" } else { "subscription" };
+            let auth_mode =
+                crate::byok::effective_auth_mode_from_path(&crate::get_db_path(), "codex");
 
             Ok(AgentStatus {
                 runtime: "codex".into(),

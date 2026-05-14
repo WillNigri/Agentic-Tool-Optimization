@@ -64,9 +64,26 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
     String::from_utf8(bytes).context("decoded key is not UTF-8")
 }
 
+/// Per-runtime auth-mode preference, stored in `settings` as
+/// `runtime_auth_mode.<runtime>`. "subscription" forces the
+/// subscription path even when a key is configured; "api_key" forces
+/// the API-key path (and errors if no key is found). Absent rows fall
+/// back to "if key exists, use it" — matches behavior before this
+/// preference existed so existing installs see no change on upgrade.
+fn read_auth_mode_setting(db_path: &Path, runtime_name: &str) -> Option<String> {
+    let conn = crate::db::open_readonly(db_path).ok()?;
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [format!("runtime_auth_mode.{}", runtime_name)],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 /// Resolve the BYOK env var + key for a runtime. Returns None when the
-/// runtime has no mapping, the process env var is already set (so we
-/// let it inherit naturally), or no stored key is found.
+/// runtime has no mapping, the user has explicitly chosen subscription
+/// mode, the process env var is already set (so we let it inherit
+/// naturally), or no stored key is found.
 ///
 /// The CLI caller forwards this to the subprocess AND keeps a copy of
 /// `key` so it can redact stderr before persisting — vendor error
@@ -74,6 +91,13 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
 /// execution_logs.error_message.
 pub fn byok_env_value(db_path: &Path, runtime_name: &str) -> Option<(&'static str, String)> {
     let (env_var, provider_slug) = runtime_byok_env(runtime_name)?;
+    // User-chosen auth mode wins over the implicit "key configured →
+    // use key" default. "subscription" means "even if I have a key
+    // stored, use the OAuth subscription credentials" — useful when
+    // the user has both and wants to save the key for emergencies.
+    if read_auth_mode_setting(db_path, runtime_name).as_deref() == Some("subscription") {
+        return None;
+    }
     if std::env::var(env_var)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)

@@ -45,7 +45,13 @@ export default function AuthMethodMatrix({ onOpenApiKeys }: Props) {
   const [authState, setAuthState] = useState<RuntimeAuthState>({});
 
   useEffect(() => {
-    setAuthState(loadRuntimeAuth());
+    let cancelled = false;
+    loadRuntimeAuth().then((s) => {
+      if (!cancelled) setAuthState(s);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const { data: statuses = [] } = useQuery({
@@ -60,9 +66,19 @@ export default function AuthMethodMatrix({ onOpenApiKeys }: Props) {
     staleTime: 30_000,
   });
 
-  const handleSelect = (runtime: RuntimeId, method: AuthMethod) => {
-    const next = setRuntimeAuthMethod(runtime, method);
-    setAuthState(next);
+  const handleSelect = async (runtime: RuntimeId, method: AuthMethod) => {
+    // Optimistic local update so the radio flips immediately.
+    setAuthState((prev) => ({ ...prev, [runtime]: method }));
+    try {
+      const next = await setRuntimeAuthMethod(runtime, method);
+      setAuthState(next);
+    } catch (e) {
+      // Persistence failed — roll back to whatever the backend says.
+      const fresh = await loadRuntimeAuth();
+      setAuthState(fresh);
+      // eslint-disable-next-line no-console
+      console.error("setRuntimeAuthMethod failed", e);
+    }
   };
 
   return (

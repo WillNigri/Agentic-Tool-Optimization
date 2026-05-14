@@ -1432,6 +1432,9 @@ pub fn run() {
             remote_runtimes_view::add_remote_runtime,
             remote_runtimes_view::remove_remote_runtime,
             remote_runtimes_view::list_ssh_key_candidates,
+            // BYOK per-runtime auth mode picker
+            byok::get_runtime_auth_info,
+            byok::set_runtime_auth_mode,
             // v2.3.7 Phase 4 — ops recipes
             recipes_list,
             recipes_get,
