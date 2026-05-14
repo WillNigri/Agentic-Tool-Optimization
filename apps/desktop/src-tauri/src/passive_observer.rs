@@ -70,7 +70,13 @@ impl PassiveObserver {
         }
         let home = match dirs::home_dir() {
             Some(h) => h,
-            None => return Err("home directory unknown".to_string()),
+            None => {
+                // Review Finding #1 — set started before bailing so a
+                // re-fired setup hook doesn't re-eprintln every time on
+                // a pathological HOME=unset machine. Idempotency wins.
+                self.started = true;
+                return Err("home directory unknown".to_string());
+            }
         };
 
         let sources = discover_sources(&home);
@@ -120,11 +126,10 @@ impl PassiveObserver {
         }
 
         let db = db_path.clone();
-        let sources_for_worker = sources;
         std::thread::Builder::new()
             .name("ato-passive-observer".to_string())
             .spawn(move || {
-                worker_loop(db, sources_for_worker, rx);
+                worker_loop(db, rx);
             })
             .map_err(|e| format!("failed to spawn watcher worker: {}", e))?;
 
@@ -244,7 +249,6 @@ fn on_fs_event(src: &Source, ev: Event, tx: &Sender<ScanRequest>) {
 
 fn worker_loop(
     db_path: PathBuf,
-    _sources: Vec<Source>,
     rx: std::sync::mpsc::Receiver<ScanRequest>,
 ) {
     // Coalesce bursts: notify can emit dozens of events for a single
@@ -689,11 +693,22 @@ fn process_codex_line(
             let Some(u) = usage else { return };
             let t_in = u.get("input_tokens").and_then(|v| v.as_i64());
             let t_out = u.get("output_tokens").and_then(|v| v.as_i64());
-            // Codex doesn't repeat session id on event_msg lines;
-            // there's only ever one session per rollout file, so
-            // forward token counts to every pending pair (typically
-            // exactly one entry).
-            for pair in state.sessions.values_mut() {
+            // Review Finding #3 — Codex doesn't repeat session id on
+            // event_msg lines; there's only ever one session per
+            // rollout file. Scope the latch to that single session
+            // explicitly rather than iterating, so a hypothetical
+            // future multi-session rollout format doesn't bleed
+            // counts across pairs.
+            //
+            // Review Finding #4 — we assume token_count events arrive
+            // BEFORE the next user message AND AFTER the assistant
+            // response they apply to (Codex's task_started → message
+            // → token_count ordering on real rollouts confirms this).
+            // If a future Codex version reverses the order we'd
+            // attribute counts to the previous turn; surfacing as
+            // honest-but-imprecise per-row data, not a correctness
+            // failure on aggregate spend.
+            if let Some(pair) = state.sessions.values_mut().next() {
                 pair.pending_tokens_in = t_in;
                 pair.pending_tokens_out = t_out;
             }
