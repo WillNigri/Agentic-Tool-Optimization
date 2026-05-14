@@ -198,7 +198,8 @@ fn bootstrap_mesh_columns(conn: &Connection) {
 /// rather than the error message string — survives rusqlite version
 /// bumps that reshape `Display` and avoids accidental matches on a
 /// future UNIQUE on some other column.
-fn is_unique_pk_violation(e: &rusqlite::Error) -> bool {
+// pub for daemon/protocol.rs retry loops — same definition, one place. (audit L2)
+pub fn is_unique_pk_violation(e: &rusqlite::Error) -> bool {
     matches!(
         e,
         rusqlite::Error::SqliteFailure(ff, _)

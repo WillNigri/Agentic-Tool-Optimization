@@ -365,14 +365,21 @@ interface PairModalProps {
 // roundtrip + an ugly stderr error string. (claude #6)
 const INVITE_CODE_RE = /^ATO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
 
+// Daemon's default port. Must match DEFAULT_DAEMON_PORT in
+// apps/cli/src/daemon/mod.rs:48 — diverging here means PairModal
+// pre-fills the wrong port and users either get "connection refused"
+// or end up pasting whatever address mDNS advertised (which
+// undermines the out-of-band peer_id pin). Security audit L1.
+const DEFAULT_DAEMON_PORT = 7755;
+
 // Pull host + port out of a mDNS-stored address. IPv6 addresses get
-// stored bare ("fe80::1:7474"), so splitting on the first `:` would
+// stored bare ("fe80::1:7755"), so splitting on the first `:` would
 // chop the address; use the last colon as the host/port separator
 // and strip any brackets. (claude #4)
 function splitHostPort(addr: string): { host: string; port: number } {
   const idx = addr.lastIndexOf(":");
   if (idx <= 0 || idx === addr.length - 1) {
-    return { host: addr, port: 7474 };
+    return { host: addr, port: DEFAULT_DAEMON_PORT };
   }
   const rawHost = addr.slice(0, idx);
   const portStr = addr.slice(idx + 1);
@@ -380,13 +387,13 @@ function splitHostPort(addr: string): { host: string; port: number } {
   const host = rawHost.replace(/^\[|\]$/g, "");
   return {
     host,
-    port: Number.isNaN(port) ? 7474 : port,
+    port: Number.isNaN(port) ? DEFAULT_DAEMON_PORT : port,
   };
 }
 
 function PairModal({ prefill, onClose, onPaired }: PairModalProps) {
   const [code, setCode] = useState("");
-  const initial = prefill ? splitHostPort(prefill.addr) : { host: "", port: 7474 };
+  const initial = prefill ? splitHostPort(prefill.addr) : { host: "", port: DEFAULT_DAEMON_PORT };
   const [host, setHost] = useState<string>(initial.host);
   const [port, setPort] = useState<number>(initial.port);
   const [peerId, setPeerId] = useState(prefill?.peerId ?? "");
@@ -471,7 +478,7 @@ function PairModal({ prefill, onClose, onPaired }: PairModalProps) {
               <input
                 type="number"
                 value={port}
-                onChange={(e) => setPort(parseInt(e.target.value, 10) || 7474)}
+                onChange={(e) => setPort(parseInt(e.target.value, 10) || DEFAULT_DAEMON_PORT)}
                 className="w-full bg-cs-bg border border-cs-border rounded px-2 py-1.5 text-sm font-mono"
               />
             </div>

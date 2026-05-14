@@ -240,8 +240,12 @@ pub fn apply_completion(db_path: &std::path::Path, p: &PostCompletionParams) -> 
                 break;
             }
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("UNIQUE constraint failed") {
+                // Audit L2 — match the structured error code, not a
+                // rusqlite Display substring. A future rusqlite bump
+                // could reshape the message and silently turn the
+                // retry into a single attempt that swallows real
+                // UNIQUE failures.
+                if crate::commands::mesh::is_unique_pk_violation(&e) {
                     last_err = Some(e);
                     continue;
                 }
@@ -309,7 +313,8 @@ fn emit_peer_completion_event(conn: &rusqlite::Connection, p: &PostCompletionPar
         ) {
             Ok(_) => return Ok(()),
             Err(e) => {
-                if e.to_string().contains("UNIQUE constraint failed") {
+                // Audit L2 — see comment on session_turns retry above.
+                if crate::commands::mesh::is_unique_pk_violation(&e) {
                     last_err = Some(e);
                     continue;
                 }
@@ -612,10 +617,16 @@ async fn handle_consume_invite(
         // Invite missing/expired/consumed — single generic error so
         // an attacker can't probe which condition failed.
         Ok(None) => Some(generic_invalid_invite(id)),
-        Err(msg) => {
-            // Internal error — log to stderr, return generic to the
-            // wire so we don't leak DB error shapes.
-            eprintln!("ato daemon: consume_invite internal error: {}", msg);
+        Err(_msg) => {
+            // Internal error — log a fixed marker and return generic
+            // to the wire so we don't leak DB error shapes. The raw
+            // `_msg` is intentionally dropped: it may carry path
+            // names, SQL fragments, or panic payload details that
+            // would land in operator bug reports / Slack pastes.
+            // (Audit L3) If the operator needs server-side detail,
+            // the spawn_blocking task itself logs sufficient context
+            // before the panic.
+            eprintln!("ato daemon: consume_invite internal error (details suppressed; see RUST_BACKTRACE=1 for the inner stack)");
             Some(generic_invalid_invite(id))
         }
     }

@@ -369,20 +369,27 @@ fn find_ato_binary() -> Result<PathBuf, String> {
             }
         }
     }
-    // 2. Dev path relative to the repo root.
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut p = cwd.clone();
-        while p.parent().is_some() {
-            let candidate = p.join("apps/cli/target/release/ato");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-            p = p.parent().unwrap().to_path_buf();
-        }
-    }
-    // 3. PATH fallback — debug builds only.
+    // 2. Dev path relative to the repo root — debug builds only.
+    // Audit M1 (claude #1): the dev-tree walk is the same class of
+    // attack as the $PATH fallback. A release build whose sidecar
+    // lookup fails (notarization stripped Resources/binaries/, an
+    // unexpected current_exe path on Linux/Windows) walks ancestors
+    // of CWD looking for `apps/cli/target/release/ato`. Any user-
+    // writable ancestor (project dir, tarball extraction, etc.)
+    // becomes a code-injection point during Pair. Gate to debug.
     #[cfg(debug_assertions)]
     {
+        if let Ok(cwd) = std::env::current_dir() {
+            let mut p = cwd.clone();
+            while p.parent().is_some() {
+                let candidate = p.join("apps/cli/target/release/ato");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+                p = p.parent().unwrap().to_path_buf();
+            }
+        }
+        // 3. PATH fallback — debug builds only.
         if let Ok(p) = which::which("ato") {
             return Ok(p);
         }
