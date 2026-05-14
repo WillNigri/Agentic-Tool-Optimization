@@ -103,22 +103,30 @@ Read the source. The persona-relevant content is usually:
 - **Frontmatter `description`** — keep as one-line summary
 - **Sections about voice, methodology, forcing questions, anti-patterns,
   "instructions", "phases"** — keep
-- **Sections about preamble, gstack telemetry, plan-mode safe ops, skill
-  routing, AskUserQuestion format, completion status, operational
-  self-improvement** — strip. These are runtime boilerplate, not persona.
+- **Runtime boilerplate** (preamble blocks, telemetry, plan-mode safe
+  ops, skill routing, completion status protocols, operational
+  self-improvement, update-check pings, etc.) — strip. These run the
+  source skill in its host environment; the dispatched agent doesn't
+  need them.
 
-Heuristic rules for stripping:
-- Drop any code block that reads `~/.gstack/`, calls `gstack-config`,
-  emits `_TEL` / `_SESSION_ID` / `_LEARN_FILE` lines, or runs
-  `gstack-update-check`.
-- Drop sections titled `## Preamble`, `## Plan Mode Safe Operations`,
+Heuristic rules for stripping (calibrated to common skill stacks like
+gstack — substitute equivalents for whatever stack you're working
+with):
+
+- Drop code blocks that read from skill-stack config dirs (e.g.
+  `~/.gstack/`), call stack-specific config commands (e.g.
+  `gstack-config`), emit telemetry/session env vars (`_TEL`,
+  `_SESSION_ID`, `_LEARN_FILE`), or run update-check probes.
+- Drop sections whose titles are obviously about skill-runtime housekeeping
+  rather than persona — e.g. `## Preamble`, `## Plan Mode Safe Operations`,
   `## Skill Invocation During Plan Mode`, `## Skill routing`,
   `## AskUserQuestion Format`, `## Artifacts Sync`,
-  `## Model-Specific Behavioral Patch`, `## Voice` (gstack's voice
-  triggers, not the persona's voice — different thing),
-  `## Context Recovery`, `## Writing Style`, `## Question Tuning`,
-  `## Completion Status Protocol`, `## Operational Self-Improvement`,
-  `## Telemetry`, `## Plan Status Footer`.
+  `## Model-Specific Behavioral Patch`, `## Voice` (when it's about
+  speech-to-text trigger phrases for the host skill, not the persona's
+  written voice), `## Context Recovery`, `## Writing Style`,
+  `## Question Tuning`, `## Completion Status Protocol`,
+  `## Operational Self-Improvement`, `## Telemetry`,
+  `## Plan Status Footer`.
 - Keep everything under sections titled `## Instructions`,
   `## Phase N:`, `## Confidence Calibration`, `## Important Rules`,
   `## Disclaimer`, anything explaining the role's methodology /
@@ -145,14 +153,14 @@ roster:
   alt1: <alt #1>
   alt2: <alt #2 or omitted>
 source_skill: <path or slug of source>
-karpathy_filter: true
+filter_framework: <name or 'none'>   # e.g. karpathy, spade, rice, custom
 ---
 ```
 
-`karpathy_filter: true` signals to `ato-warroom` that every dispatch
-prompt to this agent should be wrapped with the four-failure-mode
-checklist (wrong assumptions / overcomplexity / orthogonal edits /
-imperative-over-declarative).
+`filter_framework` signals to `ato-warroom` which failure-mode filter
+to wrap around every dispatched turn. Default value: `karpathy` (the
+four-mode filter wrapped in the body template below). Substitute or
+set to `none` if the persona doesn't need a wrapper.
 
 Body template:
 
@@ -167,7 +175,10 @@ Body template:
 
 <extracted phases / forcing questions / anti-patterns>
 
-## Karpathy filter (run on every turn)
+## Failure-mode filter (run on every turn)
+
+[Default: Karpathy's four. Swap the categories below if you've chosen a
+different framework in frontmatter.]
 
 For each response, comment explicitly on:
 1. **Wrong assumptions** — what is the user assuming that may not hold?
@@ -224,26 +235,30 @@ lands. See ato-warroom skill's "fallback for label-only --agent" section.)
   on-demand. Convert one skill at a time when the user needs that voice.
 - **Same-family alt model.** Claude Opus primary + Claude Sonnet alt is
   not cross-family. Defeats the war-room's purpose. Force the alt to a
-  different vendor (MiniMax, Gemini, DeepSeek, Codex, Grok).
-- **Including gstack runtime preambles in the persona.** The dispatch
-  target doesn't run gstack telemetry; it runs as a one-shot turn.
-  Strip aggressively.
-- **Skipping the Karpathy filter section.** Without it the agent is just
-  "a model with a system prompt" — not a war-room voice.
+  different vendor (e.g. MiniMax, Gemini, DeepSeek, Codex, Grok — pick
+  whichever your install has).
+- **Including the source skill's runtime preambles in the persona.** The
+  dispatch target runs as a one-shot turn, not inside the source skill's
+  host environment — strip telemetry / update-check / session-tracking
+  blocks aggressively.
+- **Skipping the failure-mode filter section.** Without it the agent is
+  just "a model with a system prompt" — not a war-room voice.
 - **Vendoring an agent globally that's repo-specific.** A persona built
-  around your ATO codebase belongs at `<repo>/.claude/agents/` so
-  teammates inherit it; a generic CSO belongs at `~/.claude/agents/`.
+  around a specific codebase belongs at `<repo>/.claude/agents/` so
+  teammates inherit it; a generic role (e.g. security-reviewer) belongs
+  at `~/.claude/agents/`.
 
 ## Pairs with
 
-- **`ato-warroom`** — the consumer. Summons agents created by this
-  skill into pre-decision multi-perspective war-rooms.
+- **`ato-warroom`** — the consumer. Summons agents created by this skill
+  into pre-decision multi-perspective war-rooms.
 - **`ato-review`** — post-code diff review. Different lane; runs after
   drafting, not before. Doesn't use the agent roster (yet).
-- **Any gstack persona skill** (`cso`, `plan-ceo-review`, `plan-eng-review`,
-  `plan-design-review`, `plan-devex-review`, `investigate`, `office-hours`,
-  `codex`) — these are the canonical inputs. Run `ato-make-agent` on
-  each one you want as a permanent war-room voice.
+- **Any persona-shaped skill** in your installed stack — gstack, custom,
+  third-party, or hand-authored SKILL.md files. Run `ato-make-agent` on
+  each one you want as a permanent war-room voice. The skill doesn't
+  require gstack; it works with any source that has a frontmatter +
+  Markdown shape.
 
 ## Origin
 

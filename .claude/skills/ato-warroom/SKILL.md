@@ -1,20 +1,20 @@
 ---
 name: ato-warroom
-version: 1.1.0
+version: 1.2.0
 description: |
-  Before any material decision — code chunk, plan, strategy, design, scope
-  cut, push to GitHub — convene a war-room. Claude (this session) is
-  ALWAYS the CEO seat: rethink the problem, challenge the framing, pick
-  the wedge. The war-room then dispatches specialist seats (designer,
-  eng manager, security officer, debugger, DX lead) via gstack skills
-  AND via `ato dispatch` to a cross-family runtime so priors actually
-  disagree. Every dispatch and decision is filtered through Karpathy's
-  four failure modes: wrong assumptions, overcomplexity, orthogonal
-  edits, imperative-over-declarative. Complement to `ato-review` which
-  is post-code diff review; this is the BEFORE half. Fires before:
-  sending a code draft to the user as final, opening a PR, pushing to
-  a branch with a remote, committing >50 LOC of behavior change, or
-  delivering a plan or strategic recommendation as the final answer.
+  Before any material decision — code chunk, plan, strategy, design,
+  scope cut, push to GitHub — convene a war-room. The session driver
+  takes the CEO seat: frame the tradeoff, summon specialist seats from
+  whatever agent roster the user has built, dispatch a cross-family
+  voice via `ato dispatch` so priors actually disagree, decide. A
+  failure-mode filter (wrong assumptions / overcomplexity / orthogonal
+  edits / imperative-over-declarative — Karpathy's four are one good
+  default, swap in your own) runs on every dispatch. Complement to
+  `ato-review` (post-code diff review); this is the pre-decision half.
+  Fires before: sending a code draft to the user as final, opening a
+  PR, pushing to a remote-tracking branch, committing >50 LOC of
+  behavior change, or delivering a plan or strategic recommendation as
+  the final answer.
 allowed-tools:
   - Bash
   - Read
@@ -23,77 +23,82 @@ allowed-tools:
   - Skill
 ---
 
-## Stance
+## What this skill is
 
-This is an **internal operating system** for the people building ATO
-(Will + Claude). It is NOT a feature of the ATO app — ATO already
-supports war-rooms, dispatch, sessions natively. This skill is the
-*workflow discipline* the team applies on top of ATO's primitives so
-we make better decisions and miss fewer things.
+A **tool**, not a stack-specific procedure. The war-room mechanism
+works with whatever agent roster you've built (via `ato-make-agent` or
+hand-authored) and whatever methodology you want layered on top. It
+doesn't assume gstack, Claude Code, or any specific specialist set —
+those are useful starting points referenced as examples below, not
+requirements.
 
-Treat the procedure as load-bearing for now; iterate after each PR.
+The mechanism in one paragraph: when a material decision is in front
+of you, frame it as a tradeoff (A vs B with named costs), summon two
+or more agents whose domain the decision touches, force at least one
+to run on a different model family so priors diverge, apply a
+failure-mode filter to the prompt template, then pick a position and
+record the audit trail in your deliverable.
 
-## Why this skill exists
+## Why have a war-room at all
 
-To get more of the gstack methodology's catch-rate on ATO's own
-decisions. Three components stacked together:
+Three principles, stack-agnostic:
 
-1. **gstack methodology** (Garry Tan, github.com/garrytan/gstack).
-   Turns the agent into a virtual engineering team: CEO, designer,
-   eng manager, debugger, security officer, QA lead, release engineer.
-   Each specialist has its own slash skill, its own forcing questions,
-   its own anti-AI-slop checks. The sprint runs **Think → Plan → Build
-   → Review → Test → Ship → Reflect**.
+1. **Specialist personas catch what generalist prompts miss.** A
+   security review prompt that explicitly says "you are a security
+   reviewer, look for OWASP-class issues" surfaces different findings
+   than a generic "review this." Same idea as gstack's virtual team
+   pattern; same idea as YC's office hours; same idea as code review
+   itself.
 
-2. **Karpathy's four failure modes** (No Priors, March 2026 /
-   forrestchang/andrej-karpathy-skills). Every war-room turn is
-   filtered through:
-   - **Wrong assumptions** — surface them BEFORE code is written.
-   - **Overcomplexity** — would a simpler shape ship 80% of the value?
-   - **Orthogonal edits** — anything in this change unrelated to the
-     stated goal and creeping in via drive-by?
-   - **Imperative over declarative** — is the work expressed as
-     verifiable outcomes + tests, or as a sequence of "do this, then
-     this"?
+2. **Cross-family disagreement raises the floor.** Two turns from the
+   same model family confirm each other's blind spots. Cross-family
+   pairs (e.g., Claude + MiniMax, Claude + Gemini, Claude + DeepSeek)
+   raise the chance that an embedded assumption fails one of them.
 
-3. **Use ATO's own primitives.** Cross-family dispatch (`ato dispatch
-   minimax|gemini|deepseek`) runs alongside in-session gstack skills
-   so priors actually disagree. Same-family pairs are echo chambers.
-   ATO's dispatch + sessions are the substrate; this skill is just
-   the way *we* use them.
+3. **Filter every turn through known failure modes.** Karpathy's four
+   (wrong assumptions / overcomplexity / orthogonal edits /
+   imperative-over-declarative) is one well-tested default. You can
+   swap in any framework — SPADE, RICE, OWASP, STRIDE, your own — as
+   long as it forces commitment to specific categories of risk per
+   turn.
 
-## The CEO seat is yours; specialists are on standby
+## CEO seat + specialists on standby
 
-Claude (this session) is **always the CEO**. The war-room is a room
-the CEO presides over, with a permanent roster of specialists waiting
-to be summoned. You don't run every specialist for every decision —
-you summon the ones whose domain is at stake. But the roster is
-always available; specialists are pre-installed (gstack skills) or
-one `ato dispatch` away.
+The **CEO seat is user-configurable** — it's whichever LLM the user has
+chosen to coordinate the war-room. If the user is in a Claude Code
+session, Claude is the CEO. If they're driving from Codex, Codex is the
+CEO. Same applies to Gemini, OpenClaw, Hermes, or any future runtime.
 
-CEO responsibilities:
-- Frame the question. Decide what tradeoff matters.
-- Pick which specialists to summon — by name, matched to the decision
-  class (table in §2). Two or more, always, with cross-family
-  potential, so disagreement is informative.
-- Don't defer. "I'll just ask the user" instead of forming a view is
-  abdication. Form a view, run the war-room, let it overturn you if
-  it should.
-- Read every summoned specialist's reply, force the disagreement to
-  the surface, and **pick a position**. War-rooms produce decisions,
-  not surveys.
-- Record the decision (and the rejected option(s) with reasons) in
-  the deliverable's audit trail — PR description, plan doc, commit
-  body. No audit trail = the rule was skipped.
+The CEO seat is set by **whoever is running this skill**. There is no
+hardcoded coordinator — that would lock users into a specific stack and
+defeat the point of a tool-shaped war-room.
+
+CEO responsibilities (whichever LLM holds the seat):
+- Frame the question as a specific tradeoff. "How should I X?" gets
+  generic essays; "A vs B, costs C and D, pick one" gets commitment.
+- Pick which specialists to summon, matched to the decision class.
+  Two or more per war-room. At least one cross-family from the CEO.
+- Don't defer. Form a position; let the war-room overturn it if it
+  should. Picking "I'll just ask the user" is abdication.
+- Read every summoned specialist's reply, surface disagreements, and
+  pick a position. Record the decision and the rejected options in
+  the deliverable's audit trail. No audit = the rule was skipped.
+
+Specialists are summoned by name from the agent roster the user has
+built — whatever that contains. There is no required set; build only
+what your decisions actually need.
 
 Two summons mechanisms, both available, often both used:
-- **gstack specialist skills** for in-session perspective from a
-  domain-trained role (designer, eng manager, security officer, etc.)
-- **`ato dispatch <runtime>`** for a cross-family voice so priors
-  actually disagree and we dogfood the product
+- **In-session subagent** via the host runtime's subagent mechanism
+  (Claude Code's `Task` tool, Codex's agent invocation, Gemini's
+  sub-agent call, etc.). Reads the persona from your agent file.
+- **`ato dispatch <runtime>`** to a cross-family runtime so priors
+  actually disagree. "Cross-family" = a different model family from
+  the one holding the CEO seat (e.g., if CEO is Claude, cross-family
+  is MiniMax / Gemini / DeepSeek / Codex / etc.).
 
-Default pattern: at least one gstack specialist + at least one
-cross-family ATO dispatch, per material decision.
+Default pattern per material decision: at least one in-session
+specialist + at least one cross-family dispatch.
 
 ## When this skill fires
 
@@ -161,29 +166,38 @@ catch you needed.
 
 ### 2. Summon specialists from YOUR roster
 
-War-rooms summon agents YOU built — not a pre-vendored list. Different
-installs have different skills available; your war-room voices should
-reflect what you've actually adopted.
+War-rooms summon agents YOU built — not a fixed list. Different
+installs have different skill stacks and different agent rosters;
+your war-room voices should reflect what you've actually adopted.
 
-**Build the roster** with the companion `ato-make-agent` skill. It
-takes any installed skill (gstack, custom, third-party) and produces
-an agent file at `.claude/agents/<slug>.md` (project) or
-`~/.claude/agents/<slug>.md` (global), with a model roster (primary +
-cross-family alts) baked into the frontmatter.
+**Build the roster** with the companion `ato-make-agent` skill, or
+hand-author agent files directly. Any source works — a gstack skill,
+a custom SKILL.md you wrote, a third-party persona file, an OpenAI
+Agents SDK definition, anything you can express as a system prompt.
+The agent file lands at `.claude/agents/<slug>.md` (project) or
+`~/.claude/agents/<slug>.md` (global), with a model roster (primary
++ cross-family alts) declared in frontmatter.
 
-Common starting roster if you're starting from gstack (build only on
-first-need — never the whole table upfront):
+Below is one example roster shape — names borrowed from gstack's
+specialist taxonomy because it's a well-known reference, NOT because
+it's required. Substitute your own personas freely.
 
-| Source skill          | Suggested agent slug | Suggested cross-family alt |
+| Domain                | Example agent slug   | Cross-family alt notes    |
 |-----------------------|----------------------|---------------------------|
-| `plan-ceo-review`     | `founder`            | MiniMax                   |
-| `office-hours`        | `forcing-questions`  | MiniMax                   |
-| `plan-eng-review`     | `eng-manager`        | DeepSeek or MiniMax       |
-| `plan-design-review`  | `designer`           | Gemini                    |
-| `plan-devex-review`   | `dx-lead`            | MiniMax                   |
-| `cso`                 | `cso`                | DeepSeek or Grok          |
-| `investigate`         | `debugger`           | Codex or Gemini           |
-| `codex` (adversarial) | `adversary`          | (already off-family)      |
+| Strategy / scope      | `founder`            | Any non-primary family    |
+| Product framing       | `forcing-questions`  | Any non-primary family    |
+| Architecture / tests  | `eng-manager`        | Any non-primary family    |
+| Visual / UX / IA      | `designer`           | Any non-primary family    |
+| Developer surface     | `dx-lead`            | Any non-primary family    |
+| Security / threat     | `cso`                | Any non-primary family    |
+| Debug / root-cause    | `debugger`           | Any non-primary family    |
+| Adversarial critic    | `adversary`          | Already off-family        |
+
+You can build none of these and instead create entirely different
+specialists (`@compliance`, `@perf`, `@user-empathy`, `@ml-eval`, etc.).
+The war-room mechanism doesn't care what the personas are — only that
+at least two distinct specialists are summoned and at least one runs
+cross-family.
 
 **Summon a built agent** two ways, both load the same persona file:
 
@@ -236,23 +250,31 @@ Task tool can't see a project-scoped agent, fall back to `--global`
 scope in `ato-make-agent` for that persona.
 
 **Default if you have no agents built yet.** Run `ato-make-agent` on
-one source skill matching the decision class before opening the
-war-room (~5 min per agent). Or fall back to in-session
-`Skill(<gstack-skill-name>)` for the specialist leg + a generic
-`ato dispatch minimax` (no agent) for the cross-family leg. The
-generic path works but loses persona depth; build the agent the
-first time a war-room voice recurs.
+one skill matching the decision class before opening the war-room
+(~5 min per agent). Or fall back to invoking the source skill
+in-session (e.g. `Skill(<skill-name>)` for Claude Code; equivalent
+for other runtimes) for the specialist leg + a generic
+`ato dispatch <cross-family-runtime>` (no agent) for the cross-family
+leg. The generic path works but loses persona depth; build the agent
+the first time a war-room voice recurs.
 
-### 3. Filter every dispatch through Karpathy's four
+### 3. Apply a failure-mode filter to each prompt
 
-Embed all four into the prompt you hand each seat. Suggested template:
+Embed the filter framework you've chosen into the prompt template
+handed to each summoned seat. Karpathy's four (wrong assumptions /
+overcomplexity / orthogonal edits / imperative-over-declarative) is a
+good default; you can substitute SPADE, RICE, OWASP, STRIDE, or any
+domain-appropriate framework — as long as the framework forces
+specific risk categories to be addressed per turn.
+
+Default prompt template (Karpathy's four):
 
 ```
-You are the <seat> for ATO. The CEO (Claude) is convening a war-room.
-Decision under debate: <one-line>.
+You are the <seat-role> for this project. The coordinator (CEO) is
+convening a war-room. Decision under debate: <one-line>.
 Tradeoff: <specific A-vs-B from step 1>.
 
-Karpathy filter — comment on each of the four explicitly:
+Filter — comment on each of the four explicitly:
 1. WRONG ASSUMPTIONS — what is the CEO assuming that may not hold?
 2. OVERCOMPLEXITY — what simpler shape would ship 80% of the value?
 3. ORTHOGONAL EDITS — what's in the proposed scope that doesn't
@@ -260,21 +282,23 @@ Karpathy filter — comment on each of the four explicitly:
 4. IMPERATIVE-OVER-DECLARATIVE — is the goal expressed as verifiable
    outcomes + tests, or as a sequence of steps? Push for outcomes.
 
-Then: pick A or B. Justify against the rejected option. Brief — three
-to six bullets, not a wall of text.
+Then: pick A or B. Justify against the rejected option. Brief —
+three to six bullets, not a wall of text.
 ```
 
 If a seat declines to commit, ask again with the wedge sharpened. A
 seat that won't commit isn't a seat, it's a participant.
 
-### 4. Dispatch — dogfood via `ato dispatch`
+### 4. Dispatch the cross-family seat(s) via `ato dispatch`
 
-For each cross-family seat, route the prompt through ATO. This is the
-dogfood beat — DON'T just open another tab.
+Route each cross-family seat through ATO so the work flows through
+your dispatch + session primitives.
 
 ```bash
 # Stable per-decision session so context carries across follow-ups.
 SLUG="pr-b-encryption"
+# Pick whichever runtime you're driving as CEO for the session anchor.
+CEO_RUNTIME="${ATO_CEO_RUNTIME:-claude}"
 SID=$(ato sessions list --limit 20 2>/dev/null | python3 -c '
 import sys, json
 slug = sys.argv[1]
@@ -284,28 +308,26 @@ for s in sessions:
         print(s["id"]); break
 ' "$SLUG" 2>/dev/null)
 if [ -z "$SID" ]; then
-    SID=$(ato sessions new --runtime claude --title "warroom/$SLUG" 2>/dev/null \
+    SID=$(ato sessions new --runtime "$CEO_RUNTIME" --title "warroom/$SLUG" 2>/dev/null \
           | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 fi
 
-QUESTION="<the Karpathy-filtered prompt from step 3>"
+QUESTION="<the filter-wrapped prompt from step 3>"
 
-# Cross-family seat #1 — pick a runtime in a DIFFERENT family from Claude
+# Cross-family seat #1 — DIFFERENT family from the CEO runtime
 ato dispatch minimax "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf1-$$.txt
-# (optional) second cross-family seat for adversarial-deadlock breaking
+# (optional) second cross-family seat for breaking ties / adversarial pass
 ato dispatch gemini  "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf2-$$.txt 2>/dev/null
 ```
 
-For the in-session specialist seats, invoke the gstack skill directly
-via the Skill tool — for example `Skill(plan-ceo-review)`,
-`Skill(plan-eng-review)`, `Skill(cso)`, `Skill(investigate)`,
-`Skill(codex)` for the adversarial leg.
+For the in-session specialist seats, invoke the source skill directly
+via your runtime's subagent / skill mechanism (e.g. Claude Code's
+`Skill(<name>)` or `Task(<agent-slug>)`; Codex's agent invocation).
 
 If `ato dispatch` fails (network, quota, key missing, runtime not
-configured), STOP and report it as an ATO bug — friction IS feedback.
-Fall back to a second gstack skill OR a manual cross-perspective prompt
-in this session, and note the dispatch failure in the deliverable so
-it gets fixed.
+configured), stop and note it — friction IS feedback. Fall back to a
+second in-session specialist or a manual cross-perspective prompt and
+record the dispatch failure in the deliverable so it gets fixed.
 
 ### 5. CEO synthesizes
 
@@ -316,7 +338,7 @@ Read every seat's response. Force the disagreement to the surface:
   no signal.
 - If seats split, that's the signal. As CEO, pick a position and
   justify it against each loser.
-- Apply Karpathy's four filter to YOUR OWN draft answer one more time
+- Apply your filter framework to your OWN draft answer one more time
   before committing.
 
 You may overrule any single seat. You may not overrule unanimous
@@ -331,14 +353,14 @@ This is what closes the loop. No audit trail = the rule was skipped.
 ```
 ## War-room (pre-decision)
 - Question: <the specific tradeoff>
-- Seats: <gstack skills used> + <runtimes dispatched via ato>
+- Seats: <in-session specialists> + <runtimes dispatched via ato>
 - Disagreement: <one-line summary>
 - CEO decision: <what won, and the rejected option(s) with reasons>
-- Karpathy filter pass:
-  - Wrong assumptions: <what was surfaced>
-  - Overcomplexity: <what was cut>
-  - Orthogonal edits: <what was kept out of scope>
-  - Imperative-vs-declarative: <how the goal is verifiable>
+- Filter pass (<framework name, e.g. Karpathy>):
+  - <category 1>: <what was surfaced>
+  - <category 2>: <what was cut>
+  - <category 3>: <what was kept out of scope>
+  - <category 4>: <how the goal is verifiable>
 - Session id: <warroom session uuid>
 ```
 
@@ -348,7 +370,7 @@ This is what closes the loop. No audit trail = the rule was skipped.
 ## War-room
 - Seats: <…>
 - CEO decision: <…>
-- Karpathy filter: <one-line per mode>
+- Filter pass: <one-line per category>
 - (Transcript: <session id>)
 ```
 
@@ -356,7 +378,7 @@ This is what closes the loop. No audit trail = the rule was skipped.
 
 ```
 ### War-room (pre-code)
-<one paragraph: what was debated, what won, which Karpathy mode caught
+<one paragraph: what was debated, what won, which filter category caught
 something>
 ```
 
@@ -378,13 +400,14 @@ the `warroom/<slug>` title lookup so context compounds.
   Form a position first, let the war-room overturn it if it should.
 - **Single-seat dispatch.** Second opinion ≠ war-room. Always ≥2 seats
   with cross-family disagreement potential.
-- **Generic "reviewer" for every question.** Match specialist to domain
-  (`/cso` for crypto, `/plan-ceo-review` for strategy, etc.).
+- **Generic "reviewer" for every question.** Match specialist to
+  domain (security agent for crypto, founder-mode agent for strategy,
+  whichever specialists your roster contains).
 - **Asking "is this OK?"** A sign-off prompt is not a war-room. Ask
   "A vs B, pick one and justify against the loser."
-- **Karpathy filter as boilerplate.** If the seat returns "no concerns
-  on wrong assumptions" for every prompt, re-ask with a sharper wedge
-  or the seat isn't earning its seat.
+- **Filter as boilerplate.** If a seat returns "no concerns on
+  <category>" for every prompt, re-ask with a sharper wedge or the
+  seat isn't earning its seat.
 - **Hiding the war-room from the deliverable.** No audit trail = the
   rule was skipped, period.
 - **Skipping because "I already know the answer."** That's exactly when
@@ -393,21 +416,21 @@ the `warroom/<slug>` title lookup so context compounds.
 
 ## Pairs with
 
+- **`ato-make-agent`** — the companion tool. Converts source skills
+  into ATO agent files with model rosters so war-rooms can summon
+  them by name.
 - **`ato-review`** — post-code diff review (the AFTER half). Run both
   on the same chunk: war-room before drafting, review after drafting.
   Neither replaces the other.
-- **`/autoplan`** — gstack's full review pipeline (CEO → design →
-  eng → DX). The default war-room for multi-stage features.
-- **`/codex`** — gstack adversarial mode. Use as the cross-family leg
-  when your `ato dispatch` runtime would otherwise mirror Claude.
-- **`/investigate`** — when the decision is "why doesn't this work,"
-  not "what should I build." Iron Law: no fix without investigation.
+- **Whatever specialist skills your stack provides** — gstack, custom,
+  third-party, or hand-authored. The war-room mechanism doesn't care
+  which stack populates your roster.
 
 ## Origin
 
-This skill exists because v2.6 PR-A shipped without a pre-code
-war-room — only the post-code `ato-review` ran. Two of the five
-review findings (start() idempotency, scoped Codex token latch) would
-have been caught earlier in a Karpathy-filtered war-room. Recording
-the rule so future sessions inherit it and the team building ATO is
-actually using ATO.
+This skill records a discipline gap: pre-code design decisions were
+landing without multi-specialist review while post-code diffs were
+getting full multi-LLM consensus passes. The pre-decision filter
+catches a different class of error (assumptions, scope, framing) than
+the post-code diff review catches (bugs, missed edges). Both need to
+exist; this skill is the pre-decision half.
