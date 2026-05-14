@@ -112,6 +112,39 @@ pub fn registry() -> &'static [ApiProvider] {
         // - URL embeds the model name as a path segment, not a
         //   field in the body.
         // The "gemini" flavor in api_dispatch handles all three.
+        // last verified: UNVERIFIED (no ANTHROPIC_API_KEY on dev
+        // machine as of 2026-05-14). Slug intentionally `anthropic`
+        // (vendor) rather than `claude` to avoid colliding with the
+        // existing `claude` CLI runtime — users with the Claude CLI
+        // installed keep that subprocess path, users with only an
+        // API key (or who want to skip the CLI entirely for BYOK
+        // billing transparency) dispatch via `ato dispatch
+        // anthropic "..."`. Same naming pattern as `google` /
+        // `gemini`.
+        //
+        // Anthropic's Messages API is structurally different from
+        // OpenAI's chat-completions:
+        // - Auth via `x-api-key` header, not `Authorization: Bearer`.
+        // - Required `anthropic-version: 2023-06-01` header.
+        // - Request body uses `messages[]` (compatible with OpenAI
+        //   shape for role/content) but mandates `max_tokens` and
+        //   `system` as top-level fields.
+        // - Response: `content[]` array of typed blocks (only
+        //   `type: text` consumed today) instead of
+        //   `choices[].message.content`.
+        // - Usage: `input_tokens` / `output_tokens` (not
+        //   `prompt_tokens` / `completion_tokens`).
+        // The "anthropic" flavor in api_dispatch handles all of these.
+        ApiProvider {
+            slug: "anthropic",
+            base_url: "https://api.anthropic.com",
+            path: "/v1/messages",
+            // claude-sonnet-4-6 = good cost/perf default; users on
+            // Opus subscriptions override with --model.
+            default_model: "claude-sonnet-4-6",
+            env_var: "ANTHROPIC_API_KEY",
+            flavor: "anthropic",
+        },
         ApiProvider {
             slug: "google",
             base_url: "https://generativelanguage.googleapis.com",

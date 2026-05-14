@@ -149,7 +149,7 @@ pub fn dispatch_with_history(
     // `generationConfig.maxOutputTokens` instead of `max_tokens`.
     // Branch here rather than at parse-time so a single request
     // builder doesn't have to satisfy two unrelated schemas.
-    let (url, body, use_bearer_auth) = if provider.flavor == "gemini" {
+    let (url, body, use_bearer_auth, use_x_api_key) = if provider.flavor == "gemini" {
         let path = provider.path.replace("{model}", &model);
         let url = format!("{}{}?key={}", provider.base_url, path, urlencode(&key));
         // Translate {role, content} messages → Gemini's {role, parts:[{text}]}.
@@ -172,7 +172,24 @@ pub fn dispatch_with_history(
             "contents": contents,
             "generationConfig": { "maxOutputTokens": 8192 },
         });
-        (url, body, false)
+        (url, body, false, false)
+    } else if provider.flavor == "anthropic" {
+        // Anthropic Messages API. Same {role, content} shape as
+        // OpenAI for the message array, but `max_tokens` is required
+        // and lives at the top level. Auth via x-api-key header (set
+        // below) — bearer rejected.
+        let url = format!("{}{}", provider.base_url, provider.path);
+        let mut messages: Vec<serde_json::Value> = history
+            .iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect();
+        messages.push(serde_json::json!({"role": "user", "content": prompt}));
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 8192,
+            "messages": messages,
+        });
+        (url, body, false, true)
     } else {
         let url = format!("{}{}", provider.base_url, provider.path);
         let mut messages: Vec<serde_json::Value> = history
@@ -192,13 +209,21 @@ pub fn dispatch_with_history(
             // providers' free-tier cost cliffs.
             "max_tokens": 8192,
         });
-        (url, body, true)
+        (url, body, true, false)
     };
 
     let start = std::time::Instant::now();
     let mut req = client.post(&url).header("Content-Type", "application/json");
     if use_bearer_auth {
         req = req.bearer_auth(&key);
+    }
+    if use_x_api_key {
+        // Anthropic auth: x-api-key header + required version pin.
+        // The version is stable across SDK releases for a given
+        // major; update only if we adopt a new request shape.
+        req = req
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01");
     }
     let resp = req
         .json(&body)
@@ -263,6 +288,19 @@ pub fn dispatch_with_history_streaming<F>(
 where
     F: FnMut(&str),
 {
+    // Anthropic uses a different SSE event format than the OpenAI
+    // text/event-stream shape this function parses. Rather than ship
+    // a broken streaming path, fall back to the buffered dispatch
+    // and emit the full reply as a single chunk so callers that
+    // pipe on_chunk to stdout still see the output. Real streaming
+    // for anthropic is a separate follow-up.
+    if provider.flavor == "anthropic" {
+        let outcome = dispatch_with_history(provider, history, prompt, model_override, conn)?;
+        if let Some(text) = outcome.response.as_deref() {
+            on_chunk(text);
+        }
+        return Ok(outcome);
+    }
     let key = resolve_api_key(provider, conn)?;
     let model = match (model_override, provider.default_model) {
         (Some(m), _) if !m.is_empty() => m.to_string(),
@@ -506,6 +544,72 @@ fn parse_response(
         let usage = &payload["usageMetadata"];
         let tokens_in = usage["promptTokenCount"].as_i64();
         let tokens_out = usage["candidatesTokenCount"].as_i64();
+        return Ok(ApiDispatchOutcome {
+            response: Some(response),
+            error_message: None,
+            model_used: model,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+            tool_calls: None,
+        });
+    }
+
+    // Anthropic Messages API: success is a JSON object with
+    // `content[]` of typed blocks. We consume only `type:"text"`
+    // blocks today (tool-use / image blocks land in follow-up).
+    // Errors come back with `type:"error"` + `error.message`.
+    if provider.flavor == "anthropic" {
+        if payload["type"].as_str() == Some("error") {
+            let msg = payload["error"]["message"]
+                .as_str()
+                .unwrap_or("(no error.message)");
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!("Anthropic error: {}", msg)),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+                tool_calls: None,
+            });
+        }
+        let text = payload["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if b["type"].as_str() == Some("text") {
+                            b["text"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .filter(|s| !s.is_empty());
+        let response = match text {
+            Some(s) => s,
+            None => {
+                return Ok(ApiDispatchOutcome {
+                    response: None,
+                    error_message: Some(format!(
+                        "no content[type=text] in Anthropic response: {}",
+                        truncate_for_audit(&payload.to_string(), 600)
+                    )),
+                    model_used: model,
+                    duration_ms,
+                    tokens_in: None,
+                    tokens_out: None,
+                    tool_calls: None,
+                });
+            }
+        };
+        let usage = &payload["usage"];
+        let tokens_in = usage["input_tokens"].as_i64();
+        let tokens_out = usage["output_tokens"].as_i64();
         return Ok(ApiDispatchOutcome {
             response: Some(response),
             error_message: None,

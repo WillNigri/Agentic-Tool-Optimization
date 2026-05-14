@@ -111,10 +111,19 @@ pub async fn dispatch(
     });
 
     let start = std::time::Instant::now();
-    let resp = client
-        .post(&url)
-        .bearer_auth(&key)
-        .header("Content-Type", "application/json")
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+    if provider.flavor == "anthropic" {
+        // Anthropic Messages API auth: x-api-key + required version
+        // header. Bearer rejected. Body shape is OpenAI-compatible
+        // for {messages,max_tokens,model} so we don't need a separate
+        // body builder here.
+        req = req
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.bearer_auth(&key);
+    }
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -151,6 +160,62 @@ fn parse_response(
     model: String,
     duration_ms: i64,
 ) -> Result<ApiDispatchOutcome, String> {
+    if provider.flavor == "anthropic" {
+        // Same shape as the CLI mirror — typed content blocks +
+        // `usage.input_tokens / output_tokens`. Errors carry
+        // `type:"error"` at the top level.
+        if payload["type"].as_str() == Some("error") {
+            let msg = payload["error"]["message"]
+                .as_str()
+                .unwrap_or("(no error.message)")
+                .to_string();
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!("Anthropic error: {}", msg)),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+            });
+        }
+        let text = payload["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if b["type"].as_str() == Some("text") {
+                            b["text"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .filter(|s| !s.is_empty());
+        return match text {
+            Some(s) => Ok(ApiDispatchOutcome {
+                response: Some(s),
+                error_message: None,
+                model_used: model,
+                duration_ms,
+                tokens_in: payload["usage"]["input_tokens"].as_i64(),
+                tokens_out: payload["usage"]["output_tokens"].as_i64(),
+            }),
+            None => Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!(
+                    "no content[type=text] in Anthropic response: {}",
+                    truncate_for_audit(&payload.to_string(), 600)
+                )),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+            }),
+        };
+    }
     if provider.flavor == "minimax" {
         let br = &payload["base_resp"];
         let status = br["status_code"].as_i64();
