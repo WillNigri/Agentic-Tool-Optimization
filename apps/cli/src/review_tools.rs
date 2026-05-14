@@ -282,6 +282,15 @@ fn exec_read_file(root: &Path, args: &serde_json::Value) -> Result<String> {
     if s > total {
         return Ok(format!("file: {}\nlines: {}..{}\n\n[empty: file only has {} lines]", path_str, s, e, total));
     }
+    // Defensive: reviewers occasionally pass an end < start (e.g.
+    // copy-pasted line numbers from a search hit). Without this guard
+    // the slice panics with "slice index starts at S but ends at E".
+    if e < s {
+        return Ok(format!(
+            "file: {}\nlines: {}..{}\n\n[empty: end {} < start {} — check the line numbers]",
+            path_str, s, e, e, s
+        ));
+    }
     let slice = lines[s - 1..e].join("\n");
     Ok(format!(
         "file: {}\nlines: {}..{}\n\n{}",
