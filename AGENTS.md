@@ -2,7 +2,7 @@
 
 > This file is for **AI coding agents** (Claude Code, Codex, Cursor agent mode, Aider, OpenClaw, Hermes, and similar). If you're a human, see [`README.md`](./README.md) instead.
 >
-> ATO is the local-first developer-workflow operations platform for multi-runtime AI agents. Humans and their coding agents share the same cockpit. This doc tells you (the agent) how to use it.
+> ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome. You and the human share the same cockpit — same data, same operations, same audit trail. This doc tells you (the agent) how to use it via CLI and MCP.
 
 ---
 

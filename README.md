@@ -2,6 +2,8 @@
 
 **ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.** Local-first. MIT. Bring your own keys.
 
+*Drive it from a GUI, a CLI, or your coding agent over MCP — same data, same operations, same audit trail.*
+
 Open a session. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, DeepSeek, or any of [20+ supported runtimes](#supported-runtimes) — and have them argue a decision while you push back. Every claim gets cited against the live repo (or any local files); every tool call is logged. You walk out with a signed transcript instead of a screenshot of N browser tabs.
 
 ### What you'd use it for
@@ -66,7 +68,7 @@ Sign-in is **optional** and only matters for cloud sync features (cross-device t
 
 ### Relationship to other tools
 
-**ATO is the developer-workflow operations layer for multi-runtime AI agents.** It is *complementary* to production-observability tools like [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), and [Braintrust](https://www.braintrust.dev) — not a competitor.
+**ATO is your local war room for humans and LLMs.** It is *complementary* to production-observability tools like [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), and [Braintrust](https://www.braintrust.dev) — not a competitor.
 
 - **Those tools** instrument *deployed production stacks* via SDKs and log *end-user conversations* in real time.
 - **ATO** covers the *developer side* of the same agent — what you dispatched while building, what you replayed across runtimes, what regressed after a config change, what each dispatch cost, which agent touched which files.

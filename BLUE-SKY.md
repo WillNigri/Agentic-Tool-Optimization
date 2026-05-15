@@ -1,14 +1,10 @@
 # ATO Blue-Sky Backlog
 
-> **Not on the active roadmap.** Items here are research bets that **do not currently fit the north star** in `ato-cloud/docs/STRATEGY.md`:
+> **Not on the active roadmap.** Items here are research bets that **do not currently fit the mission** in [`ROADMAP.md`](./ROADMAP.md):
 >
-> *ATO is the developer-workflow operations layer for multi-runtime AI agents.*
+> *ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.*
 >
-> Reconsider any item below only when one of the north-star invalidation triggers fires (see `STRATEGY.md` §"What changes when the north star is wrong"):
-> 1. The market for multi-runtime ops is smaller than we think (signal: low engagement on Compare/Replay surfaces after the first 500 active users)
-> 2. The market is bigger than we think but adjacent — paying customers repeatedly ask for "ATO but for our production traffic" (signal: 10+ paying customers, unprompted)
->
-> Until then, these items live here so engineering decisions don't drift into them by accident. This file is the *graveyard*, not the roadmap.
+> Until an item here demonstrably advances that mission, it stays in this file so engineering decisions don't drift into it by accident. This file is the *graveyard*, not the roadmap.
 
 ---
 
@@ -19,7 +15,7 @@ Originally framed as "planned, exploratory" but each item is a different product
 - **Team workspaces with shared agents / knowledge / trace history + per-member ACLs.** Adjacent — could fit if scoped to "team developers operating multi-runtime agents together." Currently overshoots into permissioned-collaboration platform territory.
 - **PII / safety scanning** of agent conversations with redact-on-export. This is production-observability territory (Langfuse / Helicone own this). In scope only if narrowed to *ATO's own data* (the developer's working files), not user conversations.
 - **SOC2 compliance bundles** — audit log, retention controls, export-on-request, BYOK encryption. Enterprise sales territory; reconsider when paying-team count justifies the lift.
-- **Marketplace for agent templates** with community submissions + revenue share. Marketplace operations ≠ developer-workflow operations. Curated read-only catalog is acceptable; community marketplace is its own product.
+- **Marketplace for agent templates** with community submissions + revenue share. A community marketplace is its own product — moderation, ratings infrastructure, dispute handling — and doesn't advance the war-room mission. Curated read-only catalog is acceptable; community marketplace is out of scope.
 - **Agent versioning + rollback with A/B routing + canary deploys.** Partial fit — versioning + rollback aligns (developer-workflow). A/B routing + canary deploys overlaps with deployment platform territory.
 
 **Verdict:** Keep agent versioning + rollback (north-star aligned) on the active roadmap when it's the priority. Move everything else here.

@@ -1,10 +1,10 @@
 # ATO Roadmap
 
-## North star (re-centered 2026-05-14)
+## Mission
 
-**ATO is the place users go to view *everything* multi-LLM** — what ATO fires AND what the user fires themselves from any other CLI on the same machine. The product started life as an observatory; the war-rooms / mesh / orchestration layers are *one of* the things ATO does on top of that DNA, but the unifying frame is observability.
+**ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.** Drive it from a GUI, a CLI, or your coding agent over MCP — same data, same operations, same audit trail.
 
-When prioritising features, ask: *"does this strengthen ATO as the single pane of glass for the user's multi-LLM activity?"* Features that fragment the picture (silos, agent-specific dashboards that don't roll up) work against the north star. Features that ingest more signals (passive session observation, billing-surface tagging, cross-runtime regression comparison) reinforce it. v2.6 is the explicit refocus milestone.
+See [`README.md`](./README.md) for the full pitch and [`AGENTS.md`](./AGENTS.md) for the surface a coding agent reads.
 
 ## Released
 
@@ -270,9 +270,9 @@ Four bugs Will surfaced in the Insights panel; all four about the panel reportin
 
 Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
 
-### v2.6 — Universal multi-LLM observatory (Planned, next milestone)
+### v2.6 — Universal multi-LLM observation tier (Planned, next milestone)
 
-The explicit refocus on the observatory north star. Plan locked 2026-05-14; full doc at `/Users/beatriznigri/.claude/plans/peaceful-strolling-kay.md`.
+Passive observation of native CLI sessions (Claude Code, Codex CLI, etc.) plus billing-surface tagging on every dispatch — under the war-room mission, this is the layer that lets you see what every LLM ran on this machine, not just what ATO dispatched. Plan locked 2026-05-14; full doc at `/Users/beatriznigri/.claude/plans/peaceful-strolling-kay.md`.
 
 Three tiers of observation, plus an honest Tier 4 callout:
 
@@ -299,7 +299,7 @@ Load-bearing pieces:
 
 ### v3.0.0+ / v4.0.0+ / v5.0.0+ — Blue-sky
 
-Items that previously sat in this section (federated agent network, kubectl-for-agents, compliance bundles, marketplace for agent templates, etc.) have been moved to [`BLUE-SKY.md`](BLUE-SKY.md). They don't currently fit the north star (`ato-cloud/docs/STRATEGY.md`: *the developer-workflow operations platform for multi-runtime AI agents*). They live in the blue-sky doc so engineering decisions don't drift into them by accident; reconsider only when a north-star invalidation trigger fires.
+Items that previously sat in this section (federated agent network, kubectl-for-agents, compliance bundles, marketplace for agent templates, etc.) have been moved to [`BLUE-SKY.md`](BLUE-SKY.md). They don't currently fit the mission stated at the top of this file. They live in the blue-sky doc so engineering decisions don't drift into them by accident.
 
 ### v1.7.0–1.8.0 — Polish (Planned, fits between v1.6 and v2.0)
 - Cron-driven evaluator scheduling
