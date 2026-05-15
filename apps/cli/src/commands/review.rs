@@ -213,7 +213,58 @@ pub fn run(
     } else if !opts.human {
         emit_json(&transcript)?;
     }
+
+    // Auto-close the review session so the coordinator generates a
+    // title / summary / tags / project_id (same path as
+    // `ato sessions close <id>`). Without this, every review session
+    // shows up in the Sessions tab as `review/<short-id>` with no
+    // searchable text — which is exactly the bug the user reported on
+    // 2026-05-15 ("the 19:25:11 session has no summary; the 15:33:48
+    // one does"). Best-effort: a failed close (no turns, already
+    // closed, summarizer dispatch error) logs but does not fail the
+    // review itself — the review value is the transcript on disk, not
+    // the session metadata.
+    auto_close_review_session(&transcript.session_id, db_path, opts);
+
     Ok(())
+}
+
+/// Fire-and-log session close. Errors are mapped to warnings so a broken
+/// summarizer doesn't double-fail an otherwise-successful review.
+fn auto_close_review_session(session_id: &str, db_path: &PathBuf, opts: &Opts) {
+    let conn = match db::open_readwrite(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            if opts.human {
+                emit_human(&format!(
+                    "  warn: could not auto-close session ({}). Run `ato sessions close {}` manually.",
+                    e, session_id
+                ));
+            }
+            return;
+        }
+    };
+    match sessions::close(&conn, session_id, None, None, opts) {
+        Ok(()) => { /* sessions::close already emits its own confirmation. */ }
+        Err(e) => {
+            // Common non-fatal cases:
+            //   - "no turns" — reviewers all errored before any
+            //     assistant message landed (e.g. the 2026-05-15
+            //     decrypt-llm_api_keys failure).
+            //   - "already closed" — caller (or a prior `ato sessions
+            //     close`) beat us to it.
+            //   - summarizer dispatch failure — coordinator runtime is
+            //     misconfigured or offline.
+            // Log + continue. Manual fallback is one command away.
+            let msg = e.to_string();
+            if opts.human {
+                emit_human(&format!(
+                    "  warn: auto-close skipped — {}. Run `ato sessions close {}` after fixing.",
+                    msg, session_id
+                ));
+            }
+        }
+    }
 }
 
 /// Compute the base ref (default: merge base with origin/main, or

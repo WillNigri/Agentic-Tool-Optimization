@@ -30,19 +30,45 @@ fn master_key() -> Result<[u8; 32]> {
                 KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT
             )
         })?;
-    if let Ok(b64) = entry.get_password() {
-        return decode_key_b64(&b64);
+    // 2026-05-15 — CRITICAL FIX. Previous shape was:
+    //
+    //     if let Ok(b64) = entry.get_password() { ... }
+    //     else { generate_and_store_new_random_key() }
+    //
+    // That treated EVERY error from get_password() as "no key exists,
+    // generate a new one." But the keyring crate's error enum has
+    // multiple variants — NoEntry, NoStorageAccess, PlatformFailure,
+    // BadEncoding, TooLong, Invalid, Ambiguous — and treating them
+    // all as "missing" silently rotates the master key, orphaning
+    // every previously-encrypted llm_api_keys row. The user hit this
+    // when the keychain entry was overwritten on 2026-05-14, breaking
+    // decrypt of all keys stored earlier.
+    //
+    // Correct shape: ONLY NoEntry triggers a new-key generation.
+    // Anything else fails loud — better to surface "your keychain is
+    // locked / permission denied" than to silently destroy existing
+    // ciphertexts.
+    match entry.get_password() {
+        Ok(b64) => decode_key_b64(&b64),
+        Err(keyring::Error::NoEntry) => {
+            let mut new_key = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut new_key);
+            let b64 = general_purpose::STANDARD.encode(new_key);
+            entry
+                .set_password(&b64)
+                .context("keyring set_password (master key)")?;
+            let final_b64 = entry
+                .get_password()
+                .context("keyring get_password (master key, post-set)")?;
+            decode_key_b64(&final_b64)
+        }
+        Err(e) => Err(anyhow!(
+            "keyring get_password failed (NOT a missing-entry case — refusing to silently rotate the master key): {}. \
+             If your stored ciphertexts can't decrypt and you've confirmed the OS keychain entry was reset, \
+             re-enter your API keys via the desktop's API Keys panel.",
+            e
+        )),
     }
-    let mut new_key = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut new_key);
-    let b64 = general_purpose::STANDARD.encode(new_key);
-    entry
-        .set_password(&b64)
-        .context("keyring set_password (master key)")?;
-    let final_b64 = entry
-        .get_password()
-        .context("keyring get_password (master key, post-set)")?;
-    decode_key_b64(&final_b64)
 }
 
 fn decode_key_b64(b64: &str) -> Result<[u8; 32]> {

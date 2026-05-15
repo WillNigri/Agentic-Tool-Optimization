@@ -432,14 +432,43 @@ something>
 Missing section ⇒ rule skipped ⇒ skill failed ⇒ retroactive war-room
 required before next delivery moment.
 
-### 7. Cleanup
+### 7. Cleanup + close-with-summary
 
 ```bash
 rm -f /tmp/wr-cf1-$$.txt /tmp/wr-cf2-$$.txt
 ```
 
-The session stays open. Next decision in the same class reuses it via
-the `warroom/<slug>` title lookup so context compounds.
+**Close the session so it lands in the Sessions tab with a coordinator-
+generated title, summary, tags, and project_id.** Without this, every
+war-room session shows up as `warroom/<slug>` with no searchable text —
+which defeats the "I want to find that one architecture discussion from
+three weeks ago" use case and makes the post-merge audit trail useless.
+
+```bash
+ato sessions close "$SID" --human
+```
+
+The coordinator agent (whichever LLM is configured as the session's
+summarizer; defaults to the CEO runtime) reads the full transcript,
+generates the four fields, and persists them on the session row. A
+closed session can be reopened later with `ato sessions reopen "$SID"`
+and the next dispatch continues the conversation; the next close
+refreshes the summary with the added turns.
+
+Code paths that drive war-rooms in scripts (e.g. `ato review
+--consensus`) auto-close on success as of 2026-05-15 — verify by
+checking that the Sessions tab row shows a real title instead of
+`review/<short-id>`. If your custom dispatch script bypasses
+`ato review`, call `ato sessions close` explicitly at the end. The
+auto-close is best-effort: if the close fails (no turns landed,
+already closed, summarizer dispatch error), the review still
+succeeds and surfaces a warning telling you to retry the close
+manually.
+
+If you intentionally want to keep the session OPEN (rare — e.g.
+you're in the middle of a multi-day decision and tomorrow's turn
+will continue the same conversation), skip the close. Closing then
+reopening is the only path that overwrites a prior summary.
 
 ## Anti-patterns
 

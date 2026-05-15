@@ -16,10 +16,11 @@
 //     base64-decoded). usage_count + last_used columns updated on
 //     successful dispatch so the GUI's "API Keys" panel reflects use.
 
-use base64::Engine as _;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::time::Duration;
+
+use crate::encryption;
 
 // v2.3.28 Phase 6.x-E — ApiProvider + registry live in the shared
 // `ato-api-providers` crate. Re-exported so the rest of this file
@@ -58,10 +59,14 @@ pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<Stri
             provider.slug, provider.env_var,
         )
     })?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encrypted.as_bytes())
-        .map_err(|e| format!("decode llm_api_keys.encrypted_key: {}", e))?;
-    let key = String::from_utf8(bytes).map_err(|e| format!("decoded key not UTF-8: {}", e))?;
+    // 2026-05-15 fix (codex review finding): the prior code base64-
+    // decoded `encrypted_key` directly, which only works for legacy
+    // plain-base64 rows. v1: AES-256-GCM rows (the migration-018-era
+    // default since the H1 security audit) need to route through the
+    // encryption module. Stale path missed in the H1 audit follow-up;
+    // the CLI mirror (apps/cli/src/api_dispatch.rs) already routes
+    // through encryption::decrypt — desktop was the orphan.
+    let key = encryption::decrypt(&encrypted).map_err(|e| e.to_string())?;
     // Touch last_used + usage_count so the API Keys panel's "0 uses"
     // counter increments when the GUI dispatches. Best-effort.
     let now = chrono::Utc::now().to_rfc3339();
