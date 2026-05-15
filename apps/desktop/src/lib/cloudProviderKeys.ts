@@ -175,3 +175,39 @@ export async function revokeProviderKey(
   });
   return unwrap<{ id: string; revokedAt: string }>(resp);
 }
+
+// ─── Provider priority votes (v2.6 PR-D-lite) ────────────────────────
+//
+// Demand-capture signal for cloud-side polling of the 6 gap providers
+// (balance-only + no-aggregate categories in PROVIDER_CATALOG). One
+// vote per (user, provider); idempotent on re-vote. Backed by
+// /api/provider-priority-votes on ato-cloud.
+
+export interface ProviderPriorityVote {
+  provider: ProviderSlug;
+  votedAt: string;
+}
+
+export async function listProviderPriorityVotes(
+  accessToken: string | null
+): Promise<ProviderPriorityVote[]> {
+  const resp = await fetch(`${CLOUD_API_URL}/api/provider-priority-votes`, {
+    method: "GET",
+    headers: authHeader(accessToken),
+  });
+  return unwrap<ProviderPriorityVote[]>(resp);
+}
+
+export async function voteProviderPriority(
+  accessToken: string | null,
+  provider: ProviderSlug
+): Promise<ProviderPriorityVote> {
+  const resp = await fetch(
+    `${CLOUD_API_URL}/api/provider-priority-votes/${provider}`,
+    {
+      method: "POST",
+      headers: authHeader(accessToken),
+    }
+  );
+  return unwrap<ProviderPriorityVote>(resp);
+}

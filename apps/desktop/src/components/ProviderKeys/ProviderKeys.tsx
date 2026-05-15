@@ -14,11 +14,14 @@ import {
   Eye,
   EyeOff,
   Shield,
+  ThumbsUp,
 } from "lucide-react";
 import {
   listProviderKeys,
   createProviderKey,
   revokeProviderKey,
+  listProviderPriorityVotes,
+  voteProviderPriority,
   PROVIDER_CATALOG,
   type ProviderKey,
   type ProviderSlug,
@@ -60,10 +63,31 @@ function ProviderKeysEditor() {
     enabled: !!accessToken,
   });
 
+  // Votes are a separate fetch; the page renders without waiting on them.
+  // Empty fallback if the endpoint isn't deployed yet means the vote
+  // button just doesn't appear (graceful degradation).
+  const { data: votes = [] } = useQuery({
+    queryKey: ["provider-priority-votes"],
+    queryFn: () => listProviderPriorityVotes(accessToken),
+    staleTime: 30_000,
+    enabled: !!accessToken,
+    // If the endpoint 404s on an older cloud build, fall through to
+    // an empty list instead of breaking the page.
+    retry: false,
+  });
+  const votedProviders = new Set(votes.map((v) => v.provider));
+
   const revokeMutation = useMutation({
     mutationFn: (id: string) => revokeProviderKey(accessToken, id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-keys"] });
+    },
+  });
+
+  const voteMutation = useMutation({
+    mutationFn: (provider: ProviderSlug) => voteProviderPriority(accessToken, provider),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider-priority-votes"] });
     },
   });
 
@@ -140,6 +164,11 @@ function ProviderKeysEditor() {
                     isRevoking={
                       revokeMutation.isPending && revokeMutation.variables === key.id
                     }
+                    hasVoted={votedProviders.has(key.provider)}
+                    onVote={() => voteMutation.mutate(key.provider)}
+                    isVoting={
+                      voteMutation.isPending && voteMutation.variables === key.provider
+                    }
                   />
                 ))}
               </ul>
@@ -153,7 +182,15 @@ function ProviderKeysEditor() {
               </h4>
               <ul className="space-y-2 opacity-60">
                 {revokedKeys.map((key) => (
-                  <ProviderKeyRow key={key.id} keyRow={key} onRevoke={null} isRevoking={false} />
+                  <ProviderKeyRow
+                    key={key.id}
+                    keyRow={key}
+                    onRevoke={null}
+                    isRevoking={false}
+                    hasVoted={votedProviders.has(key.provider)}
+                    onVote={null}
+                    isVoting={false}
+                  />
                 ))}
               </ul>
             </section>
@@ -374,12 +411,29 @@ interface RowProps {
   keyRow: ProviderKey;
   onRevoke: (() => void) | null;
   isRevoking: boolean;
+  hasVoted: boolean;
+  onVote: (() => void) | null;
+  isVoting: boolean;
 }
 
-function ProviderKeyRow({ keyRow, onRevoke, isRevoking }: RowProps) {
+function ProviderKeyRow({
+  keyRow,
+  onRevoke,
+  isRevoking,
+  hasVoted,
+  onVote,
+  isVoting,
+}: RowProps) {
   const { t } = useTranslation();
   const catalog = PROVIDER_CATALOG.find((p) => p.slug === keyRow.provider);
   const isRevoked = !!keyRow.revokedAt;
+  // Vote affordance applies to providers that aren't poll-viable today:
+  // balance-only + no-aggregate. Renders next to the status badge.
+  const showVoteCta =
+    !isRevoked &&
+    !!catalog &&
+    catalog.pollStatus !== "viable" &&
+    !!onVote;
 
   return (
     <li className="flex items-center gap-3 rounded-md border border-cs-border/40 bg-cs-bg2/30 px-3 py-2.5">
@@ -393,9 +447,36 @@ function ProviderKeyRow({ keyRow, onRevoke, isRevoking }: RowProps) {
           ) : null}
           <code className="text-[11px] font-mono text-cs-muted/70">{keyRow.keyPrefix}</code>
         </div>
-        <div className="mt-1 flex items-center gap-3 text-[11px] text-cs-muted">
+        <div className="mt-1 flex items-center gap-3 flex-wrap text-[11px] text-cs-muted">
           <StatusBadge status={keyRow.lastPollStatus} isRevoked={isRevoked} />
           <LastPolledHint lastPolledAt={keyRow.lastPolledAt} isRevoked={isRevoked} />
+          {showVoteCta ? (
+            hasVoted ? (
+              <span className="inline-flex items-center gap-1 text-cs-accent/80">
+                <ThumbsUp size={11} />
+                {t("providerKeys.voted", "Voted")}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={onVote}
+                disabled={isVoting}
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-cs-accent hover:bg-cs-accent/10 disabled:opacity-50"
+                aria-label={t(
+                  "providerKeys.voteAria",
+                  "Vote to prioritize {{provider}} support",
+                  { provider: catalog?.displayName ?? keyRow.provider }
+                )}
+              >
+                {isVoting ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <ThumbsUp size={11} />
+                )}
+                {t("providerKeys.voteCta", "Vote to prioritize")}
+              </button>
+            )
+          ) : null}
         </div>
       </div>
       {onRevoke ? (
