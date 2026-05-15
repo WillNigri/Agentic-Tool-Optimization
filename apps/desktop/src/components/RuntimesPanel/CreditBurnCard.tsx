@@ -190,7 +190,7 @@ export default function CreditBurnCard() {
                     {(r.tokensIn + r.tokensOut).toLocaleString()}
                   </td>
                   <td className="py-1.5 pl-3 text-right font-medium text-cs-text">
-                    {formatUsd(r.costUsdEstimated)}
+                    <RowCost row={r} />
                   </td>
                 </tr>
               ))}
@@ -206,6 +206,37 @@ export default function CreditBurnCard() {
         </>
       )}
     </section>
+  );
+}
+
+/** Distinguish "$0 because the model is unpriced in our table" from
+ *  "$0 because there was no work this period." The Rust aggregator
+ *  COALESCEs NULL cost_usd_estimated to 0, so a row with tokens > 0
+ *  but cost = 0 means at least some dispatches used a model that
+ *  `pricing_for_model` returned None for. Render an em dash with a
+ *  hover hint pointing at the fix (add the model to pricing.ts) — much
+ *  more honest than reporting "$0.00" on an actually-billed Gemini /
+ *  GPT-5 / o3 / etc. session. (2026-05-15 user bug report; pricing.ts
+ *  has an `isModelPriced` helper for future per-row use when the
+ *  aggregator surfaces the model name.) */
+function RowCost({ row }: { row: RuntimeCostRow }) {
+  if (row.costUsdEstimated > 0) {
+    return <>{formatUsd(row.costUsdEstimated)}</>;
+  }
+  const totalTokens = row.tokensIn + row.tokensOut;
+  if (totalTokens === 0) {
+    // Genuinely nothing happened in this slice.
+    return <>{formatUsd(0)}</>;
+  }
+  // Tokens but no priced cost → some/all dispatches used a model not in
+  // pricing.ts. Surface the gap rather than imply "$0 for 2.5M tokens."
+  return (
+    <span
+      className="text-cs-muted italic cursor-help"
+      title="At least one dispatch used a model not in our pricing table — actual cost is non-zero but unknown to ATO. Add the model to apps/desktop/src/lib/pricing.ts (and the Rust mirror in apps/desktop/src-tauri/src/commands.rs::pricing_for_model) to make this row priced."
+    >
+      —
+    </span>
   );
 }
 
