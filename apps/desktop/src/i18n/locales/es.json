@@ -59,6 +59,7 @@
     "cloudAuth": "Cuenta",
     "cloudTeams": "Equipos",
     "cloudSync": "Sincronizacion",
+    "cloudProviderKeys": "Claves de proveedor",
     "cloudNotifications": "Notificaciones"
   },
   "sidebar": {
@@ -800,6 +801,64 @@
       "wakeFromSleep": "Despierta del sueno en macOS, Linux y Windows — los jobs se disparan aunque ATO este cerrado.",
       "closeBuildBundle": "Construye los agentes. Agrupalos en un flujo. Ejecuta a demanda o con un agendamiento.",
       "closeBranding": "ATO. Local-first. Licencia MIT. agentictool.ai"
+    }
+  },
+  "providerKeys": {
+    "title": "Claves de proveedor",
+    "intro": "Registra claves de API para los proveedores que usas. El poller en la nube obtiene tu uso diario para que la pestana Uso muestre totales autoritativos — incluyendo actividad de apps moviles y UIs web que el watcher local no ve. Las claves se cifran en reposo con AES-256-GCM y AAD por usuario; el texto plano solo viaja en el registro y nunca se devuelve.",
+    "addButton": "Agregar una clave",
+    "activeSection": "Activas",
+    "revokedSection": "Revocadas",
+    "empty": "Aun no hay claves de proveedor. Agrega una arriba para empezar a rastrear el uso entre dispositivos.",
+    "loadError": "No se pudieron cargar tus claves de proveedor.",
+    "providerLabel": "Proveedor",
+    "labelLabel": "Etiqueta",
+    "labelOptional": "(opcional)",
+    "labelPlaceholder": "ej. trabajo, personal",
+    "keyLabel": "Clave de API",
+    "keyPlaceholder": "Pega la clave — se cifra del lado del servidor y nunca se muestra de vuelta.",
+    "keyRequired": "Pega la clave de API primero.",
+    "submitButton": "Registrar clave",
+    "cancelButton": "Cancelar",
+    "confirmRevoke": "Revocar esta clave? El cron dejara de consultarla, pero la fila de auditoria queda para forense.",
+    "revokeAria": "Revocar clave",
+    "findKeyLink": "Obtener una clave",
+    "voteCta": "Votar para priorizar",
+    "voted": "Votado",
+    "voteAria": "Votar para priorizar el soporte de {{provider}}",
+    "providerNote": {
+      "viable": "El cron diario consulta la API de uso de este proveedor y escribe los totales autoritativos en tu panel.",
+      "balanceOnly": "{{provider}} solo expone un endpoint de saldo, no agregados historicos. La clave queda guardada para cuando llegue la ruta de captura del lado del cliente (PR-D, funcionalidad Pro). Hasta entonces tu panel no muestra filas para este proveedor.",
+      "noAggregate": "{{provider}} no expone un endpoint de uso agregado para terceros. La clave queda guardada para cuando llegue la ruta de captura del lado del cliente (PR-D, funcionalidad Pro). Hasta entonces tu panel no muestra filas para este proveedor."
+    },
+    "status": {
+      "ok": "Consulta OK",
+      "authFailed": "Fallo de autenticacion",
+      "rateLimited": "Limite de tasa alcanzado",
+      "providerError": "Error del proveedor",
+      "unsupported": "Esperando captura en el cliente",
+      "timeout": "Tiempo agotado",
+      "revoked": "Revocada",
+      "pending": "Esperando primera consulta"
+    },
+    "lastPolled": {
+      "days": "consultada hace {{n}}d",
+      "hours": "consultada hace {{n}}h",
+      "recent": "consultada hace <1h"
+    }
+  },
+  "insights": {
+    "cost": {
+      "groupByCloudProvider": "Por proveedor en la nube",
+      "cloudProviderLoading": "Cargando uso reportado por el proveedor…",
+      "cloudProviderEmpty": "Aun no hay datos consultados en la nube",
+      "cloudProviderBadge": "reportado por el proveedor",
+      "partialWindow": "{{polled}}/{{requested}} dias consultados",
+      "daysShort": "dias consultados",
+      "requests": "Solicitudes",
+      "tokensIn": "Tokens entrada",
+      "tokensOut": "Tokens salida",
+      "spend": "Gasto"
     }
   }
 }

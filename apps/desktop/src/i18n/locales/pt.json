@@ -59,6 +59,7 @@
     "cloudAuth": "Conta",
     "cloudTeams": "Times",
     "cloudSync": "Sincronizacao",
+    "cloudProviderKeys": "Chaves de provedor",
     "cloudNotifications": "Notificacoes"
   },
   "sidebar": {
@@ -829,6 +830,64 @@
       "wakeFromSleep": "Acorda da suspensao no macOS, Linux e Windows — os jobs disparam mesmo com o ATO fechado.",
       "closeBuildBundle": "Construa os agentes. Agrupe-os em um fluxo. Rode sob demanda ou no agendamento.",
       "closeBranding": "ATO. Local-first. Licenca MIT. agentictool.ai"
+    }
+  },
+  "providerKeys": {
+    "title": "Chaves de provedor",
+    "intro": "Cadastre chaves de API dos provedores que voce usa. O poller na nuvem busca o uso diario para que a aba Uso mostre totais autoritativos — incluindo atividade de apps mobile e UIs web que o watcher local nao ve. As chaves sao criptografadas em repouso com AES-256-GCM e AAD por usuario; o texto puro so trafega no cadastro e nunca e devolvido.",
+    "addButton": "Adicionar uma chave",
+    "activeSection": "Ativas",
+    "revokedSection": "Revogadas",
+    "empty": "Nenhuma chave de provedor ainda. Adicione uma acima para comecar a rastrear uso entre dispositivos.",
+    "loadError": "Nao foi possivel carregar suas chaves de provedor.",
+    "providerLabel": "Provedor",
+    "labelLabel": "Rotulo",
+    "labelOptional": "(opcional)",
+    "labelPlaceholder": "ex. trabalho, pessoal",
+    "keyLabel": "Chave de API",
+    "keyPlaceholder": "Cole a chave — ela e criptografada no servidor e nunca aparece de volta.",
+    "keyRequired": "Cole a chave de API primeiro.",
+    "submitButton": "Cadastrar chave",
+    "cancelButton": "Cancelar",
+    "confirmRevoke": "Revogar esta chave? O cron deixa de consultar essa chave, mas a linha de auditoria permanece para forense.",
+    "revokeAria": "Revogar chave",
+    "findKeyLink": "Obter uma chave",
+    "voteCta": "Votar para priorizar",
+    "voted": "Votado",
+    "voteAria": "Votar para priorizar suporte ao {{provider}}",
+    "providerNote": {
+      "viable": "O cron diario consulta a API de uso deste provedor e grava os totais autoritativos no seu painel.",
+      "balanceOnly": "O {{provider}} so expoe um endpoint de saldo, sem agregados historicos. A chave fica guardada para quando o caminho de captura do lado do cliente (PR-D, recurso Pro) for entregue. Ate la o seu painel nao mostra linhas para este provedor.",
+      "noAggregate": "O {{provider}} nao expoe um endpoint de uso agregado para terceiros. A chave fica guardada para quando o caminho de captura do lado do cliente (PR-D, recurso Pro) for entregue. Ate la o seu painel nao mostra linhas para este provedor."
+    },
+    "status": {
+      "ok": "Consulta OK",
+      "authFailed": "Falha de autenticacao",
+      "rateLimited": "Limite de taxa atingido",
+      "providerError": "Erro do provedor",
+      "unsupported": "Aguardando captura no cliente",
+      "timeout": "Tempo esgotado",
+      "revoked": "Revogada",
+      "pending": "Aguardando primeira consulta"
+    },
+    "lastPolled": {
+      "days": "consultada ha {{n}}d",
+      "hours": "consultada ha {{n}}h",
+      "recent": "consultada ha <1h"
+    }
+  },
+  "insights": {
+    "cost": {
+      "groupByCloudProvider": "Por provedor na nuvem",
+      "cloudProviderLoading": "Carregando uso reportado pelo provedor…",
+      "cloudProviderEmpty": "Sem dados consultados na nuvem ainda",
+      "cloudProviderBadge": "reportado pelo provedor",
+      "partialWindow": "{{polled}}/{{requested}} dias consultados",
+      "daysShort": "dias consultados",
+      "requests": "Requisicoes",
+      "tokensIn": "Tokens entrada",
+      "tokensOut": "Tokens saida",
+      "spend": "Gasto"
     }
   }
 }
