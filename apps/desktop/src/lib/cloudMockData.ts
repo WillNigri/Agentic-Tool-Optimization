@@ -445,27 +445,35 @@ export const MOCK_PROVIDER_USAGE: ProviderUsageRow[] = [
   },
 ];
 
+// Dates are derived from NOW (defined at the top of this file) so the
+// timeline always reflects "the last 7 days ending today" no matter
+// when the mock mode is exercised. Avoids the future-dated-fixture
+// trap where queries like `WHERE date <= now()` silently include rows
+// that shouldn't exist yet. (Review fixup: MiniMax #4.)
+function daysAgoUtcDateString(n: number): string {
+  return new Date(NOW - n * 24 * HOUR).toISOString().slice(0, 10);
+}
 export const MOCK_PROVIDER_USAGE_TIMELINE: Record<
   string,
   ProviderUsageTimelinePoint[]
 > = {
   openai: [
-    { date: "2026-05-08", requests: 41, tokens_in: 72_500, tokens_out: 13_840, cost_usd: 0.49 },
-    { date: "2026-05-09", requests: 53, tokens_in: 89_120, tokens_out: 16_410, cost_usd: 0.61 },
-    { date: "2026-05-10", requests: 38, tokens_in: 67_900, tokens_out: 12_220, cost_usd: 0.45 },
-    { date: "2026-05-11", requests: 47, tokens_in: 81_400, tokens_out: 15_010, cost_usd: 0.55 },
-    { date: "2026-05-12", requests: 61, tokens_in: 102_300, tokens_out: 19_080, cost_usd: 0.70 },
-    { date: "2026-05-13", requests: 52, tokens_in: 88_750, tokens_out: 16_290, cost_usd: 0.59 },
-    { date: "2026-05-14", requests: 49, tokens_in: 83_220, tokens_out: 15_410, cost_usd: 0.56 },
+    { date: daysAgoUtcDateString(6), requests: 41, tokens_in: 72_500, tokens_out: 13_840, cost_usd: 0.49 },
+    { date: daysAgoUtcDateString(5), requests: 53, tokens_in: 89_120, tokens_out: 16_410, cost_usd: 0.61 },
+    { date: daysAgoUtcDateString(4), requests: 38, tokens_in: 67_900, tokens_out: 12_220, cost_usd: 0.45 },
+    { date: daysAgoUtcDateString(3), requests: 47, tokens_in: 81_400, tokens_out: 15_010, cost_usd: 0.55 },
+    { date: daysAgoUtcDateString(2), requests: 61, tokens_in: 102_300, tokens_out: 19_080, cost_usd: 0.70 },
+    { date: daysAgoUtcDateString(1), requests: 52, tokens_in: 88_750, tokens_out: 16_290, cost_usd: 0.59 },
+    { date: daysAgoUtcDateString(0), requests: 49, tokens_in: 83_220, tokens_out: 15_410, cost_usd: 0.56 },
   ],
   anthropic_org: [
-    { date: "2026-05-08", requests: 11, tokens_in: 28_900, tokens_out: 5_120, cost_usd: 0.27 },
-    { date: "2026-05-09", requests: 14, tokens_in: 35_440, tokens_out: 6_410, cost_usd: 0.33 },
-    { date: "2026-05-10", requests: 9, tokens_in: 22_100, tokens_out: 3_980, cost_usd: 0.21 },
-    { date: "2026-05-11", requests: 13, tokens_in: 32_780, tokens_out: 5_870, cost_usd: 0.31 },
-    { date: "2026-05-12", requests: 17, tokens_in: 41_320, tokens_out: 7_650, cost_usd: 0.39 },
-    { date: "2026-05-13", requests: 12, tokens_in: 30_510, tokens_out: 5_510, cost_usd: 0.29 },
-    { date: "2026-05-14", requests: 15, tokens_in: 37_220, tokens_out: 6_770, cost_usd: 0.35 },
+    { date: daysAgoUtcDateString(6), requests: 11, tokens_in: 28_900, tokens_out: 5_120, cost_usd: 0.27 },
+    { date: daysAgoUtcDateString(5), requests: 14, tokens_in: 35_440, tokens_out: 6_410, cost_usd: 0.33 },
+    { date: daysAgoUtcDateString(4), requests: 9, tokens_in: 22_100, tokens_out: 3_980, cost_usd: 0.21 },
+    { date: daysAgoUtcDateString(3), requests: 13, tokens_in: 32_780, tokens_out: 5_870, cost_usd: 0.31 },
+    { date: daysAgoUtcDateString(2), requests: 17, tokens_in: 41_320, tokens_out: 7_650, cost_usd: 0.39 },
+    { date: daysAgoUtcDateString(1), requests: 12, tokens_in: 30_510, tokens_out: 5_510, cost_usd: 0.29 },
+    { date: daysAgoUtcDateString(0), requests: 15, tokens_in: 37_220, tokens_out: 6_770, cost_usd: 0.35 },
   ],
 };
 

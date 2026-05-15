@@ -362,6 +362,20 @@ export default function CostBenchmarksPanel() {
             <Loader2 size={16} className="animate-spin mr-2" />
             {t("insights.cost.cloudProviderLoading", "Loading cloud-reported usage…")}
           </div>
+        ) : cloudProviderQuery.isError ? (
+          // Network / 5xx must NOT silently fall through to the empty
+          // state — that would make a real failure indistinguishable
+          // from "no data yet" (review fixup: MiniMax #1).
+          <div className="flex items-start gap-2 rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+            <AlertCircle size={14} className="text-cs-danger shrink-0 mt-0.5" />
+            <span>
+              {t(
+                "insights.cost.cloudProviderError",
+                "Couldn't load cloud-reported usage",
+              )}
+              : {String(cloudProviderQuery.error)}
+            </span>
+          </div>
         ) : (cloudProviderQuery.data?.rows ?? []).length === 0 ? (
           <Empty
             icon={<Cloud size={20} />}
@@ -374,7 +388,7 @@ export default function CostBenchmarksPanel() {
         ) : (
           <ul className="space-y-1.5">
             {(cloudProviderQuery.data?.rows ?? []).map((r) => (
-              <CloudProviderRow key={r.provider} row={r} />
+              <CloudProviderRow key={r.provider} row={r} requestedDays={days} />
             ))}
           </ul>
         )
@@ -555,12 +569,24 @@ function SurfaceRow({ row }: { row: BillingSurfaceRow }) {
 //   2. Cost is per-token where the provider returns it; null where it
 //      doesn't (OpenAI's /v1/usage doesn't include cost; rendered as
 //      "—" with a tooltip).
-function CloudProviderRow({ row }: { row: ProviderUsageRow }) {
+function CloudProviderRow({
+  row,
+  requestedDays,
+}: {
+  row: ProviderUsageRow;
+  requestedDays: number;
+}) {
   const { t } = useTranslation();
-  const cost = row.total_cost_usd === null ? null : asNumber(row.total_cost_usd);
-  const requests = asNumber(row.total_requests);
-  const tokensIn = asNumber(row.total_tokens_in);
-  const tokensOut = asNumber(row.total_tokens_out);
+  // Mirror the cost-null guard for tokens/requests too. The TypeScript
+  // interface says number | string but PG decimal serialization and
+  // future provider-adapter regressions could legitimately produce
+  // null — rendering "0" would silently mislead. (Review fixup:
+  // MiniMax #2.)
+  const cost = row.total_cost_usd == null ? null : asNumber(row.total_cost_usd);
+  const requests = row.total_requests == null ? null : asNumber(row.total_requests);
+  const tokensIn = row.total_tokens_in == null ? null : asNumber(row.total_tokens_in);
+  const tokensOut = row.total_tokens_out == null ? null : asNumber(row.total_tokens_out);
+  const partialWindow = row.rows_polled > 0 && row.rows_polled < requestedDays;
   return (
     <li className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3">
       <div className="flex items-center gap-2 flex-wrap">
@@ -577,22 +603,41 @@ function CloudProviderRow({ row }: { row: ProviderUsageRow }) {
         >
           {t("insights.cost.cloudProviderBadge", "provider-reported")}
         </span>
-        <span className="ml-auto font-mono text-cs-muted text-[10px]">
-          {row.rows_polled} {t("insights.cost.daysShort", "days polled")}
+        <span
+          className={cn(
+            "ml-auto font-mono text-[10px]",
+            partialWindow ? "text-cs-warning" : "text-cs-muted",
+          )}
+          title={
+            partialWindow
+              ? t(
+                  "insights.cost.partialWindowTitle",
+                  "Only {{polled}} of the requested {{requested}} days have been polled — provider key added recently, or the cron missed runs during an outage.",
+                  { polled: row.rows_polled, requested: requestedDays },
+                )
+              : undefined
+          }
+        >
+          {partialWindow
+            ? t("insights.cost.partialWindow", "{{polled}}/{{requested}} days polled", {
+                polled: row.rows_polled,
+                requested: requestedDays,
+              })
+            : `${row.rows_polled} ${t("insights.cost.daysShort", "days polled")}`}
         </span>
       </div>
       <div className="mt-2 grid grid-cols-4 gap-2 text-[11px]">
         <Stat
           label={t("insights.cost.requests", "Requests")}
-          value={requests.toLocaleString()}
+          value={requests === null ? "—" : requests.toLocaleString()}
         />
         <Stat
           label={t("insights.cost.tokensIn", "Tokens in")}
-          value={tokensIn.toLocaleString()}
+          value={tokensIn === null ? "—" : tokensIn.toLocaleString()}
         />
         <Stat
           label={t("insights.cost.tokensOut", "Tokens out")}
-          value={tokensOut.toLocaleString()}
+          value={tokensOut === null ? "—" : tokensOut.toLocaleString()}
         />
         {cost === null ? (
           <Stat
