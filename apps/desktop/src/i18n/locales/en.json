@@ -66,6 +66,7 @@
     "cloudAuth": "Account",
     "cloudTeams": "Teams",
     "cloudSync": "Sync",
+    "cloudProviderKeys": "Provider Keys",
     "cloudNotifications": "Notifications"
   },
   "sidebar": {
@@ -1016,6 +1017,64 @@
       "wakeFromSleep": "Wake-from-sleep on macOS, Linux, and Windows — jobs fire even when ATO is closed.",
       "closeBuildBundle": "Build the agents. Bundle them into a workflow. Run on demand or on a schedule.",
       "closeBranding": "ATO. Local-first. MIT licensed. agentictool.ai"
+    }
+  },
+  "providerKeys": {
+    "title": "Provider Keys",
+    "intro": "Register API keys for the providers you use. The cloud poller fetches your daily usage so the Usage tab shows authoritative totals — including activity from phone apps and web UIs the local watcher can't see. Keys are encrypted at rest under AES-256-GCM with per-user AAD; the plaintext is sent only on registration and never returned.",
+    "addButton": "Add a provider key",
+    "activeSection": "Active",
+    "revokedSection": "Revoked",
+    "empty": "No provider keys yet. Add one above to start tracking cross-device usage.",
+    "loadError": "Couldn't load your provider keys.",
+    "providerLabel": "Provider",
+    "labelLabel": "Label",
+    "labelOptional": "(optional)",
+    "labelPlaceholder": "e.g. work, personal",
+    "keyLabel": "API key",
+    "keyPlaceholder": "Paste the key — it's encrypted server-side and never echoed back.",
+    "keyRequired": "Paste the API key first.",
+    "submitButton": "Register key",
+    "cancelButton": "Cancel",
+    "confirmRevoke": "Revoke this key? The cron will stop polling it, but its audit row stays for forensics.",
+    "revokeAria": "Revoke key",
+    "findKeyLink": "Get a key",
+    "voteCta": "Vote to prioritize",
+    "voted": "Voted",
+    "voteAria": "Vote to prioritize {{provider}} support",
+    "providerNote": {
+      "viable": "Daily cron polls this provider's usage API and writes authoritative totals to your dashboard.",
+      "balanceOnly": "{{provider}} only exposes a balance endpoint, not historical aggregates. The key is stored for when the upcoming client-side capture path (PR-D, Pro feature) lands. Your dashboard will show no rows for this provider until then.",
+      "noAggregate": "{{provider}} doesn't expose an aggregate usage endpoint to third parties. The key is stored for when the upcoming client-side capture path (PR-D, Pro feature) lands. Your dashboard will show no rows for this provider until then."
+    },
+    "status": {
+      "ok": "Polling OK",
+      "authFailed": "Auth failed",
+      "rateLimited": "Rate-limited",
+      "providerError": "Provider error",
+      "unsupported": "Awaiting client-capture path",
+      "timeout": "Timed out",
+      "revoked": "Revoked",
+      "pending": "Pending first poll"
+    },
+    "lastPolled": {
+      "days": "polled {{n}}d ago",
+      "hours": "polled {{n}}h ago",
+      "recent": "polled <1h ago"
+    }
+  },
+  "insights": {
+    "cost": {
+      "groupByCloudProvider": "By cloud provider",
+      "cloudProviderLoading": "Loading cloud-reported usage…",
+      "cloudProviderEmpty": "No cloud-polled data yet",
+      "cloudProviderBadge": "provider-reported",
+      "partialWindow": "{{polled}}/{{requested}} days polled",
+      "daysShort": "days polled",
+      "requests": "Requests",
+      "tokensIn": "Tokens in",
+      "tokensOut": "Tokens out",
+      "spend": "Spend"
     }
   }
 }
