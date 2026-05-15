@@ -71,6 +71,7 @@ pub fn create(
         system_prompt,
         project_id,
         /* write_runtime_file_too = */ true,
+        /* source_path = */ None,
         opts,
     )
 }
@@ -81,6 +82,15 @@ pub fn create(
 /// rich fields like `roster:` / `source_skill:` / `filter_framework:`
 /// aren't in our SQLite schema, and we shouldn't strip them when the
 /// user gave us the file as the source of truth).
+///
+/// `source_path` is the file the user actually pointed at (only set by
+/// the --from-file path). When set, it lands in `file_path` so the audit
+/// trail and the delete --also-remove-file resolution both point at the
+/// correct file. `runtime_visible` is true ONLY if that source path
+/// canonically matches the runtime's canonical path (codex review
+/// HIGH 9/10, 2026-05-15 — without this, importing /tmp/foo.md while
+/// ~/.claude/agents/foo.md already exists left the DB row pointing at
+/// the canonical file even though we imported from /tmp).
 fn create_inner(
     conn: &Connection,
     slug: &str,
@@ -91,6 +101,7 @@ fn create_inner(
     system_prompt: Option<String>,
     project_id: Option<String>,
     write_runtime_file_too: bool,
+    source_path: Option<PathBuf>,
     opts: &Opts,
 ) -> Result<()> {
     // Reject duplicates at the (runtime, slug) UNIQUE boundary the GUI
@@ -140,19 +151,25 @@ fn create_inner(
             }
         }
     } else {
-        // create_from_file path — the user owns the file. We record the
-        // canonical runtime-file path on the row if it exists on disk
-        // (so the GUI can locate it), but we never write it.
-        if let Some(path) = agent_file_path(runtime, slug) {
-            if path.exists() {
-                file_path_written = Some(path);
+        // create_from_file path — the user owns the file. Record the
+        // ACTUAL source path the user passed (canonicalized by the
+        // caller), not the canonical runtime path. Only mark
+        // `runtime_visible=true` when the source path IS the canonical
+        // runtime path (same inode / resolved path) — otherwise the
+        // runtime's native discovery won't see this agent, and lying
+        // about runtime_visible misleads the human + corrupts the
+        // delete --also-remove-file resolution. (codex review
+        // HIGH 9/10, 2026-05-15.)
+        match source_path {
+            Some(source) => {
+                let canonical = agent_file_path(runtime, slug)
+                    .and_then(|p| std::fs::canonicalize(&p).ok());
+                let is_canonical = matches!(&canonical, Some(c) if c == &source);
+                file_path_written = Some(source);
                 file_action = "registered".to_string();
-                true
-            } else {
-                false
+                is_canonical
             }
-        } else {
-            false
+            None => false,
         }
     };
 
@@ -697,17 +714,35 @@ pub fn parse_agent_file(path: &Path) -> Result<ParsedAgentFile> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("Failed to read agent file at {}", path.display()))?;
 
-    // Detect leading `---\n` (allow trailing whitespace on the marker line).
-    let (frontmatter_block, body) = split_frontmatter(&raw);
-
     let mut parsed = ParsedAgentFile::default();
 
-    if let Some(fm) = frontmatter_block {
-        parsed.slug = top_level_scalar(fm, "name");
-        parsed.display_name = top_level_scalar(fm, "display_name");
-        parsed.description = top_level_scalar(fm, "description");
-        parsed.model = top_level_scalar(fm, "model");
-    }
+    let body: &str = match split_frontmatter(&raw) {
+        FrontmatterState::Present(fm, body) => {
+            parsed.slug = top_level_scalar(fm, "name");
+            parsed.display_name = top_level_scalar(fm, "display_name");
+            parsed.description = top_level_scalar(fm, "description");
+            parsed.model = top_level_scalar(fm, "model");
+            body
+        }
+        FrontmatterState::Missing => {
+            // No `---` at the top — treat the whole file as persona body.
+            // Slug must come from CLI or filename stem.
+            &raw
+        }
+        FrontmatterState::Malformed => {
+            // Opened `---` but no closing fence found. Refuse rather than
+            // silently storing raw YAML as system_prompt — that's the
+            // exact silent-failure pattern the codex 2026-05-15 review
+            // (HIGH 9/10) flagged. Either fix the file or split slug +
+            // body via the explicit CLI flags.
+            return Err(anyhow!(
+                "Frontmatter is malformed in {}: file opens with `---` but no closing `---` was found. \
+                 Either fix the file (add a closing `---` line) or pass the persona via \
+                 `--slug` + `--system-prompt` directly instead of `--from-file`.",
+                path.display()
+            ));
+        }
+    };
 
     // Fall back to the filename stem when frontmatter has no `name:`.
     if parsed.slug.is_none() {
@@ -727,25 +762,44 @@ pub fn parse_agent_file(path: &Path) -> Result<ParsedAgentFile> {
     Ok(parsed)
 }
 
-/// Split a `---\n...\n---\n<body>` document into (frontmatter, body).
-/// Returns (None, full_text) when no frontmatter is present so the
-/// caller can still treat the whole file as a persona body.
-fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+/// Three possible outcomes when reading a persona file. Distinguishing
+/// "no frontmatter at all" from "frontmatter opened but never closed"
+/// is load-bearing for `--from-file`: the former is a legitimate
+/// body-only file; the latter is a typo / corruption that we MUST NOT
+/// silently treat as a giant system_prompt. (codex review finding
+/// HIGH 9/10, 2026-05-15.)
+pub enum FrontmatterState<'a> {
+    /// File contains no leading `---` fence. Whole text is body.
+    Missing,
+    /// File opened with `---` but no closing fence was found. The
+    /// caller should treat this as an error (silently importing
+    /// raw YAML as a persona produces a garbage agent).
+    Malformed,
+    /// Frontmatter parsed cleanly. `(yaml_block, body)`.
+    Present(&'a str, &'a str),
+}
+
+/// Split a `---\n...\n---\n<body>` document. See `FrontmatterState`.
+fn split_frontmatter(raw: &str) -> FrontmatterState<'_> {
     // Strip a leading BOM if present.
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
 
     // Require the file to start with `---` on its own line.
     if !raw.starts_with("---\n") && !raw.starts_with("---\r\n") {
-        return (None, raw);
+        return FrontmatterState::Missing;
     }
 
     // Skip past the opening fence.
     let after_open = match raw.find('\n') {
         Some(i) => &raw[i + 1..],
-        None => return (None, raw),
+        // Opened `---` with no newline after = malformed.
+        None => return FrontmatterState::Malformed,
     };
 
-    // Find the closing `---` on its own line.
+    // Find the closing `---` on its own line. Must match EXACTLY
+    // `---` after trim (rejects things like `--- # comment`, which
+    // YAML technically allows but our parser doesn't promise to
+    // handle correctly — failing loud beats producing a wrong slug).
     let mut closing_idx: Option<usize> = None;
     let mut cursor = 0;
     for line in after_open.split_inclusive('\n') {
@@ -766,9 +820,10 @@ fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
                 Some(i) => &after_close[i + 1..],
                 None => "",
             };
-            (Some(fm), body)
+            FrontmatterState::Present(fm, body)
         }
-        None => (None, raw),
+        // Opening fence found, no closing fence — malformed.
+        None => FrontmatterState::Malformed,
     }
 }
 
@@ -806,6 +861,14 @@ fn top_level_scalar(block: &str, key: &str) -> Option<String> {
 /// `ato agents create --from-file <path>` entry point. Parses the file,
 /// merges with CLI overrides, then calls into the existing `create()`.
 /// CLI overrides win on every field where the user supplied one.
+///
+/// Runtime restriction: --from-file currently only supports Claude-style
+/// agent files (single markdown file per agent, YAML frontmatter +
+/// body). Codex / Gemini / OpenClaw / Hermes use richer per-runtime
+/// formats (e.g. AGENTS.md sitting inside a slug-named directory) where
+/// the parser would derive bogus slugs from naïve filename-stem fallback.
+/// Codex 2026-05-15 review MED 8/10 — fail loud here rather than ship
+/// guessing.
 pub fn create_from_file(
     conn: &Connection,
     path: &Path,
@@ -818,6 +881,15 @@ pub fn create_from_file(
     project_id: Option<String>,
     opts: &Opts,
 ) -> Result<()> {
+    if runtime != "claude" {
+        return Err(anyhow!(
+            "--from-file currently supports only `--runtime claude` (single-file persona at ~/.claude/agents/<slug>.md). \
+             For runtime '{}', author the persona via `--slug` + `--system-prompt` directly. \
+             Per-runtime file-format support is on the roadmap.",
+            runtime
+        ));
+    }
+
     let parsed = parse_agent_file(path)?;
 
     let slug = slug_override
@@ -839,6 +911,12 @@ pub fn create_from_file(
         ));
     }
 
+    // Canonicalize the source path so the comparison with the runtime's
+    // canonical path is symlink-resilient. Falls back to the raw path on
+    // canonicalize failure (rare, but the user gets a more honest
+    // file_path field than std::fs::canonicalize panicking).
+    let source_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
     create_inner(
         conn,
         &slug,
@@ -849,6 +927,7 @@ pub fn create_from_file(
         system_prompt,
         project_id,
         /* write_runtime_file_too = */ false,
+        Some(source_path),
         opts,
     )
 }
@@ -949,9 +1028,11 @@ pub fn delete(
     also_remove_file: bool,
     opts: &Opts,
 ) -> Result<()> {
-    // Resolve the (slug, runtime) target before deleting so we can
-    // report cleanly. Disambiguation matches lookup_by_slug's policy:
-    // explicit runtime wins; otherwise the most-recently-used.
+    // Resolve the target. For DESTRUCTIVE ops we refuse to MRU-guess
+    // across runtimes — if the slug exists on multiple, the user must
+    // disambiguate with --runtime. Matches `update`'s policy and the
+    // codex 2026-05-15 review (HIGH 10/10): MRU-on-delete silently
+    // destroys the wrong row + (with --also-remove-file) the wrong file.
     let target: Option<(String, String)> = match runtime.as_ref() {
         Some(rt) => conn
             .query_row(
@@ -960,13 +1041,24 @@ pub fn delete(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?,
-        None => conn
-            .query_row(
-                "SELECT slug, runtime FROM agents WHERE slug = ?1 ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1",
-                [slug],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?,
+        None => {
+            // Count first; error if ambiguous.
+            let mut stmt = conn.prepare(
+                "SELECT runtime FROM agents WHERE slug = ?1 ORDER BY runtime",
+            )?;
+            let matches: Vec<String> = stmt
+                .query_map([slug], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            if matches.len() > 1 {
+                return Err(anyhow!(
+                    "Agent slug '{}' exists on multiple runtimes ({}). Pass `--runtime <name>` to disambiguate which one to delete.",
+                    slug,
+                    matches.join(", ")
+                ));
+            }
+            matches.into_iter().next().map(|rt| (slug.to_string(), rt))
+        }
     };
     let (resolved_slug, resolved_runtime) = match target {
         Some(t) => t,
