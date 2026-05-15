@@ -3603,27 +3603,41 @@ fn estimate_text_tokens(text: &str) -> i64 {
 }
 
 /// Per-million-token (input, output) USD pricing for known models.
-/// Mirror of PRICING_PER_M_TOKENS in pricing.ts; update both together.
+/// Mirror of PRICING_PER_M_TOKENS in apps/desktop/src/lib/pricing.ts;
+/// update both together.
 ///
-/// v2.3.6 — unused inside the runtime-CLI dispatch paths since the
-/// switch to NULL cost for subscription runs. Kept available for the
-/// future direct-API dispatch path + for ad-hoc callers (compare /
-/// replay panels that compute "if this were API, it would cost X").
-#[allow(dead_code)]
+/// Bug report 2026-05-15 (Will): Settings → Runtimes → Dispatch Cost
+/// showed $0.00 for 22 google API-key dispatches that AI Studio billed
+/// for ~R$8.57. Root cause: this match returned None for any 2.5-family
+/// Gemini model, dispatch path then stored cost_usd_estimated=NULL, and
+/// the SUM-COALESCE in get_credit_burn_summary turned NULL into $0.
+/// Fix: cover the current model lineup. Long-context (>200K) overage
+/// rates not modeled — we don't measure context size.
 fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
-        // Anthropic
+        // ── Anthropic ─────────────────────────────────────────────
         "claude-opus-4-7" => Some((15.0, 75.0)),
         "claude-opus-4-6" => Some((15.0, 75.0)),
         "claude-sonnet-4-6" => Some((3.0, 15.0)),
         "claude-sonnet-4-5" => Some((3.0, 15.0)),
+        "claude-haiku-4-5" => Some((1.0, 5.0)),
         "claude-haiku-4-5-20251001" => Some((1.0, 5.0)),
-        // OpenAI
-        "gpt-4.1" => Some((2.5, 10.0)),
+        // ── OpenAI ────────────────────────────────────────────────
+        "gpt-5" => Some((1.25, 10.0)),
+        "gpt-4.1" => Some((2.0, 8.0)),
+        "gpt-4.1-mini" => Some((0.4, 1.6)),
+        "gpt-4.1-nano" => Some((0.1, 0.4)),
         "gpt-4o" => Some((2.5, 10.0)),
         "gpt-4o-mini" => Some((0.15, 0.6)),
-        // Google
+        "o3" => Some((2.0, 8.0)),
+        "o3-mini" => Some((1.1, 4.4)),
+        // ── Google Gemini ─────────────────────────────────────────
+        "gemini-2.5-pro" => Some((1.25, 10.0)),
+        "gemini-2.5-flash" => Some((0.3, 2.5)),
+        "gemini-2.5-flash-lite" => Some((0.1, 0.4)),
         "gemini-2.0-flash" => Some((0.1, 0.4)),
+        "gemini-2.0-flash-lite" => Some((0.075, 0.3)),
+        "gemini-2.0-flash-exp" => Some((0.1, 0.4)),
         "gemini-1.5-pro" => Some((1.25, 5.0)),
         "gemini-1.5-flash" => Some((0.075, 0.3)),
         _ => None,
@@ -3639,7 +3653,7 @@ fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
     match runtime {
         "claude" => Some("claude-sonnet-4-6"),
         "codex" => Some("gpt-4.1"),
-        "gemini" => Some("gemini-2.0-flash"),
+        "gemini" => Some("gemini-2.5-flash"),
         _ => None,
     }
 }
