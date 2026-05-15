@@ -706,10 +706,19 @@ enum SkillsSub {
 #[derive(Subcommand, Debug)]
 enum AgentsSub {
     /// Create a new agent record
+    ///
+    /// Two shapes:
+    /// 1. Inline: `--slug <s> --runtime <r> --system-prompt <text>` (the historical form).
+    /// 2. From file: `--from-file <path> --runtime <r>` reads a Claude-Code-style
+    ///    agent file (`~/.claude/agents/<slug>.md` format: YAML frontmatter with
+    ///    `name:`/`display_name:`/`description:`/`model:` + body = system prompt).
+    ///    Any CLI flag overrides the matching field from the file. Slug falls
+    ///    back to the filename stem when frontmatter has no `name:`.
     Create {
-        /// Unique slug (per-runtime)
+        /// Unique slug (per-runtime). Optional when `--from-file` is set
+        /// AND the file's frontmatter has `name:` OR the filename stem is acceptable.
         #[arg(long)]
-        slug: String,
+        slug: Option<String>,
         /// Runtime: claude, codex, gemini, openclaw, hermes, ollama
         #[arg(long)]
         runtime: String,
@@ -722,12 +731,40 @@ enum AgentsSub {
         /// Model override (e.g. claude-sonnet-4-6)
         #[arg(long)]
         model: Option<String>,
-        /// System prompt
+        /// System prompt. Optional when `--from-file` is set and the file
+        /// has a body after its frontmatter.
         #[arg(long = "system-prompt")]
         system_prompt: Option<String>,
         /// Optional project ID to scope the agent to
         #[arg(long = "project-id")]
         project_id: Option<String>,
+        /// Read agent fields from a Claude-Code-style markdown file
+        /// (YAML frontmatter + body). CLI flags override file values.
+        #[arg(long = "from-file")]
+        from_file: Option<PathBuf>,
+    },
+    /// List registered agents, optionally filtered by runtime or project
+    List {
+        /// Filter by runtime
+        #[arg(long)]
+        runtime: Option<String>,
+        /// Filter by project ID
+        #[arg(long = "project-id")]
+        project_id: Option<String>,
+    },
+    /// Delete an agent record
+    Delete {
+        /// Slug of the agent to delete
+        #[arg(long)]
+        slug: String,
+        /// Disambiguate when the same slug exists on multiple runtimes;
+        /// without this, the most-recently-used row wins
+        #[arg(long)]
+        runtime: Option<String>,
+        /// Also remove the per-runtime config file (e.g. ~/.claude/agents/<slug>.md).
+        /// Off by default — files are often checked into git or shared.
+        #[arg(long = "also-remove-file")]
+        also_remove_file: bool,
     },
     /// Update an existing agent's editable fields
     Update {
@@ -1257,15 +1294,59 @@ fn main() -> Result<()> {
                     model,
                     system_prompt,
                     project_id,
-                } => commands::agents::create(
+                    from_file,
+                } => {
+                    if let Some(path) = from_file {
+                        commands::agents::create_from_file(
+                            &conn,
+                            &path,
+                            &runtime,
+                            slug,
+                            display_name,
+                            description,
+                            model,
+                            system_prompt,
+                            project_id,
+                            &opts,
+                        )
+                    } else {
+                        // Inline form requires explicit slug + system_prompt.
+                        // Surface clear errors instead of letting the DB layer
+                        // throw cryptic NOT NULL constraint violations.
+                        let slug = slug.ok_or_else(|| anyhow::anyhow!(
+                            "`--slug` is required unless `--from-file` is set."
+                        ))?;
+                        if system_prompt.is_none() {
+                            return Err(anyhow::anyhow!(
+                                "`--system-prompt` is required unless `--from-file` is set."
+                            ));
+                        }
+                        commands::agents::create(
+                            &conn,
+                            &slug,
+                            &runtime,
+                            display_name,
+                            description,
+                            model,
+                            system_prompt,
+                            project_id,
+                            &opts,
+                        )
+                    }
+                }
+                AgentsSub::List {
+                    runtime,
+                    project_id,
+                } => commands::agents::list(&conn, runtime, project_id, &opts),
+                AgentsSub::Delete {
+                    slug,
+                    runtime,
+                    also_remove_file,
+                } => commands::agents::delete(
                     &conn,
                     &slug,
-                    &runtime,
-                    display_name,
-                    description,
-                    model,
-                    system_prompt,
-                    project_id,
+                    runtime,
+                    also_remove_file,
                     &opts,
                 ),
                 AgentsSub::Update {
