@@ -17,8 +17,10 @@ import {
 import {
   getCostBenchmarks,
   getCostRecommendations,
+  getProviderUsage,
   type CostBenchmarkRow,
   type CostRecommendation,
+  type ProviderUsageRow,
 } from "@/lib/cloudAgentTraces";
 // v2.3.2 Phase 2.x — local-mode fallback for cost recommendations.
 // Benchmarks (the per-(agent, runtime) cost table) stays cloud-only
@@ -116,10 +118,24 @@ export default function CostBenchmarksPanel() {
     queryFn: () => getBillingSurfaceSummary({ days: summaryDays }),
     staleTime: 30_000,
   });
-  // Group-by toggle: by-agent (existing default) OR by-billing-surface
-  // (v2.6 PR-A new view). Persisted in component state only — short
-  // session-scoped pref, not worth a settings round-trip.
-  const [groupBy, setGroupBy] = useState<"agent" | "billing_surface">("agent");
+  // Group-by toggle: by-agent (v2.1 cloud benchmarks) OR by-billing-
+  // surface (v2.6 PR-A local rollup) OR by-cloud-provider (v2.6 PR-B
+  // chunk 5 — what each provider's own usage API says was billed).
+  // Persisted in component state only — short session-scoped pref,
+  // not worth a settings round-trip.
+  const [groupBy, setGroupBy] = useState<
+    "agent" | "billing_surface" | "cloud_provider"
+  >("agent");
+
+  // v2.6 PR-B chunk 5 — cloud-polled provider usage. Only fires when
+  // the user has cloud auth (Pro+ tier) AND has actually selected the
+  // cloud_provider view, so the daily-aggregate fetch stays lazy.
+  const cloudProviderQuery = useQuery({
+    queryKey: ["cloud-provider-usage", days],
+    queryFn: () => getProviderUsage({ days }),
+    enabled: !!canQuery && isPro && groupBy === "cloud_provider",
+    staleTime: 60_000,
+  });
 
   if (!isPro) {
     return (
@@ -244,10 +260,11 @@ export default function CostBenchmarksPanel() {
         loading={summaryQuery.isLoading}
       />
 
-      {/* Group-by toggle. By-agent = the v2.1 cloud benchmarks view
-          (unchanged below). By-billing-surface = v2.6 PR-A: local
-          rollup that includes passive observations alongside ATO's
-          own dispatches. */}
+      {/* Group-by toggle. By-agent = v2.1 cloud benchmarks. By-billing-
+          surface = v2.6 PR-A local rollup including passive observations.
+          By-cloud-provider = v2.6 PR-B chunk 5: what each provider's own
+          usage API says was billed (authoritative; includes activity
+          from non-observable surfaces like phone apps + web UI). */}
       <div className="inline-flex rounded-md border border-cs-border bg-cs-bg-raised p-0.5 text-[11px]">
         {(
           [
@@ -255,6 +272,10 @@ export default function CostBenchmarksPanel() {
             [
               "billing_surface",
               t("insights.cost.groupBySurface", "By billing surface"),
+            ],
+            [
+              "cloud_provider",
+              t("insights.cost.groupByCloudProvider", "By cloud provider"),
             ],
           ] as const
         ).map(([key, label]) => (
@@ -332,6 +353,28 @@ export default function CostBenchmarksPanel() {
           <ul className="space-y-1.5">
             {surfaceRows.map((r) => (
               <SurfaceRow key={r.billing_surface} row={r} />
+            ))}
+          </ul>
+        )
+      ) : groupBy === "cloud_provider" ? (
+        cloudProviderQuery.isLoading ? (
+          <div className="flex items-center justify-center h-24 text-cs-muted">
+            <Loader2 size={16} className="animate-spin mr-2" />
+            {t("insights.cost.cloudProviderLoading", "Loading cloud-reported usage…")}
+          </div>
+        ) : (cloudProviderQuery.data?.rows ?? []).length === 0 ? (
+          <Empty
+            icon={<Cloud size={20} />}
+            title={t("insights.cost.cloudProviderEmpty", "No cloud-polled data yet")}
+            body={t(
+              "insights.cost.cloudProviderEmptyBody",
+              "Add a provider API key in Settings → Cloud → Provider Keys. ato-cloud polls each provider's usage API daily, then surfaces the authoritative totals here — including activity from phone apps and web UI that the local watcher can't see.",
+            )}
+          />
+        ) : (
+          <ul className="space-y-1.5">
+            {(cloudProviderQuery.data?.rows ?? []).map((r) => (
+              <CloudProviderRow key={r.provider} row={r} />
             ))}
           </ul>
         )
@@ -496,6 +539,70 @@ function SurfaceRow({ row }: { row: BillingSurfaceRow }) {
           <Stat
             label={t("insights.cost.spend", "Spend")}
             value={`$${row.cost_usd.toFixed(2)}`}
+          />
+        )}
+      </div>
+    </li>
+  );
+}
+
+// v2.6 PR-B chunk 5 — by-cloud-provider row. Renders one provider's
+// authoritative usage as reported by its own usage API (polled daily
+// by ato-cloud's usage-poller). Differs from SurfaceRow in two ways:
+//   1. Source is the provider's books, not local observations — so
+//      this row INCLUDES activity the local watcher cannot see (phone,
+//      web UI, other machines).
+//   2. Cost is per-token where the provider returns it; null where it
+//      doesn't (OpenAI's /v1/usage doesn't include cost; rendered as
+//      "—" with a tooltip).
+function CloudProviderRow({ row }: { row: ProviderUsageRow }) {
+  const { t } = useTranslation();
+  const cost = row.total_cost_usd === null ? null : asNumber(row.total_cost_usd);
+  const requests = asNumber(row.total_requests);
+  const tokensIn = asNumber(row.total_tokens_in);
+  const tokensOut = asNumber(row.total_tokens_out);
+  return (
+    <li className="rounded-lg border border-cs-border bg-cs-bg-raised/40 p-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Cloud size={11} className="text-cs-accent shrink-0" />
+        <span className="text-sm text-cs-text font-medium font-mono">
+          {row.provider}
+        </span>
+        <span
+          className="inline-flex items-center rounded-full border border-cs-accent/30 bg-cs-accent/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-cs-accent"
+          title={t(
+            "insights.cost.cloudProviderBadgeTitle",
+            "Provider-side ground truth — polled from the provider's own usage API. Includes activity from sources the local watcher can't see (phone apps, web UI, other machines).",
+          )}
+        >
+          {t("insights.cost.cloudProviderBadge", "provider-reported")}
+        </span>
+        <span className="ml-auto font-mono text-cs-muted text-[10px]">
+          {row.rows_polled} {t("insights.cost.daysShort", "days polled")}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-4 gap-2 text-[11px]">
+        <Stat
+          label={t("insights.cost.requests", "Requests")}
+          value={requests.toLocaleString()}
+        />
+        <Stat
+          label={t("insights.cost.tokensIn", "Tokens in")}
+          value={tokensIn.toLocaleString()}
+        />
+        <Stat
+          label={t("insights.cost.tokensOut", "Tokens out")}
+          value={tokensOut.toLocaleString()}
+        />
+        {cost === null ? (
+          <Stat
+            label={t("insights.cost.spend", "Spend")}
+            value="—"
+          />
+        ) : (
+          <Stat
+            label={t("insights.cost.spend", "Spend")}
+            value={`$${cost.toFixed(2)}`}
           />
         )}
       </div>
