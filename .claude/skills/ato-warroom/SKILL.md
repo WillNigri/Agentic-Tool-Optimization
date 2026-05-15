@@ -294,6 +294,48 @@ seat that won't commit isn't a seat, it's a participant.
 Route each cross-family seat through ATO so the work flows through
 your dispatch + session primitives.
 
+**Pick a tool-capable runtime when the seat needs to walk the code.**
+This is the most-bitten failure mode in 2026-05-15 sessions. ATO's
+`dispatch` targets split into two classes:
+
+- **Tool-capable runtimes** (CLI binaries with their own Read / Grep /
+  Bash loop): `claude`, `codex`, `gemini`, `openclaw`, `hermes`.
+  Check live status with `ato runtimes health`. These walk files
+  themselves; you pass them a brief, they go fetch the artifacts.
+- **API-only providers** (one-shot HTTP request → text response): all
+  of `minimax`, `grok`, `deepseek`, `qwen`, `openrouter`. No tool loop;
+  they can only reason from what's in the prompt.
+
+Match the seat to the question class:
+
+| Question class | Tool access needed? | Pick |
+|---|---|---|
+| Code review, security audit, PR diff scrutiny | YES | tool-capable (`codex` is the canonical cross-family choice when CEO is Claude) |
+| Scope / strategy / positioning / pricing | NO | either works; API-only is fine + cheaper + faster |
+| Plan / roadmap review | Sometimes — only if the plan cites specific files the seat should verify | tool-capable if "yes," otherwise API-only |
+| Adversarial challenge / 10-star reframe | NO | API-only is fine; the value is the model's priors, not file access |
+
+**Pitfall to avoid.** If a code-touching war-room dispatches to an
+API-only runtime with a summary instead of the raw code, the seat
+can only validate against your paraphrase — it cannot catch what
+you missed. The 2026-05-15 v2.6 security sweep hit this directly:
+a Claude in-session seat reviewed the provider-keys path, an
+API-only minimax dispatch was attempted (failed on prompt size
+anyway), and the sweep shipped 5 fixes. Switching the cross-family
+seat to `codex` (tool-capable) immediately surfaced a 6th — a TOCTOU
+race on `MAX_ACTIVE_PROVIDER_KEYS` the Claude seat had read past.
+The cross-family value comes from a different model FAMILY *and*
+tool access; same-family-with-tools beats different-family-without-
+tools for code review.
+
+If the obvious tool-capable runtime is unavailable (not installed,
+broken auth, etc.) and you must use an API-only fallback for a
+code-touching question, COMPENSATE by sending the actual source
+in the prompt (cap ~30 KB to fit `ato dispatch`'s command-line
+arg ceiling — chunk by PR if larger, or use `--prompt-file` once
+ATO supports it). Note the methodology gap in the audit trail so
+it's visible.
+
 ```bash
 # Stable per-decision session so context carries across follow-ups.
 SLUG="pr-b-encryption"
@@ -314,10 +356,15 @@ fi
 
 QUESTION="<the filter-wrapped prompt from step 3>"
 
-# Cross-family seat #1 — DIFFERENT family from the CEO runtime
-ato dispatch minimax "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf1-$$.txt
-# (optional) second cross-family seat for breaking ties / adversarial pass
-ato dispatch gemini  "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf2-$$.txt 2>/dev/null
+# Cross-family seat #1 — DIFFERENT family from the CEO runtime.
+# Pick per the table above. Default for code-touching war-rooms when
+# CEO is Claude: `codex` (tool-capable, can walk the source itself).
+# Default for strategy / scope / positioning: any API-only provider
+# is fine (`minimax`, `grok`, `deepseek`, `qwen`, `openrouter`).
+ato dispatch codex "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf1-$$.txt
+# (optional) second cross-family seat for breaking ties / adversarial pass.
+# Use a third family — e.g. minimax — so you have Claude + GPT + MiniMax priors.
+ato dispatch minimax "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf2-$$.txt 2>/dev/null
 ```
 
 For the in-session specialist seats, invoke the source skill directly
