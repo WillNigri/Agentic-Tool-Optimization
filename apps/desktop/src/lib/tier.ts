@@ -45,6 +45,8 @@ export type Feature =
   | "evaluators"
   // Cloud sync of agents
   | "cloud-sync"
+  // v2.6 — Encrypted provider-key store for the cron usage-poller
+  | "provider-keys"
   // Team workspaces
   | "team-workspaces"
   // Enterprise-only
@@ -63,6 +65,7 @@ export const FEATURE_MIN_TIER: Record<Feature, Tier> = {
   "cloud-traces": "pro",
   "evaluators": "pro",
   "cloud-sync": "pro",
+  "provider-keys": "pro",
   "team-workspaces": "team",
   "enterprise.evaluator-budgets": "enterprise",
   "enterprise.halo": "enterprise",

@@ -32,20 +32,27 @@ const ProjectManager = lazy(() =>
 const ConfigBackup = lazy(() => import("@/components/ConfigBackup"));
 const AboutPanel = lazy(() => import("@/components/AboutPanel"));
 
-// Cloud is a meta-tab that nests auth + teams + sync + notifications.
+// Cloud is a meta-tab that nests auth + teams + sync + provider keys + notifications.
 const CloudAuth = lazy(() => import("@/components/CloudAuth"));
 const TeamWorkspaces = lazy(() => import("@/components/TeamWorkspaces"));
 const SkillSync = lazy(() => import("@/components/SkillSync"));
+const ProviderKeys = lazy(() => import("@/components/ProviderKeys"));
 const NotificationsSettings = lazy(() => import("@/components/NotificationsSettings"));
 
-type CloudTabId = "auth" | "teams" | "sync" | "notifications";
+type CloudTabId = "auth" | "teams" | "sync" | "providerKeys" | "notifications";
 
 function CloudTab() {
   const { t } = useTranslation();
   const [active, setActive] = useState<CloudTabId>(() => {
     try {
       const stored = localStorage.getItem("ato.subtab.settings.cloud");
-      if (stored === "auth" || stored === "teams" || stored === "sync" || stored === "notifications")
+      if (
+        stored === "auth" ||
+        stored === "teams" ||
+        stored === "sync" ||
+        stored === "providerKeys" ||
+        stored === "notifications"
+      )
         return stored;
     } catch {
       // ignore
@@ -66,6 +73,7 @@ function CloudTab() {
     { id: "auth", label: t("subnav.cloudAuth", "Account") },
     { id: "teams", label: t("subnav.cloudTeams", "Teams") },
     { id: "sync", label: t("subnav.cloudSync", "Sync") },
+    { id: "providerKeys", label: t("subnav.cloudProviderKeys", "Provider Keys") },
     { id: "notifications", label: t("subnav.cloudNotifications", "Notifications") },
   ];
 
@@ -76,6 +84,8 @@ function CloudTab() {
       ? TeamWorkspaces
       : active === "sync"
       ? SkillSync
+      : active === "providerKeys"
+      ? ProviderKeys
       : NotificationsSettings;
 
   return (
