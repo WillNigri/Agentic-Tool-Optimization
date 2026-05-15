@@ -1159,6 +1159,40 @@ pub fn init_database(conn: &Connection) {
             ON sessions(runtime, last_used_at DESC)",
         [],
     );
+    // v2.6 Phase 6 Slice C — explicit session lifecycle (open → closed →
+    // reopened). On close, the session's coordinator (the agent at
+    // sessions.agent_slug, falling back to the anchor runtime) generates
+    // a title, summary, topic tags, and an inferred project_id. Reopen
+    // flips status back; the next close overwrites the summary with the
+    // refreshed transcript. ALTER TABLE on each column individually so
+    // older DBs upgrade in place; "duplicate column" errors are expected
+    // on a fresh install where the columns already exist and are ignored.
+    // Status is constrained to {'open', 'closed'} at the DB level so a
+    // future write of a stray string (typo, branch like 'archived')
+    // fails loudly rather than corrupting the invariant the UI relies
+    // on. SQLite supports column-level CHECK on ADD COLUMN since 3.37.
+    // Already-installed dev builds that added this column without the
+    // CHECK silently fail the ALTER (duplicate column) and rely on the
+    // application-layer enforcement in sessions.rs close/reopen.
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed'))",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN closed_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_title TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN tags_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_project
+            ON sessions(project_id, last_used_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_status_lastused
+            ON sessions(status, last_used_at DESC)",
+        [],
+    );
     // v2.3.32 Phase 6 Slice A.2 — unified turn history. Stateful
     // runtimes (claude --resume) and stateless API providers
     // (minimax etc.) both dual-write into this table on every
@@ -1409,6 +1443,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(DbState(Mutex::new(conn)))
+        .manage(sessions_view::CloseInflight::new())
         .manage(LogWatcherState::new())
         .manage(PassiveObserverState::new())
         .manage(HealthPollerState::new())
@@ -1612,6 +1647,11 @@ pub fn run() {
             sessions_view::bridge_session,
             // v2.3.48 — streaming dispatch (Phase 6.x-F GUI render)
             sessions_view::dispatch_into_session_streaming,
+            // v2.6 Slice C — explicit session close/reopen lifecycle
+            sessions_view::close_session,
+            sessions_view::cancel_close_session,
+            sessions_view::reopen_session,
+            sessions_view::search_session_turns,
             // v2.3.45 — ratchet view (Phase 6.x-K surface in the GUI)
             ratchet_view::list_ratchets,
             ratchet_view::list_ratchet_breaches,

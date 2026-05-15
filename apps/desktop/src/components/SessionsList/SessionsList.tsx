@@ -26,6 +26,10 @@ import {
   Send,
   GitBranch,
   X,
+  Lock,
+  Unlock,
+  Tag,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +43,13 @@ interface SessionListRow {
   turnCount: number;
   runtimesUsed: string[];
   lastAssistantPreview: string | null;
+  // v2.6 Slice C — lifecycle + coordinator-generated metadata.
+  status: "open" | "closed";
+  closedAt: string | null;
+  autoTitle: string | null;
+  summary: string | null;
+  tags: string[];
+  projectId: string | null;
 }
 
 interface SessionTurn {
@@ -55,6 +66,24 @@ interface SessionTranscript {
   agentSlug: string | null;
   title: string | null;
   turns: SessionTurn[];
+  status: "open" | "closed";
+  closedAt: string | null;
+  autoTitle: string | null;
+  summary: string | null;
+  tags: string[];
+  projectId: string | null;
+}
+
+interface CloseSessionResult {
+  id: string;
+  status: string;
+  autoTitle: string | null;
+  summary: string | null;
+  tags: string[];
+  projectId: string | null;
+  coordinatorRuntime: string;
+  coordinatorModel: string | null;
+  durationMs: number;
 }
 
 const RUNTIME_COLORS: Record<string, string> = {
@@ -97,9 +126,59 @@ const NEW_SESSION_RUNTIMES = [
   "openrouter",
 ];
 
+type StatusFilter = "all" | "open" | "closed";
+
+/// Case-insensitive substring search across every human-readable
+/// field on a session row plus the 8-char id prefix. Returns the
+/// filtered list; tokens that look like a single word are matched
+/// individually so users can type "review consensus" and find rows
+/// where both words appear somewhere.
+function filterSessions(
+  sessions: SessionListRow[],
+  query: string,
+  status: StatusFilter,
+): SessionListRow[] {
+  const trimmed = query.trim().toLowerCase();
+  const tokens = trimmed.length === 0 ? [] : trimmed.split(/\s+/);
+  return sessions.filter((s) => {
+    if (status === "open" && s.status !== "open") return false;
+    if (status === "closed" && s.status !== "closed") return false;
+    if (tokens.length === 0) return true;
+    // Build a single haystack string per row so each token can run a
+    // cheap String.includes. Avoids re-allocating arrays inside the
+    // inner loop. Limited to the fields a human would actually type.
+    const haystack = [
+      s.autoTitle ?? "",
+      s.title ?? "",
+      s.summary ?? "",
+      s.lastAssistantPreview ?? "",
+      s.agentSlug ?? "",
+      s.tags.join(" "),
+      s.runtimesUsed.join(" "),
+      s.runtime,
+      s.id.slice(0, 8),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return tokens.every((t) => haystack.includes(t));
+  });
+}
+
 export default function SessionsList() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Debounce the search input by 300ms before firing the backend turn
+  // search. Typing fast shouldn't fire a query on every keystroke —
+  // the metadata filter runs instantly, the content search lags
+  // slightly. State only updates when the user has stopped for the
+  // debounce window.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => window.clearTimeout(id);
+  }, [searchQuery]);
 
   const sessionsQ = useQuery<SessionListRow[]>({
     queryKey: ["sessions-full"],
@@ -107,6 +186,49 @@ export default function SessionsList() {
     staleTime: 30_000,
     refetchInterval: 30_000,
   });
+
+  // Backend search across turn text. Returns the set of session ids
+  // whose turns contain all the search tokens. Combined with the
+  // metadata filter (client-side) via union: a row matches if it
+  // either matches the metadata or appears in the content-match set.
+  // Min length 2 (after trim) so a 1-char query doesn't hammer the
+  // DB with a LIKE that matches almost every session.
+  const contentSearchEnabled = debouncedQuery.trim().length >= 2;
+  const turnSearchQ = useQuery<string[]>({
+    queryKey: ["session-turn-search", debouncedQuery],
+    queryFn: () =>
+      invoke<string[]>("search_session_turns", { query: debouncedQuery }),
+    enabled: contentSearchEnabled,
+    staleTime: 30_000,
+  });
+  const contentMatchIds = new Set(
+    contentSearchEnabled ? turnSearchQ.data ?? [] : [],
+  );
+
+  // Union of metadata matches and content-match ids. When the query
+  // is empty, contentMatchIds is empty and the filter is metadata-only
+  // (which itself is empty-query => "all").
+  const filteredSessions = sessionsQ.data
+    ? (() => {
+        const metaMatched = filterSessions(
+          sessionsQ.data,
+          searchQuery,
+          statusFilter,
+        );
+        if (!contentSearchEnabled || contentMatchIds.size === 0) {
+          return metaMatched;
+        }
+        // Build a set of metadata-matched ids and union with content
+        // matches (also gated by status filter to keep the chips
+        // honest).
+        const metaIds = new Set(metaMatched.map((s) => s.id));
+        return sessionsQ.data.filter((s) => {
+          if (statusFilter === "open" && s.status !== "open") return false;
+          if (statusFilter === "closed" && s.status !== "closed") return false;
+          return metaIds.has(s.id) || contentMatchIds.has(s.id);
+        });
+      })()
+    : [];
 
   if (openId) {
     return (
@@ -149,6 +271,71 @@ export default function SessionsList() {
         />
       )}
 
+      {/* Search + status filter. The input matches case-insensitively
+          across title, summary, tags, agent slug, runtime names, and
+          the 8-char id prefix — every field a human would type. The
+          three status chips below let you scope to open or closed
+          sessions; "All" is the default so the list looks the same as
+          before by default. */}
+      {sessionsQ.data && sessionsQ.data.length > 0 && (
+        <div className="space-y-2">
+          <div className="relative">
+            <Search
+              size={14}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-cs-muted pointer-events-none"
+            />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search titles, summaries, tags, and words inside the conversations…"
+              className="w-full bg-cs-card border border-cs-border rounded-md pl-9 pr-9 py-2 text-sm focus:outline-none focus:border-cs-accent placeholder:text-cs-muted"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-cs-muted hover:text-cs-text"
+                aria-label="clear search"
+              >
+                {turnSearchQ.isFetching ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <X size={14} />
+                )}
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2 text-xs">
+            {(["all", "open", "closed"] as StatusFilter[]).map((s) => {
+              const count =
+                s === "all"
+                  ? sessionsQ.data!.length
+                  : sessionsQ.data!.filter((row) => row.status === s).length;
+              return (
+                <button
+                  key={s}
+                  onClick={() => setStatusFilter(s)}
+                  className={cn(
+                    "px-2 py-1 rounded-md border capitalize transition-colors",
+                    statusFilter === s
+                      ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
+                      : "border-cs-border bg-cs-card text-cs-muted hover:text-cs-text"
+                  )}
+                >
+                  {s}
+                  <span className="ml-1 opacity-60">({count})</span>
+                </button>
+              );
+            })}
+            {(searchQuery || statusFilter !== "all") && (
+              <span className="text-cs-muted ml-auto">
+                {filteredSessions.length} of {sessionsQ.data.length} shown
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {sessionsQ.isLoading ? (
         <div className="flex items-center justify-center h-32">
           <Loader2 className="animate-spin text-cs-accent" size={28} />
@@ -170,45 +357,104 @@ export default function SessionsList() {
             <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">--tag-bridge</code>.
           </p>
         </div>
+      ) : filteredSessions.length === 0 ? (
+        <div className="text-center py-12 text-cs-muted">
+          <Search size={36} className="mx-auto mb-3 opacity-50" />
+          <p>No sessions match your search.</p>
+          <p className="text-xs mt-2">
+            Try a different word, or clear the filter to see all{" "}
+            {sessionsQ.data.length} sessions.
+          </p>
+        </div>
       ) : (
         <div className="space-y-2">
-          {sessionsQ.data.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => setOpenId(s.id)}
-              className="w-full text-left border border-cs-border rounded-lg bg-cs-card hover:border-cs-accent/40 hover:bg-cs-border/20 transition-colors p-4"
-            >
-              <div className="flex items-center gap-3 flex-wrap">
-                <div className="flex items-center gap-1">
-                  {s.runtimesUsed.map((r) => (
-                    <span key={r} className={runtimeBadge(r)}>
-                      {r}
+          {filteredSessions.map((s) => {
+            // Prefer the coordinator-generated auto_title when present
+            // (it's distilled from the actual conversation); fall back
+            // to the user-supplied title, then to a muted "untitled".
+            const displayTitle = s.autoTitle || s.title;
+            // For closed sessions, the summary is a better preview than
+            // the last assistant turn (which is often a tool result or
+            // mid-thought fragment). For open sessions, keep the live
+            // last-turn preview so users see what's happening now.
+            const previewText =
+              s.status === "closed" && s.summary
+                ? s.summary
+                : s.lastAssistantPreview;
+            return (
+              <button
+                key={s.id}
+                onClick={() => setOpenId(s.id)}
+                className={cn(
+                  "w-full text-left border rounded-lg transition-colors p-4",
+                  s.status === "closed"
+                    ? "border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
+                    : "border-cs-border bg-cs-card hover:border-cs-accent/40 hover:bg-cs-border/20"
+                )}
+              >
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-1">
+                    {s.runtimesUsed.map((r) => (
+                      <span key={r} className={runtimeBadge(r)}>
+                        {r}
+                      </span>
+                    ))}
+                  </div>
+                  {s.status === "closed" && (
+                    <span
+                      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted"
+                      title={
+                        s.closedAt
+                          ? `Closed ${formatTime(s.closedAt)}`
+                          : "Closed"
+                      }
+                    >
+                      <Lock size={10} /> closed
                     </span>
-                  ))}
-                </div>
-                <span className="text-sm font-medium text-cs-text truncate flex-1 min-w-0">
-                  {s.title || (
-                    <span className="text-cs-muted italic">untitled session</span>
                   )}
-                </span>
-                <span className="text-xs text-cs-muted">
-                  {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
-                </span>
-                <span className="text-xs text-cs-muted">{formatTime(s.lastUsedAt)}</span>
-              </div>
-              {s.agentSlug && (
-                <div className="mt-1 text-xs text-cs-accent">@{s.agentSlug}</div>
-              )}
-              {s.lastAssistantPreview && (
-                <div className="mt-2 text-xs text-cs-muted line-clamp-2">
-                  {s.lastAssistantPreview}
+                  <span className="text-sm font-medium text-cs-text truncate flex-1 min-w-0">
+                    {displayTitle || (
+                      <span className="text-cs-muted italic">
+                        untitled session
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-xs text-cs-muted">
+                    {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
+                  </span>
+                  <span className="text-xs text-cs-muted">
+                    {formatTime(s.lastUsedAt)}
+                  </span>
                 </div>
-              )}
-              <div className="mt-2 text-[10px] text-cs-muted font-mono opacity-60 truncate">
-                {s.id}
-              </div>
-            </button>
-          ))}
+                {s.agentSlug && (
+                  <div className="mt-1 text-xs text-cs-accent">
+                    @{s.agentSlug}
+                  </div>
+                )}
+                {previewText && (
+                  <div className="mt-2 text-xs text-cs-muted line-clamp-2">
+                    {previewText}
+                  </div>
+                )}
+                {s.tags.length > 0 && (
+                  <div className="mt-2 flex items-center gap-1 flex-wrap">
+                    <Tag size={10} className="text-cs-muted" />
+                    {s.tags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/10 text-cs-accent"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-2 text-[10px] text-cs-muted font-mono opacity-60 truncate">
+                  {s.id}
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -248,6 +494,16 @@ function SessionTranscriptView({
   const [sendError, setSendError] = useState<string | null>(null);
   const [bridging, setBridging] = useState(false);
   const [bridgeLog, setBridgeLog] = useState<string | null>(null);
+  // v2.6 Slice C — close/reopen lifecycle. `closing` blocks the UI
+  // with a modal while the coordinator LLM produces title/summary/tags
+  // (typically 5–20s). closeError/reopenError are split so a failed
+  // reopen doesn't get rendered with a "close failed" banner label,
+  // and starting either action clears the other's stale message.
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  const isClosed = q.data?.status === "closed";
   // v2.3.48 — streaming buffer for the in-flight assistant turn.
   // Populated chunk-by-chunk from the Tauri `session-stream-chunk`
   // event; cleared on `session-stream-done` or send error.
@@ -342,6 +598,66 @@ function SessionTranscriptView({
     }
   };
 
+  const handleClose = async () => {
+    if (closing) return;
+    setClosing(true);
+    setCloseError(null);
+    setReopenError(null);
+    try {
+      await invoke<CloseSessionResult>("close_session", {
+        sessionId,
+        agentSlug: q.data?.agentSlug ?? null,
+        model: null,
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["session-transcript", sessionId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["sessions-full"] });
+    } catch (e) {
+      // The backend signals user-cancelled with the sentinel
+      // "__cancelled__" so the UI doesn't render a "close failed"
+      // banner — the user *meant* to abort. Any other error string
+      // is surfaced as-is.
+      const msg = String(e);
+      if (!msg.includes("__cancelled__")) {
+        setCloseError(msg);
+      }
+    } finally {
+      setClosing(false);
+    }
+  };
+
+  const handleCancelClose = async () => {
+    // Fire and forget — the SIGTERM races with close_session's
+    // wait_with_output, which then returns the cancelled-sentinel
+    // error and unwinds the modal via the catch block above.
+    try {
+      await invoke("cancel_close_session", { sessionId });
+    } catch {
+      // Silent: if the cancel itself errors (e.g., subprocess
+      // finished a millisecond ago), the close already succeeded or
+      // failed on its own — no need for a separate error banner.
+    }
+  };
+
+  const handleReopen = async () => {
+    if (reopening) return;
+    setReopening(true);
+    setReopenError(null);
+    setCloseError(null);
+    try {
+      await invoke("reopen_session", { sessionId });
+      await queryClient.invalidateQueries({
+        queryKey: ["session-transcript", sessionId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["sessions-full"] });
+    } catch (e) {
+      setReopenError(String(e));
+    } finally {
+      setReopening(false);
+    }
+  };
+
   const handleBridge = async () => {
     if (bridging) return;
     setBridging(true);
@@ -375,10 +691,15 @@ function SessionTranscriptView({
         {q.data && (
           <>
             <span className="text-sm font-medium text-cs-text">
-              {q.data.title || (
+              {q.data.autoTitle || q.data.title || (
                 <span className="text-cs-muted italic">untitled</span>
               )}
             </span>
+            {isClosed && (
+              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted">
+                <Lock size={10} /> closed
+              </span>
+            )}
             <div className="flex items-center gap-1">
               {allRuntimes.map((r) => (
                 <span key={r} className={runtimeBadge(r)}>
@@ -388,16 +709,145 @@ function SessionTranscriptView({
             </div>
           </>
         )}
-        <button
-          onClick={handleBridge}
-          disabled={bridging || !q.data || q.data.turns.length === 0}
-          className="ml-auto flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-accent/40 bg-cs-accent/10 text-cs-accent text-sm font-medium hover:bg-cs-accent/20 disabled:opacity-40 disabled:cursor-not-allowed"
-          title="Scan the last assistant turn for @mentions and bridge to those runtimes. Loops until [CONSENSUS] or 3 rounds."
-        >
-          <GitBranch size={14} />
-          {bridging ? "Bridging…" : "Bridge"}
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {isClosed ? (
+            <button
+              onClick={handleReopen}
+              disabled={reopening}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Reopen this session so you can continue the conversation. The next close will refresh the summary."
+            >
+              {reopening ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Unlock size={14} />
+              )}
+              {reopening ? "Reopening…" : "Reopen"}
+            </button>
+          ) : (
+            <button
+              onClick={handleClose}
+              disabled={closing || !q.data || q.data.turns.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Close this session. The coordinator agent will summarize the conversation, generate topic tags, and infer a project."
+            >
+              <Lock size={14} /> Close session
+            </button>
+          )}
+          <button
+            onClick={handleBridge}
+            disabled={bridging || !q.data || q.data.turns.length === 0}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-accent/40 bg-cs-accent/10 text-cs-accent text-sm font-medium hover:bg-cs-accent/20 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Scan the last assistant turn for @mentions and bridge to those runtimes. Loops until [CONSENSUS] or 3 rounds."
+          >
+            <GitBranch size={14} />
+            {bridging ? "Bridging…" : "Bridge"}
+          </button>
+        </div>
       </div>
+
+      {/* Coordinator-generated summary banner. Only renders when the
+          session is closed AND we have a summary. Tags render as chips
+          underneath. The user can reopen with the button above to
+          continue the conversation — the next close refreshes this. */}
+      {q.data && isClosed && q.data.summary && (
+        <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
+          <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
+            <Sparkles size={12} /> Coordinator summary
+            {q.data.closedAt && (
+              <span className="text-[10px] text-cs-muted normal-case font-normal">
+                · closed {formatTime(q.data.closedAt)}
+              </span>
+            )}
+          </div>
+          <div className="text-sm text-cs-text whitespace-pre-wrap">
+            {q.data.summary}
+          </div>
+          {q.data.tags.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap pt-1">
+              <Tag size={10} className="text-cs-muted" />
+              {q.data.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/10 text-cs-accent"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Blocking close modal. While the coordinator runs, the UI is
+          intentionally locked — the user picked "block with progress"
+          over fire-and-forget so the new title/summary/tags are
+          visible immediately when control returns. The Cancel button
+          sends SIGTERM to the underlying `ato sessions close` process
+          via cancel_close_session; the session stays 'open' and the
+          modal closes without writing any summary. */}
+      {closing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-cs-bg/80 backdrop-blur-sm">
+          <div className="border border-cs-border bg-cs-card rounded-lg p-6 max-w-md w-full mx-4 space-y-4">
+            <div className="flex items-center gap-3">
+              <Loader2
+                size={20}
+                className="animate-spin text-cs-accent shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-cs-text">
+                  Coordinator is summarizing…
+                </div>
+                <div className="text-xs text-cs-muted mt-1">
+                  Generating title, summary, topic tags, and project
+                  association from {q.data?.turns.length ?? 0} turn
+                  {q.data && q.data.turns.length !== 1 ? "s" : ""}. Typically
+                  5–20 seconds.
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={handleCancelClose}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-xs font-medium text-cs-muted hover:text-cs-text"
+              >
+                <X size={12} /> Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {closeError && (
+        <div className="border border-cs-danger/40 bg-cs-danger/5 rounded-md p-3 text-sm text-cs-danger flex items-start gap-2">
+          <span className="flex-1">
+            <span className="font-medium">Close failed: </span>
+            {closeError}
+          </span>
+          <button
+            onClick={() => setCloseError(null)}
+            className="text-cs-muted hover:text-cs-text"
+            aria-label="dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+      {reopenError && (
+        <div className="border border-cs-danger/40 bg-cs-danger/5 rounded-md p-3 text-sm text-cs-danger flex items-start gap-2">
+          <span className="flex-1">
+            <span className="font-medium">Reopen failed: </span>
+            {reopenError}
+          </span>
+          <button
+            onClick={() => setReopenError(null)}
+            className="text-cs-muted hover:text-cs-text"
+            aria-label="dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {bridgeLog && (
         <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 text-xs text-cs-text font-mono whitespace-pre-wrap relative">
@@ -502,13 +952,22 @@ function SessionTranscriptView({
 
       {/* Continue conversation input — wired to dispatch_into_session.
           Always rendered so users can kick off the first turn of a
-          freshly-created session or continue an existing one. */}
+          freshly-created session or continue an existing one. When the
+          session is closed, we disable the controls and prompt the
+          user to reopen rather than silently dropping their input. */}
       <div className="border-t border-cs-border pt-4 mt-4">
+        {isClosed && (
+          <div className="mb-2 text-xs text-cs-muted flex items-center gap-2">
+            <Lock size={12} />
+            Session is closed. Reopen to continue — the next close will
+            refresh the summary.
+          </div>
+        )}
         <div className="flex items-end gap-2">
           <select
             value={continueRuntime}
             onChange={(e) => setContinueRuntime(e.target.value)}
-            disabled={sending}
+            disabled={sending || isClosed}
             className="bg-cs-card border border-cs-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-cs-accent"
           >
             {NEW_SESSION_RUNTIMES.map((r) => (
@@ -521,11 +980,13 @@ function SessionTranscriptView({
             rows={2}
             value={continuePrompt}
             onChange={(e) => setContinuePrompt(e.target.value)}
-            disabled={sending}
+            disabled={sending || isClosed}
             placeholder={
-              q.data && q.data.turns.length === 0
-                ? "Send the first message…"
-                : "Continue the conversation…"
+              isClosed
+                ? "Reopen this session to send a message…"
+                : q.data && q.data.turns.length === 0
+                  ? "Send the first message…"
+                  : "Continue the conversation…"
             }
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -537,7 +998,7 @@ function SessionTranscriptView({
           />
           <button
             onClick={handleSend}
-            disabled={!continuePrompt.trim() || sending}
+            disabled={!continuePrompt.trim() || sending || isClosed}
             className="flex items-center gap-2 px-3 py-2 rounded-md bg-cs-accent text-cs-bg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {sending ? (

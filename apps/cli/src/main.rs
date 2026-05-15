@@ -373,6 +373,25 @@ enum SessionsSub {
     Get { id: String },
     /// Delete a session (does NOT clean up the underlying runtime's history)
     Delete { id: String },
+    /// Close a session — the coordinator agent generates a title,
+    /// summary, topic tags, and inferred project_id from the turn
+    /// history, all persisted on the session row. A closed session
+    /// can be reopened with `ato sessions reopen`.
+    Close {
+        id: String,
+        /// Override the coordinator agent slug. Defaults to the
+        /// session's stored agent_slug, then falls back to a generic
+        /// summarizer running on the session's anchor runtime.
+        #[arg(long = "as")]
+        agent_slug: Option<String>,
+        /// Override the summarizer model.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Reopen a previously-closed session. The next dispatch can
+    /// continue the conversation; the next close will refresh the
+    /// summary with the new turns.
+    Reopen { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -960,6 +979,18 @@ fn main() -> Result<()> {
             SessionsSub::Delete { id } => {
                 let conn = db::open_readwrite(&db_path)?;
                 commands::sessions::delete(&conn, &id, &opts)
+            }
+            SessionsSub::Close {
+                id,
+                agent_slug,
+                model,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::sessions::close(&conn, &id, agent_slug, model, &opts)
+            }
+            SessionsSub::Reopen { id } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::sessions::reopen(&conn, &id, &opts)
             }
         },
         Commands::Bridge {

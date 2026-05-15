@@ -123,6 +123,16 @@ pub fn run(
     let session = if let Some(ref sid) = session_id {
         let conn = db::open_readonly(db_path)?;
         let s = crate::commands::sessions::lookup(&conn, sid)?;
+        // v2.6 Slice C — refuse to write turns into a closed session.
+        // The UI disables its Continue input, but the CLI is the canonical
+        // entrypoint for agents and scripts, so enforcement has to live
+        // here too. Reopen first if the user really wants to continue.
+        if s.status == "closed" {
+            anyhow::bail!(
+                "Session {} is closed. Reopen it first with `ato sessions reopen {}`, then retry the dispatch.",
+                sid, sid
+            );
+        }
         if s.runtime != runtime_name && opts.human {
             // Informational only — Slice B intentionally allows
             // cross-runtime continuation. The note helps the user
