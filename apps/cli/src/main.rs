@@ -87,7 +87,10 @@ enum Commands {
         /// Override the model (per-runtime: --model claude-sonnet-4-6, etc.)
         #[arg(long)]
         model: Option<String>,
-        /// Optional agent slug — for labeling only in this Phase 1 cut
+        /// Optional agent slug. When set, the agent's persona
+        /// (system_prompt from the SQLite agents table) is prepended
+        /// to the dispatch as a `## Persona` block, and the slug is
+        /// recorded for telemetry.
         #[arg(long)]
         agent: Option<String>,
         /// v2.3.31 Phase 6 Slice A — resume an existing sticky session.

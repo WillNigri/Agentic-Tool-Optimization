@@ -19,6 +19,68 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
+/// PR-A.5 — load `agents.system_prompt` for `--agent <slug>` and
+/// prepend it as a `## Persona` block to the dispatch body. Mirrors
+/// the pattern review.rs:733-751 already uses for `--reviewer @<slug>`.
+///
+/// Wraps the WHOLE dispatch body (which for `run()` already includes
+/// the session-history transcript prefix) so the agent's identity
+/// frames the conversation once at the top; transcript follows; new
+/// turn last.
+///
+/// Hard errors:
+/// - readonly DB open fails — better to surface the misconfig than to
+///   silently dispatch without the persona the caller asked for.
+/// - slug doesn't resolve on the named runtime — caller typo or stale
+///   slug; matches review.rs error shape.
+///
+/// Silent skip (returns body unchanged):
+/// - `system_prompt` is NULL / empty / whitespace-only. An agent row
+///   can legitimately exist for slug/description without a defined
+///   persona; in that case `--agent` reverts to label-only behavior
+///   for telemetry.
+///
+/// INVARIANT — do not write the returned wrapped String into
+/// `session_turns`. `session_turns` stores the raw user prompt; the
+/// persona-wrapped form is dispatch-side only. If a future refactor
+/// stores the wrapped form, persona will nest unbounded across
+/// multi-turn sessions.
+fn prepend_agent_persona_with_conn(
+    conn: &rusqlite::Connection,
+    slug: &str,
+    runtime: &str,
+    body: &str,
+) -> Result<String> {
+    let agent = crate::commands::agents::lookup_by_slug(conn, slug, Some(runtime))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Agent '{}' not found on runtime '{}'. Create it in the GUI or with `ato agents create`.",
+                slug, runtime
+            )
+        })?;
+    if let Some(sp) = agent.system_prompt.as_deref() {
+        let trimmed = sp.trim();
+        if !trimmed.is_empty() {
+            return Ok(format!(
+                "## Persona (from your agent definition)\n\n{}\n\n---\n\n{}",
+                trimmed, body
+            ));
+        }
+    }
+    Ok(body.to_string())
+}
+
+fn prepend_agent_persona(
+    db_path: &PathBuf,
+    slug: &str,
+    runtime: &str,
+    body: &str,
+) -> Result<String> {
+    let conn = db::open_readonly(db_path)
+        .context("opening DB for --agent persona lookup")?;
+    prepend_agent_persona_with_conn(&conn, slug, runtime, body)
+}
+
 #[derive(Debug, Serialize)]
 pub struct DispatchResult {
     pub id: String,
@@ -219,6 +281,16 @@ pub fn run(
         }
     } else {
         prompt.to_string()
+    };
+
+    // PR-A.5 — when --agent is set, prepend the agent's persona to
+    // effective_prompt. Runs AFTER the session-history prefix is
+    // built so persona frames the whole transcript at the top. See
+    // prepend_agent_persona docstring for invariants.
+    let effective_prompt: String = if let Some(slug) = agent_slug_for_event.as_deref() {
+        prepend_agent_persona(db_path, slug, runtime_name, &effective_prompt)?
+    } else {
+        effective_prompt
     };
 
     let mut cmd = Command::new(&cli_path);
@@ -604,6 +676,16 @@ fn run_api(
             .collect(),
         None => Vec::new(),
     };
+
+    // PR-A.5 — when --agent is set, prepend the persona to the user
+    // prompt body for the dispatch call ONLY. Raw `prompt` stays
+    // unwrapped for execution_logs / session_turns logging below so
+    // persona doesn't nest across multi-turn sessions.
+    let effective_prompt: String = if let Some(slug) = agent_slug_for_event.as_deref() {
+        prepend_agent_persona_with_conn(&conn, slug, provider.slug, prompt)?
+    } else {
+        prompt.to_string()
+    };
     // v2.3.47 Phase 6.x-F — streaming. Three output modes:
     //   - --human + --stream: write raw chunks to stdout as they
     //     arrive, then print the normal footer at the end.
@@ -625,7 +707,7 @@ fn run_api(
         crate::api_dispatch::dispatch_with_history_streaming(
             provider,
             &history,
-            prompt,
+            &effective_prompt,
             model_override.as_deref(),
             &conn,
             |chunk| {
@@ -654,7 +736,7 @@ fn run_api(
         crate::api_dispatch_tools::dispatch_with_tools(
             provider,
             &history,
-            prompt,
+            &effective_prompt,
             model_override.as_deref(),
             &conn,
         )
@@ -662,7 +744,7 @@ fn run_api(
         crate::api_dispatch::dispatch_with_history(
             provider,
             &history,
-            prompt,
+            &effective_prompt,
             model_override.as_deref(),
             &conn,
         )
@@ -912,9 +994,18 @@ fn run_remote(
     );
     let _live_run_guard = crate::live_runs::LiveRunGuard::new(db_path, live_run_id);
 
+    // PR-A.5 — when --agent is set, prepend the agent's persona before
+    // shipping the prompt over SSH. Raw `prompt` is preserved for the
+    // execution_logs insert below so the persona stays dispatch-side.
+    let effective_prompt: String = if let Some(slug) = agent_slug_for_event.as_deref() {
+        prepend_agent_persona(db_path, slug, &remote.runtime, prompt)?
+    } else {
+        prompt.to_string()
+    };
+
     let started = Instant::now();
     let (output, applied_byok_key) =
-        crate::remote_runtime::exec(&remote, prompt, model.as_deref())?;
+        crate::remote_runtime::exec(&remote, &effective_prompt, model.as_deref())?;
     let duration_ms = started.elapsed().as_millis() as i64;
 
     let response_text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1030,4 +1121,165 @@ fn run_remote(
         emit_json(&result)?;
     }
     Ok(())
+}
+
+// PR-A.5 — tests for prepend_agent_persona_with_conn. The three
+// dispatch paths (`run`, `run_api`, `run_remote`) all funnel through
+// this single helper for persona prepend, so coverage here is the
+// uniformity invariant. Integration coverage across the three runtime
+// paths would require live CLIs / API keys / SSH and lives outside
+// the unit suite by design.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn agents_schema() -> &'static str {
+        "CREATE TABLE agents (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL,
+            display_name  TEXT NOT NULL,
+            description   TEXT,
+            runtime       TEXT NOT NULL,
+            model         TEXT,
+            project_id    TEXT,
+            system_prompt TEXT,
+            permissions   TEXT,
+            skills        TEXT,
+            mcps          TEXT,
+            goal          TEXT,
+            file_path     TEXT,
+            created_at    TEXT NOT NULL,
+            last_used_at  TEXT,
+            UNIQUE (runtime, slug)
+        );"
+    }
+
+    fn db_with_agent(slug: &str, runtime: &str, system_prompt: Option<&str>) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(agents_schema()).expect("create schema");
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                slug,
+                "Test Agent",
+                runtime,
+                system_prompt,
+                "2026-05-14T00:00:00Z"
+            ],
+        )
+        .expect("insert agent");
+        conn
+    }
+
+    #[test]
+    fn prepend_agent_persona_prepends_above_body() {
+        let conn = db_with_agent("eng-mgr", "claude", Some("You are an engineering manager."));
+        let body = "=== Previous conversation ===\n[user @claude] earlier turn\n=== End previous conversation ===\n\nnew user prompt";
+        let result =
+            prepend_agent_persona_with_conn(&conn, "eng-mgr", "claude", body).expect("ok");
+
+        assert!(
+            result.starts_with(
+                "## Persona (from your agent definition)\n\nYou are an engineering manager.\n\n---\n\n"
+            ),
+            "persona block must lead the wrapped body, got: {}",
+            &result[..result.len().min(200)]
+        );
+        // Persona block ends BEFORE the conversation prefix.
+        let persona_sep = result
+            .find("\n\n---\n\n=== Previous conversation ===")
+            .expect("persona separator immediately precedes the transcript prefix");
+        // And the new turn comes last.
+        let new_turn_pos = result.find("new user prompt").expect("new turn present");
+        assert!(
+            persona_sep < new_turn_pos,
+            "persona must come before the new turn in the wrapped body"
+        );
+    }
+
+    #[test]
+    fn prepend_agent_persona_missing_slug_errors_with_create_hint() {
+        let conn = db_with_agent("real-agent", "claude", Some("hi"));
+        let err = prepend_agent_persona_with_conn(&conn, "missing-slug", "claude", "body")
+            .expect_err("must error on missing slug");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Agent 'missing-slug' not found"),
+            "error names the slug: {}",
+            msg
+        );
+        assert!(
+            msg.contains("runtime 'claude'"),
+            "error names the runtime that was searched: {}",
+            msg
+        );
+        assert!(
+            msg.contains("ato agents create"),
+            "error includes the create hint so users have a next step: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn prepend_agent_persona_empty_system_prompt_skips_silently() {
+        let body = "untouched body";
+
+        // Empty string.
+        let conn = db_with_agent("empty-sp", "claude", Some(""));
+        let result =
+            prepend_agent_persona_with_conn(&conn, "empty-sp", "claude", body).expect("ok");
+        assert_eq!(
+            result, body,
+            "empty system_prompt must not prepend any persona block"
+        );
+
+        // Whitespace-only.
+        let conn2 = db_with_agent("whitespace-sp", "claude", Some("   \n\t  "));
+        let result2 = prepend_agent_persona_with_conn(&conn2, "whitespace-sp", "claude", body)
+            .expect("ok");
+        assert_eq!(
+            result2, body,
+            "whitespace-only system_prompt must not prepend"
+        );
+
+        // NULL.
+        let conn3 = db_with_agent("null-sp", "claude", None);
+        let result3 =
+            prepend_agent_persona_with_conn(&conn3, "null-sp", "claude", body).expect("ok");
+        assert_eq!(result3, body, "NULL system_prompt must not prepend");
+    }
+
+    #[test]
+    fn prepend_agent_persona_disambiguates_by_runtime() {
+        // Same slug exists on two runtimes. The flag must resolve to
+        // the runtime explicitly named on the dispatch — not fall
+        // back to last_used_at across runtimes.
+        let conn = Connection::open_in_memory().expect("in-memory");
+        conn.execute_batch(agents_schema()).unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, created_at)
+             VALUES ('a', 'shared', 'Shared', 'claude', 'CLAUDE-PERSONA', '2026-05-14T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, created_at)
+             VALUES ('b', 'shared', 'Shared', 'codex', 'CODEX-PERSONA', '2026-05-14T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let claude_result =
+            prepend_agent_persona_with_conn(&conn, "shared", "claude", "body").unwrap();
+        assert!(claude_result.contains("CLAUDE-PERSONA"));
+        assert!(!claude_result.contains("CODEX-PERSONA"));
+
+        let codex_result =
+            prepend_agent_persona_with_conn(&conn, "shared", "codex", "body").unwrap();
+        assert!(codex_result.contains("CODEX-PERSONA"));
+        assert!(!codex_result.contains("CLAUDE-PERSONA"));
+    }
 }
