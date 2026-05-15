@@ -24,7 +24,14 @@
 //   - 1 pipeline of 2 stages
 //   - 1 file (`src/auth.ts`) touched by 3 different traces
 
-import type { CloudAgentTrace, CloudAgentTraceMetric, RegressionRow, CostBenchmarkRow } from "./cloudAgentTraces";
+import type {
+  CloudAgentTrace,
+  CloudAgentTraceMetric,
+  RegressionRow,
+  CostBenchmarkRow,
+  ProviderUsageRow,
+  ProviderUsageTimelinePoint,
+} from "./cloudAgentTraces";
 import type { ConfigChange } from "./cloudConfigChanges";
 import type { OverlapEvidence } from "./activeRuns";
 
@@ -406,6 +413,69 @@ export const MOCK_OVERLAP_EVIDENCE: OverlapEvidence = {
 };
 
 export const MOCK_EMBED_KEY = "eba_MOCK1234ABCDEFGHJKLMNPQRSTUVWXYZ23";
+
+// v2.6 PR-B chunk 5 — mock provider-usage rows (the cloud-polled
+// rollups the usage-poller cron materializes from each provider's
+// usage API). These show up in the Usage tab's "By cloud provider"
+// view alongside the local-watcher data.
+export const MOCK_PROVIDER_USAGE: ProviderUsageRow[] = [
+  {
+    provider: "openai",
+    total_requests: 1247,
+    total_tokens_in: 2_184_512,
+    total_tokens_out: 412_905,
+    total_cost_usd: 14.83,
+    rows_polled: 30,
+  },
+  {
+    provider: "anthropic_org",
+    total_requests: 318,
+    total_tokens_in: 882_104,
+    total_tokens_out: 156_220,
+    total_cost_usd: 8.21,
+    rows_polled: 30,
+  },
+  {
+    provider: "gemini",
+    total_requests: 42,
+    total_tokens_in: 91_445,
+    total_tokens_out: 12_310,
+    total_cost_usd: 0.41,
+    rows_polled: 12,
+  },
+];
+
+// Dates are derived from NOW (defined at the top of this file) so the
+// timeline always reflects "the last 7 days ending today" no matter
+// when the mock mode is exercised. Avoids the future-dated-fixture
+// trap where queries like `WHERE date <= now()` silently include rows
+// that shouldn't exist yet. (Review fixup: MiniMax #4.)
+function daysAgoUtcDateString(n: number): string {
+  return new Date(NOW - n * 24 * HOUR).toISOString().slice(0, 10);
+}
+export const MOCK_PROVIDER_USAGE_TIMELINE: Record<
+  string,
+  ProviderUsageTimelinePoint[]
+> = {
+  openai: [
+    { date: daysAgoUtcDateString(6), requests: 41, tokens_in: 72_500, tokens_out: 13_840, cost_usd: 0.49 },
+    { date: daysAgoUtcDateString(5), requests: 53, tokens_in: 89_120, tokens_out: 16_410, cost_usd: 0.61 },
+    { date: daysAgoUtcDateString(4), requests: 38, tokens_in: 67_900, tokens_out: 12_220, cost_usd: 0.45 },
+    { date: daysAgoUtcDateString(3), requests: 47, tokens_in: 81_400, tokens_out: 15_010, cost_usd: 0.55 },
+    { date: daysAgoUtcDateString(2), requests: 61, tokens_in: 102_300, tokens_out: 19_080, cost_usd: 0.70 },
+    { date: daysAgoUtcDateString(1), requests: 52, tokens_in: 88_750, tokens_out: 16_290, cost_usd: 0.59 },
+    { date: daysAgoUtcDateString(0), requests: 49, tokens_in: 83_220, tokens_out: 15_410, cost_usd: 0.56 },
+  ],
+  anthropic_org: [
+    { date: daysAgoUtcDateString(6), requests: 11, tokens_in: 28_900, tokens_out: 5_120, cost_usd: 0.27 },
+    { date: daysAgoUtcDateString(5), requests: 14, tokens_in: 35_440, tokens_out: 6_410, cost_usd: 0.33 },
+    { date: daysAgoUtcDateString(4), requests: 9, tokens_in: 22_100, tokens_out: 3_980, cost_usd: 0.21 },
+    { date: daysAgoUtcDateString(3), requests: 13, tokens_in: 32_780, tokens_out: 5_870, cost_usd: 0.31 },
+    { date: daysAgoUtcDateString(2), requests: 17, tokens_in: 41_320, tokens_out: 7_650, cost_usd: 0.39 },
+    { date: daysAgoUtcDateString(1), requests: 12, tokens_in: 30_510, tokens_out: 5_510, cost_usd: 0.29 },
+    { date: daysAgoUtcDateString(0), requests: 15, tokens_in: 37_220, tokens_out: 6_770, cost_usd: 0.35 },
+  ],
+};
 
 /** Look up a single trace by id from the fixture set. */
 export function mockTraceById(id: string): CloudAgentTrace | null {

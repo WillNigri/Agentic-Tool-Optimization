@@ -22,6 +22,8 @@ import {
   MOCK_COST_BENCHMARKS,
   MOCK_COST_RECOMMENDATIONS,
   MOCK_PIPELINE_PARENT_ID,
+  MOCK_PROVIDER_USAGE,
+  MOCK_PROVIDER_USAGE_TIMELINE,
 } from "@/lib/cloudMockData";
 
 const CLOUD_API_URL =
@@ -360,4 +362,86 @@ export function canQueryCloudTraces(): boolean {
   if (isMockMode()) return true;
   const { isCloudUser, accessToken } = useAuthStore.getState();
   return Boolean(isCloudUser && accessToken);
+}
+
+// ──────────────────────────────────────────────────────────────────
+// v2.6 PR-B chunk 5 — cloud-polled provider usage rows.
+//
+// Fetches the rows that ato-cloud's usage-poller cron materialized
+// from each provider's usage API. These are AUTHORITATIVE — they
+// reflect what the provider's own books say the user spent, including
+// activity from machines / browsers / phones that the local watcher
+// (PR-A) cannot see.
+//
+// Pairs with the local `getBillingSurfaceSummary` in @/lib/localInsights —
+// the Usage tab renders both as separate group-by views, so users can
+// triangulate "what I saw firing locally" vs "what the provider says
+// they billed me for." Discrepancies > a few percent = activity from
+// non-observed surfaces (web UI, phone, other machines).
+// ──────────────────────────────────────────────────────────────────
+
+/** One aggregate row from /api/analytics/provider-usage. */
+export interface ProviderUsageRow {
+  provider: string;
+  total_requests: number | string;
+  total_tokens_in: number | string;
+  total_tokens_out: number | string;
+  total_cost_usd: number | string | null;
+  rows_polled: number;
+}
+
+/** One day's slice from /api/analytics/provider-usage/timeline. */
+export interface ProviderUsageTimelinePoint {
+  date: string; // YYYY-MM-DD
+  requests: number | string;
+  tokens_in: number | string;
+  tokens_out: number | string;
+  cost_usd: number | string | null;
+}
+
+/** Provider totals over the past N days. Returns null when not signed in. */
+export async function getProviderUsage(opts?: { days?: number }): Promise<
+  | {
+      rows: ProviderUsageRow[];
+      days: number;
+    }
+  | null
+> {
+  const days = opts?.days ?? 30;
+  if (isMockMode()) {
+    return { rows: MOCK_PROVIDER_USAGE, days };
+  }
+  const params = new URLSearchParams();
+  params.set("days", String(days));
+  const data = await cloudGet<ProviderUsageRow[]>(
+    `/api/analytics/provider-usage?${params.toString()}`,
+  );
+  if (!data) return null;
+  return { rows: data, days };
+}
+
+/** Daily timeline for a single provider over the past N days. */
+export async function getProviderUsageTimeline(opts: {
+  days?: number;
+  provider: string;
+}): Promise<{ rows: ProviderUsageTimelinePoint[]; days: number; provider: string } | null> {
+  const days = opts.days ?? 30;
+  if (isMockMode()) {
+    return {
+      rows:
+        MOCK_PROVIDER_USAGE_TIMELINE[opts.provider] ??
+        MOCK_PROVIDER_USAGE_TIMELINE.openai ??
+        [],
+      days,
+      provider: opts.provider,
+    };
+  }
+  const params = new URLSearchParams();
+  params.set("days", String(days));
+  params.set("provider", opts.provider);
+  const data = await cloudGet<ProviderUsageTimelinePoint[]>(
+    `/api/analytics/provider-usage/timeline?${params.toString()}`,
+  );
+  if (!data) return null;
+  return { rows: data, days, provider: opts.provider };
 }
