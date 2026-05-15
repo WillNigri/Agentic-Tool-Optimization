@@ -116,7 +116,7 @@ Replaces chat-only PromptBar with an expandable bottom pane, two modes:
 
 **Open source (this repo)**: Skills manager + marketplace, multi-agent runtime, subagents, **Create Agent wizard (v1.3.0)**, **MCP install UI (v1.3.0)**, **embedded terminal (v1.3.0)**, automation builder, cron scheduling, context visualizer, hooks, ATO MCP server (8 tools), config editor, command palette, i18n.
 
-**Closed source (`ato-cloud`, paid)**: Real-time cron monitoring, silent failure detection, push notifications, usage analytics (cloud), cloud sync of agents + skills, team workspaces, hosted `/agent-suggest` fallback, MCP registry mirror, hosted LLM-as-judge evaluators, agent-trace upload + retention, cross-runtime config-change ledger, provider-key + provider-usage tracking, mesh-relay (paid-tier WebSocket router for laptop↔server dispatch), SSO + audit retention (Enterprise).
+**Closed source (`ato-cloud`, paid)**: Real-time cron monitoring, silent failure detection, push notifications, usage analytics (cloud), cloud sync of agents + skills, team workspaces, MCP registry mirror, hosted LLM-as-judge evaluators, agent-trace upload + retention, cross-runtime config-change ledger, provider-key + provider-usage tracking, mesh-relay (paid-tier WebSocket router for laptop↔server dispatch), SSO + audit retention (Enterprise).
 
 ## Security
 
