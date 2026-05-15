@@ -42,27 +42,45 @@ const TAG_LEN: usize = 16;
 
 /// Read (or atomically create) the AES-256 master key from the OS
 /// keychain. Result is the 32-byte raw key.
+///
+/// 2026-05-15 — CRITICAL FIX. Previous shape (`if let Ok(b64) =
+/// entry.get_password() { ... } else { generate }`) treated EVERY
+/// keyring error as "no key exists, generate one." The keyring crate's
+/// error enum has multiple variants (NoEntry, NoStorageAccess,
+/// PlatformFailure, BadEncoding, TooLong, Invalid, Ambiguous); treating
+/// them all as "missing" silently rotates the master key, orphaning
+/// every previously-encrypted `llm_api_keys` row. User hit this on
+/// 2026-05-14 when the keychain entry was overwritten (most likely an
+/// app re-sign / re-permission prompt that didn't resolve cleanly).
+///
+/// Correct shape: ONLY NoEntry → generate. Anything else fails loud.
 fn master_key() -> Result<[u8; 32], String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
         .map_err(|e| format!("keyring entry {}/{}: {}", KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT, e))?;
-    if let Ok(b64) = entry.get_password() {
-        return decode_key_b64(&b64);
+    match entry.get_password() {
+        Ok(b64) => decode_key_b64(&b64),
+        Err(keyring::Error::NoEntry) => {
+            // Genuine first-run. Generate + store. Race-window note
+            // preserved: if two processes hit this simultaneously we
+            // re-read after the write so we use whoever's value ended
+            // up in the keychain.
+            let mut new_key = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut new_key);
+            let b64 = general_purpose::STANDARD.encode(new_key);
+            entry
+                .set_password(&b64)
+                .map_err(|e| format!("keyring set_password: {}", e))?;
+            let final_b64 = entry
+                .get_password()
+                .map_err(|e| format!("keyring get_password after set: {}", e))?;
+            decode_key_b64(&final_b64)
+        }
+        Err(e) => Err(format!(
+            "keyring get_password failed (NOT a missing-entry case — refusing to silently rotate the master key): {}. \
+             If you've confirmed the OS keychain entry was reset, your stored API keys are orphaned and must be re-entered via Settings → API Keys.",
+            e
+        )),
     }
-    // Not set yet — generate. There's a small race window if two
-    // processes hit this simultaneously; we re-read after our write to
-    // make sure we use whoever's value ended up in the keychain.
-    let mut new_key = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut new_key);
-    let b64 = general_purpose::STANDARD.encode(new_key);
-    entry
-        .set_password(&b64)
-        .map_err(|e| format!("keyring set_password: {}", e))?;
-    // Re-read to handle the race. If the keychain reports a value
-    // different from ours, another process won — use their key.
-    let final_b64 = entry
-        .get_password()
-        .map_err(|e| format!("keyring get_password after set: {}", e))?;
-    decode_key_b64(&final_b64)
 }
 
 fn decode_key_b64(b64: &str) -> Result<[u8; 32], String> {
