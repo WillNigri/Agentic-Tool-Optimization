@@ -475,7 +475,7 @@ pub fn run(
     // can group multi-turn conversations under one header.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode, agent_slug) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             id,
             runtime_name,
@@ -491,6 +491,7 @@ pub fn run(
             session_id_for_log,
             effective_model,
             auth_mode,
+            agent_slug_for_event.as_deref(),
         ],
     ).context("Failed to write execution_logs row")?;
 
@@ -837,7 +838,7 @@ fn run_api(
     // so History grouping works for cross-runtime conversations.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             id,
             provider.slug,
@@ -855,6 +856,7 @@ fn run_api(
             tool_calls_summary,
             model_used,
             auth_mode,
+            agent_slug_for_event.as_deref(),
         ],
     )
     .context("Failed to write execution_logs row")?;
@@ -1074,8 +1076,8 @@ fn run_remote(
 
     let conn = db::open_readwrite(db_path)?;
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, agent_slug)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             id,
             remote.slug,
@@ -1090,6 +1092,7 @@ fn run_remote(
             cost_usd,
             effective_model,
             auth_mode,
+            agent_slug_for_event.as_deref(),
         ],
     )
     .context("Failed to write execution_logs row (remote)")?;

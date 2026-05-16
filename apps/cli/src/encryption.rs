@@ -22,7 +22,51 @@ const VERSION_PREFIX: &str = "v1:";
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 
+/// 2026-05-16 — wrap the keychain read in a hard timeout. macOS shows a
+/// Keychain Access permission dialog the first time a new binary
+/// signature reads the master_key entry. In headless/background
+/// invocations (subprocess-of-self in demo-compare, CI, watchers) the
+/// dialog can't be approved, so the keyring call hangs forever. Bug
+/// #48 dogfooded this directly: every cargo build between dispatches
+/// invalidated the prior approval and the next dispatch sat at zero
+/// CPU waiting for input that never came.
+///
+/// The fix is defensive: cap the call at KEYCHAIN_TIMEOUT_SECS. On
+/// timeout, surface a clear error naming the env-var workaround so
+/// the caller can unblock themselves without code changes.
+const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
+
 fn master_key() -> Result<[u8; 32]> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // Send a String error rather than anyhow::Error since the latter
+    // isn't Send. Caller re-wraps with anyhow!() after recv.
+    let (tx, rx) = mpsc::channel::<std::result::Result<[u8; 32], String>>();
+
+    std::thread::spawn(move || {
+        let result = master_key_inner().map_err(|e| format!("{:#}", e));
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(KEYCHAIN_TIMEOUT_SECS)) {
+        Ok(Ok(key)) => Ok(key),
+        Ok(Err(s)) => Err(anyhow!("{}", s)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "keychain access timed out after {}s — macOS is likely showing a Keychain Access permission dialog \
+             (the first read after a new binary build needs explicit approval). \
+             Approve the dialog if visible (use 'Always Allow' so future dispatches don't re-prompt), \
+             or bypass the keychain for this dispatch by setting the provider's API key as an env var \
+             (e.g. GEMINI_API_KEY=..., MINIMAX_API_KEY=..., ANTHROPIC_API_KEY=...).",
+            KEYCHAIN_TIMEOUT_SECS
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+            "keychain reader thread disconnected without sending a result — unexpected; report as a bug"
+        )),
+    }
+}
+
+fn master_key_inner() -> Result<[u8; 32]> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
         .with_context(|| {
             format!(

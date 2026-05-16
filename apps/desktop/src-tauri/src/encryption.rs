@@ -54,7 +54,42 @@ const TAG_LEN: usize = 16;
 /// app re-sign / re-permission prompt that didn't resolve cleanly).
 ///
 /// Correct shape: ONLY NoEntry → generate. Anything else fails loud.
+///
+/// 2026-05-16 — wrap in a hard timeout. macOS shows a Keychain Access
+/// permission dialog the first time a new binary signature reads this
+/// entry. In headless contexts (background workers, mesh-relay daemons,
+/// CLI-subprocess-of-self in demo-compare) the dialog can't be approved
+/// and the read hangs forever. Bug #48 dogfooded this directly. The
+/// 8-second timeout lets an interactive user approve the dialog while
+/// also failing fast in headless contexts.
+const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
+
 fn master_key() -> Result<[u8; 32], String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel::<Result<[u8; 32], String>>();
+
+    std::thread::spawn(move || {
+        let _ = tx.send(master_key_inner());
+    });
+
+    match rx.recv_timeout(Duration::from_secs(KEYCHAIN_TIMEOUT_SECS)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "keychain access timed out after {}s — macOS is likely showing a Keychain Access permission dialog \
+             (the first read after a new binary build needs explicit approval). \
+             Approve the dialog if visible ('Always Allow' so future opens don't re-prompt), \
+             or set the master key directly via env vars per-provider as a workaround.",
+            KEYCHAIN_TIMEOUT_SECS
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+            "keychain reader thread disconnected without sending a result".to_string(),
+        ),
+    }
+}
+
+fn master_key_inner() -> Result<[u8; 32], String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
         .map_err(|e| format!("keyring entry {}/{}: {}", KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT, e))?;
     match entry.get_password() {
