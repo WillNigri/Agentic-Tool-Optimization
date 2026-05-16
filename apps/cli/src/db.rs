@@ -67,6 +67,19 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    // 2026-05-16 — idempotent column adds the desktop migration also
+    // does. If the user is running CLI-only without ever opening the
+    // desktop, these ALTER TABLEs ensure the dispatch INSERTs (which
+    // write to these columns) don't fail with "no such column". Each
+    // ALTER fails silently when the column already exists.
+    let _ = conn.execute(
+        "ALTER TABLE session_turns ADD COLUMN agent_slug TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_turns_agent_slug ON session_turns(agent_slug)",
+        [],
+    );
     Ok(conn)
 }
 

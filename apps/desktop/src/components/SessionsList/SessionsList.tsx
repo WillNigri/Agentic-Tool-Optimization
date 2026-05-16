@@ -42,6 +42,11 @@ interface SessionListRow {
   lastUsedAt: string;
   turnCount: number;
   runtimesUsed: string[];
+  // 2026-05-16 — distinct agent slugs that appeared on assistant turns
+  // in this session, in first-spoken order. Empty when every dispatch
+  // was a generalist (no --agent). Drives the persona-badge cluster
+  // on the SessionsList card.
+  agentsUsed: string[];
   lastAssistantPreview: string | null;
   // v2.6 Slice C — lifecycle + coordinator-generated metadata.
   status: "open" | "closed";
@@ -58,6 +63,8 @@ interface SessionTurn {
   text: string;
   runtime: string;
   createdAt: string;
+  // 2026-05-16 — null for generalist dispatches, slug otherwise.
+  agentSlug: string | null;
 }
 
 interface SessionTranscript {
@@ -133,6 +140,24 @@ const RUNTIME_DISPLAY: Record<string, string> = {
 
 function runtimeDisplay(rt: string): string {
   return RUNTIME_DISPLAY[rt] ?? rt.replace(/^[a-z]/, (c) => c.toUpperCase());
+}
+
+// 2026-05-16 — persona slug → human label. "positioning" → "Positioning",
+// "office-hours" → "Office Hours". Falls back to capitalized slug for
+// custom personas users define (security-specialist → "Security Specialist").
+function personaDisplay(slug: string): string {
+  return slug
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+// Persona-badge styling for the SessionsList card cluster + chat-bubble
+// role labels. Uses a single cyan-tinted treatment so the cluster reads
+// as "these are the named seats that spoke" without competing with the
+// per-turn runtime badges.
+function personaBadge(): string {
+  return "px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-accent/10 text-cs-accent border border-cs-accent/20";
 }
 
 // Heuristic to detect when a `user`-role turn was authored by the
@@ -452,11 +477,36 @@ export default function SessionsList() {
                 <div className="flex items-center gap-3 flex-wrap">
                   <div className="flex items-center gap-1">
                     {s.runtimesUsed.map((r) => (
-                      <span key={r} className={runtimeBadge(r)}>
-                        {r}
+                      <span
+                        key={r}
+                        className={runtimeBadge(r)}
+                        title={
+                          r === s.runtime
+                            ? `Coordinator runtime: ${runtimeDisplay(r)}`
+                            : `Participant: ${runtimeDisplay(r)}`
+                        }
+                      >
+                        {r === s.runtime ? `★ ${r}` : r}
                       </span>
                     ))}
                   </div>
+                  {/* 2026-05-16 — persona cluster. Renders the distinct
+                      seat slugs that spoke in this session, in first-
+                      spoken order. Empty (so the cluster is hidden) for
+                      generalist-only sessions. */}
+                  {s.agentsUsed.length > 0 && (
+                    <div className="flex items-center gap-1">
+                      {s.agentsUsed.map((slug) => (
+                        <span
+                          key={slug}
+                          className={personaBadge()}
+                          title={`Persona seat: ${personaDisplay(slug)}`}
+                        >
+                          {personaDisplay(slug)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {s.status === "closed" && (
                     <span
                       className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted"
@@ -483,11 +533,37 @@ export default function SessionsList() {
                     {formatTime(s.lastUsedAt)}
                   </span>
                 </div>
-                {s.agentSlug && (
-                  <div className="mt-1 text-xs text-cs-accent">
-                    @{s.agentSlug}
-                  </div>
-                )}
+                {/* 2026-05-16 — coordinator + project line. Coordinator
+                    is the session's anchor runtime (where the session
+                    was created). The session-level agent slug (when
+                    set) is the agent the SESSION was anchored to —
+                    separate from the per-turn personas in the cluster
+                    above. Project shows which project the conversation
+                    is scoped to. */}
+                <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
+                  <span>
+                    coordinator:{" "}
+                    <span className="text-cs-text">
+                      {runtimeDisplay(s.runtime)}
+                    </span>
+                    {s.agentSlug && (
+                      <>
+                        {" / "}
+                        <span className="text-cs-accent">
+                          {personaDisplay(s.agentSlug)}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                  {s.projectId && (
+                    <span>
+                      project:{" "}
+                      <span className="text-cs-text font-mono">
+                        {s.projectId}
+                      </span>
+                    </span>
+                  )}
+                </div>
                 {previewText && (
                   <div className="mt-2 text-xs text-cs-muted line-clamp-2">
                     {previewText}
@@ -945,12 +1021,23 @@ function SessionTranscriptView({
             const coordTarget = !isAssistant
               ? inferCoordinatorTarget(turn.text)
               : null;
+            // 2026-05-16 — persona-aware speaker label. When a turn
+            // was dispatched with `--agent <slug>`, the assistant
+            // speaks AS the persona (e.g. "Positioning") rather than
+            // as the raw runtime. The runtime stays visible in the
+            // pill badge so users still see who answered underneath.
+            // For user turns with a slug, label as "You → Positioning"
+            // so the multi-seat war-room read order is legible.
+            const personaLabel = turn.agentSlug
+              ? personaDisplay(turn.agentSlug)
+              : null;
             // Speaker = who's TALKING in this bubble.
-            //   - assistant: the responding runtime
-            //   - user/coordinator: "ATO Coordinator"
-            //   - user/human:       "You"
+            //   - assistant + persona:   "Positioning"
+            //   - assistant generalist:  the responding runtime
+            //   - user/coordinator:      "ATO Coordinator"
+            //   - user/human:            "You"
             const speakerLabel = isAssistant
-              ? runtimeDisplay(turn.runtime)
+              ? personaLabel ?? runtimeDisplay(turn.runtime)
               : coordTarget !== null
               ? "ATO Coordinator"
               : "You";

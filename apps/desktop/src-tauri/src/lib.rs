@@ -1297,6 +1297,21 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // 2026-05-16 — session_turns.agent_slug carries the persona/seat
+    // slug when a turn was dispatched with `--agent <slug>`. NULL means
+    // a generalist turn (no persona overlay). Mirror of the column
+    // already on execution_logs; the duplication is intentional so the
+    // SessionsList + chat-detail views can render persona badges and
+    // role labels without joining across tables per row.
+    let _ = conn.execute(
+        "ALTER TABLE session_turns ADD COLUMN agent_slug TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_turns_agent_slug ON session_turns(agent_slug)",
+        [],
+    );
+
     // v2.4.1 Phase 7.0 step 2 — mDNS-discovered peers (transient).
     // Separate from mesh_peers (which holds *trusted* peers post-
     // pairing). Discoveries are upserted by peer_id as the daemon's

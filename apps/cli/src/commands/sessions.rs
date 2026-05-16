@@ -134,6 +134,7 @@ pub fn append_turn(
     role: &str,
     text: &str,
     runtime: &str,
+    agent_slug: Option<&str>,
 ) -> Result<()> {
     let next_index: i64 = conn
         .query_row(
@@ -144,9 +145,9 @@ pub fn append_turn(
         .unwrap_or(0);
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO session_turns (session_id, turn_index, role, text, runtime, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![session_id, next_index, role, text, runtime, now],
+        "INSERT INTO session_turns (session_id, turn_index, role, text, runtime, created_at, agent_slug)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![session_id, next_index, role, text, runtime, now, agent_slug],
     )?;
     Ok(())
 }

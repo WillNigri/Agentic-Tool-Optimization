@@ -57,6 +57,12 @@ pub struct SessionListRow {
     /// cross-runtime conversation it's e.g. `["claude", "minimax"]`.
     /// Drives the runtime badges in the list UI.
     pub runtimes_used: Vec<String>,
+    /// 2026-05-16 — distinct agent slugs that appear on the assistant
+    /// turns of this session. Empty when every turn was a generalist
+    /// dispatch (no `--agent` flag). For a war-room session it's e.g.
+    /// `["positioning", "devex", "ceo", "designer", "office-hours"]`.
+    /// Drives the persona-badge cluster on the SessionsList card.
+    pub agents_used: Vec<String>,
     /// Last (assistant) turn's text, truncated. Gives the user a
     /// "what was this conversation about" preview without expanding.
     pub last_assistant_preview: Option<String>,
@@ -82,6 +88,11 @@ pub struct SessionTurn {
     pub text: String,
     pub runtime: String,
     pub created_at: String,
+    /// 2026-05-16 — agent slug captured when the dispatching turn was
+    /// fired with `--agent <slug>`. NULL means a generalist dispatch
+    /// (raw model priors, no persona overlay). Drives the persona role
+    /// label in the chat-bubble UI.
+    pub agent_slug: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -139,6 +150,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 last_used_at: r.get(5)?,
                 turn_count: r.get(6)?,
                 runtimes_used: Vec::new(),
+                agents_used: Vec::new(),
                 last_assistant_preview: None,
                 status: r.get(7)?,
                 closed_at: r.get(8)?,
@@ -174,6 +186,23 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         } else {
             runtimes
         };
+
+        // 2026-05-16 — distinct agent slugs on assistant turns. Order
+        // by first appearance (MIN(turn_index)) so the badge cluster
+        // matches the order seats spoke in. Generalist turns (NULL
+        // agent_slug) are excluded — they show up via the runtime
+        // badges alone.
+        let mut ag_stmt = conn.prepare_cached(
+            "SELECT agent_slug FROM session_turns
+              WHERE session_id = ?1 AND role = 'assistant' AND agent_slug IS NOT NULL
+              GROUP BY agent_slug
+              ORDER BY MIN(turn_index) ASC",
+        )?;
+        let agents: Vec<String> = ag_stmt
+            .query_map([&row.id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        row.agents_used = agents;
 
         // Last assistant turn → preview. Order by turn_index DESC so we
         // get the chronologically last assistant message, not whichever
@@ -319,7 +348,7 @@ pub fn get_session_transcript(
 
     let mut stmt = conn
         .prepare(
-            "SELECT turn_index, role, text, runtime, created_at
+            "SELECT turn_index, role, text, runtime, created_at, agent_slug
                FROM session_turns
               WHERE session_id = ?1
               ORDER BY turn_index ASC",
@@ -334,6 +363,7 @@ pub fn get_session_transcript(
                 text: r.get(2)?,
                 runtime: r.get(3)?,
                 created_at: r.get(4)?,
+                agent_slug: r.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?

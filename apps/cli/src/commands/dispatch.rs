@@ -555,6 +555,7 @@ pub fn run(
             "user",
             prompt,
             runtime_name,
+            agent_slug_for_event.as_deref(),
         );
         if status == "success" {
             if let Some(resp) = response_persisted.as_deref() {
@@ -564,6 +565,7 @@ pub fn run(
                     "assistant",
                     resp,
                     runtime_name,
+                    agent_slug_for_event.as_deref(),
                 );
             }
         }
@@ -904,6 +906,7 @@ fn run_api(
             "user",
             prompt,
             provider.slug,
+            agent_slug_for_event.as_deref(),
         );
         if status == "success" {
             if let Some(resp) = response_persisted.as_deref() {
@@ -913,6 +916,7 @@ fn run_api(
                     "assistant",
                     resp,
                     provider.slug,
+                    agent_slug_for_event.as_deref(),
                 );
             }
         }
