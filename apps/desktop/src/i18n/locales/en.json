@@ -166,9 +166,10 @@
     "lockedTitle": "{{tier}} feature",
     "lockedTooltip": "Upgrade to {{tier}} to unlock",
     "upgrade": "Upgrade",
-    "requires": "Requires {{tier}} · {{price}}",
+    "requires": "{{tier}} tier · {{price}}",
     "notNow": "Not now",
-    "seePricing": "See pricing"
+    "seePricing": "See pricing",
+    "bookOnboarding": "Book onboarding · free"
   },
   "myAgents": {
     "loadError": "Couldn't load agents.",

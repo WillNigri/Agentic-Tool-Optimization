@@ -9,11 +9,16 @@ import { tierForFeature, TIER_LABEL, type Feature, type Tier } from "@/lib/tier"
 // copy lives in the FEATURE_COPY map below — keep these short and concrete
 // (the user is one click from upgrading; brevity wins).
 
+// Pricing is held at $0 during the beta — Pro/Team capabilities are unlocked
+// via a founder-led onboarding call (Cal.com link in the CTA) rather than a
+// fake checkout. Founding-user pricing will be grandfathered when paid tiers
+// switch on. Anything claiming a dollar amount today is a trust leak (the
+// 2026-05-16 design seat scored the old copy 2/10).
 const TIER_PRICE: Record<Tier, string> = {
   free: "Free",
-  pro: "$29 / seat / mo",
-  team: "$49 / seat / mo (min 5)",
-  enterprise: "$99+ / seat / yr (annual)",
+  pro: "Free during beta",
+  team: "Free during beta",
+  enterprise: "Talk to us",
 };
 
 const FEATURE_COPY: Partial<Record<Feature, { title: string; bullets: string[] }>> = {
@@ -191,12 +196,12 @@ export default function UpgradePrompt({ feature, open, onClose }: Props) {
             {t("tier.notNow", "Not now")}
           </button>
           <a
-            href="https://agentictool.ai/pricing"
+            href="https://cal.com/willnigri/ato-onboarding"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1.5 rounded-lg bg-cs-accent px-4 py-2 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover"
           >
-            {t("tier.seePricing", "See pricing")}
+            {t("tier.bookOnboarding", "Book onboarding · free")}
             <ExternalLink size={12} />
           </a>
         </footer>

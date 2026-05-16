@@ -159,9 +159,10 @@
     "lockedTitle": "Funcion {{tier}}",
     "lockedTooltip": "Actualiza a {{tier}} para desbloquear",
     "upgrade": "Actualizar",
-    "requires": "Requiere {{tier}} · {{price}}",
+    "requires": "Plan {{tier}} · {{price}}",
     "notNow": "Ahora no",
-    "seePricing": "Ver precios"
+    "seePricing": "Ver precios",
+    "bookOnboarding": "Agendar onboarding · gratis"
   },
   "myAgents": {
     "loadError": "No se pudieron cargar los agentes.",

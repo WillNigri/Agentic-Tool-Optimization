@@ -1,83 +1,63 @@
-# ATO — Agentic Tool Optimization
+# ATO — Run any AI on your actual task
 
-**ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.** Local-first. MIT. Bring your own keys.
+> **Run any AI on your actual task — see which one solved it cheapest and best, with receipts.**
+>
+> One command across Claude, Codex, Gemini, and 7 more runtimes. Local-first. MIT licensed.
 
-*Drive it from a GUI, a CLI, or your coding agent over MCP — same data, same operations, same audit trail.*
+```bash
+brew install willnigri/ato/ato
+```
 
-Open a session. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, DeepSeek, or any of [20+ supported runtimes](#supported-runtimes) — and have them argue a decision while you push back. Every claim gets cited against the live repo (or any local files); every tool call is logged. You walk out with a signed transcript instead of a screenshot of N browser tabs.
+<!-- terminal cast: ato dispatch claude "refactor this function" && ato dispatch codex "refactor this function" && ato review --consensus -->
 
-### What you'd use it for
+[![Homebrew](https://img.shields.io/badge/homebrew-install-blue?logo=homebrew)](https://github.com/WillNigri/homebrew-ato) · [![Direct download](https://img.shields.io/badge/direct-download-green?logo=github)](https://github.com/WillNigri/Agentic-Tool-Optimization/releases) · [![MCP server](https://img.shields.io/badge/mcp-server-purple)](#mcp-server)
+
+**Why now:** AI model performance varies wildly by task and budget. Manual comparison wastes time and leaves no audit trail. ATO makes runtime comparison a single command — with receipts (cost, tokens, diff, tool calls).
+
+---
+
+## What you'd use it for
 
 | Use case | Example |
 |---|---|
-| **Strategy debates** | *"Should we narrow to enterprise customers? Argue both sides with citations from our last 6 retros."* |
-| **Pre-mortems** | *"This launch ships in two weeks. Each of you find the one thing most likely to break."* |
-| **Architecture decisions** | *"Postgres + queue vs. event-sourced — debate it against our existing services."* |
-| **Code review** | `ato review --against main` — as many LLMs as you want read your diff, push back on each other, cite the files they checked. |
-| **Security & compliance audits** | Same primitive, scoped to threat-model files and historical incidents. |
+| **Code review across runtimes** | `ato review --consensus` — Claude, Codex, Gemini argue the diff, cite tool calls, surface disagreements inline |
+| **Cost comparison** | Same prompt → 3 runtimes → table shows duration, tokens, $ per run. Cheapest model that solved it wins. |
+| **Replay across runtimes** | Failing example from a regression? One click replays it against any runtime/model and diffs side-by-side. |
+| **Strategy debates / pre-mortems** | Drop your LLMs into a war-room session and have them argue with each other while you push back. Every claim is cited against live files. |
+| **Architecture decisions** | *"Postgres + queue vs. event-sourced — debate it against our existing services."* Tool-verified across N runtimes. |
+| **Security & compliance audits** | Same primitive, scoped to threat-model files. Every "this looks fine" gets a tool-call citation. |
 
-The decision-making engine and the audit trail are the same across all of them. Code review is the most-validated workflow today; the rest of the use cases ride the same rails.
+The decision-making engine and the audit trail are the same across all of them. Code review is the most-validated workflow today; the war-room patterns ride the same rails.
 
 ```bash
-ato review --against main \
+ato review --consensus \
   --reviewer @security-specialist \
   --reviewer @perf-reviewer \
   --reviewer google \
   --out review.md
 ```
 
-Each reviewer (or debate participant, or pre-mortem voice) runs in the same session — turn #2 sees #1's findings via history replay, no prompt re-pasting. Function-calling tools (`read_file`, `grep`, `git_log`) let the model walk the live repo instead of guessing. The audit log records which tool calls each LLM made, so the GUI can badge a reply `verified via 2 tool calls` vs `prompt-only`.
+Each reviewer runs in the same session — turn #2 sees #1's findings via history replay, no prompt re-pasting. Function-calling tools (`read_file`, `grep`, `git_log`) let the model walk the live repo instead of guessing. The audit log records which tool calls each LLM made, so the GUI can badge a reply `verified via 2 tool calls` vs `prompt-only`.
 
-> **Coding agent? Read [`AGENTS.md`](./AGENTS.md) first.** ATO is built to be driven by both humans (via the GUI) and AI coding agents (via CLI and MCP). The AGENTS.md doc covers everything an AI agent needs to know to operate ATO on a developer's behalf.
+---
 
-```ts
-// Your system prompt:
-You are a context-aware assistant for {user_name} working on {project_name}.
-Today is {today}. The project root is {project_root}.
-// All four resolve at every turn — env var, computed JS, project path, current date.
-// Plus a pre-call hook injects the latest CHANGELOG.md into <context> on each call.
+## 5-minute first run
+
+After install, the desktop app drops you into a pre-loaded demo session with two LLMs comparing a refactor side-by-side. Want to skip straight to your own work?
+
+```bash
+# zero-config demo — uses your first 2 configured runtimes, or falls back to local Ollama
+ato demo-compare
+
+# real workflow
+ato dispatch claude "your prompt here"
+ato dispatch codex  "your prompt here"
+ato review --consensus
 ```
 
-This is what production-grade agents look like — and ATO makes it a 5-minute setup, not weeks of plumbing. **Pick the [Production-grade Agent template](apps/desktop/src/lib/agentTemplates.ts) on first launch to see the dynamic pattern wired end-to-end.**
+Or from the GUI: ⌘K → "demo compare". Every run lands in `~/.ato/local.db` with cost, tokens, and tool-call trace.
 
-Two group types make agents collaborate:
-
-- **Routed groups** — single prompt → router picks the right specialist child (keyword rules + LLM-classifier fallback).
-- **Sequential automations** — single prompt → children run in order, each agent's output flows into the next as input. **Each child runs on its own runtime**, so you can chain Claude → Codex → Gemini in a single pipeline.
-
-<a id="supported-runtimes"></a>**Supported runtimes**: **Claude Code**, **Codex / OpenAI Agents SDK**, **Gemini CLI / ADK**, **OpenClaw**, **Hermes**, **Ollama** as native CLIs — plus 15+ API providers including Anthropic, OpenAI, Google AI, Mistral, Groq, **xAI/Grok**, Together, Fireworks, DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi.
-
-### Three audiences, one app
-
-- **First-time users** — chat-style guided wizard ("describe what you want") suggests runtime, model, skills, MCPs. Or pick a starter template. Working agent in under two minutes.
-- **Power users** — Quick form, command palette (⌘K), embedded `portable-pty` terminal, persistent threads, drag-drop file attachments, streaming responses with syntax-highlighted markdown, sequential automation pipelines.
-- **Teams** — cloud sync, shared agents, team-wide observability, SSO, audit retention via the optional Pro / Team tier.
-- **AI coding agents** *(new)* — every meaningful operation is reachable from a local CLI (`ato <command>`) or a stdio MCP server. The agent reads [`AGENTS.md`](./AGENTS.md), discovers ATO's surface, and operates it alongside the human. Local SQLite means zero network round-trip; agents never have to leave the machine.
-
-Bring your own auth: ATO rides your existing logged-in CLI subscriptions (Claude Code, Codex, Gemini CLI) the way VS Code rides your GitHub login — *or* you can use stored API keys. Your choice, per runtime.
-
-### Local-first by design
-
-ATO writes everything to `~/.ato/` on the developer's machine:
-
-- **`~/.ato/local.db`** — SQLite database with every dispatch, replay, config change, agent definition, chat thread, skill registration. Agents can `sqlite3` query it directly for fast reads.
-- **`~/.ato/agent-logs.jsonl`** — append-only JSONL log; grep-friendly.
-- **`~/.ato/workflows/`**, **`~/.ato/cron-jobs.json`**, **`~/.ato/backups/`** — workflows, schedules, auto-backups.
-
-Sign-in is **optional** and only matters for cloud sync features (cross-device trace history, team workspaces). Every core operation — dispatch, replay, compare, file attribution, configuration ledger — works fully offline.
-
-### Relationship to other tools
-
-**ATO is your local war room for humans and LLMs.** It is *complementary* to production-observability tools like [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), and [Braintrust](https://www.braintrust.dev) — not a competitor.
-
-- **Those tools** instrument *deployed production stacks* via SDKs and log *end-user conversations* in real time.
-- **ATO** covers the *developer side* of the same agent — what you dispatched while building, what you replayed across runtimes, what regressed after a config change, what each dispatch cost, which agent touched which files.
-
-Most production teams use one from each camp: a Langfuse / Helicone for production user-conversation logging, plus ATO for the developer/multi-runtime side. The two views fit together: production tools catch regressions in real user traffic; ATO catches regressions before you ship, and lets you replay any failing example against an alternative runtime in one click.
-
-**[Website](https://agentictool.ai)** | **[Web Dashboard](https://app.agentictool.ai)** | **[SDK Docs](docs/SDK.md)** | **[npm](https://www.npmjs.com/package/@ato-sdk/js)**
-
-**MIT Licensed** | **Local-first** | **macOS, Windows, Linux**
+> **Coding agent? Read [`AGENTS.md`](./AGENTS.md) first.** Every meaningful operation is reachable from the local CLI (`ato <command>`) or the stdio MCP server. The agent reads `AGENTS.md`, discovers ATO's surface, and operates it alongside the human. Local SQLite means zero network round-trip; agents never have to leave the machine.
 
 ---
 
@@ -96,17 +76,14 @@ brew install --cask ato
 
 **[Download latest release](https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest)**
 
-### SDK — narrow scope
+### CLI only
 
 ```bash
-npm install @ato-sdk/js
+brew install willnigri/ato/ato
+ato --help
 ```
 
-`@ato-sdk/js` is a **trace forwarder for ATO-authored agents deployed outside the desktop app** (Cloudflare Worker / Vercel / Docker / Node bundles). It is **not** a general-purpose LLM observability SDK.
-
-If you have an existing production stack and want general LLM observability, use [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), or [Braintrust](https://www.braintrust.dev). They're built for that job. ATO is **complementary** to them — see [Relationship to other tools](#relationship-to-other-tools) below.
-
-[Full SDK docs](docs/SDK.md).
+The CLI talks to the same `~/.ato/local.db` as the desktop app. Use either, both, or your coding agent shelling out — same data.
 
 ### MCP Server
 
@@ -121,96 +98,19 @@ If you have an existing production stack and want general LLM observability, use
 }
 ```
 
-The MCP server exposes `run_agent` — any MCP-aware runtime can dispatch to any ATO-managed agent regardless of native runtime. Cross-runtime by protocol, not by hack.
+Exposes `run_agent` and 24 other tools — any MCP-aware runtime (Claude Code, Cursor agent mode, etc.) can dispatch to any ATO-managed agent regardless of native runtime. Cross-runtime by protocol, not by hack.
 
-### Claude Code skill: `ato-review`
+### SDK — narrow scope
 
-The repo ships a Claude Code skill at [`.claude/skills/ato-review/SKILL.md`](.claude/skills/ato-review/SKILL.md). When a Claude session is in this repo, the skill instructs Claude to dispatch every non-trivial diff to a reviewer runtime (default: MiniMax) via `ato dispatch` before committing. Findings are parsed, applied or deferred with justification, and recorded in the commit body. Codifies the "build passes ≠ reviewed" guardrail described in Garry Tan's [AI Agent Complexity Ratchet](https://garrytan.com/) post — turns review into a contract Claude follows automatically.
+```bash
+npm install @ato-sdk/js
+```
 
-To use it on another project: copy `.claude/skills/ato-review/` into your repo, ensure `ato` is on PATH, and set `$ATO_REVIEWER` to whichever runtime you want as the second-opinion source (or rely on the MiniMax default).
+`@ato-sdk/js` is a **trace forwarder for ATO-authored agents deployed outside the desktop app** (Cloudflare Worker / Vercel / Docker / Node bundles). It is **not** a general-purpose LLM observability SDK.
 
----
+If you have an existing production stack and want general LLM observability, use [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), or [Braintrust](https://www.braintrust.dev). They're built for that job. ATO is **complementary** to them — see [Relationship to other tools](#relationship-to-other-tools).
 
-## What's in the box
-
-### Production-Ready Agents (v1.5.5)
-
-- **Production-grade Agent template** — fifth starter ships pre-wired with 4 variables (env / computed / project-path / Date), a pre-call file hook, and a memory policy. Click it once → see the dynamic-prompt pattern end-to-end without manually configuring anything.
-- **Dynamic-prompt messaging** — the wizard now spells out that prompts adapt at fire time. Empty states on Variables / Context tabs teach the resolver kinds instead of just saying "no items yet."
-- **Cron jobs wake from sleep** on every desktop OS — launchd on macOS, systemd-user timers on Linux, Task Scheduler on Windows. Your scheduled agents fire even when ATO is closed.
-- **Demo Tab-to-pause** — viewing the in-app demo? Tab pauses, Tab resumes, Esc stops. Catch a long subtitle without restarting from scratch.
-
-### Daily workspace (v1.5.0–1.5.4)
-
-- **Persistent chat threads** — conversations survive app restart, scoped optionally to projects, listed in a dropdown with msg count + last activity.
-- **Multi-runtime mid-thread** — switch Claude → Codex → Gemini in the same conversation. The full thread history travels to whichever runtime answers next.
-- **Streaming responses** — tokens appear as they're generated, with a blinking caret. No more 20-second blocking waits.
-- **Sequential pipeline messages** — when a Claude → Codex pipeline returns, the messages stagger in with a "stage 1 / 2" badge so you can read each step as it arrives.
-- **Syntax-highlighted markdown** — assistant replies render as proper markdown: headings, lists, GFM tables, fenced code blocks with copy buttons. Inline code in cyan.
-- **File attachments** — paperclip pick or drag-drop a text file (`.md`, `.json`, `.ts`, `.py`, etc.); contents join the conversation as context.
-- **Embedded shell** — real interactive PTY via `xterm.js` + `portable-pty`, scoped to active project, persists across navigation.
-- **i18n** — English, Português, Español. Demo subtitles localized too.
-
-### Production-grade agent authoring (v1.4)
-
-Every principle from the [context engineering literature](https://nigri.substack.com/p/context-engineering-2026), as a first-class UI:
-
-- **Variables** — `{user_name}` style templates with resolvers: static, env var, project path, file (Free) + db-query, computed expressions, MCP call (Pro).
-- **Pre-call context hooks** — ordered list of resolvers that fire before each turn and inject results into the user message inside `<context>...</context>` tags.
-- **Conversation summarizers** — per-agent memory policy (`summarizeAfter`, `keepLastK`, custom summarizer model). Long sessions auto-compact.
-- **Multi-agent groups** — two types: **Routed** (router picks one child per prompt — keyword rules + LLM-classifier fallback) and **Sequential automation pipeline** (children run in `position` order, each agent's output feeds the next as input; cross-runtime chains like Claude → Codex → Gemini work natively).
-- **Per-task models** — distinct models for routing / summarizing / responding / evaluating. Cheap fast for routing, advanced for response.
-- **Observability** — per-agent metrics (run count, p50/p95 latency, success rate), trace explorer with full sequence (variables → hooks → router → response).
-- **Evaluators** — heuristic kinds (contains / not-contains / length-range / tool-called) run locally; LLM-as-judge runs Pro cloud-side. Manual + scheduled batch — never live on every dispatch.
-- **Tool description rewrite** — per-MCP-tool button that asks your runtime to rewrite the description for your specific use-case.
-
-### Cross-runtime dispatch (agents-as-MCPs)
-
-The MCP server exposes `mcp__ato__run_agent("<slug>", "<prompt>")`. Any MCP-aware runtime can dispatch to any ATO-managed agent. Slug points at a single agent or a group — groups route through their router transparently. This is how cross-runtime works: not via a fragile shim, but as a standard MCP tool.
-
-### Create Agent (3 paths)
-
-- **Guided** — chat wizard: describe goal → ATO suggests runtime/model/skills/MCPs/permissions as confirmable cards.
-- **Quick** — one-page form, all fields visible, draft auto-saved.
-- **Templates** — 5 production-quality starters (PR Reviewer, Doc Writer, Codebase Explainer, Data Analyst, DevOps Helper). Pick → form pre-filled → customize → save.
-
-All paths write through the same safety pipeline (hash check, auto-backup, audit log) to the right place per runtime.
-
-### Skills, MCPs, projects
-
-- **Skills Manager** — per-runtime tabs, scope grouping (enterprise/personal/project/plugin), drag-to-prioritize, conflict detection (similar-description warnings), AI-powered creation.
-- **Skill version history** — every edit auto-snapshots; drawer shows prior versions; restore is itself reversible.
-- **Bulk skill ops** — multi-select toolbar: enable/disable/delete N at once.
-- **Marketplace** — browse curated + community skills.
-- **MCP install UI** — curated registry (filesystem, github, postgres, slack, brave-search, gmail, calendar, …) with one-click install.
-- **Projects dashboard** — click a project, see everything: memory hierarchy, skills, subagents, commands, hooks, permissions, MCPs. File watcher auto-refreshes.
-
-### Settings
-
-- **Runtimes** — Setup tab (CLI paths, SSH config, status checks) + **Compare tab** (per-runtime feature/config matrix).
-- **Models** — model config per runtime/project.
-- **API Keys / Secrets / Environment** — encrypted local storage, OS-keychain-backed where applicable.
-- **Cloud** — auth, teams, sync, notifications.
-- **Backup** — JSON export/import of all your config (agents, hooks, variables, groups, projects, env, model configs, secrets metadata).
-
-### Cross-cutting
-
-- **Command palette ⌘K** — global search across agents, skills, MCPs, projects, plus quick navigation.
-- **Tier gating** — Pro features are visible to Free users with a crown lock badge + upgrade tooltip. Discovery sells; hiding doesn't.
-- **i18n** — EN, PT, ES (react-i18next).
-
-### SDK (trace forwarder)
-
-`@ato-sdk/js` is narrow-scoped: it forwards traces from agents you authored in ATO and deployed externally (Cloudflare Worker / Vercel / Docker / Node bundles) back to your ATO Insights dashboard. It is not a drop-in observability SDK for arbitrary production stacks.
-
-| Provider | Wrapper | Import |
-|----------|---------|--------|
-| Anthropic | `wrapAnthropic(client)` | `@ato-sdk/js/anthropic` |
-| OpenAI | `wrapOpenAI(client)` | `@ato-sdk/js/openai` |
-| Claude Agent SDK | `wrapAgent(agent)` | `@ato-sdk/js/agent` |
-| Custom provider in a bundle | `capture(trace)` | `@ato-sdk/js` |
-
-Each forwarded trace records: model, tokens (input/output/cached), cost (USD), duration, status, errors, metadata. Built-in pricing for 60+ models. [Full SDK documentation](docs/SDK.md).
+[Full SDK docs](docs/SDK.md).
 
 ---
 
@@ -225,35 +125,98 @@ Each forwarded trace records: model, tokens (input/output/cached), cost (USD), d
 | **Hermes** | NousResearch | `SOUL.md`, `config.yaml`, `memories/*.md` | `~/.hermes/skills/` |
 | **Ollama** | local | auto-detect `localhost:11434` | n/a |
 
+Plus 15+ API providers: Anthropic, OpenAI, Google AI, Mistral, Groq, **xAI/Grok**, Together, Fireworks, DeepSeek, Qwen, MiniMax, Kimi, GLM, Yi, OpenRouter.
+
 ---
 
-## Free vs Pro vs Team vs Enterprise
+## Three audiences, one app
 
-| | Free (this repo) | Pro $29/seat/mo | Team $49/seat/mo | Enterprise $99+/seat/yr |
-|---|---|---|---|---|
-| Single-agent create / run / shell / Quick Test | ✅ | ✅ | ✅ | ✅ |
-| Cross-runtime MCP dispatch (`run_agent`) | ✅ | ✅ | ✅ | ✅ |
-| Persistent multi-runtime threads | ✅ | ✅ | ✅ | ✅ |
-| Streaming responses + markdown | ✅ | ✅ | ✅ | ✅ |
-| Variables — basic resolvers | ✅ | ✅ | ✅ | ✅ |
-| Variables — db-query / computed / MCP-call | – | ✅ | ✅ | ✅ |
-| Pre-call context hooks | – | ✅ | ✅ | ✅ |
-| Tunable summarizer policy | – | ✅ | ✅ | ✅ |
-| Routed groups (router picks one) | up to 3 children | unlimited | unlimited + shared | unlimited |
-| Sequential automation pipelines | up to 3 stages | unlimited | unlimited + shared | unlimited |
-| Cross-runtime children in pipelines | ✅ | ✅ | ✅ | ✅ |
-| Visual group graph editor | view-only | edit | edit + collab | edit + audit |
-| Per-task model selection | – | ✅ | ✅ | ✅ |
-| Local trace history | last 100 runs | unlimited | unlimited | unlimited |
-| Cloud trace retention | – | 30 days | 90 days | unlimited |
-| Observability dashboard | basic counts | full per-agent | + team aggregates | + SLA dashboards |
-| LLM-as-judge evaluators | – | ✅ | ✅ | ✅ |
-| Cron / Schedules | up to 3 jobs | unlimited | unlimited | unlimited + SLA |
-| Cloud sync of agents | – | ✅ | ✅ | ✅ |
-| Team workspaces / shared agents | – | – | ✅ | ✅ |
-| SSO / Audit retention | – | – | – | ✅ |
+- **First-time users** — chat-style guided wizard ("describe what you want") suggests runtime, model, skills, MCPs. Or pick a starter template. Working agent in under two minutes.
+- **Power users** — Quick form, command palette (⌘K), embedded `portable-pty` terminal, persistent threads, drag-drop file attachments, streaming responses, sequential automation pipelines.
+- **AI coding agents** — every meaningful operation reachable from a local CLI (`ato <command>`) or a stdio MCP server. The agent reads [`AGENTS.md`](./AGENTS.md), discovers ATO's surface, and operates it alongside the human.
 
-The OSS desktop is fully functional standalone — Pro adds cloud-side capabilities (suggest fallback, hosted judge, trace retention, sync). Sign-in is optional.
+Bring your own auth: ATO rides your existing logged-in CLI subscriptions (Claude Code, Codex, Gemini CLI) the way VS Code rides your GitHub login — *or* you can use stored API keys. Your choice, per runtime.
+
+---
+
+## Local-first by design
+
+ATO writes everything to `~/.ato/` on the developer's machine:
+
+- **`~/.ato/local.db`** — SQLite database with every dispatch, replay, config change, agent definition, chat thread, skill registration. Agents can `sqlite3` query it directly for fast reads.
+- **`~/.ato/agent-logs.jsonl`** — append-only JSONL log; grep-friendly.
+- **`~/.ato/workflows/`**, **`~/.ato/cron-jobs.json`**, **`~/.ato/backups/`** — workflows, schedules, auto-backups.
+
+Sign-in is **optional** and only unlocks cloud-side features (cross-device trace history, hosted LLM-as-judge, team workspaces). Every core operation — dispatch, replay, compare, file attribution, configuration ledger — works fully offline.
+
+[**Sign in to unlock cloud sync, evaluators, and trace retention — free during beta →**](https://agentictool.ai/signup)
+
+*Built in the open — star the repo if comparing AI runtimes sounds useful: [github.com/WillNigri/Agentic-Tool-Optimization](https://github.com/WillNigri/Agentic-Tool-Optimization)*
+
+---
+
+## What's in the box
+
+### The compare-and-decide loop
+
+- **`ato dispatch <runtime>`** — fire the same prompt at any runtime (CLI or API), record cost, tokens, duration, tool calls into `~/.ato/local.db`.
+- **`ato review --consensus`** — multi-LLM code review. Each reviewer sees prior turns via session history, surfaces disagreements inline, cites tool calls.
+- **`ato compare <run-a> <run-b>`** — post-hoc side-by-side of two execution_logs rows: duration delta, cost delta, response diff.
+- **`ato demo-compare`** — zero-config first-run demo. Uses your first 2 configured runtimes, falls back to local Ollama, then to stubbed responses. Always shows the cost-comparison table.
+- **`ato sessions`** — sticky multi-turn conversations. Cross-runtime by `--session <id>` + `--tag-bridge`. Auto-closes with coordinator-generated title/summary/tags.
+- **Replay across runtimes** — failing example from a regression? One click re-dispatches the prompt against an alternative runtime + diffs side-by-side.
+
+### Agent authoring
+
+- **Variables** — `{user_name}` style templates with resolvers: static, env var, project path, file (Free) + db-query, computed expressions, MCP call (sign-in).
+- **Pre-call context hooks** — ordered list of resolvers that fire before each turn and inject results into the user message inside `<context>...</context>` tags.
+- **Conversation summarizers** — per-agent memory policy (`summarizeAfter`, `keepLastK`, custom summarizer model).
+- **Multi-agent groups** — **Routed** (router picks one child per prompt) and **Sequential automation pipeline** (children run in `position` order, cross-runtime chains like Claude → Codex → Gemini work natively).
+- **Per-task models** — distinct models for routing / summarizing / responding / evaluating.
+- **Observability** — per-agent metrics (run count, p50/p95 latency, success rate), trace explorer with full sequence.
+- **Evaluators** — heuristic kinds (contains / not-contains / length-range / tool-called) run locally; LLM-as-judge runs cloud-side (sign-in). Manual + scheduled batch — never live on every dispatch.
+
+### Daily workspace
+
+- Persistent chat threads (SQLite), streaming responses, syntax-highlighted markdown, file attachments.
+- Multi-runtime mid-thread — switch Claude → Codex → Gemini in the same conversation.
+- Embedded shell — real interactive PTY via `xterm.js` + `portable-pty`.
+- i18n — English, Português, Español.
+
+### Skills, MCPs, projects
+
+- **Skills Manager** — per-runtime tabs, scope grouping, drag-to-prioritize, conflict detection, AI-powered creation.
+- **MCP install UI** — curated registry (filesystem, github, postgres, slack, brave-search, gmail, calendar, …) with one-click install.
+- **Projects dashboard** — memory hierarchy, skills, subagents, commands, hooks, permissions, MCPs. File watcher auto-refreshes.
+
+### Settings
+
+- Runtimes setup (CLI paths, SSH config, status checks) + Compare tab (per-runtime feature/config matrix).
+- API Keys / Secrets / Environment — encrypted locally, OS-keychain-backed where applicable.
+- Cloud — auth, teams, sync, notifications.
+- Backup — JSON export/import of all your config.
+
+### Cross-cutting
+
+- **Command palette ⌘K** — global search across agents, skills, MCPs, projects.
+- **i18n** — EN, PT, ES.
+
+---
+
+## Relationship to other tools
+
+ATO is **complementary** to production-observability tools like [Langfuse](https://langfuse.com), [Helicone](https://www.helicone.ai), [LangSmith](https://smith.langchain.com), [Arize Phoenix](https://phoenix.arize.com), and [Braintrust](https://www.braintrust.dev) — not a competitor.
+
+- **Those tools** instrument *deployed production stacks* via SDKs and log *end-user conversations* in real time.
+- **ATO** covers the *developer side* of the same agent — what you dispatched while building, what you replayed across runtimes, what regressed after a config change, what each dispatch cost, which agent touched which files.
+
+Most production teams use one from each camp: Langfuse / Helicone for production user-conversation logging, plus ATO for the developer/multi-runtime side. Production tools catch regressions in real user traffic; ATO catches regressions before you ship and lets you replay any failing example against an alternative runtime in one click.
+
+vs. **Cursor / Continue / Cody** — those are *authoring* (write code with an AI in your editor). ATO is *operations* (dispatch, compare, replay).
+
+vs. **Claude Code / Codex / Gemini CLI directly** — we're the GUI/orchestrator above them. They're the runtimes that do the work.
+
+vs. **`/ultrareview`, CodeRabbit, Greptile** — code review is one of ATO's surfaces, not the headline. We're cross-runtime by default; they're tied to one provider.
 
 ---
 
@@ -262,23 +225,23 @@ The OSS desktop is fully functional standalone — Pro adds cloud-side capabilit
 ```
 apps/
   desktop/                 # Tauri 2.x desktop app (Rust + React)
-  web/                     # Web dashboard (Vite + React)
+  cli/                     # ato CLI binary (Rust)
 
 packages/
-  sdk/                     # @ato-sdk/js — auto-trace LLM calls
+  sdk/                     # @ato-sdk/js — narrow trace forwarder
   core/                    # Shared types, token utils
   db/                      # Database adapters
 
 services/
-  mcp-server/              # Standalone MCP server with `run_agent`
+  mcp-server/              # Standalone MCP server (25 tools)
 ```
 
-### Cloud Backend (separate repo, Pro+)
+### Cloud Backend (optional, sign-in for cloud features)
 
 ```
 api.agentictool.ai
-├── API Gateway       # Routing, JWT auth, tiered rate limiting
-├── Auth              # Register, login, GitHub OAuth, SSO/OIDC, tier
+├── API Gateway       # Routing, JWT auth, rate limiting
+├── Auth              # Register, login, GitHub OAuth, SSO/OIDC
 ├── Skills            # CRUD, agent-suggest, agent-traces, agent-evaluators/judge
 ├── Analytics         # Token tracking, cost aggregation, burn rate
 ├── MCP Monitor       # MCP server health monitoring
@@ -307,54 +270,35 @@ cd Agentic-Tool-Optimization
 # Desktop app
 cd apps/desktop && npm install && npx tauri dev
 
+# CLI
+cd apps/cli && cargo run -- --help
+
 # MCP server
 npm run dev:mcp
-
-# SDK development
-cd packages/sdk && npm run dev
 ```
 
 Requires [Rust](https://rustup.rs/) and [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ---
 
-## Version History
-
-| Version | Highlights |
-|---------|-----------|
-| **v2.2.1** | **Regression → Replay** — failing examples in the regression drill modal now have a one-click "Replay on…" button that re-dispatches the prompt against an alternative runtime + diffs side-by-side. Closes the loop the strategy alignment audit flagged as highest-leverage. |
-| **v2.2.0** | **Real cost capture on the dispatch path** — Rust dispatch path computes tokens + cost at finish and persists them on `execution_logs` + `replay_jobs`. Compare / Cost Recs / Replay panels read the captured value instead of recomputing per render. |
-| **v2.1.x** | **Replay infrastructure + deep regression detection + cost recommendations** — replay any cloud trace against a different runtime / model; configuration ledger joined with trace stats surfaces regressions with failing-example drill-down; cost-rec layer surfaces same-agent model swaps when historical data justifies them |
-| **v2.0.0** | **External agents + hosted deployment** — Internal-vs-External agent toggle; deploy bundles for Cloudflare Worker / Vercel / Docker / Node across 9 chat-LLM providers; knowledge ingestion + RAG; embed widget; trace sink forwarding to Langfuse + OTLP webhook (complementary boundary baked into v2.0); Apple Developer signing + notarization |
-| **v1.5.0–1.5.5** | **Daily workspace** — persistent chat threads (SQLite), streaming responses, syntax-highlighted markdown, file attachments, multi-runtime mid-thread, per-thread sticky agent, production-grade agent template with welcome tour, dynamic-prompt empty-state CTAs |
-| **v1.4.0** | **Production-grade agent authoring** — Variables (F1), Context Hooks (F2), Summarizers (F3), Multi-agent Groups + Router + Graph Editor (F4), Per-task Models (F5), Observability + Trace Explorer (F6), Evaluators (F7), Tool Description Rewrite (F8); Pro tier gating; agent templates (5 starters); skill version history; bulk skill ops; runtime comparison tab; configuration export/import |
-| **v1.3.0** | **The GUI Pivot** — IA collapse (24 → 6 sections), Home page, Create Agent (Guided + Quick), MCP install UI, embedded terminal (xterm + portable-pty), command palette (⌘K), subscriptions-or-keys auth model |
-| **v1.2.0** | Visual workspace canvas, live execution visualization, skill palette, multi-select batch ops |
-| **v1.1.0** | Projects dashboard, 6 runtimes (+ Gemini + OpenAI Agents SDK), Ollama provider, CodeMirror editor with conflict detection + inline lint, sandbox/policies management, backup/restore, file watcher, token chart, i18n (EN/PT/ES) |
-| **v1.0.0** | SDK (`@ato-sdk/js` — narrow-scoped trace forwarder for ATO-authored agents deployed externally; not general-purpose LLM observability), web dashboard, cost tracking, LLM API key management, audit logging, agent monitor, SSO, Homebrew tap |
-
----
-
 ## Engineering
 
-- **CI/CD**: GitHub Actions runs `cargo check` + `cargo test` + `vitest run` + `vite build` on every PR
+- **CI/CD:** GitHub Actions runs `cargo check` + `cargo test` + `vitest run` + `vite build` on every PR
 - **66+ Rust unit tests** + frontend Vitest tests
-- **Code splitting**: Sidebar sections lazy-loaded via `React.lazy`
-- **Accessibility**: ARIA labels on navigation, dialogs, dashboard tabs
-- **Modular Rust**: types separate from commands
+- **Code splitting:** Sidebar sections lazy-loaded via `React.lazy`
+- **Accessibility:** ARIA labels on navigation, dialogs, dashboard tabs
+- **Modular Rust:** types separate from commands
 
 ## Security
 
 - **Local-first** — no network calls unless sync explicitly enabled
 - **Parameterized SQL** — all queries
-- **API keys** — encrypted locally, never sent externally
+- **API keys** — AES-256-GCM encrypted locally under a macOS-keychain-backed master key
 - **SSH** — OpenClaw uses key-based auth (paths only)
 - **Validation** — all inputs validated with Zod / serde
 - **Conflict detection** — content hashing prevents overwriting concurrent edits
 - **Auto-backup** — every file write creates a timestamped backup, restorable from the UI
 - **Audit trail** — every file write logged with diff stats and backup path
-- **db-query resolver** — opens SQLite read-only; rejects anything that isn't `SELECT/WITH`
-- **computed resolver** — constrained expression grammar, not arbitrary JS
 
 ## Contributing
 
@@ -363,3 +307,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+---
+
+**[Website](https://agentictool.ai)** | **[Sign in (free during beta)](https://agentictool.ai/signup)** | **[SDK Docs](docs/SDK.md)** | **[Roadmap](ROADMAP.md)**
+
+**MIT Licensed** | **Local-first** | **macOS, Windows, Linux**

@@ -159,9 +159,10 @@
     "lockedTitle": "Recurso {{tier}}",
     "lockedTooltip": "Atualize para {{tier}} para desbloquear",
     "upgrade": "Atualizar",
-    "requires": "Requer {{tier}} · {{price}}",
+    "requires": "Plano {{tier}} · {{price}}",
     "notNow": "Agora nao",
-    "seePricing": "Ver precos"
+    "seePricing": "Ver precos",
+    "bookOnboarding": "Agendar onboarding · gratis"
   },
   "myAgents": {
     "loadError": "Nao foi possivel carregar os agentes.",
