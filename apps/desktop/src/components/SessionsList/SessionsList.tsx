@@ -90,6 +90,7 @@ const RUNTIME_COLORS: Record<string, string> = {
   claude: "text-orange-400 bg-orange-400/10",
   codex: "text-green-400 bg-green-400/10",
   gemini: "text-blue-400 bg-blue-400/10",
+  google: "text-blue-400 bg-blue-400/10",
   hermes: "text-purple-400 bg-purple-400/10",
   openclaw: "text-cyan-400 bg-cyan-400/10",
   minimax: "text-pink-400 bg-pink-400/10",
@@ -97,6 +98,7 @@ const RUNTIME_COLORS: Record<string, string> = {
   deepseek: "text-indigo-400 bg-indigo-400/10",
   qwen: "text-amber-400 bg-amber-400/10",
   openrouter: "text-violet-400 bg-violet-400/10",
+  anthropic: "text-orange-400 bg-orange-400/10",
 };
 
 function runtimeBadge(rt: string) {
@@ -108,6 +110,61 @@ function runtimeBadge(rt: string) {
 
 function formatTime(iso: string) {
   return new Date(iso).toLocaleString();
+}
+
+// Pretty-name lookup for runtimes. Used in chat-bubble sender labels
+// where "google" or "minimax" alone is opaque. Pairs with the model
+// when known (e.g. "Google AI · Gemini 2.5 Flash"). Falls back to the
+// capitalized runtime slug for unknown values.
+const RUNTIME_DISPLAY: Record<string, string> = {
+  claude: "Claude",
+  codex: "OpenAI Codex",
+  gemini: "Google Gemini",
+  google: "Google Gemini",
+  hermes: "Hermes",
+  openclaw: "OpenClaw",
+  minimax: "MiniMax",
+  grok: "xAI Grok",
+  deepseek: "DeepSeek",
+  qwen: "Qwen",
+  openrouter: "OpenRouter",
+  anthropic: "Anthropic",
+};
+
+function runtimeDisplay(rt: string): string {
+  return RUNTIME_DISPLAY[rt] ?? rt.replace(/^[a-z]/, (c) => c.toUpperCase());
+}
+
+// Heuristic to detect when a `user`-role turn was authored by the
+// `ato review` orchestrator (or another scripted dispatch) versus a
+// human-typed prompt. The orchestrator's prompts have a predictable
+// opener — "# Code review request for `<runtime>`" or "<runtime> —
+// consensus round." — that we lean on to flip the rendered sender from
+// "You" to "ATO Coordinator → @<addressee>". Best-effort: if neither
+// pattern matches, treat as human input. (No false positives observed
+// for human prose in 2026-05-15 dogfooding, but the regex is narrow
+// enough to fix if one shows up.)
+function inferCoordinatorTarget(text: string): string | null {
+  const m1 = text.match(
+    /^\s*#\s*Code review request for\s+`([a-z][a-z0-9_-]*)`/i
+  );
+  if (m1) return m1[1];
+  const m2 = text.match(
+    /^\s*([a-z][a-z0-9_-]*)\s+—\s+consensus round/i
+  );
+  if (m2) return m2[1];
+  return null;
+}
+
+// Two-letter avatar from the speaker label. "MiniMax" → "Mi",
+// "Google Gemini" → "GG", "ATO Coordinator" → "AC". Easier to scan
+// in a chat list than a generic robot icon.
+function avatarInitials(label: string): string {
+  const words = label.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  return label.slice(0, 2).toUpperCase();
 }
 
 // Runtimes we offer in the New Session / Continue dropdowns. Mirrors
@@ -879,46 +936,117 @@ function SessionTranscriptView({
         </div>
       ) : (
         <div className="space-y-3">
-          {q.data.turns.map((turn) => (
-            <div key={turn.turnIndex} className="flex gap-3">
+          {q.data.turns.map((turn) => {
+            // Sender resolution. For assistant turns, the speaker IS
+            // the runtime. For user turns, we distinguish ato-orchestrator
+            // prompts (auto-generated, e.g. `ato review`) from human-typed
+            // dispatches (manual `ato dispatch <runtime> --session ...`).
+            const isAssistant = turn.role === "assistant";
+            const coordTarget = !isAssistant
+              ? inferCoordinatorTarget(turn.text)
+              : null;
+            // Speaker = who's TALKING in this bubble.
+            //   - assistant: the responding runtime
+            //   - user/coordinator: "ATO Coordinator"
+            //   - user/human:       "You"
+            const speakerLabel = isAssistant
+              ? runtimeDisplay(turn.runtime)
+              : coordTarget !== null
+              ? "ATO Coordinator"
+              : "You";
+            // Avatar bg color: themed by runtime for assistant; neutral
+            // for human; coordinator-accent for orchestrator.
+            const avatarColorCls = isAssistant
+              ? RUNTIME_COLORS[turn.runtime] ?? "text-cs-muted bg-cs-border"
+              : coordTarget !== null
+              ? "text-cs-accent bg-cs-accent/15"
+              : "text-cs-muted bg-cs-border";
+            // Bubble border picks up the runtime tint for assistant
+            // turns so back-to-back replies from different reviewers
+            // visually contrast. Subtle for user turns.
+            const runtimeTintClass = (
+              RUNTIME_COLORS[turn.runtime] ?? "text-cs-muted"
+            ).split(" ")[0]; // pull "text-X-400" → use for border
+            const bubbleBorderCls = isAssistant
+              ? cn("border", runtimeTintClass.replace("text-", "border-") + "/30")
+              : "border border-cs-border";
+            const bubbleBgCls = isAssistant
+              ? cn(runtimeTintClass.replace("text-", "bg-") + "/5")
+              : coordTarget !== null
+              ? "bg-cs-accent/5"
+              : "bg-cs-card";
+            // WhatsApp alignment: human (you) right-aligned, everyone
+            // else (assistants + coordinator-generated) left.
+            const isYou = !isAssistant && coordTarget === null;
+            return (
               <div
-                className={cn(
-                  "shrink-0 w-8 h-8 rounded-full flex items-center justify-center",
-                  turn.role === "user"
-                    ? "bg-cs-border text-cs-muted"
-                    : "bg-cs-accent/20 text-cs-accent"
-                )}
+                key={turn.turnIndex}
+                className={cn("flex gap-3", isYou && "flex-row-reverse")}
               >
-                {turn.role === "user" ? <UserIcon size={14} /> : <Bot size={14} />}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span
+                <div
+                  className={cn(
+                    "shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-semibold",
+                    avatarColorCls
+                  )}
+                  title={
+                    isAssistant
+                      ? `${speakerLabel} (${turn.runtime})`
+                      : coordTarget !== null
+                      ? `ATO Coordinator addressing @${coordTarget}`
+                      : "You (manual dispatch)"
+                  }
+                >
+                  {avatarInitials(speakerLabel)}
+                </div>
+                <div className={cn("flex-1 min-w-0", isYou && "text-right")}>
+                  <div
                     className={cn(
-                      "text-xs font-medium uppercase",
-                      turn.role === "user" ? "text-cs-muted" : "text-cs-accent"
+                      "flex items-center gap-2 mb-1",
+                      isYou && "justify-end"
                     )}
                   >
-                    {turn.role}
-                  </span>
-                  <span className={runtimeBadge(turn.runtime)}>{turn.runtime}</span>
-                  <span className="text-[10px] text-cs-muted">
-                    {formatTime(turn.createdAt)}
-                  </span>
+                    <span
+                      className={cn(
+                        "text-xs font-medium",
+                        isAssistant
+                          ? "text-cs-text"
+                          : coordTarget !== null
+                          ? "text-cs-accent"
+                          : "text-cs-muted"
+                      )}
+                    >
+                      {speakerLabel}
+                    </span>
+                    {coordTarget !== null && (
+                      <span className="text-[11px] text-cs-muted">
+                        →{" "}
+                        <span className={runtimeBadge(coordTarget)}>
+                          @{coordTarget}
+                        </span>
+                      </span>
+                    )}
+                    {isAssistant && (
+                      <span className={runtimeBadge(turn.runtime)}>
+                        {turn.runtime}
+                      </span>
+                    )}
+                    <span className="text-[10px] text-cs-muted">
+                      {formatTime(turn.createdAt)}
+                    </span>
+                  </div>
+                  <pre
+                    className={cn(
+                      "p-3 rounded-md text-sm whitespace-pre-wrap font-sans text-left",
+                      bubbleBgCls,
+                      bubbleBorderCls
+                    )}
+                  >
+                    {turn.text}
+                  </pre>
                 </div>
-                <pre
-                  className={cn(
-                    "p-3 rounded-md text-sm whitespace-pre-wrap font-sans border",
-                    turn.role === "user"
-                      ? "bg-cs-card border-cs-border"
-                      : "bg-cs-accent/5 border-cs-accent/20"
-                  )}
-                >
-                  {turn.text}
-                </pre>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {/* v2.3.48 — streaming placeholder turn. Renders while
               session-stream-chunk events are landing; cleared by
               session-stream-done + transcript refetch. The cursor
