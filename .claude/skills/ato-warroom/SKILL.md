@@ -429,6 +429,45 @@ Two patterns produce very different outputs. Picking the wrong one wastes both r
 
 **Recording the shape in the audit trail.** PR descriptions and decision docs should name which pattern was used and which session (if R2+). Example: *"R1 parallel via 5 ato dispatch (no --session); R2 sequential in session b1547c69 (3 seats, history-replay). Verdict tag [AMEND] unanimous in R2."* This makes the strength of the conclusion legible to whoever inherits the decision.
 
+### 4c. Session discipline — one subject per session, never overload, never re-open off-topic
+
+This rule cost ATO a strategic session preview during the 2026-05-16 dogfood; don't repeat the mistake.
+
+**Sessions are how the local DB structures decision history by subject, date, and work session.** The Sessions list in the desktop app is meant to be readable months later by a human (you, your teammate, your future self) asking *"what was decided about X, and when?"*. That only works if each session row is a coherent unit. Overload a session with off-topic dispatches and the row title, summary, and preview stop describing what's in it — the trail goes dark.
+
+**The rules:**
+
+1. **One session per subject / decision / work block.** A PMF war-room and an unrelated code review go in different sessions. A war-room about pricing and a war-room about onboarding go in different sessions. Sequential rounds *of the same war-room* (R1, R2, R3 ratifying the same decision) belong in the *same* session — that's the value of history replay.
+
+2. **Never re-open a closed session for a different topic.** `ato sessions reopen <id>` is for genuinely continuing the same conversation (new evidence, follow-up question, related amendment). It is NOT a "scratch buffer." If you find yourself reaching for an old session to ask a new question, create a new session instead. The old one's coordinator-generated summary already committed an interpretation of the conversation; piling new turns on rots that summary in place.
+
+3. **Smoke tests, schema verification, ack pings — separate session always.** Anything you'd later regret seeing as the preview of a strategic session is the wrong dispatch to send to that session. `ato sessions new --runtime <X> --title "smoke test 2026-05-16"` is one command; type it. The same holds for "I just want to verify --agent wires through" or "let me see what the table looks like" — all of these dispatches change `sessions.last_used_at`, refresh the `lastAssistantPreview`, and (on close) influence the coordinator's auto-summary.
+
+4. **Title and summary are part of the deliverable, not metadata.** When `ato sessions close <id>` runs, the coordinator generates `auto_title`, `summary`, `tags`, and `project_id` from the conversation. That summary is the row's identity going forward — it's what someone (or you, in 3 weeks) reads to decide whether the session is worth opening. A war-room session whose summary becomes "Ack." because the last turn was an unrelated smoke test is permanently degraded as a navigation artifact. Either keep the smoke-test dispatches out, or re-close the session with explicit context so the regenerated summary captures the real decision.
+
+5. **Naming the session at creation time is cheap insurance.** `ato sessions new --runtime claude --title "PMF war-room — wedge + pitch + hero ratification 2026-05-16"` reads correctly even before a single turn lands. A session that grows past its original scope (e.g. "Round 2 ratification" that ends up holding Rounds 2-7) should be renamed when you notice — `ato sessions ... ` doesn't expose rename today, but you can `UPDATE sessions SET title = ?` directly while the right command lands.
+
+6. **When the war-room spans a multi-day decision, prefer one session over splitting by day.** Continuity of history beats date-bucketing. Use the title and tags to mark the cadence (e.g. `tags: ["round-1", "round-5", "ratified"]`).
+
+7. **When in doubt, create a new session.** Sessions are free; you can always link them via tags or a meta-doc that references both ids. Cluttering one session is the irreversible cost.
+
+**Convention for war-room session titles:**
+
+```
+<topic> war-room — <scope summary> <YYYY-MM-DD>
+```
+
+Examples:
+- `PMF war-room — wedge / pitch / hero ratification 2026-05-16`
+- `Pricing war-room — tier collapse vs sign-in capture 2026-05-12`
+- `Security audit war-room — provider-keys path 2026-05-15`
+
+**What this skill should make you do automatically:**
+
+- Before dispatching, check: *does this question belong in the open session I'm about to target, or does it deserve a fresh one?* If the answer is anywhere short of "yes, this is the same subject," create new.
+- Before closing, scroll the last 3-5 turns and confirm they would make a coherent summary. If not, dispatch one final "summarize this round in 80 words" turn so the coordinator has clean material to work with.
+- After closing, glance at the row in the Sessions list. The title + preview should describe the session in a way that's legible to someone who didn't run it.
+
 ### 5. CEO synthesizes
 
 Read every seat's response. Force the disagreement to the surface:
