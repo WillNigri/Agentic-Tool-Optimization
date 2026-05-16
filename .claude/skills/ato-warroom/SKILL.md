@@ -361,11 +361,22 @@ QUESTION="<the filter-wrapped prompt from step 3>"
 # CEO is Claude: `codex` (tool-capable, can walk the source itself).
 # Default for strategy / scope / positioning: any API-only provider
 # is fine (`minimax`, `grok`, `deepseek`, `qwen`, `openrouter`).
-ato dispatch codex "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf1-$$.txt
+#
+# When the seat has a named role (Positioning, Devex, CEO, Designer,
+# Office Hours, security-specialist, etc.) pass `--agent <slug>` so the
+# persona is recorded in `execution_logs.agent_slug` for the audit
+# trail. See section 4a for when to skip the flag (generalist voice).
+ato dispatch codex --agent positioning "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf1-$$.txt
 # (optional) second cross-family seat for breaking ties / adversarial pass.
 # Use a third family — e.g. minimax — so you have Claude + GPT + MiniMax priors.
-ato dispatch minimax "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf2-$$.txt 2>/dev/null
+ato dispatch minimax --agent devex "$QUESTION" --session "$SID" --human | tee /tmp/wr-cf2-$$.txt 2>/dev/null
+# Generalist seat — no --agent, raw model priors. Drop one of these in
+# when you want a falsification voice that isn't anchored to the seat's
+# pre-set frame. Healthy default: 3 specialist + 1 generalist per round.
+ato dispatch grok "$QUESTION" --session "$SID" --human | tee /tmp/wr-gen-$$.txt 2>/dev/null
 ```
+
+**Agent records to create once (per ATO install).** The gstack PMF war-room shipped with these 5 — `positioning` / `devex` / `ceo` / `designer` / `office-hours`. To use one on a runtime other than where the canonical record lives, create a sibling record with the same slug and a different runtime (the schema's `UNIQUE (runtime, slug)` accepts it). The `ato agents list` command shows what's installed.
 
 For the in-session specialist seats, invoke the source skill directly
 via your runtime's subagent / skill mechanism (e.g. Claude Code's
@@ -375,6 +386,30 @@ If `ato dispatch` fails (network, quota, key missing, runtime not
 configured), stop and note it — friction IS feedback. Fall back to a
 second in-session specialist or a manual cross-perspective prompt and
 record the dispatch failure in the deliverable so it gets fixed.
+
+### 4a. Pick the seat type per voice — generalist vs specialist vs adaptive
+
+A war-room is a mix of voices, not a panel of identical experts. The same dispatch invocation can produce three legitimate seat types, each useful for different reasons. Mix them deliberately.
+
+| Seat type | How to dispatch | What you trade | Use when |
+|---|---|---|---|
+| **Generalist** | `ato dispatch <runtime> "<prompt>"` (no `--agent`, no skill) | Pure model priors, no persona overlay. **Cost**: no domain expertise, no audit-trail persona slug. **Value**: untainted answer, useful as a sanity-check voice or for "what would a smart outsider say?" | You want variance, a falsification voice, or to test whether the project's framing survives a fresh read. At least one generalist per war-room is healthy; four specialists who already agree is noise. |
+| **Agent-backed specialist** | `ato dispatch <runtime> --agent <slug> "<prompt>"` — agent record's `system_prompt` is prepended deterministically; slug lands in `execution_logs.agent_slug` | Cross-runtime portable (an agent record works for any runtime where you've defined it). Persistent — mutate the persona in one place, every future dispatch picks it up. Captured in the audit trail. **Cost**: setup-once per persona × runtime. | **Default for named seats** (Positioning, Devex, CEO, Designer, Office Hours, security specialist, etc.). Reproducibility and audit-trail legibility outweigh the setup cost the first time you create the record. |
+| **Skill-loaded (Claude in-session only)** | Claude Code's `Skill(<name>)` or `Task(<agent-slug>)` invocation, loading a `.claude/skills/<name>/SKILL.md` | Rich tool grant rules + version-control via markdown. **Cost**: Claude-only — doesn't transfer to `ato dispatch <other-runtime>`. | You're already in a Claude Code session and need the specialist's full procedural depth (steps, decision trees, examples). For cross-runtime seats, mirror the skill's persona into an agent record (see below). |
+| **Hook-driven adaptive** | `ato dispatch <runtime> "<prompt>"` against an agent that has a pre-call context hook attached — the hook resolves persona / context at fire time based on a rule (project type, prompt keyword, etc.) | Adaptive — same dispatch line becomes a different persona in different contexts. **Cost**: harder to reason about "did the right specialist fire?"; audit trail records the hook ran but not the resolved persona name as cleanly as `--agent`. | You want context-aware specialists (e.g., "use security-specialist when the prompt contains 'auth' or 'crypto'"). Power-user pattern; not the default for war-rooms. |
+
+**Recommendation hierarchy (when in doubt, top wins):**
+
+1. **Named seat with a known role** → agent-backed (`--agent <slug>`). The 5 gstack agents shipped with this skill — `positioning`, `devex`, `ceo`, `designer`, `office-hours` — are the canonical defaults; create more for specialized domains (security-specialist, infra-reviewer, etc.) the same way.
+2. **Untainted-prior voice** → generalist. Don't apologize for it; one generalist per room is feature, not bug.
+3. **Claude Code session already loaded with the skill** → use it directly. The agent record is for cross-runtime portability; if you're staying inside Claude, the SKILL.md is already richer.
+4. **Adaptive context-dependent persona** → hook-driven, but only if you've already mastered patterns 1-3.
+
+**Don't force the choice.** Mixing seat types in one war-room (e.g., 3 agent-backed specialists + 1 generalist) usually produces sharper outputs than 4 of the same kind.
+
+**Compare patterns when in doubt.** Run the same question through two seat types on the same runtime and compare receipts (the dispatch JSON has cost, tokens, response). Specialists tend to win on positioning / design / framing-heavy questions; generalists tend to win on "is this problem even real?" tests. Your mileage will vary by domain — measure, don't assume.
+
+**Creating an agent record from an existing skill.** When a gstack-style `SKILL.md` already captures the persona well, distill the *seat identity* (~150-300 words: who they are, what frame they apply, how they commit) into the `system_prompt` field. Don't paste the whole skill — procedural steps and examples bloat the prompt without sharpening the persona. See the 5 gstack agents shipped with this skill for templates.
 
 ### 4b. Pick the multi-seat shape — parallel for breadth, sequential session for depth
 
