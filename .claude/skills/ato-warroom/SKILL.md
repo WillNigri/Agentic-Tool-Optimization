@@ -431,6 +431,8 @@ Two patterns produce very different outputs. Picking the wrong one wastes both r
 
 ### 4c. Session discipline — one subject per session, never overload, never re-open off-topic
 
+> Full reference: [`docs/SESSIONS.md`](../../../docs/SESSIONS.md). This section is the war-room-specific summary; SESSIONS.md covers the lifecycle, data model, dispatch types, and cross-runtime mechanics in depth.
+
 This rule cost ATO a strategic session preview during the 2026-05-16 dogfood; don't repeat the mistake.
 
 **Sessions are how the local DB structures decision history by subject, date, and work session.** The Sessions list in the desktop app is meant to be readable months later by a human (you, your teammate, your future self) asking *"what was decided about X, and when?"*. That only works if each session row is a coherent unit. Overload a session with off-topic dispatches and the row title, summary, and preview stop describing what's in it — the trail goes dark.
