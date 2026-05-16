@@ -81,7 +81,11 @@ interface SessionCostRow {
   tokensIn: number | null;
   tokensOut: number | null;
   totalDurationMs: number | null;
+  costNullTurns: number;
   totalCostUsd: number;
+  // 2026-05-16 — from execution_logs.auth_mode (authoritative per-row)
+  // with a runtime-string fallback for pre-auth-mode rows.
+  billingMode: string; // "subscription" | "api_key" | "local"
 }
 
 interface SessionCostBreakdown {
@@ -556,22 +560,18 @@ export default function SessionsList() {
                   <span className="text-xs text-cs-muted">
                     {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
                   </span>
-                  {/* 2026-05-16 — session-total cost pill. Hidden for
-                      pre-session-id-on-execution-logs sessions (null).
-                      Shows "free" for sessions that ran entirely on
-                      subscription (cost 0.0 with rows present). */}
-                  {s.totalCostUsd !== null && (
+                  {/* 2026-05-16 — session-total cost pill. Shows the
+                      summed cost from execution_logs.cost_usd_estimated.
+                      Sum mixes metered + subscription-estimate rows; the
+                      Receipts panel inside has the proper per-row labels.
+                      Hidden when no execution_logs rows reference the
+                      session (pre-session-id-on-logs). */}
+                  {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
                     <span
                       className="text-xs text-cs-muted font-mono"
-                      title={
-                        s.totalCostUsd === 0
-                          ? "Session ran entirely on subscription — no metered cost"
-                          : "Estimated session cost (sum of execution_logs)"
-                      }
+                      title="Estimated session cost (sum of execution_logs). Open the session to see the per-runtime breakdown including which rows are metered API vs subscription-estimate."
                     >
-                      {s.totalCostUsd === 0
-                        ? "free"
-                        : `$${s.totalCostUsd.toFixed(4)}`}
+                      ${s.totalCostUsd.toFixed(4)}
                     </span>
                   )}
                   <span className="text-xs text-cs-muted">
@@ -1303,30 +1303,63 @@ function SessionTranscriptView({
                               ? "text-cs-muted"
                               : "text-cs-text"
                           )}
+                          title={
+                            row.billingMode === "subscription"
+                              ? "Subscription auth (Claude Code / Codex CLI / Gemini CLI). No per-token billing — cost is the equivalent if you were paying per-token directly."
+                              : row.billingMode === "local"
+                              ? "Local runtime (Ollama / OpenClaw / Hermes). No network, no cost."
+                              : row.costNullTurns > 0
+                              ? `${row.costNullTurns} turn(s) had no cost computed — model missing from pricing table. Add the model's per-million rates in apps/cli/src/runtime.rs.`
+                              : "Estimated from published per-token rates. Matches your provider's metered billing."
+                          }
                         >
-                          {row.totalCostUsd === 0
-                            ? "free"
-                            : `$${row.totalCostUsd.toFixed(4)}`}
+                          {row.costNullTurns > 0 ? (
+                            <span className="text-amber-400">
+                              $? <span className="text-[10px]">(pricing missing)</span>
+                            </span>
+                          ) : row.billingMode === "local" ? (
+                            <span className="text-cs-muted">local</span>
+                          ) : row.totalCostUsd === 0 ? (
+                            row.billingMode === "subscription" ? (
+                              <span className="text-cs-muted">subscription</span>
+                            ) : (
+                              <span className="text-cs-muted">$0.0000</span>
+                            )
+                          ) : row.billingMode === "subscription" ? (
+                            <span>
+                              <span className="text-cs-muted">≈ </span>
+                              ${row.totalCostUsd.toFixed(4)}
+                              <span className="text-[10px] text-cs-muted ml-1">
+                                (sub est.)
+                              </span>
+                            </span>
+                          ) : (
+                            <>${row.totalCostUsd.toFixed(4)}</>
+                          )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              {/* Cheapest-success callout when there's variance worth
-                  pointing at. Skipped when every row is on subscription
-                  (cost 0.0) since there's no comparison to make. */}
+              {/* Cheapest-success callout — only over genuinely-metered
+                  (api_key) rows so we don't compare apples (subscription
+                  estimate) to oranges (real billable). */}
               {(() => {
-                const paid = costQ.data.rows.filter(
-                  (r) => r.totalCostUsd > 0 && r.successfulTurns > 0
+                const metered = costQ.data.rows.filter(
+                  (r) =>
+                    r.billingMode === "api_key" &&
+                    r.totalCostUsd > 0 &&
+                    r.successfulTurns > 0
                 );
-                if (paid.length < 2) return null;
-                const cheapest = paid.reduce((a, b) =>
+                if (metered.length < 2) return null;
+                const cheapest = metered.reduce((a, b) =>
                   a.totalCostUsd < b.totalCostUsd ? a : b
                 );
                 return (
                   <div className="px-3 py-1.5 text-xs text-cs-muted border-t border-cs-border/40 bg-cs-card/40">
-                    Cheapest: <span className="text-cs-accent">{cheapest.runtime}</span>
+                    Cheapest metered:{" "}
+                    <span className="text-cs-accent">{cheapest.runtime}</span>
                     {cheapest.agentSlug && (
                       <> as {personaDisplay(cheapest.agentSlug)}</>
                     )}{" "}
@@ -1334,6 +1367,20 @@ function SessionTranscriptView({
                   </div>
                 );
               })()}
+              {/* Caveat line. Always present so the reader knows the
+                  cost numbers are estimates from a per-runtime pricing
+                  table, not the provider's own bill. */}
+              <div className="px-3 py-1.5 text-[10px] text-cs-muted border-t border-cs-border/40">
+                Costs estimated from published per-runtime rates × tokens
+                used. For metered providers (api_key) this should match
+                your bill. For subscription runtimes this is the equivalent
+                if you were paying per-token. "$?" means the model is
+                missing from the pricing table — see{" "}
+                <code className="text-cs-text">
+                  apps/cli/src/runtime.rs:pricing_for_model
+                </code>
+                .
+              </div>
             </div>
           )}
 

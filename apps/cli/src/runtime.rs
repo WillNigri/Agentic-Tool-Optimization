@@ -33,31 +33,93 @@ pub fn resolve_runtime_cli(runtime: &str) -> Result<PathBuf> {
     })
 }
 
-/// Per-million-token (input, output) pricing. Mirror of pricing.ts +
-/// commands.rs's pricing_for_model. Keep in sync when adding models.
+/// Per-million-token (input, output) USD pricing.
 ///
-/// v2.3.6 — unused inside the CLI's dispatch / replay paths since the
-/// switch to NULL cost for subscription runs. Kept for the future
-/// direct-API path (`ato dispatch --api-key`) and for ad-hoc usage
-/// like cost-of-equivalent comparisons.
-#[allow(dead_code)]
+/// **Rates last verified: 2026-05-16.** Treat as estimates — published
+/// vendor rates drift. For accurate billing always cross-check against
+/// the provider's own dashboard. The `(0.30, 2.50)` Gemini 2.5 Flash
+/// numbers, for example, came from Google AI Studio pricing as of that
+/// date; verify before quoting publicly.
+///
+/// Returning `None` for an unknown model is signal — the dispatch path
+/// will write `cost_usd_estimated = NULL` and the UI surfaces "$? (model
+/// not in pricing table)" rather than a misleading "$0.00".
 pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
-        // Anthropic
+        // ---- Anthropic ----
         "claude-opus-4-7" => Some((15.0, 75.0)),
         "claude-opus-4-6" => Some((15.0, 75.0)),
         "claude-sonnet-4-6" => Some((3.0, 15.0)),
         "claude-sonnet-4-5" => Some((3.0, 15.0)),
-        "claude-haiku-4-5-20251001" => Some((1.0, 5.0)),
-        // OpenAI
+        "claude-haiku-4-5" | "claude-haiku-4-5-20251001" => Some((1.0, 5.0)),
+
+        // ---- OpenAI ----
+        "gpt-5" | "gpt-5-2025" => Some((1.25, 10.0)),
         "gpt-4.1" => Some((2.5, 10.0)),
         "gpt-4o" => Some((2.5, 10.0)),
         "gpt-4o-mini" => Some((0.15, 0.6)),
-        // Google
+        "o3" => Some((1.10, 4.40)),
+        "o3-mini" => Some((1.10, 4.40)),
+
+        // ---- Google (Gemini API on AI Studio) ----
+        "gemini-2.5-pro" => Some((1.25, 10.0)),
+        "gemini-2.5-flash" => Some((0.30, 2.50)),
         "gemini-2.0-flash" => Some((0.1, 0.4)),
         "gemini-1.5-pro" => Some((1.25, 5.0)),
         "gemini-1.5-flash" => Some((0.075, 0.3)),
+
+        // ---- xAI Grok ----
+        "grok-2-latest" | "grok-2-1212" => Some((2.0, 10.0)),
+        "grok-3" => Some((3.0, 15.0)),
+
+        // ---- DeepSeek ----
+        "deepseek-chat" => Some((0.27, 1.10)),
+        "deepseek-coder" => Some((0.27, 1.10)),
+        "deepseek-reasoner" | "deepseek-r1" => Some((0.55, 2.19)),
+
+        // ---- Alibaba Qwen (DashScope-Intl) ----
+        "qwen-plus" => Some((0.40, 1.20)),
+        "qwen-max" => Some((1.40, 5.60)),
+        "qwen-turbo" => Some((0.05, 0.20)),
+
+        // ---- MiniMax ----
+        // Note: most users hit MiniMax via the Token Plan subscription, in
+        // which case there's no metered per-token cost — the dispatch
+        // auth mode flags that case. These are the published API rates if
+        // a user is on the metered tier.
+        "MiniMax-M2.7-highspeed" => Some((1.0, 3.0)),
+        "MiniMax-M2" => Some((1.0, 3.0)),
+        "MiniMax-Text-01" => Some((0.5, 1.5)),
+
         _ => None,
+    }
+}
+
+/// Runtime billing-mode classification. Distinguishes "this user's auth
+/// is a CLI subscription (Claude Max, Codex CLI, Gemini CLI)" from "this
+/// is a metered API key" from "this is local."
+///
+/// Used by the UI cost panel to label rows appropriately — a NULL cost
+/// on a Subscription row means "subscription, no per-token billing,"
+/// but a NULL cost on an ApiKey row means "we forgot the pricing for
+/// this model" (a real bug to surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingMode {
+    Subscription,
+    ApiKey,
+    Local,
+}
+
+pub fn billing_mode(runtime: &str) -> BillingMode {
+    match runtime {
+        // CLI runtimes that use the user's existing subscription auth.
+        "claude" | "codex" | "gemini" => BillingMode::Subscription,
+        // Local runtimes — no network, no cost.
+        "ollama" | "openclaw" | "hermes" => BillingMode::Local,
+        // Anything else is an API key path (anthropic, openai, google,
+        // minimax, grok, deepseek, qwen, openrouter, together, groq…).
+        _ => BillingMode::ApiKey,
     }
 }
 

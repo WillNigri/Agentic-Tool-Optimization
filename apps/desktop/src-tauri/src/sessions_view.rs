@@ -340,7 +340,27 @@ pub struct SessionCostRow {
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
     pub total_duration_ms: Option<i64>,
+    /// 2026-05-16 — `cost_null_turns` counts rows where the dispatch
+    /// computed a NULL cost (model missing from pricing table). The UI
+    /// surfaces these as "$? (model not in pricing table)" so a stale
+    /// pricing table doesn't masquerade as a free dispatch.
+    pub cost_null_turns: i64,
     pub total_cost_usd: f64,
+    /// "subscription" / "api_key" / "local" — read from
+    /// `execution_logs.auth_mode` when populated (authoritative; per-
+    /// row truth from the dispatch). Falls back to a static lookup on
+    /// the runtime name for pre-auth-mode rows.
+    pub billing_mode: String,
+}
+
+/// Fallback for older rows where `execution_logs.auth_mode` is NULL.
+/// Mirrors `apps/cli/src/runtime.rs:billing_mode`.
+fn billing_mode_fallback(runtime: &str) -> &'static str {
+    match runtime {
+        "claude" | "codex" | "gemini" => "subscription",
+        "ollama" | "openclaw" | "hermes" => "local",
+        _ => "api_key",
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -365,30 +385,39 @@ pub fn get_session_cost_breakdown(
         .prepare(
             "SELECT runtime,
                     agent_slug,
+                    auth_mode,
                     COUNT(*) AS total_turns,
                     SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_turns,
                     SUM(COALESCE(tokens_in, 0))  AS tokens_in,
                     SUM(COALESCE(tokens_out, 0)) AS tokens_out,
                     SUM(COALESCE(duration_ms, 0)) AS total_duration_ms,
+                    SUM(CASE WHEN cost_usd_estimated IS NULL AND status = 'success' THEN 1 ELSE 0 END) AS cost_null_turns,
                     SUM(COALESCE(cost_usd_estimated, 0)) AS total_cost_usd
                FROM execution_logs
               WHERE session_id = ?1
-              GROUP BY runtime, agent_slug
+              GROUP BY runtime, agent_slug, auth_mode
               ORDER BY total_cost_usd DESC, runtime ASC",
         )
         .map_err(|e| e.to_string())?;
 
     let rows: Vec<SessionCostRow> = stmt
         .query_map([&session_id], |r| {
+            let runtime: String = r.get(0)?;
+            let auth_mode: Option<String> = r.get(2)?;
+            let billing_mode = auth_mode
+                .clone()
+                .unwrap_or_else(|| billing_mode_fallback(&runtime).to_string());
             Ok(SessionCostRow {
-                runtime: r.get(0)?,
+                runtime,
                 agent_slug: r.get(1)?,
-                total_turns: r.get(2)?,
-                successful_turns: r.get(3)?,
-                tokens_in: r.get::<_, Option<i64>>(4)?,
-                tokens_out: r.get::<_, Option<i64>>(5)?,
-                total_duration_ms: r.get::<_, Option<i64>>(6)?,
-                total_cost_usd: r.get(7)?,
+                total_turns: r.get(3)?,
+                successful_turns: r.get(4)?,
+                tokens_in: r.get::<_, Option<i64>>(5)?,
+                tokens_out: r.get::<_, Option<i64>>(6)?,
+                total_duration_ms: r.get::<_, Option<i64>>(7)?,
+                cost_null_turns: r.get(8)?,
+                total_cost_usd: r.get(9)?,
+                billing_mode,
             })
         })
         .map_err(|e| e.to_string())?
