@@ -2,6 +2,7 @@ pub mod agents;
 pub mod bridge;
 pub mod compare;
 pub mod config_changes;
+pub mod demo_compare;
 pub mod cost;
 pub mod dispatch;
 pub mod dispatches;

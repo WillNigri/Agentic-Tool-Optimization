@@ -376,6 +376,24 @@ configured), stop and note it — friction IS feedback. Fall back to a
 second in-session specialist or a manual cross-perspective prompt and
 record the dispatch failure in the deliverable so it gets fixed.
 
+### 4b. Pick the multi-seat shape — parallel for breadth, sequential session for depth
+
+Two patterns produce very different outputs. Picking the wrong one wastes both rounds.
+
+| Pattern | How | What it produces | Use when |
+|---|---|---|---|
+| **Parallel** (Round 1) | Dispatch each seat to its OWN dispatch (no `--session`). Each seat sees the same shared context but NOT each other's answers. | Breadth — no anchoring bias, every seat answers from priors. Convergence (if any) is independent evidence. | Initial wedge discovery, falsifier-finding, getting variance on a question. The CEO synthesizes by hand after all seats land. |
+| **Sequential session** (Round 2+) | Create one session: `ato sessions new --runtime <primary>`. Dispatch each seat with `--session <id>`. Each subsequent seat sees prior turns via history replay and can react to them. | Depth — amendments stack, escalations become explicit ("I agree with seat 1 — and here's why we should go further"). The last turn IS the synthesis. | Ratification, escalating fixes, getting confrontational disagreement visible, deepening a synthesis the first round produced. |
+| **Hybrid** (R1 parallel → R2+ sequential) | Run R1 parallel for breadth, then R2 sequential in a fresh session passing the R1 synthesis as context. | Both — diversity in R1, convergence with bite in R2. | The default for any non-trivial decision. Cost: ~2× a single round. Cheaper than skipping R2 and shipping the wrong answer. |
+
+**Concrete signal that R1 parallel produced what it should:** seats disagree on framing but converge on substance, or every seat surfaces a different risk you hadn't considered. If they agree on framing AND substance, the question was leading and R1 didn't add signal.
+
+**Concrete signal that R2 sequential is needed:** at least one R1 seat used a verb like "could" / "might" / "worth considering" — that's a hedge the seat would sharpen if it saw a prior seat commit. Run R2 to force the sharpening.
+
+**Pitfall: confusing parallel for "real chat".** Parallel multi-seat outputs LOOK like a debate but no seat saw another's reply. If you write "the room agreed X," verify whether the agreement was independent (R1 parallel) or built (R2 sequential). The former is stronger evidence for X being true; the latter is stronger evidence for X being the room's best joint conclusion. Both are useful — confusing them isn't.
+
+**Recording the shape in the audit trail.** PR descriptions and decision docs should name which pattern was used and which session (if R2+). Example: *"R1 parallel via 5 ato dispatch (no --session); R2 sequential in session b1547c69 (3 seats, history-replay). Verdict tag [AMEND] unanimous in R2."* This makes the strength of the conclusion legible to whoever inherits the decision.
+
 ### 5. CEO synthesizes
 
 Read every seat's response. Force the disagreement to the surface:

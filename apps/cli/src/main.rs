@@ -133,6 +133,16 @@ enum Commands {
         /// Second run ID
         b: String,
     },
+    /// Zero-config first-run demo: same prompt through two runtimes, comparison table at the end
+    #[command(name = "demo-compare")]
+    DemoCompare {
+        /// Override the demo prompt (defaults to a short merge-sort explainer)
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Comma-separated runtimes to use (defaults to fallback ladder: configured API keys → Ollama → stubs)
+        #[arg(long)]
+        runtimes: Option<String>,
+    },
     /// Author skills (Phase 1 ships only "draft from replay")
     Skills {
         #[command(subcommand)]
@@ -894,6 +904,9 @@ fn main() -> Result<()> {
             }
         },
         Commands::Compare { a, b } => commands::compare::run(&ro_conn()?, &a, &b, &opts),
+        Commands::DemoCompare { prompt, runtimes } => {
+            commands::demo_compare::run(&db_path, prompt, runtimes, &opts)
+        }
         Commands::Skills { sub } => match sub {
             SkillsSub::Draft { from_replay, out } => {
                 let conn = db::open_readwrite(&db_path)?;
