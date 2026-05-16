@@ -47,6 +47,10 @@ interface SessionListRow {
   // was a generalist (no --agent). Drives the persona-badge cluster
   // on the SessionsList card.
   agentsUsed: string[];
+  // 2026-05-16 — session-total cost USD. NULL when no execution_logs
+  // rows reference this session (pre-session-id-on-logs sessions). 0.0
+  // when there are rows but all were on subscription (no metered cost).
+  totalCostUsd: number | null;
   lastAssistantPreview: string | null;
   // v2.6 Slice C — lifecycle + coordinator-generated metadata.
   status: "open" | "closed";
@@ -65,6 +69,29 @@ interface SessionTurn {
   createdAt: string;
   // 2026-05-16 — null for generalist dispatches, slug otherwise.
   agentSlug: string | null;
+}
+
+// 2026-05-16 — cost-receipts panel data shape, mirrors the backend
+// SessionCostBreakdown / SessionCostRow.
+interface SessionCostRow {
+  runtime: string;
+  agentSlug: string | null;
+  totalTurns: number;
+  successfulTurns: number;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  totalDurationMs: number | null;
+  totalCostUsd: number;
+}
+
+interface SessionCostBreakdown {
+  sessionId: string;
+  totalCostUsd: number;
+  totalTurns: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  totalDurationMs: number;
+  rows: SessionCostRow[];
 }
 
 interface SessionTranscript {
@@ -529,6 +556,24 @@ export default function SessionsList() {
                   <span className="text-xs text-cs-muted">
                     {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
                   </span>
+                  {/* 2026-05-16 — session-total cost pill. Hidden for
+                      pre-session-id-on-execution-logs sessions (null).
+                      Shows "free" for sessions that ran entirely on
+                      subscription (cost 0.0 with rows present). */}
+                  {s.totalCostUsd !== null && (
+                    <span
+                      className="text-xs text-cs-muted font-mono"
+                      title={
+                        s.totalCostUsd === 0
+                          ? "Session ran entirely on subscription — no metered cost"
+                          : "Estimated session cost (sum of execution_logs)"
+                      }
+                    >
+                      {s.totalCostUsd === 0
+                        ? "free"
+                        : `$${s.totalCostUsd.toFixed(4)}`}
+                    </span>
+                  )}
                   <span className="text-xs text-cs-muted">
                     {formatTime(s.lastUsedAt)}
                   </span>
@@ -606,6 +651,19 @@ function SessionTranscriptView({
     queryKey: ["session-transcript", sessionId],
     queryFn: () =>
       invoke<SessionTranscript>("get_session_transcript", { sessionId }),
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  });
+
+  // 2026-05-16 — cost-receipts panel. Joined view from execution_logs
+  // by session_id, grouped by (runtime, agent_slug). Same staleness as
+  // the transcript so they refresh together when new turns land.
+  const costQ = useQuery<SessionCostBreakdown>({
+    queryKey: ["session-cost", sessionId],
+    queryFn: () =>
+      invoke<SessionCostBreakdown>("get_session_cost_breakdown", {
+        sessionId,
+      }),
     staleTime: 5_000,
     refetchInterval: 10_000,
   });
@@ -1138,6 +1196,147 @@ function SessionTranscriptView({
               session-stream-chunk events are landing; cleared by
               session-stream-done + transcript refetch. The cursor
               signals "live". */}
+          {/* 2026-05-16 — cost-receipts panel. Renders below the chat
+              transcript whenever costQ has rows. Joined view of
+              execution_logs by session_id grouped by (runtime,
+              agent_slug). Highlights: cheapest model, total cost, per-
+              seat breakdown. This is the "receipts" the Loom is about. */}
+          {costQ.data && costQ.data.rows.length > 0 && (
+            <div className="mt-6 border border-cs-border rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-cs-card border-b border-cs-border flex items-center justify-between">
+                <span className="text-xs font-medium text-cs-text uppercase tracking-wide">
+                  Receipts
+                </span>
+                <span className="text-xs text-cs-muted font-mono">
+                  total{" "}
+                  <span className="text-cs-accent">
+                    {costQ.data.totalCostUsd === 0
+                      ? "free (subscription)"
+                      : `$${costQ.data.totalCostUsd.toFixed(4)}`}
+                  </span>
+                  {" · "}
+                  {costQ.data.totalTurns} turn
+                  {costQ.data.totalTurns !== 1 ? "s" : ""}
+                  {" · "}
+                  {(costQ.data.totalDurationMs / 1000).toFixed(1)}s
+                  {" · "}
+                  {(
+                    costQ.data.totalTokensIn + costQ.data.totalTokensOut
+                  ).toLocaleString()}{" "}
+                  tok
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="text-cs-muted border-b border-cs-border bg-cs-card/40">
+                    <tr>
+                      <th className="text-left px-3 py-1.5 font-medium">
+                        Runtime
+                      </th>
+                      <th className="text-left px-3 py-1.5 font-medium">
+                        Seat
+                      </th>
+                      <th className="text-right px-3 py-1.5 font-medium">
+                        Turns
+                      </th>
+                      <th className="text-right px-3 py-1.5 font-medium">
+                        Tokens in
+                      </th>
+                      <th className="text-right px-3 py-1.5 font-medium">
+                        Tokens out
+                      </th>
+                      <th className="text-right px-3 py-1.5 font-medium">
+                        Duration
+                      </th>
+                      <th className="text-right px-3 py-1.5 font-medium">
+                        Cost
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono">
+                    {costQ.data.rows.map((row, i) => (
+                      <tr
+                        key={`${row.runtime}-${row.agentSlug ?? "_"}-${i}`}
+                        className="border-b border-cs-border/40 last:border-0"
+                      >
+                        <td className="px-3 py-1.5">
+                          <span className={runtimeBadge(row.runtime)}>
+                            {row.runtime}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5">
+                          {row.agentSlug ? (
+                            <span className={personaBadge()}>
+                              {personaDisplay(row.agentSlug)}
+                            </span>
+                          ) : (
+                            <span className="text-cs-muted italic">
+                              generalist
+                            </span>
+                          )}
+                        </td>
+                        <td className="text-right px-3 py-1.5">
+                          {row.successfulTurns}
+                          {row.totalTurns !== row.successfulTurns && (
+                            <span
+                              className="text-cs-muted ml-1"
+                              title={`${row.totalTurns - row.successfulTurns} error turn(s)`}
+                            >
+                              (+
+                              {row.totalTurns - row.successfulTurns}e)
+                            </span>
+                          )}
+                        </td>
+                        <td className="text-right px-3 py-1.5 text-cs-muted">
+                          {(row.tokensIn ?? 0).toLocaleString()}
+                        </td>
+                        <td className="text-right px-3 py-1.5 text-cs-muted">
+                          {(row.tokensOut ?? 0).toLocaleString()}
+                        </td>
+                        <td className="text-right px-3 py-1.5 text-cs-muted">
+                          {((row.totalDurationMs ?? 0) / 1000).toFixed(1)}s
+                        </td>
+                        <td
+                          className={cn(
+                            "text-right px-3 py-1.5",
+                            row.totalCostUsd === 0
+                              ? "text-cs-muted"
+                              : "text-cs-text"
+                          )}
+                        >
+                          {row.totalCostUsd === 0
+                            ? "free"
+                            : `$${row.totalCostUsd.toFixed(4)}`}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* Cheapest-success callout when there's variance worth
+                  pointing at. Skipped when every row is on subscription
+                  (cost 0.0) since there's no comparison to make. */}
+              {(() => {
+                const paid = costQ.data.rows.filter(
+                  (r) => r.totalCostUsd > 0 && r.successfulTurns > 0
+                );
+                if (paid.length < 2) return null;
+                const cheapest = paid.reduce((a, b) =>
+                  a.totalCostUsd < b.totalCostUsd ? a : b
+                );
+                return (
+                  <div className="px-3 py-1.5 text-xs text-cs-muted border-t border-cs-border/40 bg-cs-card/40">
+                    Cheapest: <span className="text-cs-accent">{cheapest.runtime}</span>
+                    {cheapest.agentSlug && (
+                      <> as {personaDisplay(cheapest.agentSlug)}</>
+                    )}{" "}
+                    at ${cheapest.totalCostUsd.toFixed(4)}.
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
           {streamingText && streamingRuntime && (
             <div className="flex gap-3">
               <div className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-cs-accent/20 text-cs-accent">

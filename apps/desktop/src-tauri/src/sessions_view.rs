@@ -63,6 +63,13 @@ pub struct SessionListRow {
     /// `["positioning", "devex", "ceo", "designer", "office-hours"]`.
     /// Drives the persona-badge cluster on the SessionsList card.
     pub agents_used: Vec<String>,
+    /// 2026-05-16 — session-total cost in USD, summed across every
+    /// successful execution_logs row tied to this session_id. Renders
+    /// as a small "$0.0644" pill on the card next to the turn count so
+    /// users can scan cost per session without opening it. NULL when
+    /// no execution_logs rows reference the session (older sessions
+    /// pre-session_id-on-execution-logs).
+    pub total_cost_usd: Option<f64>,
     /// Last (assistant) turn's text, truncated. Gives the user a
     /// "what was this conversation about" preview without expanding.
     pub last_assistant_preview: Option<String>,
@@ -151,6 +158,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 turn_count: r.get(6)?,
                 runtimes_used: Vec::new(),
                 agents_used: Vec::new(),
+                total_cost_usd: None,
                 last_assistant_preview: None,
                 status: r.get(7)?,
                 closed_at: r.get(8)?,
@@ -203,6 +211,20 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             .filter_map(|r| r.ok())
             .collect();
         row.agents_used = agents;
+
+        // 2026-05-16 — session-total cost from execution_logs. NULL out
+        // (rather than 0.0) when there are no rows so the UI knows the
+        // session pre-dates session-id-on-execution-logs and can hide
+        // the pill instead of rendering a misleading "$0.00".
+        let mut cost_stmt = conn.prepare_cached(
+            "SELECT SUM(COALESCE(cost_usd_estimated, 0)), COUNT(*)
+               FROM execution_logs
+              WHERE session_id = ?1",
+        )?;
+        let (sum_cost, n): (Option<f64>, i64) = cost_stmt
+            .query_row([&row.id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap_or((None, 0));
+        row.total_cost_usd = if n > 0 { sum_cost.or(Some(0.0)) } else { None };
 
         // Last assistant turn → preview. Order by turn_index DESC so we
         // get the chronologically last assistant message, not whichever
@@ -293,6 +315,101 @@ pub fn search_session_turns(
         }
     }
     Ok(result_set.map(|s| s.into_iter().collect()).unwrap_or_default())
+}
+
+// 2026-05-16 — cost receipts panel.
+//
+// The Loom shot-list's most compelling moment is the cost-comparison
+// table that shows "the cheapest model caught the bug." That data lives
+// in execution_logs.cost_usd_estimated + tokens_in/out + duration_ms,
+// joined to the session by session_id. This command exposes the per-
+// (runtime, agent_slug) breakdown for a single session so the chat
+// detail can render a receipts panel at the bottom.
+//
+// Rows include both successful AND error turns (errors still cost
+// tokens at the provider) — `successful_turns` lets the UI distinguish.
+// Generalist turns surface as agent_slug = None; the UI renders these
+// as "<generalist>" so the row reads cleanly.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCostRow {
+    pub runtime: String,
+    pub agent_slug: Option<String>,
+    pub total_turns: i64,
+    pub successful_turns: i64,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub total_duration_ms: Option<i64>,
+    pub total_cost_usd: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCostBreakdown {
+    pub session_id: String,
+    pub total_cost_usd: f64,
+    pub total_turns: i64,
+    pub total_tokens_in: i64,
+    pub total_tokens_out: i64,
+    pub total_duration_ms: i64,
+    pub rows: Vec<SessionCostRow>,
+}
+
+#[tauri::command]
+pub fn get_session_cost_breakdown(
+    db: State<'_, DbState>,
+    session_id: String,
+) -> Result<SessionCostBreakdown, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT runtime,
+                    agent_slug,
+                    COUNT(*) AS total_turns,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_turns,
+                    SUM(COALESCE(tokens_in, 0))  AS tokens_in,
+                    SUM(COALESCE(tokens_out, 0)) AS tokens_out,
+                    SUM(COALESCE(duration_ms, 0)) AS total_duration_ms,
+                    SUM(COALESCE(cost_usd_estimated, 0)) AS total_cost_usd
+               FROM execution_logs
+              WHERE session_id = ?1
+              GROUP BY runtime, agent_slug
+              ORDER BY total_cost_usd DESC, runtime ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows: Vec<SessionCostRow> = stmt
+        .query_map([&session_id], |r| {
+            Ok(SessionCostRow {
+                runtime: r.get(0)?,
+                agent_slug: r.get(1)?,
+                total_turns: r.get(2)?,
+                successful_turns: r.get(3)?,
+                tokens_in: r.get::<_, Option<i64>>(4)?,
+                tokens_out: r.get::<_, Option<i64>>(5)?,
+                total_duration_ms: r.get::<_, Option<i64>>(6)?,
+                total_cost_usd: r.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total_cost_usd: f64 = rows.iter().map(|r| r.total_cost_usd).sum();
+    let total_turns: i64 = rows.iter().map(|r| r.total_turns).sum();
+    let total_tokens_in: i64 = rows.iter().map(|r| r.tokens_in.unwrap_or(0)).sum();
+    let total_tokens_out: i64 = rows.iter().map(|r| r.tokens_out.unwrap_or(0)).sum();
+    let total_duration_ms: i64 = rows.iter().map(|r| r.total_duration_ms.unwrap_or(0)).sum();
+
+    Ok(SessionCostBreakdown {
+        session_id,
+        total_cost_usd,
+        total_turns,
+        total_tokens_in,
+        total_tokens_out,
+        total_duration_ms,
+        rows,
+    })
 }
 
 #[tauri::command]

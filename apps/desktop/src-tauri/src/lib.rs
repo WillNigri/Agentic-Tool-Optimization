@@ -1667,6 +1667,8 @@ pub fn run() {
             sessions_view::cancel_close_session,
             sessions_view::reopen_session,
             sessions_view::search_session_turns,
+            // 2026-05-16 — cost receipts panel
+            sessions_view::get_session_cost_breakdown,
             // v2.3.45 — ratchet view (Phase 6.x-K surface in the GUI)
             ratchet_view::list_ratchets,
             ratchet_view::list_ratchet_breaches,
