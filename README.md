@@ -163,8 +163,82 @@ Sign-in is **optional** and only unlocks cloud-side features (cross-device trace
 - **`ato review --consensus`** — multi-LLM code review. Each reviewer sees prior turns via session history, surfaces disagreements inline, cites tool calls.
 - **`ato compare <run-a> <run-b>`** — post-hoc side-by-side of two execution_logs rows: duration delta, cost delta, response diff.
 - **`ato demo-compare`** — zero-config first-run demo. Uses your first 2 configured runtimes, falls back to local Ollama, then to stubbed responses. Always shows the cost-comparison table.
-- **`ato sessions`** — sticky multi-turn conversations. Cross-runtime by `--session <id>` + `--tag-bridge`. Auto-closes with coordinator-generated title/summary/tags.
+- **`ato sessions`** — sticky multi-turn conversations. Cross-runtime by `--session <id>` + `--tag-bridge`. Auto-closes with coordinator-generated title/summary/tags. See [Sessions](#sessions-how-multi-turn-conversations-work) below for the full lifecycle.
 - **Replay across runtimes** — failing example from a regression? One click re-dispatches the prompt against an alternative runtime + diffs side-by-side.
+
+### Sessions: how multi-turn conversations work
+
+A **session** is one work unit — one decision, one war-room, one debug, one ratification round. Every dispatch into the session lands as a turn; turns are visible in order; each new turn sees all prior turns via history replay. Sessions are how ATO structures decision history on the local SQLite so you can find what was decided about a topic months later.
+
+#### Three ways to dispatch into a session
+
+| Type | How | When to use |
+|---|---|---|
+| **Generalist** — raw model priors | `ato dispatch <runtime> --session <id> "<prompt>"` | A fresh, untainted voice. Useful as a sanity-check or "what would a smart outsider say?" Especially valuable in a multi-seat room — one generalist among specialists keeps the room honest. |
+| **Agent-backed specialist** — deterministic persona | `ato dispatch <runtime> --agent <slug> --session <id> "<prompt>"` | A named seat (Positioning, Devex, CEO, Designer, Office Hours, security-specialist, etc.). The agent record's `system_prompt` is prepended to the dispatch automatically, the slug is recorded in `execution_logs.agent_slug` and `session_turns.agent_slug`, and the UI renders the persona name in the chat bubble. Cross-runtime portable. |
+| **Skill-loaded (Claude in-session only)** | Inside a Claude Code session, invoke `Skill(<name>)` or `Task(<agent-slug>)` to load a `~/.claude/skills/<name>/SKILL.md` | Rich tool-grant rules + procedural depth (steps, decision trees, examples). Doesn't transfer to cross-runtime dispatches — for those, mirror the skill's persona into an agent record. |
+
+Mix them. A war-room with 3 agent-backed specialists + 1 generalist usually produces sharper outputs than 4 specialists who already agree. See `.claude/skills/ato-warroom/SKILL.md` (section 4a) for the full hierarchy.
+
+#### The lifecycle
+
+```bash
+# 1. Create the session at the topic boundary.
+ato sessions new --runtime claude --title "PMF war-room — wedge + pitch 2026-05-16"
+# → returns: { "id": "b1547c69-...", ... }
+
+# 2. Dispatch turns into it. Each turn sees prior turns via history replay.
+ato dispatch minimax --agent positioning --session b1547c69-... "Round 1: name the wedge."
+ato dispatch google  --agent devex       --session b1547c69-... "Round 2: TTHW audit on the wedge."
+ato dispatch claude  --agent ceo         --session b1547c69-... "Round 3: 10-star reframe."
+
+# 3. Close the session. The coordinator-runtime LLM reads the full transcript
+#    and generates an auto-title, summary, tag list, and inferred project_id —
+#    all persisted on the sessions row.
+ato sessions close b1547c69-...
+
+# 4. (Optional) Reopen only if a follow-up belongs to the SAME topic.
+#    The next close refreshes the summary with the new turns.
+ato sessions reopen b1547c69-...
+ato dispatch claude --agent designer --session b1547c69-... "One more amendment on the hero."
+ato sessions close b1547c69-...
+```
+
+The coordinator-generated `auto_title`, `summary`, `tags`, and `project_id` become the row's identity in the Sessions list — they're what you (or your teammate, or your future self) read months later to navigate to the right conversation.
+
+#### How sessions appear in the desktop app
+
+The Sessions tab shows each row with:
+
+- **Runtime badges** — the distinct runtimes that spoke in the session. The coordinator runtime is marked with a `★` (this is where the session was anchored).
+- **Persona badges** — the named seats that appeared on assistant turns (`Positioning`, `Devex`, `CEO`, etc.). Hidden for generalist-only sessions.
+- **Title** — `auto_title` (coordinator-generated, preferred) falls back to the title you set at creation.
+- **Coordinator + project line** — small meta line: `coordinator: <runtime> / <persona> · project: <id>`.
+- **Summary preview** — the last assistant turn while the session is open; the coordinator's `summary` once closed.
+- **Tags** — coordinator-generated topic tags, queryable across sessions.
+- **Status** — `open` (taking new turns) or `closed` (frozen with the summary as its identity).
+
+The chat detail view renders each turn as a WhatsApp-style bubble. The role label is the persona name when set (`POSITIONING`), or the runtime name for generalist turns. The runtime stays visible in a small pill so you see who answered underneath the persona.
+
+#### Session discipline — one subject per session
+
+The Sessions list is meant to be readable months later. That only works when each row describes a coherent unit of work. The rules (full version in `.claude/skills/ato-warroom/SKILL.md` section 4c):
+
+1. **One session per subject / decision / work block.** Sequential rounds of the same war-room belong in the same session (history replay is the value). Unrelated war-rooms go in different sessions.
+2. **Never re-open a closed session for a different topic.** `ato sessions reopen` is for genuinely continuing the same conversation. New question = new session.
+3. **Smoke tests, schema verification, ack pings — separate throwaway session, always.** Anything you'd regret seeing as the preview of a strategic session is the wrong dispatch to send there.
+4. **Title and summary are part of the deliverable, not metadata.** A coordinator-generated summary of "Ack." because the last turn was a smoke test permanently degrades the row as a navigation artifact.
+5. **Name sessions at creation time.** Convention: `<topic> war-room — <scope> <YYYY-MM-DD>`.
+6. **When in doubt, create a new session.** Sessions are free; cluttering one is irreversible.
+
+#### Cross-runtime sessions
+
+A session is anchored to one runtime (the `--runtime` you passed to `sessions new`) but ANY runtime can dispatch a turn into it. The session-history payload sent to each runtime is translated to that runtime's expected format (e.g., Gemini's `contents[]` with `user`/`model` roles, OpenAI's `messages[]` with `user`/`assistant`). For a war-room with 5 seats across 4 model families, this is the primitive that makes the multi-LLM conversation coherent across providers.
+
+#### See also
+
+- `ato sessions --help` — full subcommand reference (`new` / `list` / `get` / `close` / `reopen` / `delete`).
+- `.claude/skills/ato-warroom/SKILL.md` — the war-room methodology that sits on top of sessions (section 4 covers seat types, parallel-vs-sequential rounds, and session discipline in depth).
 
 ### Agent authoring
 
