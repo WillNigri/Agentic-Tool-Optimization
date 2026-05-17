@@ -1,0 +1,8 @@
+[package]
+name = "ato-db-views"
+version = "0.1.0"
+edition = "2021"
+description = "Shared SQLite VIEW definitions for ATO desktop + CLI. Pure SQL strings, no execution logic."
+license = "MIT"
+
+[dependencies]

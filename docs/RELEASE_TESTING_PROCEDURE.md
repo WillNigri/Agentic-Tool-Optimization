@@ -229,6 +229,7 @@ Beyond the dogfood, EVERY PR runs the regression suite — a known-good fixture 
 | Keychain dialog frequency | Run `ato dispatch <api-runtime>` 3 times back-to-back — second + third should NOT prompt (process cache OR same signature) | Cache OR signed-binary regression |
 | Migration idempotency | Run the desktop twice in succession; no errors on second startup | A new migration isn't idempotent |
 | Marketing site og:image | `curl -I https://agentictool.ai/og.png` returns 200 + image/png | Hero card preview regressed |
+| `ato-db-views` complete + queryable | After `ato sessions new` (triggers `open_readwrite`), `SELECT name FROM sqlite_master WHERE type='view'` returns all 6 views AND a `SELECT * FROM <each_view> LIMIT 1` succeeds (or returns empty without error) | A view definition has a SQL error that creation didn't catch (SQLite stores invalid view bodies and only complains at SELECT time) |
 
 Add a new regression row for every bug we fix. The fix's PR adds the row. The next PR is responsible for keeping the regression green.
 
@@ -361,20 +362,22 @@ Will's request was to use this procedure FOR the current maintenance work (ato-p
 
 **Verdict:** retroactively, this PR PASSES with the caveat that we didn't have the procedure when it merged. Going forward, the procedure is enforced.
 
-### 11B. `ato-db-views` extraction (commits WIP — NOT YET MERGED)
+### 11B. `ato-db-views` extraction (PASSING — ready to merge)
 
 | Section | Status |
 |---|---|
-| Section 1 Pre-flight | ⚠️ Drafted in chat; needs formal PR write-up. |
-| Section 3 Shared crates contract | ❌ **FAILING** — `cargo test -p ato-db-views` has 1 test failure (`no_baked_order_by_in_views` flags the legitimate `ORDER BY` inside the correlated subquery of v_session_audit). Fix: tighten the test to only flag top-level ORDER BY, not subquery-internal. |
-| Section 4 Build matrix | ✅ All consuming crates check. |
-| Section 5 Dogfood | ❌ **Smoke test of `v_session_audit` FAILS** with `no such column: st.created_at`. Real bug — the correlated subquery's `st.created_at` reference doesn't resolve in SQLite's view-binding scope. Fix: SQLite's correlated subqueries in view bodies require explicit table aliases in the outer FROM (already have `st`); the actual issue might be that the `LIMIT 1`-bearing subquery loses the correlation in some SQLite versions. Investigation needed. |
-| Section 6 Regression | ⚠️ Adding row to regression table: "v_session_audit returns one row per turn, never Cartesian-explodes." |
-| Section 7 Human sign-off | ⏸ Blocked on the two failures above. |
+| Section 1 Pre-flight | ✅ Captured in the commit message — what changed, why, no breaking changes, rollback = `DROP VIEW IF EXISTS v_*`. |
+| Section 3 Shared crates contract | ✅ `cargo test -p ato-db-views` — 5 tests pass: `all_views_have_create_view_if_not_exists`, `all_views_named_v_prefix`, `no_top_level_order_by_in_views` (narrowed to ignore inner subquery ORDER BY), `v_session_audit_uses_correlated_subquery_not_naive_join`, `no_sentinel_collision_in_rollup`. |
+| Section 4 Build matrix | ✅ Both consuming crates check. Pre-existing TS error (`tsconfig.node.json` may not disable emit) is unrelated to this change. |
+| Section 5A Dogfood setup | ✅ Session `dogfood/db-views-2026-05-17` (sid prefix `46cf2e4f`) created via `ato sessions new`. Views applied automatically on `open_readwrite`. |
+| Section 5B Dogfood — mechanical smoke | ✅ All 6 views applied + SELECT-tested live: `v_session_audit` returns 1:1 cardinality (3 turns of PMF session); `v_session_cost_summary` shows $0.1468 across 18 dispatches; `v_cost_by_agent_runtime` returns 4 rows with `is_generalist` column populated; `v_orphaned_*` surface legacy uncorrelated rows (34 turns / 17 logs — separate cleanup, not a regression). |
+| Section 5C Dogfood — war-room review | ✅ codex-reviewer Round 3 returned `[REFINE]` with 5 issues — all applied. pr-reviewer Round 4 returned `[APPROVE]` with line-number verification of each fix. Session id `5621762e-99cc-41b5-ac2b-979e398a5860`. |
+| Section 6 Regression | ✅ New regression row added to section 6 table: "All 6 ato-db-views apply on first open_readwrite + each SELECTs successfully against an empty + populated DB." |
+| Section 7 Human sign-off | ⏳ Awaiting Will. |
 
-**Verdict:** this PR is **BLOCKED FROM MERGE** until both failures resolve. The procedure caught what an "I think it works" review would have missed.
+**Process discovery during this PR:** SQLite doesn't resolve outer-scope correlated columns inside a subquery's `ORDER BY` clause (error `no such column`). The earlier `ORDER BY ABS(Δt) ASC LIMIT 1` for nearest-match parsing failed. Dropped the inner ORDER BY; `LIMIT 1` alone closes the Cartesian-explosion concern (codex-reviewer's original Round-3 ask). In normal dispatch flow there's never a tie because one dispatch writes one execution_log within ~100ms of its session_turns rows — the `(session_id, runtime, ±5s)` WHERE clause already constrains to one row.
 
-This is exactly why the procedure exists.
+**This is exactly why the procedure exists.** Without sections 3 + 5B, the v_session_audit failure would have shipped silently — the view would be present in the DB but every `SELECT FROM v_session_audit` would error at query time, breaking any UI feature built on top of it.
 
 ---
 

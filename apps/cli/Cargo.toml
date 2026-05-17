@@ -29,6 +29,7 @@ ato-recipes = { path = "../../packages/ato-recipes" }
 ato-posts = { path = "../../packages/ato-posts" }
 ato-api-providers = { path = "../../packages/ato-api-providers" }
 ato-pricing = { path = "../../packages/ato-pricing" }
+ato-db-views = { path = "../../packages/ato-db-views" }
 # v2.3.21 Phase 6.x — API-key dispatch for non-CLI providers
 # (MiniMax, Grok, Qwen, DeepSeek, OpenRouter). Blocking client keeps
 # dispatch.rs synchronous like the existing shell-out path.

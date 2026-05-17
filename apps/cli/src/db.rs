@@ -80,6 +80,14 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         "CREATE INDEX IF NOT EXISTS idx_session_turns_agent_slug ON session_turns(agent_slug)",
         [],
     );
+
+    // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
+    // what the desktop applies on startup. Each `CREATE VIEW IF NOT
+    // EXISTS` is a no-op after the first run, so applying on every
+    // open is cheap and means CLI-only users never see a missing view.
+    for stmt in ato_db_views::ALL_VIEWS {
+        let _ = conn.execute(stmt, []);
+    }
     Ok(conn)
 }
 

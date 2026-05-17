@@ -299,6 +299,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "ato-api-providers",
+ "ato-db-views",
  "ato-posts",
  "ato-pricing",
  "ato-recipes",
@@ -323,6 +324,10 @@ dependencies = [
 
 [[package]]
 name = "ato-api-providers"
+version = "0.1.0"
+
+[[package]]
+name = "ato-db-views"
 version = "0.1.0"
 
 [[package]]

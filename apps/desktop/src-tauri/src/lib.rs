@@ -1312,6 +1312,19 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // 2026-05-17 — SQL views over the audit-trail tables. Common joins
+    // (session_turns ↔ execution_logs, per-session cost summary,
+    // per-(agent,runtime) rollup) used to be re-implemented at every
+    // call site. The views centralize them.
+    //
+    // SOURCE OF TRUTH: `packages/ato-db-views`. CLI also applies these
+    // on `open_readwrite` so power users running CLI-only never see a
+    // missing view. Each statement uses `CREATE VIEW IF NOT EXISTS` so
+    // re-applies are no-ops.
+    for stmt in ato_db_views::ALL_VIEWS {
+        let _ = conn.execute(stmt, []);
+    }
+
     // v2.4.1 Phase 7.0 step 2 — mDNS-discovered peers (transient).
     // Separate from mesh_peers (which holds *trusted* peers post-
     // pairing). Discoveries are upserted by peer_id as the daemon's

@@ -52,6 +52,7 @@ ato-recipes = { path = "../../../packages/ato-recipes" }
 ato-posts = { path = "../../../packages/ato-posts" }
 ato-api-providers = { path = "../../../packages/ato-api-providers" }
 ato-pricing = { path = "../../../packages/ato-pricing" }
+ato-db-views = { path = "../../../packages/ato-db-views" }
 
 [dev-dependencies]
 tempfile = "3"
