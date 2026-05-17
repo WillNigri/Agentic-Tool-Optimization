@@ -59,6 +59,13 @@ interface SessionListRow {
   summary: string | null;
   tags: string[];
   projectId: string | null;
+  // 2026-05-17 — Sessions UX polish PR 2 + 4. category is a
+  // controlled-vocab work-band tag (Business / Marketing / Dev /
+  // Frontend / etc.); team is a free-form owner label. Both are
+  // populated by the coordinator at close (PR 3, pending); NULL on
+  // pre-PR-2 rows.
+  category: string | null;
+  team: string | null;
 }
 
 interface SessionTurn {
@@ -581,6 +588,21 @@ export default function SessionsList() {
                       <Lock size={10} /> closed
                     </span>
                   )}
+                  {/* 2026-05-17 — Sessions UX polish PR 4. Category
+                      badge in the cs-accent (cyan) color sits between
+                      the closed-lock and the title so the work-band
+                      reads at a glance (Dev / Marketing / Backend /
+                      etc.). Hidden when NULL (pre-PR-2 rows or rows
+                      that closed without category — PR 3 will warn at
+                      close time). */}
+                  {s.category && (
+                    <span
+                      className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-accent/15 text-cs-accent"
+                      title={`Category: ${s.category} — populated by the coordinator at close`}
+                    >
+                      {s.category}
+                    </span>
+                  )}
                   <span className="text-sm font-medium text-cs-text truncate flex-1 min-w-0">
                     {displayTitle || (
                       <span className="text-cs-muted italic">
@@ -637,6 +659,17 @@ export default function SessionsList() {
                       <span className="text-cs-text font-mono">
                         {s.projectId}
                       </span>
+                    </span>
+                  )}
+                  {/* 2026-05-17 — Sessions UX polish PR 4. Team is a
+                      free-form owner/band label (founder / frontend /
+                      backend / ops / etc.). Sits alongside project so
+                      the metadata line reads "coordinator · project ·
+                      team" left-to-right. Hidden when NULL. */}
+                  {s.team && (
+                    <span>
+                      team:{" "}
+                      <span className="text-cs-text font-mono">{s.team}</span>
                     </span>
                   )}
                 </div>

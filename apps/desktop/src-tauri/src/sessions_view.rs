@@ -85,6 +85,12 @@ pub struct SessionListRow {
     pub summary: Option<String>,
     pub tags: Vec<String>,
     pub project_id: Option<String>,
+    /// 2026-05-17 — Sessions UX polish PR 2 + 4. Controlled-vocab tag
+    /// for the work band (Business / Marketing / Dev / Frontend / etc.)
+    /// + free-form team label. NULL on pre-PR-2 rows; populated by the
+    /// coordinator at close in PR 3 (still pending).
+    pub category: Option<String>,
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -136,7 +142,8 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // the default forward, but the cost of being safe is zero).
     let mut stmt = conn.prepare(
         "SELECT s.id, s.runtime, s.agent_slug, s.title, s.created_at, s.last_used_at, s.turn_count,
-                COALESCE(s.status, 'open'), s.closed_at, s.auto_title, s.summary, s.tags_json, s.project_id
+                COALESCE(s.status, 'open'), s.closed_at, s.auto_title, s.summary, s.tags_json, s.project_id,
+                s.category, s.team
            FROM sessions s
           ORDER BY s.last_used_at DESC
           LIMIT ?1",
@@ -166,6 +173,8 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 summary: r.get(10)?,
                 tags,
                 project_id: r.get(12)?,
+                category: r.get(13)?,
+                team: r.get(14)?,
             })
         })?
         .filter_map(|r| r.ok())
