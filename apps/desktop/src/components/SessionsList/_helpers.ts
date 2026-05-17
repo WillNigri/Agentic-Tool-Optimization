@@ -16,7 +16,7 @@
 
 import { cn } from "@/lib/utils";
 
-const RUNTIME_COLORS: Record<string, string> = {
+export const RUNTIME_COLORS: Record<string, string> = {
   claude: "text-orange-400 bg-orange-400/10",
   codex: "text-green-400 bg-green-400/10",
   gemini: "text-blue-400 bg-blue-400/10",
