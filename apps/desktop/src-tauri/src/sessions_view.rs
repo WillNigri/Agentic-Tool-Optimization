@@ -88,9 +88,22 @@ pub struct SessionListRow {
     /// 2026-05-17 — Sessions UX polish PR 2 + 4. Controlled-vocab tag
     /// for the work band (Business / Marketing / Dev / Frontend / etc.)
     /// + free-form team label. NULL on pre-PR-2 rows; populated by the
-    /// coordinator at close in PR 3 (still pending).
+    /// coordinator at close in PR 3.
     pub category: Option<String>,
     pub team: Option<String>,
+    /// 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
+    /// real sessions (multi-turn, from the `sessions` table) and
+    /// "ephemeral" single-shot dispatches (one row in `execution_logs`
+    /// with `session_id IS NULL`). The History tab today shows the
+    /// latter as a flat list; PR 5 collapses both into one Sessions
+    /// feed (WhatsApp-style — group chats and single chats in one
+    /// inbox). The frontend uses this discriminator to pick the card
+    /// variant + the click-into-detail route (full transcript for
+    /// `"session"`, single-turn detail for `"ephemeral"`). Codex
+    /// Round-1 #2: bool would be too weak for routing/caching — a
+    /// typed string keeps future variants open ("scheduled-run",
+    /// "automation-step", etc.) without another migration.
+    pub row_kind: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -135,6 +148,23 @@ pub fn list_sessions_full(
 }
 
 fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<SessionListRow>> {
+    // PR 5a (Sessions UX polish, 2026-05-17) — Sessions list is now a
+    // unified feed of both real multi-turn sessions and "ephemeral"
+    // single-shot dispatches (execution_logs with session_id IS NULL).
+    // The History tab (Runs → History) shipped the same data twice; PR
+    // 5 collapses it into one WhatsApp-style inbox where group chats
+    // (sessions) and single chats (standalone dispatches) coexist.
+    //
+    // Two SELECTs, merged Rust-side rather than via SQL UNION — the
+    // enrichment phase below (distinct runtimes, agent slugs, cost
+    // sum, last-turn preview) is per-row work on session rows and
+    // is irrelevant for ephemeral rows, so doing them separately
+    // keeps each path readable and avoids a UNION that would have to
+    // emit dummy-column padding for the session-only fields. The
+    // final list is sorted by the unified timestamp (last_used_at for
+    // sessions, created_at for ephemerals — both are "when this thing
+    // last had activity") and truncated to `limit`.
+    //
     // SELECT the v2.6 lifecycle columns alongside the originals.
     // COALESCE wraps status because the v2.6 migration sets a default
     // of 'open' but pre-migration rows on a partially-upgraded install
@@ -175,6 +205,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 project_id: r.get(12)?,
                 category: r.get(13)?,
                 team: r.get(14)?,
+                row_kind: "session".to_string(),
             })
         })?
         .filter_map(|r| r.ok())
@@ -260,6 +291,109 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
 
         enriched.push(row);
     }
+
+    // PR 5a — ephemeral rows: standalone dispatches (execution_logs
+    // with session_id IS NULL). One row per dispatch. Synthesizes the
+    // session-shaped fields so the frontend renders against one
+    // contract; all "session-only" fields (status/summary/tags/etc.)
+    // are NULL or sentinel values so the ephemeral card variant can
+    // render without branching on each field.
+    //
+    // Why session_id IS NULL: anything WITH a session_id is already
+    // counted as part of its session via the session_turns table — we
+    // don't double-count those here. Standalone dispatches are the
+    // ones the History tab was the only surface for, and they're what
+    // we need to absorb to make the History tab redundant.
+    //
+    // The ephemeral count is also capped at `limit` so a user with
+    // 10k standalone dispatches doesn't slow the feed render. The
+    // final Rust-side merge orders by timestamp DESC and truncates
+    // the combined list to `limit`.
+    let mut eph_stmt = conn.prepare(
+        "SELECT e.id, e.runtime, e.agent_slug, e.created_at, e.cost_usd_estimated,
+                e.prompt, e.response, e.model, e.status
+           FROM execution_logs e
+          WHERE e.session_id IS NULL
+          ORDER BY e.created_at DESC
+          LIMIT ?1",
+    )?;
+    let ephemerals: Vec<SessionListRow> = eph_stmt
+        .query_map([limit], |r| {
+            let id: String = r.get(0)?;
+            let runtime: String = r.get(1)?;
+            let agent_slug: Option<String> = r.get(2)?;
+            let created_at: String = r.get(3)?;
+            let cost: Option<f64> = r.get(4)?;
+            let prompt: Option<String> = r.get(5)?;
+            let response: Option<String> = r.get(6)?;
+            let _model: Option<String> = r.get(7)?;
+            let status_str: Option<String> = r.get(8)?;
+            // Ephemeral title = first 80 chars of the prompt (so the
+            // card is recognizable at a glance). The last_assistant_
+            // preview slot carries the response truncated to 160. If
+            // either is NULL the card still renders — the missing
+            // field just collapses.
+            let title = prompt.as_deref().map(|s| {
+                if s.chars().count() > 80 {
+                    let head: String = s.chars().take(80).collect();
+                    format!("{}…", head)
+                } else {
+                    s.to_string()
+                }
+            });
+            let preview = response.as_deref().map(|s| {
+                if s.chars().count() > 160 {
+                    let head: String = s.chars().take(160).collect();
+                    format!("{}…", head)
+                } else {
+                    s.to_string()
+                }
+            });
+            // An ephemeral dispatch's "status" mirrors the
+            // execution_logs status (success/error/...) rather than
+            // sessions' open/closed lifecycle. The frontend uses
+            // row_kind to decide whether status semantics are
+            // lifecycle ("open"/"closed") or outcome ("success"/etc.).
+            let status = status_str.unwrap_or_else(|| "unknown".to_string());
+            let agents_used: Vec<String> = match agent_slug.as_deref() {
+                Some(slug) if !slug.is_empty() => vec![slug.to_string()],
+                _ => Vec::new(),
+            };
+            Ok(SessionListRow {
+                id,
+                runtime: runtime.clone(),
+                agent_slug,
+                title,
+                // Ephemeral rows reuse created_at for both timestamps —
+                // a single-shot dispatch IS its own last_used_at.
+                created_at: created_at.clone(),
+                last_used_at: created_at,
+                turn_count: 1,
+                runtimes_used: vec![runtime],
+                agents_used,
+                total_cost_usd: cost,
+                last_assistant_preview: preview,
+                status,
+                closed_at: None,
+                auto_title: None,
+                summary: None,
+                tags: Vec::new(),
+                project_id: None,
+                category: None,
+                team: None,
+                row_kind: "ephemeral".to_string(),
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Merge: real sessions + ephemerals, sorted by their unified
+    // timestamp (last_used_at, which equals created_at for ephemerals).
+    // Stable sort so two rows with the same timestamp keep their
+    // intra-list order, which is good for determinism in tests.
+    enriched.extend(ephemerals);
+    enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+    enriched.truncate(limit as usize);
     Ok(enriched)
 }
 

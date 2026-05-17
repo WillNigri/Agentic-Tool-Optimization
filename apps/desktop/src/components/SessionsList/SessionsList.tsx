@@ -53,7 +53,13 @@ interface SessionListRow {
   totalCostUsd: number | null;
   lastAssistantPreview: string | null;
   // v2.6 Slice C — lifecycle + coordinator-generated metadata.
-  status: "open" | "closed";
+  // PR 5a (2026-05-17) broadened the `status` literal from "open" |
+  // "closed" to a plain string so ephemeral rows (which carry the
+  // execution_log status like "success" / "error") flow through the
+  // same shape. UI code that checks lifecycle still tests for "open"
+  // / "closed" explicitly; everything else falls through to the
+  // ephemeral card variant.
+  status: string;
   closedAt: string | null;
   autoTitle: string | null;
   summary: string | null;
@@ -62,10 +68,19 @@ interface SessionListRow {
   // 2026-05-17 — Sessions UX polish PR 2 + 4. category is a
   // controlled-vocab work-band tag (Business / Marketing / Dev /
   // Frontend / etc.); team is a free-form owner label. Both are
-  // populated by the coordinator at close (PR 3, pending); NULL on
-  // pre-PR-2 rows.
+  // populated by the coordinator at close (PR 3); NULL on
+  // pre-PR-2 rows AND on ephemeral rows (taxonomy is a session-only
+  // concern — a single dispatch isn't worth taxonomizing).
   category: string | null;
   team: string | null;
+  // 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
+  // real multi-turn sessions (from the `sessions` table) and
+  // ephemeral single-shot dispatches (from `execution_logs` with
+  // session_id IS NULL — what the History tab was the only surface
+  // for before PR 5 collapsed them into one unified feed). The
+  // frontend uses this to pick the card variant + the
+  // click-into-detail route in PR 5b/5c.
+  rowKind: "session" | "ephemeral";
 }
 
 interface SessionTurn {
