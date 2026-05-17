@@ -119,26 +119,91 @@ fn master_key_fetch() -> Result<[u8; 32], String> {
     }
 }
 
+/// PR 13 (2026-05-17) — first-run sentinel. See the CLI mirror at
+/// `apps/cli/src/encryption.rs` for the full design rationale. Short
+/// version: macOS keychain returns errSecItemNotFound (→ NoEntry)
+/// for both "no row at all" AND "ACL-masked from this binary." The
+/// 2026-05-15 fix limited regeneration to NoEntry, which is
+/// necessary but not sufficient — an ACL-masked NoEntry still hit
+/// the regenerate path. The sentinel file at
+/// `~/.ato/.master_key_initialized` distinguishes the two: present
+/// = previously initialized → never regen; absent = true first run.
+const FIRST_RUN_SENTINEL_NAME: &str = ".master_key_initialized";
+
+fn first_run_sentinel_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| std::path::PathBuf::from(h).join(".ato").join(FIRST_RUN_SENTINEL_NAME))
+}
+
+fn first_run_sentinel_exists() -> bool {
+    first_run_sentinel_path()
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+fn write_first_run_sentinel() {
+    if let Some(p) = first_run_sentinel_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&p, b"1\n");
+    }
+}
+
 fn master_key_inner() -> Result<[u8; 32], String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
         .map_err(|e| format!("keyring entry {}/{}: {}", KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT, e))?;
     match entry.get_password() {
-        Ok(b64) => decode_key_b64(&b64),
+        Ok(b64) => {
+            // PR 13 migration — write the sentinel on the success
+            // path so existing installs (entry present + no
+            // sentinel) gain protection on the NEXT ACL-mask event.
+            // Idempotent; rewrite is fine.
+            if !first_run_sentinel_exists() {
+                write_first_run_sentinel();
+            }
+            decode_key_b64(&b64)
+        }
         Err(keyring::Error::NoEntry) => {
-            // Genuine first-run. Generate + store. Race-window note
-            // preserved: if two processes hit this simultaneously we
-            // re-read after the write so we use whoever's value ended
-            // up in the keychain.
-            let mut new_key = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut new_key);
-            let b64 = general_purpose::STANDARD.encode(new_key);
-            entry
-                .set_password(&b64)
-                .map_err(|e| format!("keyring set_password: {}", e))?;
-            let final_b64 = entry
-                .get_password()
-                .map_err(|e| format!("keyring get_password after set: {}", e))?;
-            decode_key_b64(&final_b64)
+            // PR 13 — distinguish "truly fresh" from "ACL-masked
+            // NoEntry." Sentinel present = previously initialized →
+            // refuse to regen and orphan ciphertexts. Sentinel
+            // absent = genuine first-run → generate + write sentinel.
+            if first_run_sentinel_exists() {
+                Err(format!(
+                    "keychain returned NoEntry for {}/{} BUT the first-run sentinel at \
+                     `~/.ato/{}` exists. The keychain entry was almost certainly created by a \
+                     different code-signed binary (a different Designated Requirement on the \
+                     entry's ACL list). Generating a new master key here would orphan every \
+                     existing llm_api_keys ciphertext.\n\
+                     \n\
+                     Fix: launch ATO from the Apple-Developer-signed bundle (/Applications/ATO.app) \
+                     so the entry's ACL grants access. If you intend a true reset, delete \
+                     `~/.ato/{}` AND the keychain entry, then re-launch and re-enter all API keys.",
+                    KEYCHAIN_SERVICE,
+                    MASTER_KEY_ACCOUNT,
+                    FIRST_RUN_SENTINEL_NAME,
+                    FIRST_RUN_SENTINEL_NAME,
+                ))
+            } else {
+                // Genuine first-run. Generate + store. Race-window
+                // note preserved: if two processes hit this
+                // simultaneously we re-read after the write so we
+                // use whoever's value ended up in the keychain.
+                let mut new_key = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut new_key);
+                let b64 = general_purpose::STANDARD.encode(new_key);
+                entry
+                    .set_password(&b64)
+                    .map_err(|e| format!("keyring set_password: {}", e))?;
+                let final_b64 = entry
+                    .get_password()
+                    .map_err(|e| format!("keyring get_password after set: {}", e))?;
+                let key = decode_key_b64(&final_b64)?;
+                write_first_run_sentinel();
+                Ok(key)
+            }
         }
         Err(e) => Err(format!(
             "keyring get_password failed (NOT a missing-entry case — refusing to silently rotate the master key): {}. \

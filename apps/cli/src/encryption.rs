@@ -108,6 +108,63 @@ fn master_key_fetch() -> Result<[u8; 32]> {
     }
 }
 
+/// PR 13 (2026-05-17) — first-run sentinel file. The 2026-05-15
+/// hotfix limited regeneration to the `keyring::Error::NoEntry` arm
+/// of the match. That's necessary but NOT sufficient on macOS,
+/// because `keyring-2.3.3/src/macos.rs:234` maps the underlying
+/// `errSecItemNotFound` to `NoEntry` — and macOS returns that same
+/// errSecItemNotFound when a binary's code-signing Designated
+/// Requirement does not appear in the keychain entry's ACL.
+///
+/// In other words: an adhoc-signed dev build of `ato` reading the
+/// production-signed desktop's `master_key_v1` entry sees `NoEntry`
+/// from the keyring crate — semantically identical to "no row at
+/// all," even though the entry exists for the user. The 2026-05-15
+/// guard then rotates the master key, orphaning every existing
+/// llm_api_keys ciphertext (today's bug Will hit during PR 3
+/// dogfood).
+///
+/// The sentinel resolves the ambiguity. We touch
+/// `~/.ato/.master_key_initialized` the first time we successfully
+/// generate a master key. On subsequent runs, if `NoEntry` comes
+/// back AND the sentinel exists, this binary is being ACL-masked
+/// out of an entry the user has previously initialized — never
+/// regenerate. If the sentinel is absent, it's a true fresh
+/// install and regeneration is correct.
+const FIRST_RUN_SENTINEL_NAME: &str = ".master_key_initialized";
+
+fn first_run_sentinel_path() -> Option<std::path::PathBuf> {
+    // Avoid pulling in the `dirs` crate just for this — std::env
+    // gives us $HOME on Unix and %USERPROFILE% on Windows is
+    // shimmed by the system. Returns None on environments that
+    // expose neither (sandboxed CI, etc.), in which case the
+    // sentinel-existence check returns false and the regenerate
+    // path proceeds. That degrades to pre-PR-13 behavior for
+    // unknown environments rather than hard-failing every dispatch.
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| std::path::PathBuf::from(h).join(".ato").join(FIRST_RUN_SENTINEL_NAME))
+}
+
+fn first_run_sentinel_exists() -> bool {
+    first_run_sentinel_path()
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+fn write_first_run_sentinel() {
+    if let Some(p) = first_run_sentinel_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Best-effort; a failed sentinel write does NOT block the
+        // master-key generate path. Worst case is the protection
+        // doesn't trip on a subsequent ACL-mask, which is the same
+        // pre-PR-13 behavior.
+        let _ = std::fs::write(&p, b"1\n");
+    }
+}
+
 fn master_key_inner() -> Result<[u8; 32]> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
         .with_context(|| {
@@ -116,37 +173,74 @@ fn master_key_inner() -> Result<[u8; 32]> {
                 KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT
             )
         })?;
-    // 2026-05-15 — CRITICAL FIX. Previous shape was:
+    // 2026-05-15 — CRITICAL FIX (limited): previous shape treated
+    // every error from get_password() as "no key exists, generate."
+    // That collapsed NoEntry, PlatformFailure, BadEncoding, etc. all
+    // into the regenerate path and silently orphaned every existing
+    // llm_api_keys ciphertext. Fixed: only NoEntry triggers regen,
+    // everything else fails loud.
     //
-    //     if let Ok(b64) = entry.get_password() { ... }
-    //     else { generate_and_store_new_random_key() }
-    //
-    // That treated EVERY error from get_password() as "no key exists,
-    // generate a new one." But the keyring crate's error enum has
-    // multiple variants — NoEntry, NoStorageAccess, PlatformFailure,
-    // BadEncoding, TooLong, Invalid, Ambiguous — and treating them
-    // all as "missing" silently rotates the master key, orphaning
-    // every previously-encrypted llm_api_keys row. The user hit this
-    // when the keychain entry was overwritten on 2026-05-14, breaking
-    // decrypt of all keys stored earlier.
-    //
-    // Correct shape: ONLY NoEntry triggers a new-key generation.
-    // Anything else fails loud — better to surface "your keychain is
-    // locked / permission denied" than to silently destroy existing
-    // ciphertexts.
+    // 2026-05-17 PR 13 — sufficient fix: macOS returns
+    // errSecItemNotFound (→ NoEntry) on ACL-mask too, so NoEntry
+    // alone is still ambiguous. The first-run sentinel file
+    // (`~/.ato/.master_key_initialized`) disambiguates: present
+    // means the user has previously initialized → ACL mask, NEVER
+    // regenerate; absent means true first-run.
     match entry.get_password() {
-        Ok(b64) => decode_key_b64(&b64),
+        Ok(b64) => {
+            // PR 13 migration step — a successful read on an install
+            // that has no sentinel yet means the user is already
+            // initialized (entry exists, ACL grants access). Write
+            // the sentinel so future ACL-mask events (e.g., a dev-
+            // build CLI on the same machine) trip the refuse-to-
+            // regen branch below. Idempotent: if the file already
+            // exists, write_first_run_sentinel() just rewrites it.
+            if !first_run_sentinel_exists() {
+                write_first_run_sentinel();
+            }
+            decode_key_b64(&b64)
+        }
         Err(keyring::Error::NoEntry) => {
-            let mut new_key = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut new_key);
-            let b64 = general_purpose::STANDARD.encode(new_key);
-            entry
-                .set_password(&b64)
-                .context("keyring set_password (master key)")?;
-            let final_b64 = entry
-                .get_password()
-                .context("keyring get_password (master key, post-set)")?;
-            decode_key_b64(&final_b64)
+            if first_run_sentinel_exists() {
+                Err(anyhow!(
+                    "keychain returned NoEntry for {}/{} BUT the first-run sentinel at \
+                     `~/.ato/{}` exists. This almost always means the keychain entry was \
+                     created by a different code-signed binary (e.g., the production Apple-\
+                     Developer-signed desktop) and the current binary (adhoc-signed dev build, \
+                     or a freshly re-signed install with a different Designated Requirement) \
+                     does not have ACL access. Generating a new master key here would orphan \
+                     every existing llm_api_keys ciphertext under the previous one.\n\
+                     \n\
+                     Fix: copy the master key out of the OS keychain into the env var \
+                     ATO_MASTER_KEY_B64 for this process. On macOS:\n\
+                     `export ATO_MASTER_KEY_B64=\"$(security find-generic-password -s {} -a {} -w)\"`\n\
+                     \n\
+                     If you genuinely want to start fresh and re-enter all API keys, delete the \
+                     sentinel file (`rm ~/.ato/{}`) AND the keychain entry, then re-run.",
+                    KEYCHAIN_SERVICE,
+                    MASTER_KEY_ACCOUNT,
+                    FIRST_RUN_SENTINEL_NAME,
+                    KEYCHAIN_SERVICE,
+                    MASTER_KEY_ACCOUNT,
+                    FIRST_RUN_SENTINEL_NAME,
+                ))
+            } else {
+                let mut new_key = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut new_key);
+                let b64 = general_purpose::STANDARD.encode(new_key);
+                entry
+                    .set_password(&b64)
+                    .context("keyring set_password (master key)")?;
+                let final_b64 = entry
+                    .get_password()
+                    .context("keyring get_password (master key, post-set)")?;
+                let key = decode_key_b64(&final_b64)?;
+                // Sentinel write is the last step — only marks the
+                // run as "initialized" once the key is verifiably
+                // round-trippable from the keychain.
+                write_first_run_sentinel();
+                Ok(key)
+            }
         }
         Err(e) => Err(anyhow!(
             "keyring get_password failed (NOT a missing-entry case — refusing to silently rotate the master key): {}. \
