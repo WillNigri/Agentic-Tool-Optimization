@@ -51,6 +51,7 @@ portable-pty = "0.8"
 ato-recipes = { path = "../../../packages/ato-recipes" }
 ato-posts = { path = "../../../packages/ato-posts" }
 ato-api-providers = { path = "../../../packages/ato-api-providers" }
+ato-pricing = { path = "../../../packages/ato-pricing" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -13,10 +13,13 @@
 // is a real risk; treat this file as the source of truth and update
 // shared.ts when prices change.
 
-// Pricing per million tokens (input, output) in USD. When updating, mirror
-// the same change in apps/desktop/src-tauri/src/commands.rs::pricing_for_model
-// — both tables MUST stay in sync (the dispatch path uses Rust; the
-// replay/compare UIs use this TS copy).
+// Pricing per million tokens (input, output) in USD.
+//
+// SOURCE OF TRUTH: `packages/ato-pricing/src/lib.rs::pricing_for_model`
+// (extracted 2026-05-17). This TS file is a hand-kept mirror — replace
+// with codegen from the Rust crate in a follow-up so the JS frontend
+// can never drift again. Until then, when you update the Rust table,
+// update this table in the same commit.
 //
 // Bug report 2026-05-15 (Will): Settings → Runtimes → Dispatch Cost showed
 // $0.00 for 22 google API-key dispatches that AI Studio billed for ~R$8.57.

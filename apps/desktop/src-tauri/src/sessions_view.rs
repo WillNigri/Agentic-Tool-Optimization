@@ -354,13 +354,10 @@ pub struct SessionCostRow {
 }
 
 /// Fallback for older rows where `execution_logs.auth_mode` is NULL.
-/// Mirrors `apps/cli/src/runtime.rs:billing_mode`.
+/// Delegates to the shared `ato_pricing::billing_mode` so the CLI and
+/// desktop classify runtimes identically.
 fn billing_mode_fallback(runtime: &str) -> &'static str {
-    match runtime {
-        "claude" | "codex" | "gemini" => "subscription",
-        "ollama" | "openclaw" | "hermes" => "local",
-        _ => "api_key",
-    }
+    ato_pricing::billing_mode(runtime).as_str()
 }
 
 #[derive(Debug, Serialize, Clone)]

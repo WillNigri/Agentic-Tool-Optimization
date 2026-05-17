@@ -3590,65 +3590,19 @@ pub(crate) fn persist_execution_log(
 // this one is what the dispatch path writes into execution_logs so that
 // History/Insights queries don't have to recompute on every read.
 
-/// 4-chars-per-token heuristic — same as estimateTokens() in pricing.ts.
-/// Within ~15% of real tokenizer counts for English prose, more off for
-/// code (which is denser). Acceptable for cost-comparison; not billing.
-/// Named distinctly from the byte-count `estimate_tokens` at line 115
-/// (used by the context-usage code path) to avoid the name collision.
-fn estimate_text_tokens(text: &str) -> i64 {
-    if text.is_empty() {
-        return 0;
-    }
-    (text.len() as i64 + 3) / 4
-}
-
-/// Per-million-token (input, output) USD pricing for known models.
-/// Mirror of PRICING_PER_M_TOKENS in apps/desktop/src/lib/pricing.ts;
-/// update both together.
-///
-/// Bug report 2026-05-15 (Will): Settings → Runtimes → Dispatch Cost
-/// showed $0.00 for 22 google API-key dispatches that AI Studio billed
-/// for ~R$8.57. Root cause: this match returned None for any 2.5-family
-/// Gemini model, dispatch path then stored cost_usd_estimated=NULL, and
-/// the SUM-COALESCE in get_credit_burn_summary turned NULL into $0.
-/// Fix: cover the current model lineup. Long-context (>200K) overage
-/// rates not modeled — we don't measure context size.
-fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
-    match model {
-        // ── Anthropic ─────────────────────────────────────────────
-        "claude-opus-4-7" => Some((15.0, 75.0)),
-        "claude-opus-4-6" => Some((15.0, 75.0)),
-        "claude-sonnet-4-6" => Some((3.0, 15.0)),
-        "claude-sonnet-4-5" => Some((3.0, 15.0)),
-        "claude-haiku-4-5" => Some((1.0, 5.0)),
-        "claude-haiku-4-5-20251001" => Some((1.0, 5.0)),
-        // ── OpenAI ────────────────────────────────────────────────
-        "gpt-5" => Some((1.25, 10.0)),
-        "gpt-4.1" => Some((2.0, 8.0)),
-        "gpt-4.1-mini" => Some((0.4, 1.6)),
-        "gpt-4.1-nano" => Some((0.1, 0.4)),
-        "gpt-4o" => Some((2.5, 10.0)),
-        "gpt-4o-mini" => Some((0.15, 0.6)),
-        "o3" => Some((2.0, 8.0)),
-        "o3-mini" => Some((1.1, 4.4)),
-        // ── Google Gemini ─────────────────────────────────────────
-        "gemini-2.5-pro" => Some((1.25, 10.0)),
-        "gemini-2.5-flash" => Some((0.3, 2.5)),
-        "gemini-2.5-flash-lite" => Some((0.1, 0.4)),
-        "gemini-2.0-flash" => Some((0.1, 0.4)),
-        "gemini-2.0-flash-lite" => Some((0.075, 0.3)),
-        "gemini-2.0-flash-exp" => Some((0.1, 0.4)),
-        "gemini-1.5-pro" => Some((1.25, 5.0)),
-        "gemini-1.5-flash" => Some((0.075, 0.3)),
-        _ => None,
-    }
-}
+// Pricing helpers live in `packages/ato-pricing` (extracted 2026-05-17).
+// `apps/desktop/src/lib/pricing.ts` is the JS mirror — still hand-kept
+// in sync; replace with a codegen step in a follow-up.
+use ato_pricing::estimate_text_tokens;
 
 /// Mirror of DEFAULT_MODEL_PER_RUNTIME in pricing.ts — what the runtime
 /// CLI defaults to when no explicit `--model` is passed. Letting the
 /// dispatch path estimate cost even when the caller didn't specify a
 /// model is the difference between "every dispatch has a cost number"
 /// and "only configured agents do."
+///
+/// Lives here (not the shared pricing crate) because the runtime list is
+/// CLI-runtime-specific, not a generic pricing concern.
 fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
     match runtime {
         "claude" => Some("claude-sonnet-4-6"),
@@ -3658,22 +3612,11 @@ fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
     }
 }
 
-/// Estimate USD cost for (model, prompt, response). Returns None when
-/// the model isn't in the pricing table — caller should treat None as
-/// "unknown" rather than zero so the UI can render "—" for honesty.
-///
-/// v2.3.6 — unused inside runtime-CLI dispatch paths (subscription).
-/// Kept for the future direct-API path.
+// estimate_cost_usd alias kept for the dead-code path that referenced
+// it inline; the shared crate's version is identical. Drop when the
+// caller is gone.
 #[allow(dead_code)]
-fn estimate_cost_usd(model: &str, prompt: &str, response: &str) -> Option<f64> {
-    let (in_per_m, out_per_m) = pricing_for_model(model)?;
-    let in_tokens = estimate_text_tokens(prompt) as f64;
-    let out_tokens = estimate_text_tokens(response) as f64;
-    let cost = (in_tokens / 1_000_000.0) * in_per_m + (out_tokens / 1_000_000.0) * out_per_m;
-    // Round to 6 decimals — fractional cents matter at scale; truncating
-    // earlier loses precision for cheap models.
-    Some((cost * 1_000_000.0).round() / 1_000_000.0)
-}
+use ato_pricing::estimate_cost_usd;
 
 /// 64 KB cap on prompt/response/error text persisted into SQLite. A
 /// runaway tool that dumps a giant log shouldn't bloat the History

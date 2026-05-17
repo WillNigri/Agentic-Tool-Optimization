@@ -1,0 +1,9 @@
+[package]
+name = "ato-pricing"
+version = "0.1.0"
+edition = "2021"
+description = "Shared model-pricing table + runtime billing-mode classification for ATO desktop + CLI. Pure data, no I/O."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

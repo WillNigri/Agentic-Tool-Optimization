@@ -301,11 +301,12 @@ version = "0.1.0"
 
 [[package]]
 name = "ato-desktop"
-version = "2.7.0"
+version = "2.7.1"
 dependencies = [
  "aes-gcm",
  "ato-api-providers",
  "ato-posts",
+ "ato-pricing",
  "ato-recipes",
  "base64 0.22.1",
  "chrono",
@@ -343,6 +344,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ato-pricing"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

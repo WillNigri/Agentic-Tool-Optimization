@@ -300,6 +300,7 @@ dependencies = [
  "anyhow",
  "ato-api-providers",
  "ato-posts",
+ "ato-pricing",
  "ato-recipes",
  "base64",
  "chrono",
@@ -330,6 +331,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ato-pricing"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
