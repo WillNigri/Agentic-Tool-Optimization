@@ -2,7 +2,7 @@
 
 > **Purpose:** a single doc capturing (a) everything shipped during the maintenance sprint with test status, (b) what's queued with priority, and (c) **a copy-paste session-kickoff prompt for each remaining item** so work can resume cleanly across multiple sessions/days.
 >
-> **Last updated:** 2026-05-17 (PR 3 closure-time coordinator enforcement landed). Maintained in OSS repo. Mirror not required (this is the master log).
+> **Last updated:** 2026-05-17 (PR 3 + Sessions UX polish wave 5 — Runs IA collapse — landed). Maintained in OSS repo. Mirror not required (this is the master log).
 
 ---
 
@@ -48,7 +48,10 @@ All commits listed below ran through their relevant slice of `docs/RELEASE_TESTI
 | `20c63f9` | PR 1 — explicit "Coord" + "+" badge groups replace the ★-prefix cluster on SessionsList card | §5B visual verification |
 | `dee47a7` | PR 2 — schema: `sessions.category` with CHECK on controlled vocab + `sessions.team` free-form + two indexes | §3 + §4 + manual ALTER dogfood |
 | `348fd9e` | PR 4 — category badge + team display rendered on SessionsList card | §5B visual verification (TS types + Tauri SELECT already wired) |
-| **PR 3 (pending commit, 2026-05-17)** | **Closure-time coordinator enforcement of `category` + `team`.** Coordinator prompt asks for both; parse-time validator hard-fails on out-of-vocab category; soft-warns on NULL; `--force-close-without-context` suppresses warning. `validate_category` owns trim + empty-coalesce. UPDATE uses COALESCE on category+team so a weaker re-close can't erase taxonomy. Drift-killer test parses `apps/desktop/src-tauri/src/lib.rs` CHECK at compile time and asserts set-equality with `ALLOWED_CATEGORIES`. `ato review` auto-close passes `force_close_without_context=true` to silence dual stderr. | §3 ✓ §4 ✓ §5B mechanical smoke + SQL UPDATE/CHECK exercise ✓; §5B live LLM round-trip BLOCKED on local decrypt cliff (pubkey rotation) — v2.7.2 actionable UX correctly fires. §5C codex-reviewer + pr-reviewer both `[REFINE]` with 7 issues total, all applied. Awaits Will sign-off + push. |
+| `fff889e` | **PR 3 — closure-time coordinator enforcement of `category` + `team`.** Coordinator prompt asks for both; parse-time validator hard-fails on out-of-vocab category; soft-warns on NULL; `--force-close-without-context` suppresses warning. `validate_category` owns trim + empty-coalesce. UPDATE uses COALESCE on category+team so a weaker re-close can't erase taxonomy. Drift-killer unit test parses `apps/desktop/src-tauri/src/lib.rs` CHECK at compile time and asserts set-equality with `ALLOWED_CATEGORIES`. `ato review` auto-close passes `force_close_without_context=true` to silence dual stderr. | §3 ✓ §4 ✓ §5B mechanical smoke + SQL exercise ✓; §5B live LLM round-trip (after Will rotated minimax key with fresh value + I pinned `ATO_MASTER_KEY_B64`): minimax M2.7-highspeed closed session `ae268adf` and multi-runtime session `fc3c71b8` (Claude+Minimax+Google+Codex, 8 turns) with `category=Dev / team=backend`. §5C codex-reviewer + pr-reviewer both `[REFINE]` with 7 issues total, all applied. |
+| `203654f` | **PR 5a — UNION ephemeral dispatches into the Sessions feed.** `list_sessions_full` reads standalone `execution_logs` (session_id IS NULL) and emits them as ephemeral rows alongside real sessions. `SessionListRow.rowKind: "session" \| "ephemeral"` discriminator (codex Round-1 #2: bool too weak for routing/caching). Frontend TS picks up the field; `status` literal broadened to string. | §3 ✓ §4 ✓ §5C codex Round 1 [REFINE: UNION not implicit-session migration, typed discriminator, unified row contract, explicit click contract before tab removal] — all 4 addressed before the diff landed. |
+| `3926af0` | **PR 5b — kind filter chips + ephemeral card variant.** "All / Sessions / Single runs" chip group above the existing Open/Closed chips with per-kind counts. Ephemeral card variant: lighter render, one runtime badge + optional persona + "single run" marker, prompt prefix headline, response preview, cost + timestamp. Ephemeral cards visible but not yet clickable (pending 5c). | §4 ✓ Visual verification deferred to 5c bundle. |
+| `b01edc7` | **PR 5c — drop History tab + ephemeral detail view + IA collapse.** New `get_ephemeral_detail(log_id)` Tauri command with `AND session_id IS NULL` contract enforcement. New `EphemeralDetailView.tsx` component. `openSelection: {kind,id}` routing replaces `openId`. New `_helpers.ts` module breaks the previous SessionsList ↔ EphemeralDetailView circular import. Lifecycle chips relabeled "Lifecycle (sessions only)" with per-chip tooltips. RunsSection drops the History tab + LogViewer import; `components/LogViewer/` directory deleted entirely. | §3 ✓ §4 ✓ §5C codex Round 1 [REFINE: 5 items] + pr-reviewer Round 2 [REFINE: confirmed 5 + 2 more] — all 7 applied (ephemeral-only WHERE clause, setOpenId alias removed, component extracted, dead code deleted, lifecycle chips clarified, helpers.ts cycle break, stale comment fixed). |
 
 ### Strategy / docs
 
@@ -420,10 +423,13 @@ Items 6+7 (Knowledge + Agent⇄Skill bundled wave) — when their trigger fires
 - [x] commands.rs PR 1 (shared.rs) — `2e0069c` + `73d7583`
 - [x] Sessions UX polish PR 1 — coordinator/participants badge split (`20c63f9`)
 - [x] Sessions UX polish PR 2 — schema for `category` + `team` (`dee47a7`)
-- [ ] Sessions UX polish PR 3 — closure-time coordinator enforcement (this session 2026-05-17; war-room reviewed + fixes applied; awaits Will sign-off + push)
+- [x] Sessions UX polish PR 3 — closure-time coordinator enforcement (`fff889e`)
 - [x] Sessions UX polish PR 4 — SessionsList card surfaces category + team (`348fd9e`)
-- [ ] Sessions UX polish PR 5 — **Runs IA collapse: merge History tab into Sessions, WhatsApp-feed model (single-run + multi-round in one list with card-level marker)** — design decided 2026-05-17, see `memory/project_ato_runs_tab_collapse.md`
-- [ ] Sessions UX polish PR 6 — filter UI (category dropdown, team dropdown, click-tag-to-filter) — defer until PR 5 ships so the filters are designed against the unified feed shape
+- [x] Sessions UX polish PR 5a — UNION ephemeral dispatches into Sessions feed (`203654f`)
+- [x] Sessions UX polish PR 5b — kind filter chips + ephemeral card variant (`3926af0`)
+- [x] Sessions UX polish PR 5c — drop History tab + ephemeral detail view (`b01edc7`)
+- [ ] Sessions UX polish PR 6 — filter UI (category dropdown, team dropdown, click-tag-to-filter) — Open against the unified feed shape now that PR 5 has landed
+- [ ] Sessions UX polish PR 7 (small) — lifecycle chip counts: "All" includes ephemerals but "Open + Closed" only sums sessions, so the numbers don't add to All. Add a `(N sessions, M ephemerals)` footer to reconcile. Flagged as a non-blocker in pr-reviewer Round 2.
 - [ ] commands.rs PR 2-29
 - [ ] Auto-Optimization Pro feature
 - [ ] Knowledge Source Adapters + Agent ⇄ Skill linkage wave
