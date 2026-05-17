@@ -1,10 +1,10 @@
 // PR 5c (Sessions UX polish, 2026-05-17) — single-shot dispatch
 // detail view. A session uuid and an execution_log uuid live in the
 // same string space, so the parent SessionsList encodes a discriminator
-// (kind: "session" | "ephemeral") alongside the open id to route
+// (kind: "session" | "single_run") alongside the open id to route
 // correctly. This view is intentionally lighter than SessionTranscriptView:
 // one prompt + one response, no Continue / Bridge / Close affordances
-// (ephemeral by definition — there's nothing to continue).
+// (single-run by definition — there's nothing to continue).
 //
 // Extracted from SessionsList.tsx per codex-reviewer Round-1 #3:
 // inlining a full detail view in a ~2k-line parent was a readability
@@ -24,7 +24,7 @@ import {
   formatTime,
 } from "./_helpers";
 
-export interface EphemeralDetail {
+export interface SingleRunDetail {
   id: string;
   runtime: string;
   agentSlug: string | null;
@@ -41,17 +41,17 @@ export interface EphemeralDetail {
   authMode: string | null;
 }
 
-export default function EphemeralDetailView({
+export default function SingleRunDetailView({
   logId,
   onBack,
 }: {
   logId: string;
   onBack: () => void;
 }) {
-  const q = useQuery<EphemeralDetail>({
-    queryKey: ["ephemeral-detail", logId],
+  const q = useQuery<SingleRunDetail>({
+    queryKey: ["single-run-detail", logId],
     queryFn: () =>
-      invoke<EphemeralDetail>("get_ephemeral_detail", { logId }),
+      invoke<SingleRunDetail>("get_single_run_detail", { logId }),
     staleTime: 60_000,
   });
 

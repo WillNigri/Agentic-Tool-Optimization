@@ -93,13 +93,13 @@ pub struct SessionListRow {
     pub team: Option<String>,
     /// 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
     /// real sessions (multi-turn, from the `sessions` table) and
-    /// "ephemeral" single-shot dispatches (one row in `execution_logs`
+    /// "single_run" single-shot dispatches (one row in `execution_logs`
     /// with `session_id IS NULL`). The History tab today shows the
     /// latter as a flat list; PR 5 collapses both into one Sessions
     /// feed (WhatsApp-style — group chats and single chats in one
     /// inbox). The frontend uses this discriminator to pick the card
     /// variant + the click-into-detail route (full transcript for
-    /// `"session"`, single-turn detail for `"ephemeral"`). Codex
+    /// `"session"`, single-turn detail for `"single_run"`). Codex
     /// Round-1 #2: bool would be too weak for routing/caching — a
     /// typed string keeps future variants open ("scheduled-run",
     /// "automation-step", etc.) without another migration.
@@ -149,7 +149,7 @@ pub fn list_sessions_full(
 
 fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<SessionListRow>> {
     // PR 5a (Sessions UX polish, 2026-05-17) — Sessions list is now a
-    // unified feed of both real multi-turn sessions and "ephemeral"
+    // unified feed of both real multi-turn sessions and "single_run"
     // single-shot dispatches (execution_logs with session_id IS NULL).
     // The History tab (Runs → History) shipped the same data twice; PR
     // 5 collapses it into one WhatsApp-style inbox where group chats
@@ -158,11 +158,11 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // Two SELECTs, merged Rust-side rather than via SQL UNION — the
     // enrichment phase below (distinct runtimes, agent slugs, cost
     // sum, last-turn preview) is per-row work on session rows and
-    // is irrelevant for ephemeral rows, so doing them separately
+    // is irrelevant for single-run rows, so doing them separately
     // keeps each path readable and avoids a UNION that would have to
     // emit dummy-column padding for the session-only fields. The
     // final list is sorted by the unified timestamp (last_used_at for
-    // sessions, created_at for ephemerals — both are "when this thing
+    // sessions, created_at for single-runs — both are "when this thing
     // last had activity") and truncated to `limit`.
     //
     // SELECT the v2.6 lifecycle columns alongside the originals.
@@ -292,11 +292,11 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         enriched.push(row);
     }
 
-    // PR 5a — ephemeral rows: standalone dispatches (execution_logs
+    // PR 5a — single-run rows: standalone dispatches (execution_logs
     // with session_id IS NULL). One row per dispatch. Synthesizes the
     // session-shaped fields so the frontend renders against one
     // contract; all "session-only" fields (status/summary/tags/etc.)
-    // are NULL or sentinel values so the ephemeral card variant can
+    // are NULL or sentinel values so the single-run card variant can
     // render without branching on each field.
     //
     // Why session_id IS NULL: anything WITH a session_id is already
@@ -305,7 +305,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // ones the History tab was the only surface for, and they're what
     // we need to absorb to make the History tab redundant.
     //
-    // The ephemeral count is also capped at `limit` so a user with
+    // The single-run count is also capped at `limit` so a user with
     // 10k standalone dispatches doesn't slow the feed render. The
     // final Rust-side merge orders by timestamp DESC and truncates
     // the combined list to `limit`.
@@ -317,7 +317,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
           ORDER BY e.created_at DESC
           LIMIT ?1",
     )?;
-    let ephemerals: Vec<SessionListRow> = eph_stmt
+    let single_runs: Vec<SessionListRow> = eph_stmt
         .query_map([limit], |r| {
             let id: String = r.get(0)?;
             let runtime: String = r.get(1)?;
@@ -328,7 +328,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             let response: Option<String> = r.get(6)?;
             let _model: Option<String> = r.get(7)?;
             let status_str: Option<String> = r.get(8)?;
-            // Ephemeral title = first 80 chars of the prompt (so the
+            // Single-run title = first 80 chars of the prompt (so the
             // card is recognizable at a glance). The last_assistant_
             // preview slot carries the response truncated to 160. If
             // either is NULL the card still renders — the missing
@@ -349,7 +349,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                     s.to_string()
                 }
             });
-            // An ephemeral dispatch's "status" mirrors the
+            // A single-run dispatch's "status" mirrors the
             // execution_logs status (success/error/...) rather than
             // sessions' open/closed lifecycle. The frontend uses
             // row_kind to decide whether status semantics are
@@ -364,7 +364,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 runtime: runtime.clone(),
                 agent_slug,
                 title,
-                // Ephemeral rows reuse created_at for both timestamps —
+                // Single-run rows reuse created_at for both timestamps —
                 // a single-shot dispatch IS its own last_used_at.
                 created_at: created_at.clone(),
                 last_used_at: created_at,
@@ -381,17 +381,17 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 project_id: None,
                 category: None,
                 team: None,
-                row_kind: "ephemeral".to_string(),
+                row_kind: "single_run".to_string(),
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
 
-    // Merge: real sessions + ephemerals, sorted by their unified
-    // timestamp (last_used_at, which equals created_at for ephemerals).
+    // Merge: real sessions + single-runs, sorted by their unified
+    // timestamp (last_used_at, which equals created_at for single-runs).
     // Stable sort so two rows with the same timestamp keep their
     // intra-list order, which is good for determinism in tests.
-    enriched.extend(ephemerals);
+    enriched.extend(single_runs);
     enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
     enriched.truncate(limit as usize);
     Ok(enriched)
@@ -582,23 +582,23 @@ pub fn get_session_cost_breakdown(
 }
 
 /// PR 5c (Sessions UX polish, 2026-05-17) — full detail for a single
-/// "ephemeral" dispatch (an `execution_logs` row with `session_id IS
-/// NULL`). The Sessions tab's ephemeral cards (added in 5a/5b) route
+/// "single_run" dispatch (an `execution_logs` row with `session_id IS
+/// NULL`). The Sessions tab's single-run cards (added in 5a/5b) route
 /// here on click instead of the multi-turn `get_session_transcript`
-/// path, because an ephemeral row has no session row to fetch — it
+/// path, because a single-run row has no session row to fetch — it
 /// IS the entire conversation, one prompt + one response.
 ///
 /// Why a separate command rather than overloading `get_session_
-/// transcript`: codex-reviewer Round-1 #4 — "Define the ephemeral-
+/// transcript`: codex-reviewer Round-1 #4 — "Define the single-run-
 /// open click contract explicitly. If detail loaders assume
-/// `session_id`, ephemeral open will misroute." Two commands keeps
+/// `session_id`, single-run open will misroute." Two commands keeps
 /// the contracts honest: each one has a fixed expectation about its
 /// id space (session uuid vs execution_log uuid) and a fixed return
 /// shape, so the frontend's discriminator (`rowKind`) maps to a
 /// real-routing fork rather than a runtime branch inside one bag.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct EphemeralDetail {
+pub struct SingleRunDetail {
     pub id: String,
     pub runtime: String,
     pub agent_slug: Option<String>,
@@ -616,10 +616,10 @@ pub struct EphemeralDetail {
 }
 
 #[tauri::command]
-pub fn get_ephemeral_detail(
+pub fn get_single_run_detail(
     db: State<'_, DbState>,
     log_id: String,
-) -> Result<EphemeralDetail, String> {
+) -> Result<SingleRunDetail, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     // Codex Round-1 #1 — the WHERE clause MUST enforce `session_id IS
     // NULL`. Without it, any execution_logs row is fetchable, including
@@ -635,7 +635,7 @@ pub fn get_ephemeral_detail(
           WHERE id = ?1 AND session_id IS NULL",
         [&log_id],
         |r| {
-            Ok(EphemeralDetail {
+            Ok(SingleRunDetail {
                 id: r.get(0)?,
                 runtime: r.get(1)?,
                 agent_slug: r.get(2)?,
@@ -655,7 +655,7 @@ pub fn get_ephemeral_detail(
     )
     .map_err(|e| {
         format!(
-            "ephemeral dispatch id {} not found (either the id doesn't exist or it belongs to a session — session-attached turns are fetched via get_session_transcript, not this command): {}",
+            "single-run dispatch id {} not found (either the id doesn't exist or it belongs to a session — session-attached turns are fetched via get_session_transcript, not this command): {}",
             log_id, e
         )
     })

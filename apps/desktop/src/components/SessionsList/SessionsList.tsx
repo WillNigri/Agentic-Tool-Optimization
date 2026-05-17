@@ -32,7 +32,7 @@ import {
   Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import EphemeralDetailView from "./EphemeralDetailView";
+import SingleRunDetailView from "./SingleRunDetailView";
 import {
   runtimeBadge,
   formatTime,
@@ -62,11 +62,11 @@ interface SessionListRow {
   lastAssistantPreview: string | null;
   // v2.6 Slice C — lifecycle + coordinator-generated metadata.
   // PR 5a (2026-05-17) broadened the `status` literal from "open" |
-  // "closed" to a plain string so ephemeral rows (which carry the
+  // "closed" to a plain string so single-run rows (which carry the
   // execution_log status like "success" / "error") flow through the
   // same shape. UI code that checks lifecycle still tests for "open"
   // / "closed" explicitly; everything else falls through to the
-  // ephemeral card variant.
+  // single-run card variant.
   status: string;
   closedAt: string | null;
   autoTitle: string | null;
@@ -77,18 +77,18 @@ interface SessionListRow {
   // controlled-vocab work-band tag (Business / Marketing / Dev /
   // Frontend / etc.); team is a free-form owner label. Both are
   // populated by the coordinator at close (PR 3); NULL on
-  // pre-PR-2 rows AND on ephemeral rows (taxonomy is a session-only
+  // pre-PR-2 rows AND on single-run rows (taxonomy is a session-only
   // concern — a single dispatch isn't worth taxonomizing).
   category: string | null;
   team: string | null;
   // 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
   // real multi-turn sessions (from the `sessions` table) and
-  // ephemeral single-shot dispatches (from `execution_logs` with
+  // single-run dispatches (from `execution_logs` with
   // session_id IS NULL — what the History tab was the only surface
   // for before PR 5 collapsed them into one unified feed). The
   // frontend uses this to pick the card variant + the
   // click-into-detail route in PR 5b/5c.
-  rowKind: "session" | "ephemeral";
+  rowKind: "session" | "single_run";
 }
 
 interface SessionTurn {
@@ -250,14 +250,14 @@ const CATEGORY_VOCAB = [
 ] as const;
 
 // PR 5b (2026-05-17) — kind filter: ALL shows both real sessions and
-// ephemeral single-shot dispatches; SESSIONS shows only multi-turn
+// single-run dispatches; SESSIONS shows only multi-turn
 // rooms from the `sessions` table; SINGLE_RUNS shows only standalone
 // `execution_logs` rows (what the History tab used to be the only
 // surface for). Keeps the status filter (open/closed) orthogonal —
-// status applies to sessions; ephemerals carry execution_log status
+// status applies to sessions; single-runs carry execution_log status
 // values (success/error/unknown) so they pass through the "all"
 // status bucket only. PR 5c dropped the History tab and added the
-// ephemeral click-into-detail panel — see EphemeralDetailView.tsx.
+// single-run click-into-detail panel — see SingleRunDetailView.tsx.
 type KindFilter = "all" | "sessions" | "single_runs";
 
 /// Case-insensitive substring search across every human-readable
@@ -285,7 +285,7 @@ function rowMatchesFilters(
 ): boolean {
   if (skip !== "kind") {
     if (f.kind === "sessions" && s.rowKind !== "session") return false;
-    if (f.kind === "single_runs" && s.rowKind !== "ephemeral") return false;
+    if (f.kind === "single_runs" && s.rowKind !== "single_run") return false;
   }
   if (skip !== "status") {
     if (f.status === "open" && s.status !== "open") return false;
@@ -293,7 +293,7 @@ function rowMatchesFilters(
   }
   // PR 6 — taxonomy filters. Category + team only exist on real
   // sessions (PR 3 closure path); a category or team filter therefore
-  // implicitly scopes to sessions, dropping ephemerals.
+  // implicitly scopes to sessions, dropping single-runs.
   if (skip !== "category" && f.category !== null && s.category !== f.category)
     return false;
   if (skip !== "team" && f.team !== null && s.team !== f.team) return false;
@@ -344,7 +344,7 @@ function filterSessions(
 // session uuid and an execution_log uuid live in the same string
 // space, so the discriminator is required for routing. `null`
 // means the list is showing.
-type OpenSelection = { kind: "session" | "ephemeral"; id: string } | null;
+type OpenSelection = { kind: "session" | "single_run"; id: string } | null;
 
 export default function SessionsList() {
   const [openSelection, setOpenSelection] = useState<OpenSelection>(null);
@@ -439,9 +439,9 @@ export default function SessionsList() {
       />
     );
   }
-  if (openSelection?.kind === "ephemeral") {
+  if (openSelection?.kind === "single_run") {
     return (
-      <EphemeralDetailView
+      <SingleRunDetailView
         logId={openSelection.id}
         onBack={() => setOpenSelection(null)}
       />
@@ -519,7 +519,7 @@ export default function SessionsList() {
               data the History tab was the only surface for);
               "Sessions" scopes to multi-turn rooms; "Single runs"
               scopes to standalone dispatches. The status chips below
-              (Open / Closed) apply to sessions only — ephemerals don't
+              (Open / Closed) apply to sessions only — single-runs don't
               have a lifecycle and are filtered out when a status is
               selected. */}
           <div className="flex items-center gap-2 text-xs">
@@ -533,7 +533,7 @@ export default function SessionsList() {
                   ? sessionsQ.data!.length
                   : k === "sessions"
                     ? sessionsQ.data!.filter((row) => row.rowKind === "session").length
-                    : sessionsQ.data!.filter((row) => row.rowKind === "ephemeral").length;
+                    : sessionsQ.data!.filter((row) => row.rowKind === "single_run").length;
               return (
                 <button
                   key={k}
@@ -552,7 +552,7 @@ export default function SessionsList() {
             })}
           </div>
           {/* PR 6 — taxonomy filters: category dropdown + team
-              dropdown. Both implicitly scope to sessions (ephemerals
+              dropdown. Both implicitly scope to sessions (single-runs
               have neither). Counts shown next to each option reflect
               how many rows match the value under the currently-active
               kind/status/tag filters, so the dropdown stays honest
@@ -668,7 +668,7 @@ export default function SessionsList() {
             );
           })()}
           {/* Status chips — lifecycle filter that applies to SESSIONS
-              ONLY. Ephemerals carry `execution_logs.status` values
+              ONLY. Single-runs carry `execution_logs.status` values
               ("success"/"error"/"unknown") which aren't open/closed,
               so they're hidden when this filter is anything other
               than "all" (codex Round-1 #5: rename/scope copy so the
@@ -693,8 +693,8 @@ export default function SessionsList() {
                   onClick={() => setStatusFilter(s)}
                   title={
                     s === "all"
-                      ? "Show every row (sessions + ephemerals)"
-                      : `Show sessions whose lifecycle is "${s}". Ephemeral single-runs are hidden here — they have no open/closed lifecycle.`
+                      ? "Show every row (sessions + single-runs)"
+                      : `Show sessions whose lifecycle is "${s}". Single-runs are hidden here — they have no open/closed lifecycle.`
                   }
                   className={cn(
                     "px-2 py-1 rounded-md border capitalize transition-colors",
@@ -720,11 +720,11 @@ export default function SessionsList() {
             )}
           </div>
           {/* PR 7 (2026-05-17) — lifecycle chip count reconciliation
-              footer. The lifecycle chips' "All (N)" counts ephemerals
+              footer. The lifecycle chips' "All (N)" counts single-runs
               too, but "Open + Closed" only sums sessions, so the
               numbers don't naturally add up to N. A small breakdown
               line below removes the visual mystery: "N total · S
-              sessions · E ephemerals" matches what "All" actually
+              sessions · E single-runs" matches what "All" actually
               contains. Hidden when the user has narrowed via search
               or any filter to avoid double-redundancy with the "X of
               Y shown" line above. (pr-reviewer Round-2 nit on PR 5c.) */}
@@ -738,7 +738,7 @@ export default function SessionsList() {
                 {sessionsQ.data!.length} total ·{" "}
                 {sessionsQ.data!.filter((r) => r.rowKind === "session").length} sessions
                 ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "ephemeral").length} ephemerals
+                {sessionsQ.data!.filter((r) => r.rowKind === "single_run").length} single-runs
                 · Open/Closed apply to sessions only
               </div>
             )}
@@ -778,17 +778,17 @@ export default function SessionsList() {
       ) : (
         <div className="space-y-2">
           {filteredSessions.map((s) => {
-            // PR 5b — ephemeral card variant. A single-run dispatch
-            // (`rowKind === "ephemeral"`) gets a lighter card: one
+            // PR 5b — single-run card variant. A single-run dispatch
+            // (`rowKind === "single_run"`) gets a lighter card: one
             // runtime badge, persona (if any), the prompt prefix as
             // title, response preview, cost, timestamp. No Coord/+
             // group (only one runtime spoke), no closed-lock (no
             // lifecycle), no category/team (taxonomy is a session-only
             // concern). Click-into-detail lands in PR 5c — until then
-            // ephemeral cards render as non-interactive `div`s with a
+            // single-run cards render as non-interactive `div`s with a
             // tooltip explaining that the History tab still has the
             // full detail.
-            if (s.rowKind === "ephemeral") {
+            if (s.rowKind === "single_run") {
               const promptPreview = s.title ?? "(no prompt recorded)";
               const responsePreview = s.lastAssistantPreview;
               const isErr = s.status !== "success";
@@ -796,7 +796,7 @@ export default function SessionsList() {
                 <button
                   key={s.id}
                   onClick={() =>
-                    setOpenSelection({ kind: "ephemeral", id: s.id })
+                    setOpenSelection({ kind: "single_run", id: s.id })
                   }
                   title="Open the full prompt + response for this single-run dispatch."
                   className={cn(

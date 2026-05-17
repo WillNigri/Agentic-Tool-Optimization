@@ -22,7 +22,7 @@ const ActivityFeed = lazy(() => import("@/components/ActivityFeed"));
 // v2.3.42 — Sessions tab surfaces Phase 6 Slice A/A.2/B conversations.
 // PR 5c (2026-05-17) — Sessions tab absorbs the standalone dispatches
 // the History tab used to show. WhatsApp-feed model: multi-turn rooms
-// (sessions) and single chats (ephemerals) coexist in one inbox. The
+// (sessions) and single chats (single-runs) coexist in one inbox. The
 // History tab + its `LogViewer` import are removed here, and the
 // orphaned `apps/desktop/src/components/LogViewer/` directory has
 // been deleted alongside (codex Round-1 #4: dead code dies with the

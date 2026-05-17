@@ -1,9 +1,9 @@
 // PR 5c follow-up (pr-reviewer Round-2 #1) — helpers extracted from
-// SessionsList.tsx into this internal module so EphemeralDetailView
+// SessionsList.tsx into this internal module so SingleRunDetailView
 // can reuse them without creating an import cycle. The cycle was:
 //
-//   SessionsList.tsx  imports  EphemeralDetailView
-//   EphemeralDetailView.tsx  imports  runtimeBadge/etc. from SessionsList
+//   SessionsList.tsx  imports  SingleRunDetailView
+//   SingleRunDetailView.tsx  imports  runtimeBadge/etc. from SessionsList
 //
 // ESM live-bindings make it work today because every helper use is at
 // render time (no module-init dependency), but it bites HMR ordering
