@@ -64,7 +64,35 @@ const TAG_LEN: usize = 16;
 /// also failing fast in headless contexts.
 const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
 
+// 2026-05-17 — process-memory cache + dev-mode env-var bypass.
+// Reasons for both: (a) macOS keychain re-prompts on every binary
+// signature change, including unsigned dev rebuilds — even after
+// "Always Allow"; (b) within a single process there's no reason to
+// pay the keychain round-trip on every call. Together: first call
+// pays once (or skips entirely in dev with ATO_MASTER_KEY_B64), every
+// subsequent call returns from the in-memory OnceLock.
+static MASTER_KEY_CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
 fn master_key() -> Result<[u8; 32], String> {
+    if let Some(cached) = MASTER_KEY_CACHE.get() {
+        return Ok(*cached);
+    }
+    let key = master_key_fetch()?;
+    let _ = MASTER_KEY_CACHE.set(key);
+    Ok(key)
+}
+
+fn master_key_fetch() -> Result<[u8; 32], String> {
+    // Dev-mode bypass — unsigned local builds skip the keychain
+    // entirely. Production releases (signed Apple Developer cert) never
+    // set this env var and go through the normal keychain path.
+    if let Ok(b64) = std::env::var("ATO_MASTER_KEY_B64") {
+        let trimmed = b64.trim();
+        if !trimmed.is_empty() {
+            return decode_key_b64(trimmed);
+        }
+    }
+
     use std::sync::mpsc;
     use std::time::Duration;
 

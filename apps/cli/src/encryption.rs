@@ -36,7 +36,48 @@ const TAG_LEN: usize = 16;
 /// the caller can unblock themselves without code changes.
 const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
 
+// 2026-05-17 — process-memory cache. macOS keychain ACL re-prompts on
+// every binary-signature change, AND historically the dispatch path
+// fetched the master key per call. Within a single process there's no
+// reason to hit the keychain more than once: cache the [u8; 32] in a
+// OnceLock, the first call pays the keychain round-trip, every
+// subsequent call returns instantly. Cuts the "dialog spam during
+// rebuilds" problem AND makes scripted/cron flows cheaper.
+//
+// Cache is per-process — a new `ato dispatch` invocation starts cold,
+// which is correct (macOS code-signature ACL is the right enforcement
+// boundary across processes; in-process caching shouldn't bypass it).
+static MASTER_KEY_CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
 fn master_key() -> Result<[u8; 32]> {
+    if let Some(cached) = MASTER_KEY_CACHE.get() {
+        return Ok(*cached);
+    }
+    let key = master_key_fetch()?;
+    // Use `get_or_init`-style write — if two threads raced through the
+    // check above, the loser's write is dropped; both end up with the
+    // same value (keychain is the source of truth).
+    let _ = MASTER_KEY_CACHE.set(key);
+    Ok(key)
+}
+
+fn master_key_fetch() -> Result<[u8; 32]> {
+    // 2026-05-17 — dev-mode bypass. Unsigned local builds (cargo build
+    // --release on a dev machine) produce a fresh code signature on
+    // every rebuild, which macOS keychain treats as "a new app" — so
+    // even after clicking "Always Allow" the dialog comes back on the
+    // next rebuild. The env var bypass lets dev builds skip the
+    // keychain entirely. Production users on signed Apple Developer
+    // releases NEVER set this var and go through the normal keychain
+    // path. Same security model: an attacker with user-level env access
+    // already has the user's keychain too.
+    if let Ok(b64) = std::env::var("ATO_MASTER_KEY_B64") {
+        let trimmed = b64.trim();
+        if !trimmed.is_empty() {
+            return decode_key_b64(trimmed);
+        }
+    }
+
     use std::sync::mpsc;
     use std::time::Duration;
 
