@@ -71,7 +71,11 @@ All commits listed below ran through their relevant slice of `docs/RELEASE_TESTI
 
 ### Release
 
-| Tag | Status | Notes |
+| Tag | Date | Commit | Notes |
+|---|---|---|---|
+| `v2.7.3` | 2026-05-17 | `b01a6a4` | Sessions UX polish wave 5. PR 3 (closure-time category+team) + PR 5a/5b/5c (Runs IA collapse, WhatsApp-feed Sessions inbox) + PR 6+7 (taxonomy filters + count reconciliation footer). Two release-day fixes: RUNTIME_COLORS re-export (`44fb571`), keychain timeout help text → ATO_MASTER_KEY_B64 (`305e222`). War-room: 7 seats × 4 LLM families, 3 APPROVE / 4 REFINE / 0 DISSENT; Round 2 ceo synthesis → Option B (ship after the one help-text fix). Tag pushed; awaiting CI artifacts + Homebrew tap update. |
+
+| Older tag | Status | Notes |
 |---|---|---|
 | `v2.7.0` | Built + released | First tag with `ato demo-compare`, agent_slug persistence, persona UI, keychain timeout |
 | `v2.7.1` | Built + released, **Homebrew tap update pending** | Adds cost receipts panel + pricing fixes |
@@ -428,8 +432,17 @@ Items 6+7 (Knowledge + Agent⇄Skill bundled wave) — when their trigger fires
 - [x] Sessions UX polish PR 5a — UNION ephemeral dispatches into Sessions feed (`203654f`)
 - [x] Sessions UX polish PR 5b — kind filter chips + ephemeral card variant (`3926af0`)
 - [x] Sessions UX polish PR 5c — drop History tab + ephemeral detail view (`b01edc7`)
-- [ ] Sessions UX polish PR 6 — filter UI (category dropdown, team dropdown, click-tag-to-filter) — Open against the unified feed shape now that PR 5 has landed
-- [ ] Sessions UX polish PR 7 (small) — lifecycle chip counts: "All" includes ephemerals but "Open + Closed" only sums sessions, so the numbers don't add to All. Add a `(N sessions, M ephemerals)` footer to reconcile. Flagged as a non-blocker in pr-reviewer Round 2.
+- [x] Sessions UX polish PR 6 — taxonomy filters + click-tag-to-filter (`cff59b4`)
+- [x] Sessions UX polish PR 7 — lifecycle chip count footer (`cff59b4` bundled)
+- [x] v2.7.3 release — tag pushed `b01a6a4`; CI building; Homebrew tap update pending artifacts
+- [ ] **PR 8 — rename "ephemeral" → "single-shot" everywhere** (Tauri command name, struct, TS interface, chip label, footer). Positioning Round 1 verdict: "ephemeral" contradicts "keep the receipts" pitch. Touches Rust struct + TS + every comment in the wave.
+- [ ] **PR 9 — designer polish wave**: ⚡ leading glyph on single-run cards (`var(--accent)` at 0.7 opacity, 12px); collapse category+team into a `Filters ▾` disclosure to save vertical space; tag chip pressed-state with bg+font-weight+letter-spacing not border-only (color-blind a11y). All flagged by designer seat as PR-8 sub-10 polish items.
+- [ ] **PR 10 — drop "Taxonomy" toolbar label + add comparison-verb copy** that telegraphs intent ("Filter receipts by…" or empty-state copy bridging to "Compare these runs"). Positioning Round 1.
+- [ ] **PR 11 — Slice C PR-2 (resurrected): `project_id` snapshot at session create** + `--project` flag on `ato sessions new`. Will surfaced 2026-05-17: sessions are born project-less because the active-project sidebar isn't snapshotted at create. Column exists, write path doesn't. Originally queued in v2.6 Slice C PR-2 plan; bypassed in favor of category/team work; now overdue.
+- [ ] **PR 12 — codex lifecycle-counts global-vs-contextual semantics decision**: Open/Closed chips count globally while category/team count contextually in the same toolbar. Pick one model and apply everywhere. Codex Round-1 on v2.7.3 release review.
+- [ ] **PR 13 — keychain ACL-as-NoEntry root-cause fix**: `master_key_inner()` in `apps/cli/src/encryption.rs` + `apps/desktop/src-tauri/src/encryption.rs` should inspect the underlying `keyring` crate error variant and refuse to regenerate on `errSecAuthFailed` / permission-denied subcases — only true `NoEntry` (no row at all) triggers generation. Today's `ATO_MASTER_KEY_B64` workaround is documented in `memory/feedback_dev_build_keychain.md`.
+- [ ] **PR 14 — war-room cohesion**: today's Round-1-parallel methodology fires N standalone dispatches per round, showing as N separate single-run cards instead of one logical war-room. Two designs on the table: (a) add `war_room_id` UUID to `execution_logs`, group cards sharing the same id, (b) shift methodology so Round-1-parallel goes into a single session with parallel turns. Both candidate PR shapes captured in chat 2026-05-17.
+- [ ] **60s Loom post-ship recording** — office-hours falsifier: if the Loom doesn't clear 500 X views in 48h, the IA collapse was not user-pulled and the team pivots to the Create Agent wizard next, not more sessions polish.
 - [ ] commands.rs PR 2-29
 - [ ] Auto-Optimization Pro feature
 - [ ] Knowledge Source Adapters + Agent ⇄ Skill linkage wave
