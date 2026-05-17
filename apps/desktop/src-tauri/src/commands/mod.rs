@@ -1,5 +1,15 @@
 // All Tauri command functions and helpers.
 // Extracted from lib.rs for maintainability.
+//
+// 2026-05-17 — beginning of the commands.rs split (see
+// COMMANDS_SPLIT_PLAN.md alongside). PR 1 lands the directory
+// layout + `commands/shared.rs` as the foundation for cross-cutting
+// types. Subsequent PRs extract domain modules (agents.rs,
+// skills_mcps.rs, cron.rs, …) and update internal call sites to
+// `use super::shared::*;`. Zero behavior change per PR — only the
+// file boundary moves.
+
+pub mod shared;
 
 use crate::*;
 use std::collections::HashMap;
