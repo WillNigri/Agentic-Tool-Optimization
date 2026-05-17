@@ -46,6 +46,8 @@ One row per conversation / decision / war-room / work block. The unit users see 
 | `summary` | TEXT | Coordinator-generated paragraph at close. |
 | `tags_json` | TEXT (JSON array) | Coordinator-generated topic tags. |
 | `project_id` | TEXT | Inferred project. Free-form string today; controlled vocab in roadmap. |
+| `category` | TEXT (CHECK) | Controlled vocabulary: `Business` / `Marketing` / `Dev` / `Frontend` / `Backend` / `Design` / `Security` / `Compliance` / `Ops` / `Other`. NULL allowed (back-fill safety). Populated by the coordinator at close in PR 3. Indexed via `idx_sessions_category_lastused` for filter dropdowns. |
+| `team` | TEXT | Free-form owner/team label (founder / frontend / backend / etc.). NULL allowed. Indexed via `idx_sessions_team_lastused`. Multi-tenant story land later — single-user installs use this as a "band" label per Will's findability theme. |
 | `status` | TEXT | `'open'` or `'closed'`. |
 | `created_at`, `last_used_at`, `closed_at` | TEXT (RFC3339) | Lifecycle timestamps. |
 | `turn_count` | INTEGER | Cached count of `session_turns` rows. |

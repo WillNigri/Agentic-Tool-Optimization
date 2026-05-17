@@ -1193,6 +1193,32 @@ pub fn init_database(conn: &Connection) {
             ON sessions(status, last_used_at DESC)",
         [],
     );
+    // v2.7.3 — Sessions UX polish PR 2. Adds the closure-time taxonomy
+    // fields the coordinator populates at `ato sessions close`. NULL
+    // allowed on both so back-fill / older rows / forced-close paths
+    // don't break. `category` is gated by CHECK to a controlled
+    // vocabulary so UI filters can rely on it; `team` is free-form
+    // because the multi-tenant story isn't locked yet (single-user
+    // installs use it as "owner-band" labels — frontend / backend /
+    // design / ops / etc., per Will's screenshot complaint that "all
+    // sessions look the same"). Both columns surface in the UI in PR 3
+    // and become required-at-close (warn, not hard fail) in PR 3 also.
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN category TEXT CHECK (category IS NULL OR category IN \
+         ('Business','Marketing','Dev','Frontend','Backend','Design','Security','Compliance','Ops','Other'))",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN team TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_category_lastused
+            ON sessions(category, last_used_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_team_lastused
+            ON sessions(team, last_used_at DESC)",
+        [],
+    );
     // v2.3.32 Phase 6 Slice A.2 — unified turn history. Stateful
     // runtimes (claude --resume) and stateless API providers
     // (minimax etc.) both dual-write into this table on every
