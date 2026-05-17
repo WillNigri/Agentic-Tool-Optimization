@@ -2,7 +2,6 @@ import { lazy } from "react";
 import { useTranslation } from "react-i18next";
 import {
   MonitorDot,
-  ScrollText,
   Clock,
   Workflow,
   Webhook,
@@ -13,9 +12,6 @@ import SectionTabs, { type TabDef } from "./SectionTabs";
 
 // AgentMonitor uses `export default`; importing directly gives the right shape.
 const AgentMonitor = lazy(() => import("@/components/AgentMonitor/AgentMonitor"));
-const LogViewer = lazy(() =>
-  import("@/components/LogViewer").then((m) => ({ default: m.LogViewer }))
-);
 const CronDashboard = lazy(() => import("@/components/cron/CronDashboard"));
 const AutomationFlow = lazy(() => import("@/components/AutomationFlow"));
 const HooksManager = lazy(() => import("@/components/HooksManager"));
@@ -24,6 +20,14 @@ const HooksManager = lazy(() => import("@/components/HooksManager"));
 // the existing Live + Automations tabs.
 const ActivityFeed = lazy(() => import("@/components/ActivityFeed"));
 // v2.3.42 — Sessions tab surfaces Phase 6 Slice A/A.2/B conversations.
+// PR 5c (2026-05-17) — Sessions tab absorbs the standalone dispatches
+// the History tab used to show. WhatsApp-feed model: multi-turn rooms
+// (sessions) and single chats (ephemerals) coexist in one inbox. The
+// History tab + its `LogViewer` import are removed here, and the
+// orphaned `apps/desktop/src/components/LogViewer/` directory has
+// been deleted alongside (codex Round-1 #4: dead code dies with the
+// feature removal, not "in a follow-up PR"). AgentDetail has its own
+// per-agent HistoryTab which is unrelated and stays.
 const SessionsList = lazy(() => import("@/components/SessionsList"));
 
 export default function RunsSection() {
@@ -34,12 +38,6 @@ export default function RunsSection() {
       label: t("subnav.runsLive", "Live"),
       icon: MonitorDot,
       Component: AgentMonitor,
-    },
-    {
-      id: "history",
-      label: t("subnav.runsHistory", "History"),
-      icon: ScrollText,
-      Component: LogViewer,
     },
     {
       id: "sessions",

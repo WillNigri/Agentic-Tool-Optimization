@@ -32,6 +32,13 @@ import {
   Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import EphemeralDetailView from "./EphemeralDetailView";
+import {
+  runtimeBadge,
+  formatTime,
+  personaDisplay,
+  personaBadge,
+} from "./_helpers";
 
 interface SessionListRow {
   id: string;
@@ -146,32 +153,6 @@ interface CloseSessionResult {
   durationMs: number;
 }
 
-const RUNTIME_COLORS: Record<string, string> = {
-  claude: "text-orange-400 bg-orange-400/10",
-  codex: "text-green-400 bg-green-400/10",
-  gemini: "text-blue-400 bg-blue-400/10",
-  google: "text-blue-400 bg-blue-400/10",
-  hermes: "text-purple-400 bg-purple-400/10",
-  openclaw: "text-cyan-400 bg-cyan-400/10",
-  minimax: "text-pink-400 bg-pink-400/10",
-  grok: "text-slate-400 bg-slate-400/10",
-  deepseek: "text-indigo-400 bg-indigo-400/10",
-  qwen: "text-amber-400 bg-amber-400/10",
-  openrouter: "text-violet-400 bg-violet-400/10",
-  anthropic: "text-orange-400 bg-orange-400/10",
-};
-
-function runtimeBadge(rt: string) {
-  return cn(
-    "px-1.5 py-0.5 rounded text-xs font-medium capitalize",
-    RUNTIME_COLORS[rt] || "text-cs-muted bg-cs-border"
-  );
-}
-
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleString();
-}
-
 // Pretty-name lookup for runtimes. Used in chat-bubble sender labels
 // where "google" or "minimax" alone is opaque. Pairs with the model
 // when known (e.g. "Google AI · Gemini 2.5 Flash"). Falls back to the
@@ -193,24 +174,6 @@ const RUNTIME_DISPLAY: Record<string, string> = {
 
 function runtimeDisplay(rt: string): string {
   return RUNTIME_DISPLAY[rt] ?? rt.replace(/^[a-z]/, (c) => c.toUpperCase());
-}
-
-// 2026-05-16 — persona slug → human label. "positioning" → "Positioning",
-// "office-hours" → "Office Hours". Falls back to capitalized slug for
-// custom personas users define (security-specialist → "Security Specialist").
-function personaDisplay(slug: string): string {
-  return slug
-    .split("-")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-// Persona-badge styling for the SessionsList card cluster + chat-bubble
-// role labels. Uses a single cyan-tinted treatment so the cluster reads
-// as "these are the named seats that spoke" without competing with the
-// per-turn runtime badges.
-function personaBadge(): string {
-  return "px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-accent/10 text-cs-accent border border-cs-accent/20";
 }
 
 // Heuristic to detect when a `user`-role turn was authored by the
@@ -270,8 +233,8 @@ type StatusFilter = "all" | "open" | "closed";
 // surface for). Keeps the status filter (open/closed) orthogonal —
 // status applies to sessions; ephemerals carry execution_log status
 // values (success/error/unknown) so they pass through the "all"
-// status bucket only. PR 5c will drop the History tab once
-// click-into-ephemeral has a working detail panel.
+// status bucket only. PR 5c dropped the History tab and added the
+// ephemeral click-into-detail panel — see EphemeralDetailView.tsx.
 type KindFilter = "all" | "sessions" | "single_runs";
 
 /// Case-insensitive substring search across every human-readable
@@ -313,8 +276,15 @@ function filterSessions(
   });
 }
 
+// PR 5c — what's currently open in the detail view. Encoding the
+// kind alongside the id keeps the render branch unambiguous: a
+// session uuid and an execution_log uuid live in the same string
+// space, so the discriminator is required for routing. `null`
+// means the list is showing.
+type OpenSelection = { kind: "session" | "ephemeral"; id: string } | null;
+
 export default function SessionsList() {
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openSelection, setOpenSelection] = useState<OpenSelection>(null);
   const [showNew, setShowNew] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -383,11 +353,19 @@ export default function SessionsList() {
       })()
     : [];
 
-  if (openId) {
+  if (openSelection?.kind === "session") {
     return (
       <SessionTranscriptView
-        sessionId={openId}
-        onBack={() => setOpenId(null)}
+        sessionId={openSelection.id}
+        onBack={() => setOpenSelection(null)}
+      />
+    );
+  }
+  if (openSelection?.kind === "ephemeral") {
+    return (
+      <EphemeralDetailView
+        logId={openSelection.id}
+        onBack={() => setOpenSelection(null)}
       />
     );
   }
@@ -419,7 +397,7 @@ export default function SessionsList() {
           onClose={() => setShowNew(false)}
           onCreated={(id) => {
             setShowNew(false);
-            setOpenId(id);
+            setOpenSelection({ kind: "session", id });
           }}
         />
       )}
@@ -495,7 +473,21 @@ export default function SessionsList() {
               );
             })}
           </div>
+          {/* Status chips — lifecycle filter that applies to SESSIONS
+              ONLY. Ephemerals carry `execution_logs.status` values
+              ("success"/"error"/"unknown") which aren't open/closed,
+              so they're hidden when this filter is anything other
+              than "all" (codex Round-1 #5: rename/scope copy so the
+              labels don't silently mean "sessions only"). The
+              "(sessions)" tooltip + the row label below the chips
+              make the scope explicit. */}
           <div className="flex items-center gap-2 text-xs">
+            <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
+              Lifecycle
+              <span className="ml-1 opacity-60 normal-case lowercase">
+                (sessions only)
+              </span>
+            </span>
             {(["all", "open", "closed"] as StatusFilter[]).map((s) => {
               const count =
                 s === "all"
@@ -505,6 +497,11 @@ export default function SessionsList() {
                 <button
                   key={s}
                   onClick={() => setStatusFilter(s)}
+                  title={
+                    s === "all"
+                      ? "Show every row (sessions + ephemerals)"
+                      : `Show sessions whose lifecycle is "${s}". Ephemeral single-runs are hidden here — they have no open/closed lifecycle.`
+                  }
                   className={cn(
                     "px-2 py-1 rounded-md border capitalize transition-colors",
                     statusFilter === s
@@ -574,14 +571,17 @@ export default function SessionsList() {
               const responsePreview = s.lastAssistantPreview;
               const isErr = s.status !== "success";
               return (
-                <div
+                <button
                   key={s.id}
-                  title="Single-run dispatch — open the History tab for the full prompt + response (detail panel ships in PR 5c)."
+                  onClick={() =>
+                    setOpenSelection({ kind: "ephemeral", id: s.id })
+                  }
+                  title="Open the full prompt + response for this single-run dispatch."
                   className={cn(
-                    "w-full text-left border rounded-lg p-4 cursor-default",
+                    "w-full text-left border rounded-lg p-4 transition-colors",
                     isErr
-                      ? "border-cs-danger/40 bg-cs-card/40"
-                      : "border-cs-border/60 bg-cs-card/60"
+                      ? "border-cs-danger/40 bg-cs-card/40 hover:border-cs-danger/60"
+                      : "border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
                   )}
                 >
                   <div className="flex items-center gap-3 flex-wrap">
@@ -630,7 +630,7 @@ export default function SessionsList() {
                       {responsePreview}
                     </div>
                   )}
-                </div>
+                </button>
               );
             }
             // Real-session card path below — unchanged from PR 4.
@@ -649,7 +649,7 @@ export default function SessionsList() {
             return (
               <button
                 key={s.id}
-                onClick={() => setOpenId(s.id)}
+                onClick={() => setOpenSelection({ kind: "session", id: s.id })}
                 className={cn(
                   "w-full text-left border rounded-lg transition-colors p-4",
                   s.status === "closed"
@@ -1800,3 +1800,4 @@ function NewSessionModal({
     </div>
   );
 }
+

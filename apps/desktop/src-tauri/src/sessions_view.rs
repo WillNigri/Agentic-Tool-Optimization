@@ -581,6 +581,86 @@ pub fn get_session_cost_breakdown(
     })
 }
 
+/// PR 5c (Sessions UX polish, 2026-05-17) — full detail for a single
+/// "ephemeral" dispatch (an `execution_logs` row with `session_id IS
+/// NULL`). The Sessions tab's ephemeral cards (added in 5a/5b) route
+/// here on click instead of the multi-turn `get_session_transcript`
+/// path, because an ephemeral row has no session row to fetch — it
+/// IS the entire conversation, one prompt + one response.
+///
+/// Why a separate command rather than overloading `get_session_
+/// transcript`: codex-reviewer Round-1 #4 — "Define the ephemeral-
+/// open click contract explicitly. If detail loaders assume
+/// `session_id`, ephemeral open will misroute." Two commands keeps
+/// the contracts honest: each one has a fixed expectation about its
+/// id space (session uuid vs execution_log uuid) and a fixed return
+/// shape, so the frontend's discriminator (`rowKind`) maps to a
+/// real-routing fork rather than a runtime branch inside one bag.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EphemeralDetail {
+    pub id: String,
+    pub runtime: String,
+    pub agent_slug: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub prompt: Option<String>,
+    pub response: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub duration_ms: Option<i64>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub cost_usd_estimated: Option<f64>,
+    pub auth_mode: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_ephemeral_detail(
+    db: State<'_, DbState>,
+    log_id: String,
+) -> Result<EphemeralDetail, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // Codex Round-1 #1 — the WHERE clause MUST enforce `session_id IS
+    // NULL`. Without it, any execution_logs row is fetchable, including
+    // session-attached turns; the frontend's `rowKind` discriminator
+    // would be advisory rather than load-bearing. Making the contract
+    // real here means a misrouted click (or a stale id from an
+    // outdated client) gets a `not found` error instead of silently
+    // pulling session-turn data into the wrong detail view.
+    conn.query_row(
+        "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
+                created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode
+           FROM execution_logs
+          WHERE id = ?1 AND session_id IS NULL",
+        [&log_id],
+        |r| {
+            Ok(EphemeralDetail {
+                id: r.get(0)?,
+                runtime: r.get(1)?,
+                agent_slug: r.get(2)?,
+                model: r.get(3)?,
+                status: r.get(4)?,
+                prompt: r.get(5)?,
+                response: r.get(6)?,
+                error_message: r.get(7)?,
+                created_at: r.get(8)?,
+                duration_ms: r.get(9)?,
+                tokens_in: r.get(10)?,
+                tokens_out: r.get(11)?,
+                cost_usd_estimated: r.get(12)?,
+                auth_mode: r.get(13)?,
+            })
+        },
+    )
+    .map_err(|e| {
+        format!(
+            "ephemeral dispatch id {} not found (either the id doesn't exist or it belongs to a session — session-attached turns are fetched via get_session_transcript, not this command): {}",
+            log_id, e
+        )
+    })
+}
+
 #[tauri::command]
 pub fn get_session_transcript(
     db: State<'_, DbState>,

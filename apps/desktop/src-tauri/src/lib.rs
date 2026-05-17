@@ -1695,6 +1695,9 @@ pub fn run() {
             // v2.3.42 — sessions view (Phase 6 surface in the GUI)
             sessions_view::list_sessions_full,
             sessions_view::get_session_transcript,
+            // PR 5c — single-shot ephemeral dispatch detail (read of
+            // execution_logs rows that don't have a session)
+            sessions_view::get_ephemeral_detail,
             // v2.3.43 — sessions GUI completion: New / Continue / Bridge
             sessions_view::create_session,
             sessions_view::dispatch_into_session,
