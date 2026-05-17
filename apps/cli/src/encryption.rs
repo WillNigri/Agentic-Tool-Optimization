@@ -96,9 +96,10 @@ fn master_key_fetch() -> Result<[u8; 32]> {
         Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
             "keychain access timed out after {}s — macOS is likely showing a Keychain Access permission dialog \
              (the first read after a new binary build needs explicit approval). \
-             Approve the dialog if visible (use 'Always Allow' so future dispatches don't re-prompt), \
-             or bypass the keychain for this dispatch by setting the provider's API key as an env var \
-             (e.g. GEMINI_API_KEY=..., MINIMAX_API_KEY=..., ANTHROPIC_API_KEY=...).",
+             Approve the dialog if visible (use 'Always Allow' so future dispatches don't re-prompt). \
+             To bypass the keychain for this run, copy the master key from the OS keychain into the env var ATO_MASTER_KEY_B64: \
+             `export ATO_MASTER_KEY_B64=\"$(security find-generic-password -s ato-desktop -a master_key_v1 -w)\"`. \
+             Provider API-key env vars (GEMINI_API_KEY, MINIMAX_API_KEY, ANTHROPIC_API_KEY, ...) only help if you also have those keys handy — the ATO_MASTER_KEY_B64 path is the real bypass.",
             KEYCHAIN_TIMEOUT_SECS
         )),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
