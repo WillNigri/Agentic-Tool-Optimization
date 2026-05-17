@@ -506,21 +506,52 @@ export default function SessionsList() {
                 )}
               >
                 <div className="flex items-center gap-3 flex-wrap">
+                  {/* 2026-05-17 — coordinator vs participants split into
+                      explicit labelled groups. Previously rendered as a
+                      single badge cluster with a ★ prefix on the
+                      coordinator — too easy to miss when the card has 4+
+                      runtime badges (see e.g. cross-runtime war-rooms with
+                      `Codex Claude Minimax Google` chips). Now: "Coord"
+                      label + ring-accented coordinator badge, separator,
+                      "+" label + dimmed participant badges. The session's
+                      anchor runtime is always shown as coordinator even
+                      if no turns have been recorded yet. */}
                   <div className="flex items-center gap-1">
-                    {s.runtimesUsed.map((r) => (
-                      <span
-                        key={r}
-                        className={runtimeBadge(r)}
-                        title={
-                          r === s.runtime
-                            ? `Coordinator runtime: ${runtimeDisplay(r)}`
-                            : `Participant: ${runtimeDisplay(r)}`
-                        }
-                      >
-                        {r === s.runtime ? `★ ${r}` : r}
-                      </span>
-                    ))}
+                    <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
+                      Coord
+                    </span>
+                    <span
+                      className={cn(
+                        runtimeBadge(s.runtime),
+                        "ring-1 ring-cs-accent/70"
+                      )}
+                      title={`Coordinator runtime: ${runtimeDisplay(s.runtime)} — orchestrated this session`}
+                    >
+                      {s.runtime}
+                    </span>
                   </div>
+                  {(() => {
+                    const participants = s.runtimesUsed.filter(
+                      (r) => r !== s.runtime
+                    );
+                    if (participants.length === 0) return null;
+                    return (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
+                          +
+                        </span>
+                        {participants.map((r) => (
+                          <span
+                            key={r}
+                            className={cn(runtimeBadge(r), "opacity-75")}
+                            title={`Participant runtime: ${runtimeDisplay(r)} — contributed turns to this session`}
+                          >
+                            {r}
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
                   {/* 2026-05-16 — persona cluster. Renders the distinct
                       seat slugs that spoke in this session, in first-
                       spoken order. Empty (so the cluster is hidden) for
