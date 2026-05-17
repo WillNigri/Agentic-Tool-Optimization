@@ -263,6 +263,17 @@ const NEW_SESSION_RUNTIMES = [
 
 type StatusFilter = "all" | "open" | "closed";
 
+// PR 5b (2026-05-17) — kind filter: ALL shows both real sessions and
+// ephemeral single-shot dispatches; SESSIONS shows only multi-turn
+// rooms from the `sessions` table; SINGLE_RUNS shows only standalone
+// `execution_logs` rows (what the History tab used to be the only
+// surface for). Keeps the status filter (open/closed) orthogonal —
+// status applies to sessions; ephemerals carry execution_log status
+// values (success/error/unknown) so they pass through the "all"
+// status bucket only. PR 5c will drop the History tab once
+// click-into-ephemeral has a working detail panel.
+type KindFilter = "all" | "sessions" | "single_runs";
+
 /// Case-insensitive substring search across every human-readable
 /// field on a session row plus the 8-char id prefix. Returns the
 /// filtered list; tokens that look like a single word are matched
@@ -272,10 +283,13 @@ function filterSessions(
   sessions: SessionListRow[],
   query: string,
   status: StatusFilter,
+  kind: KindFilter,
 ): SessionListRow[] {
   const trimmed = query.trim().toLowerCase();
   const tokens = trimmed.length === 0 ? [] : trimmed.split(/\s+/);
   return sessions.filter((s) => {
+    if (kind === "sessions" && s.rowKind !== "session") return false;
+    if (kind === "single_runs" && s.rowKind !== "ephemeral") return false;
     if (status === "open" && s.status !== "open") return false;
     if (status === "closed" && s.status !== "closed") return false;
     if (tokens.length === 0) return true;
@@ -304,6 +318,7 @@ export default function SessionsList() {
   const [showNew, setShowNew] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   // Debounce the search input by 300ms before firing the backend turn
   // search. Typing fast shouldn't fire a query on every keystroke —
   // the metadata filter runs instantly, the content search lags
@@ -349,6 +364,7 @@ export default function SessionsList() {
           sessionsQ.data,
           searchQuery,
           statusFilter,
+          kindFilter,
         );
         if (!contentSearchEnabled || contentMatchIds.size === 0) {
           return metaMatched;
@@ -358,6 +374,8 @@ export default function SessionsList() {
         // honest).
         const metaIds = new Set(metaMatched.map((s) => s.id));
         return sessionsQ.data.filter((s) => {
+          if (kindFilter === "sessions" && s.rowKind !== "session") return false;
+          if (kindFilter === "single_runs" && s.rowKind !== "ephemeral") return false;
           if (statusFilter === "open" && s.status !== "open") return false;
           if (statusFilter === "closed" && s.status !== "closed") return false;
           return metaIds.has(s.id) || contentMatchIds.has(s.id);
@@ -440,6 +458,43 @@ export default function SessionsList() {
               </button>
             )}
           </div>
+          {/* PR 5b — kind filter chips. WhatsApp-feed model: "All"
+              shows both real sessions and single-run dispatches (the
+              data the History tab was the only surface for);
+              "Sessions" scopes to multi-turn rooms; "Single runs"
+              scopes to standalone dispatches. The status chips below
+              (Open / Closed) apply to sessions only — ephemerals don't
+              have a lifecycle and are filtered out when a status is
+              selected. */}
+          <div className="flex items-center gap-2 text-xs">
+            {([
+              ["all", "All"],
+              ["sessions", "Sessions"],
+              ["single_runs", "Single runs"],
+            ] as [KindFilter, string][]).map(([k, label]) => {
+              const count =
+                k === "all"
+                  ? sessionsQ.data!.length
+                  : k === "sessions"
+                    ? sessionsQ.data!.filter((row) => row.rowKind === "session").length
+                    : sessionsQ.data!.filter((row) => row.rowKind === "ephemeral").length;
+              return (
+                <button
+                  key={k}
+                  onClick={() => setKindFilter(k)}
+                  className={cn(
+                    "px-2 py-1 rounded-md border transition-colors",
+                    kindFilter === k
+                      ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
+                      : "border-cs-border bg-cs-card text-cs-muted hover:text-cs-text"
+                  )}
+                >
+                  {label}
+                  <span className="ml-1 opacity-60">({count})</span>
+                </button>
+              );
+            })}
+          </div>
           <div className="flex items-center gap-2 text-xs">
             {(["all", "open", "closed"] as StatusFilter[]).map((s) => {
               const count =
@@ -504,6 +559,81 @@ export default function SessionsList() {
       ) : (
         <div className="space-y-2">
           {filteredSessions.map((s) => {
+            // PR 5b — ephemeral card variant. A single-run dispatch
+            // (`rowKind === "ephemeral"`) gets a lighter card: one
+            // runtime badge, persona (if any), the prompt prefix as
+            // title, response preview, cost, timestamp. No Coord/+
+            // group (only one runtime spoke), no closed-lock (no
+            // lifecycle), no category/team (taxonomy is a session-only
+            // concern). Click-into-detail lands in PR 5c — until then
+            // ephemeral cards render as non-interactive `div`s with a
+            // tooltip explaining that the History tab still has the
+            // full detail.
+            if (s.rowKind === "ephemeral") {
+              const promptPreview = s.title ?? "(no prompt recorded)";
+              const responsePreview = s.lastAssistantPreview;
+              const isErr = s.status !== "success";
+              return (
+                <div
+                  key={s.id}
+                  title="Single-run dispatch — open the History tab for the full prompt + response (detail panel ships in PR 5c)."
+                  className={cn(
+                    "w-full text-left border rounded-lg p-4 cursor-default",
+                    isErr
+                      ? "border-cs-danger/40 bg-cs-card/40"
+                      : "border-cs-border/60 bg-cs-card/60"
+                  )}
+                >
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span
+                      className={cn(runtimeBadge(s.runtime))}
+                      title={`Runtime: ${runtimeDisplay(s.runtime)}`}
+                    >
+                      {s.runtime}
+                    </span>
+                    {s.agentSlug && (
+                      <span
+                        className={personaBadge()}
+                        title={`Persona seat: ${personaDisplay(s.agentSlug)}`}
+                      >
+                        {personaDisplay(s.agentSlug)}
+                      </span>
+                    )}
+                    <span
+                      className={cn(
+                        "px-1.5 py-0.5 rounded text-[10px] font-medium uppercase",
+                        isErr
+                          ? "bg-cs-danger/15 text-cs-danger"
+                          : "bg-cs-muted/15 text-cs-muted"
+                      )}
+                      title={`Single run · ${s.status}`}
+                    >
+                      single run
+                    </span>
+                    <span className="text-sm text-cs-text truncate flex-1 min-w-0 font-mono text-xs">
+                      {promptPreview}
+                    </span>
+                    {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
+                      <span
+                        className="text-xs text-cs-muted font-mono"
+                        title="Estimated cost from execution_logs.cost_usd_estimated."
+                      >
+                        ${s.totalCostUsd.toFixed(4)}
+                      </span>
+                    )}
+                    <span className="text-xs text-cs-muted">
+                      {formatTime(s.lastUsedAt)}
+                    </span>
+                  </div>
+                  {responsePreview && (
+                    <div className="mt-2 text-xs text-cs-muted line-clamp-2 font-mono">
+                      {responsePreview}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            // Real-session card path below — unchanged from PR 4.
             // Prefer the coordinator-generated auto_title when present
             // (it's distilled from the actual conversation); fall back
             // to the user-supplied title, then to a muted "untitled".
