@@ -793,6 +793,7 @@ pub fn create_session(
     runtime: String,
     title: Option<String>,
     agent_slug: Option<String>,
+    project_id: Option<String>,
 ) -> Result<String, String> {
     let bin = resolve_ato_binary()?;
     let mut cmd = Command::new(&bin);
@@ -802,6 +803,15 @@ pub fn create_session(
     }
     if let Some(slug) = &agent_slug {
         cmd.args(["--as", slug]);
+    }
+    // PR 11 — pass the active project from the sidebar through to the
+    // CLI. CLI's create_inner validates the id against the projects
+    // table and silently drops unknown ids to None (UI cache may be
+    // stale). Empty strings are also treated as None.
+    if let Some(pid) = project_id.as_deref() {
+        if !pid.is_empty() {
+            cmd.args(["--project", pid]);
+        }
     }
     let out = cmd.output().map_err(|e| format!("spawn ato: {}", e))?;
     if !out.status.success() {

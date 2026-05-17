@@ -152,14 +152,64 @@ pub fn append_turn(
     Ok(())
 }
 
+/// PR 11 — validate a candidate project_id against the projects
+/// table. See the three-state model in the comment above
+/// `resolved_project_id` in `create_inner`. Extracted so the unit
+/// tests can exercise each branch deterministically (codex Round-1
+/// #4: missing test coverage on the validation paths).
+pub(crate) fn resolve_project_id(conn: &Connection, pid: &str) -> Option<String> {
+    let has_projects = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_projects {
+        // State 1: no projects table. Silent None — fresh CLI-only
+        // install before the desktop's first run.
+        return None;
+    }
+    let exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM projects WHERE id = ?1",
+            [pid],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists > 0 {
+        // State 3: id resolved.
+        Some(pid.to_string())
+    } else {
+        // State 2: table exists, id missing. Real bug surface —
+        // warn so it's not silently invisible.
+        eprintln!(
+            "warn: --project '{}' not found in projects table; session created project-less. \
+             If you expected this project to exist, check the desktop sidebar selector or run `ato projects list`.",
+            pid
+        );
+        None
+    }
+}
+
 /// Programmatic session creation — no stdout side effects. Used by
 /// callers like `ato review` that orchestrate sessions on the user's
 /// behalf and shouldn't double-emit the "created session X" line.
+///
+/// PR 11 (2026-05-17) — `project_id` is now snapshotted at create
+/// time instead of being filled only by the close-time coordinator's
+/// `suggested_project_id`. When the desktop's active-project sidebar
+/// is set, every new session inherits that id; the close coordinator
+/// can still refine it (via COALESCE behavior in close()). Old call
+/// sites that don't pass a project_id pass None and stay project-less
+/// until close.
 pub fn create_inner(
     conn: &Connection,
     runtime: &str,
     agent_slug: Option<&str>,
     title: Option<&str>,
+    project_id: Option<&str>,
 ) -> Result<Session> {
     if !has_table(conn) {
         return Err(anyhow!(
@@ -169,10 +219,28 @@ pub fn create_inner(
     validate_runtime(runtime)?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    // PR 11 — project_id validated against the projects table.
+    // Three distinct states, only one of which warns:
+    //   1. projects table missing → return None silently. A fresh
+    //      CLI-only install (no desktop ever opened) has no projects
+    //      table, and that's a valid state — nothing to validate
+    //      against, so the field stays NULL.
+    //   2. table present + id NOT in it → return None with a stderr
+    //      warning. This branch indicates a real wiring bug (UI cache
+    //      stale, or someone passed a stray id via --project). Codex
+    //      Round-1 #2: "make dropped project_id observable."
+    //   3. table present + id IS in it → use it.
+    // Tolerant on insert because losing the snapshot is recoverable
+    // (close-time coordinator can re-suggest); a hard failure on a
+    // stale UI cache would be a worse UX.
+    let resolved_project_id: Option<String> = match project_id {
+        Some(pid) if !pid.is_empty() => resolve_project_id(conn, pid),
+        _ => None,
+    };
     conn.execute(
-        "INSERT INTO sessions (id, runtime, agent_slug, runtime_session_id, title, created_at, last_used_at, turn_count)
-         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?5, 0)",
-        rusqlite::params![id, runtime, agent_slug, title, now],
+        "INSERT INTO sessions (id, runtime, agent_slug, runtime_session_id, title, created_at, last_used_at, turn_count, project_id)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?5, 0, ?6)",
+        rusqlite::params![id, runtime, agent_slug, title, now, resolved_project_id],
     )
     .context("insert session row")?;
     Ok(Session {
@@ -193,9 +261,10 @@ pub fn new(
     runtime: String,
     agent_slug: Option<String>,
     title: Option<String>,
+    project_id: Option<String>,
     opts: &Opts,
 ) -> Result<()> {
-    let s = create_inner(conn, &runtime, agent_slug.as_deref(), title.as_deref())?;
+    let s = create_inner(conn, &runtime, agent_slug.as_deref(), title.as_deref(), project_id.as_deref())?;
     if opts.human {
         let title_part = s
             .title
@@ -1181,5 +1250,124 @@ mod tests {
              does not match ALLOWED_CATEGORIES in apps/cli/src/commands/sessions.rs. \
              Update both, or extract the vocab into a shared crate."
         );
+    }
+
+    // PR 11 — resolve_project_id paths. Codex Round-1 #4: cover
+    // the three-state model explicitly so the tolerant-by-design
+    // behavior is intentional not accidental.
+
+    fn fresh_conn_no_projects_table() -> rusqlite::Connection {
+        // In-memory DB with no `projects` table at all — simulates a
+        // CLI-only fresh install before the desktop has ever run.
+        rusqlite::Connection::open_in_memory().unwrap()
+    }
+
+    fn fresh_conn_with_projects_table() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn resolve_project_id_no_projects_table_returns_none() {
+        let conn = fresh_conn_no_projects_table();
+        // Even with a real-looking id, the absence of the projects
+        // table is a State 1: silent None, no warn.
+        assert_eq!(resolve_project_id(&conn, "any-id"), None);
+    }
+
+    #[test]
+    fn resolve_project_id_table_present_id_missing_returns_none() {
+        let conn = fresh_conn_with_projects_table();
+        // No row matches; State 2: returns None (and emits a stderr
+        // warning, which we don't capture here but is observable in
+        // integration). The session create stays tolerant.
+        assert_eq!(resolve_project_id(&conn, "ghost-id"), None);
+    }
+
+    #[test]
+    fn resolve_project_id_valid_id_resolves() {
+        let conn = fresh_conn_with_projects_table();
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES (?1, ?2)",
+            ["proj-abc", "ATO"],
+        )
+        .unwrap();
+        // State 3: id resolves, returned as-is.
+        assert_eq!(
+            resolve_project_id(&conn, "proj-abc"),
+            Some("proj-abc".to_string())
+        );
+    }
+
+    #[test]
+    fn create_inner_with_valid_project_persists() {
+        // End-to-end check: a session created with a known project_id
+        // ends up with that id on the persisted row. Builds the
+        // minimum sessions schema in-memory (no migration runner
+        // available in the test crate).
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                runtime TEXT NOT NULL,
+                agent_slug TEXT,
+                runtime_session_id TEXT,
+                title TEXT,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                project_id TEXT
+             );
+             INSERT INTO projects (id, name) VALUES ('proj-abc', 'ATO');",
+        )
+        .unwrap();
+        let s = create_inner(&conn, "claude", None, Some("test"), Some("proj-abc"))
+            .expect("create_inner should succeed");
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT project_id FROM sessions WHERE id = ?1",
+                [&s.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, Some("proj-abc".to_string()));
+    }
+
+    #[test]
+    fn create_inner_empty_project_id_persists_null() {
+        // Empty string is treated as "no project" (same as None).
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                runtime TEXT NOT NULL,
+                agent_slug TEXT,
+                runtime_session_id TEXT,
+                title TEXT,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                project_id TEXT
+             );",
+        )
+        .unwrap();
+        let s = create_inner(&conn, "claude", None, None, Some(""))
+            .expect("create_inner with empty project_id should succeed");
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT project_id FROM sessions WHERE id = ?1",
+                [&s.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none(), "empty project_id should land as NULL");
     }
 }

@@ -373,6 +373,14 @@ enum SessionsSub {
         /// Optional human-readable title for `ato sessions list`
         #[arg(long)]
         title: Option<String>,
+        /// PR 11 — snapshot a project id at create time. The session
+        /// inherits the project for filtering + display purposes. When
+        /// omitted, sessions are born project-less and the close-time
+        /// coordinator may still suggest one. Validated against the
+        /// projects table; an unknown id is silently dropped to None
+        /// rather than failing the create (UI cache may be stale).
+        #[arg(long)]
+        project: Option<String>,
     },
     /// List sessions newest-first
     List {
@@ -1027,9 +1035,10 @@ fn main() -> Result<()> {
                 runtime,
                 agent_slug,
                 title,
+                project,
             } => {
                 let conn = db::open_readwrite(&db_path)?;
-                commands::sessions::new(&conn, runtime, agent_slug, title, &opts)
+                commands::sessions::new(&conn, runtime, agent_slug, title, project, &opts)
             }
             SessionsSub::List { limit } => {
                 commands::sessions::list(&ro_conn()?, limit, &opts)

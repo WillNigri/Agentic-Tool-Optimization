@@ -586,6 +586,11 @@ fn run_review(
         &anchor_runtime,
         first.agent_slug().as_deref(),
         Some(&format!("review/{}", short_head(ctx))),
+        // `ato review` doesn't take a --project flag yet; its sessions
+        // stay project-less. PR 11 lands project_id snapshotting on
+        // `ato sessions new` first; wiring review's session-create to
+        // a workspace-scoped project_id is a follow-up.
+        None,
     )?;
     let session_id = session.id.clone();
 

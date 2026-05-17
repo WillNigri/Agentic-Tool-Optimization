@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import SingleRunDetailView from "./SingleRunDetailView";
+import { useProjectStore } from "@/stores/useProjectStore";
 import {
   runtimeBadge,
   formatTime,
@@ -1959,6 +1960,23 @@ function NewSessionModal({
   const [agentSlug, setAgentSlug] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // PR 11 — snapshot the active project from the sidebar into the
+  // new session's `project_id` at create time. The Project store is
+  // the source of truth for which project the user is "in" right
+  // now; reading it here means the session inherits that scope
+  // without the user needing to pick from a dropdown. When no
+  // project is active ("NO PROJECT" in the sidebar), project_id
+  // stays null and the close-time coordinator may still suggest
+  // one. Codex Round-1 #1: snapshot BOTH the id AND the display
+  // name. Previously we froze only the id but read `activeProject.
+  // name` live at render time — if the user switched projects in
+  // the sidebar while the modal was open, the displayed name would
+  // drift from the snapshotted id. Freezing the full {id, name}
+  // pair keeps the label honest about what gets submitted.
+  const activeProject = useProjectStore((s) => s.activeProject);
+  const [projectSnapshot] = useState<{ id: string; name: string } | null>(
+    activeProject ? { id: activeProject.id, name: activeProject.name } : null,
+  );
 
   const handleCreate = async () => {
     setCreating(true);
@@ -1968,6 +1986,7 @@ function NewSessionModal({
         runtime,
         title: title.trim() || null,
         agentSlug: agentSlug.trim() || null,
+        projectId: projectSnapshot?.id ?? null,
       });
       onCreated(id);
     } catch (e) {
@@ -1994,6 +2013,26 @@ function NewSessionModal({
           <X size={16} />
         </button>
         <h3 className="text-lg font-semibold text-cs-text">New session</h3>
+        {/* PR 11 — show the project snapshot inline so the user knows
+            which project the new session will be tagged to. Reads from
+            useProjectStore.activeProject; null when sidebar shows "NO
+            PROJECT". The session inherits whatever's active at the
+            moment of create; switching projects after this modal opens
+            does NOT change the snapshot (intentionally — the modal
+            shouldn't surprise the user mid-edit). */}
+        <div className="text-[11px] text-cs-muted flex items-center gap-2">
+          <span className="uppercase tracking-wider">Project:</span>
+          {projectSnapshot ? (
+            <span
+              className="text-cs-accent font-mono"
+              title={`project_id at snapshot: ${projectSnapshot.id}`}
+            >
+              {projectSnapshot.name}
+            </span>
+          ) : (
+            <span className="italic">no project (session created project-less)</span>
+          )}
+        </div>
         <div className="space-y-3">
           <div>
             <label className="text-xs text-cs-muted uppercase font-medium">Runtime</label>
