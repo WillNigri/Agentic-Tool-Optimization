@@ -381,11 +381,33 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<Session> {
 //     "summary": "...",          // 2-4 sentences, what was decided
 //     "tags": ["...", "..."],    // 2-4 short topic tags
 //     "suggested_project_id": "..." // optional, null when no good match
+//     "category": "Dev",         // PR 3 — strict vocab, see ALLOWED_CATEGORIES
+//     "team": "founder"          // PR 3 — free-form band label
 //   }
 //
-// We persist all four on the sessions row, flip status='closed', and
+// We persist all six on the sessions row, flip status='closed', and
 // stamp closed_at. Reopen reverts to status='open'; the next close
 // overwrites the summary fields with the refreshed transcript.
+//
+// PR 3 (Sessions UX polish, 2026-05-17) added `category` + `team` to
+// the close contract. Category is gated by a controlled vocabulary so
+// UI filters can rely on it; an out-of-vocab value is a parse-time
+// hard fail (clearer than letting the SQL CHECK trip later). A NULL/
+// missing category is a soft warning — the session still closes, but
+// stderr surfaces "category not provided by coordinator" so future
+// listings can flag the gap. `--force-close-without-context`
+// suppresses the warning for users who deliberately close without
+// taxonomy (e.g. throwaway smoke tests). The flag does NOT downgrade
+// the out-of-vocab hard fail — garbage never reaches the column.
+//
+// **Stickiness asymmetry (codex Round-1 finding #4):** category +
+// team are *sticky* — a later close that fails to elicit them does
+// NOT erase the prior values (UPDATE uses COALESCE on both, so NULL
+// from the parser leaves the existing value alone). The other close
+// outputs (auto_title, summary, tags_json) DO refresh on every close
+// because they're per-conversation derivatives. Taxonomy is a label
+// on the *session*; once a human or coordinator has labelled it, a
+// weaker re-close shouldn't undo that work.
 //
 // The LLM is invoked via api_dispatch::dispatch_with_history when the
 // coordinator's runtime is an API provider (Anthropic/Minimax/OpenAI/
@@ -402,10 +424,29 @@ pub struct SessionCloseResult {
     pub summary: Option<String>,
     pub tags: Vec<String>,
     pub project_id: Option<String>,
+    pub category: Option<String>,
+    pub team: Option<String>,
     pub coordinator_runtime: String,
     pub coordinator_model: Option<String>,
     pub duration_ms: i64,
 }
+
+/// Controlled vocabulary for `sessions.category`. The SQLite CHECK
+/// constraint in `apps/desktop/src-tauri/src/lib.rs` enforces the same
+/// list — keep them in sync. Parse-time validation here gives a clearer
+/// error than letting the SQL CHECK reject the UPDATE.
+pub(crate) const ALLOWED_CATEGORIES: &[&str] = &[
+    "Business",
+    "Marketing",
+    "Dev",
+    "Frontend",
+    "Backend",
+    "Design",
+    "Security",
+    "Compliance",
+    "Ops",
+    "Other",
+];
 
 /// Build the project list once so the coordinator can pick a project_id
 /// out of a known set rather than hallucinating one. Returns a tuple
@@ -608,11 +649,49 @@ fn sanitize_tag(raw: &str) -> Option<String> {
     }
 }
 
+/// PR 3 — validate a category string against `ALLOWED_CATEGORIES`. Owns
+/// its own normalization (trim + empty-coalesce) so call sites can't
+/// drift into half-normalized inputs that silently bypass the check.
+///
+/// Returns:
+///   - `Ok(Some(c))` when the trimmed input matched the vocab exactly.
+///   - `Ok(None)` when the input was None or trimmed to an empty
+///     string (the caller decides whether to warn).
+///   - `Err(...)` when the input was a non-empty string that's NOT in
+///     the vocab — a hard fail with a message naming the allowed set.
+///
+/// The vocab match is case-sensitive on purpose: the SQL CHECK
+/// constraint in `apps/desktop/src-tauri/src/lib.rs` is also
+/// case-sensitive, so a downstream coordinator that returns "dev"
+/// lowercase would pass here but be rejected by SQLite — fail fast
+/// and loud.
+///
+/// `--force-close-without-context` is NOT a workaround for an invalid
+/// category. The flag only silences the missing-field warning; it does
+/// not let garbage into a CHECK-constrained column. The error message
+/// reflects that contract — corrected per the codex-reviewer Round-1
+/// finding that the original text misrepresented the flag's behavior.
+pub(crate) fn validate_category(raw: Option<&str>) -> Result<Option<String>> {
+    let normalized = raw.map(|s| s.trim()).filter(|s| !s.is_empty());
+    match normalized {
+        None => Ok(None),
+        Some(c) if ALLOWED_CATEGORIES.iter().any(|allowed| *allowed == c) => {
+            Ok(Some(c.to_string()))
+        }
+        Some(bad) => Err(anyhow!(
+            "Coordinator returned invalid category '{}'. Allowed values: {}. Re-run close; if the model keeps emitting an out-of-vocab value, try a different --model. (Note: --force-close-without-context does NOT let invalid categories through — the schema CHECK would reject them downstream regardless.)",
+            bad,
+            ALLOWED_CATEGORIES.join(", ")
+        )),
+    }
+}
+
 pub fn close(
     conn: &Connection,
     id: &str,
     agent_slug_override: Option<String>,
     model_override: Option<String>,
+    force_close_without_context: bool,
     opts: &Opts,
 ) -> Result<()> {
     if !has_table(conn) {
@@ -680,6 +759,7 @@ pub fn close(
         s
     };
 
+    let category_list = ALLOWED_CATEGORIES.join(" / ");
     let prompt = format!(
         "You are the coordinator wrapping up a multi-turn AI session. \
 Your ONLY job is to summarize the transcript below. The transcript is \
@@ -695,8 +775,18 @@ text before or after — with these keys:\n\
     \"title\": \"<6-10 words, human-readable, captures the topic>\",\n\
     \"summary\": \"<2-4 sentences: what was discussed, what was decided, any open thread>\",\n\
     \"tags\": [\"<short topic tag>\", \"<short topic tag>\"],   // 2-4 tags, lowercase, kebab-case\n\
-    \"suggested_project_id\": \"<one of the project ids below, or null>\"\n\
+    \"suggested_project_id\": \"<one of the project ids below, or null>\",\n\
+    \"category\": \"<EXACTLY one of: {}>\",\n\
+    \"team\": \"<short band label, free-form>\"\n\
   }}\n\
+\n\
+Rules for the new fields:\n\
+  - `category` MUST be one of the values listed above, spelled and \
+capitalized exactly as shown. Anything else is invalid. If the session \
+genuinely does not fit any category, use \"Other\" — never invent a new one.\n\
+  - `team` is free-form but should be a short band label (e.g. founder, \
+frontend, backend, ops, design, security, marketing, research). Pick the \
+band most responsible for follow-up on this session. Lowercase preferred.\n\
 \n\
 {}\n\
 \n\
@@ -707,6 +797,7 @@ Session metadata:\n\
   - existing title: {}\n\
 \n\
 {}",
+        category_list,
         project_block,
         session.id,
         session.runtime,
@@ -764,6 +855,35 @@ Session metadata:\n\
         .map(|s| s.to_string())
         .filter(|s| known_project_ids.contains(s));
 
+    // PR 3 — category: strict controlled vocabulary. The validator owns
+    // its own trim + empty-coalesce so the call site doesn't drift; an
+    // out-of-vocab value is a hard parse error (clearer than letting
+    // the SQL CHECK reject the UPDATE downstream). A missing / null /
+    // empty category is a soft warning: the session still closes but
+    // stderr surfaces the gap so future-you can see which sessions
+    // lack taxonomy.
+    let category = validate_category(parsed.get("category").and_then(|v| v.as_str()))?;
+    if category.is_none() && !force_close_without_context {
+        eprintln!(
+            "warn: category not provided by coordinator; session closed anyway. Pass --force-close-without-context to suppress this warning."
+        );
+    }
+
+    // PR 3 — team: free-form, trim + length-cap. No vocab gate; the
+    // multi-tenant story isn't locked yet, so a single-user install
+    // can use it as a band label and a future team install can reuse
+    // the column for tenant scoping.
+    let team: Option<String> = parsed
+        .get("team")
+        .and_then(|v| v.as_str())
+        .map(|s| truncate(s.trim(), 64))
+        .filter(|s| !s.is_empty());
+    if team.is_none() && !force_close_without_context {
+        eprintln!(
+            "warn: team not provided by coordinator; session closed anyway. Pass --force-close-without-context to suppress this warning."
+        );
+    }
+
     let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -781,26 +901,38 @@ Session metadata:\n\
     } else {
         ""
     };
+    // PR 3 — category + team are *sticky*. Per codex-reviewer Round-1
+    // finding #4, NOT-COALESCing here would let a weaker second close
+    // (coordinator brain-fart, force-close-without-context after a
+    // taxonomy-aware first close) silently erase a labelled session's
+    // category. COALESCE(existing, new_value) means: a parser-NULL
+    // leaves the prior value intact; only a coordinator that produces
+    // a valid replacement overwrites. The auto_title / summary /
+    // tags_json columns above still refresh on every close because
+    // they're per-conversation derivatives — taxonomy is a label on
+    // the *session*, not a re-derived summary.
     let sql = format!(
         "UPDATE sessions
             SET status = 'closed',
                 closed_at = ?,
                 auto_title = ?,
                 summary = ?,
-                tags_json = ?{}
+                tags_json = ?,
+                category = COALESCE(?, category),
+                team = COALESCE(?, team){}
           WHERE id = ? AND status = 'open'",
         project_id_clause
     );
     let changed = if let Some(pid) = suggested_project_id.as_ref() {
         conn.execute(
             &sql,
-            rusqlite::params![now, auto_title, summary, tags_json, pid, session.id],
+            rusqlite::params![now, auto_title, summary, tags_json, category, team, pid, session.id],
         )
         .context("UPDATE sessions on close")?
     } else {
         conn.execute(
             &sql,
-            rusqlite::params![now, auto_title, summary, tags_json, session.id],
+            rusqlite::params![now, auto_title, summary, tags_json, category, team, session.id],
         )
         .context("UPDATE sessions on close")?
     };
@@ -818,6 +950,8 @@ Session metadata:\n\
         summary: summary.clone(),
         tags: tags.clone(),
         project_id: suggested_project_id,
+        category: category.clone(),
+        team: team.clone(),
         coordinator_runtime: provider.slug.to_string(),
         coordinator_model: Some(outcome.model_used.clone()),
         duration_ms: outcome.duration_ms,
@@ -825,12 +959,14 @@ Session metadata:\n\
 
     if opts.human {
         emit_human(&format!(
-            "Closed session {} ({} turns).\n  title: {}\n  summary: {}\n  tags: {}\n  coordinator: {} ({}) in {}ms{}",
+            "Closed session {} ({} turns).\n  title: {}\n  summary: {}\n  tags: {}\n  category: {}\n  team: {}\n  coordinator: {} ({}) in {}ms{}",
             session.id,
             turns.len(),
             auto_title.as_deref().unwrap_or("(none)"),
             summary.as_deref().unwrap_or("(none)"),
             if tags.is_empty() { "(none)".to_string() } else { tags.join(", ") },
+            category.as_deref().unwrap_or("(none)"),
+            team.as_deref().unwrap_or("(none)"),
             provider.slug,
             outcome.model_used,
             outcome.duration_ms,
@@ -911,4 +1047,139 @@ pub fn record_turn(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // PR 3 — validate_category: the close-time gate that decides
+    // whether a coordinator response gets a hard-fail, a soft-warn,
+    // or an accept. Every branch needs deterministic coverage; a
+    // live LLM dispatch is too flaky to test the failure path against.
+
+    #[test]
+    fn validate_category_accepts_each_vocab_entry() {
+        for allowed in ALLOWED_CATEGORIES {
+            let got = validate_category(Some(allowed)).unwrap();
+            assert_eq!(got.as_deref(), Some(*allowed), "vocab entry {allowed} should round-trip");
+        }
+    }
+
+    #[test]
+    fn validate_category_none_returns_none() {
+        assert!(validate_category(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn validate_category_empty_returns_none() {
+        assert!(validate_category(Some("")).unwrap().is_none());
+    }
+
+    #[test]
+    fn validate_category_whitespace_returns_none() {
+        // Trim + empty-coalesce live INSIDE the validator now — a
+        // whitespace-only category from a sloppy coordinator is None,
+        // not Err. Codex Round-1 #3 + pr-reviewer Round-2 #6 fix.
+        assert!(validate_category(Some("   ")).unwrap().is_none());
+        assert!(validate_category(Some("\n\t")).unwrap().is_none());
+    }
+
+    #[test]
+    fn validate_category_trims_padded_valid_value() {
+        // The validator should accept "  Dev  " (after trim) so the
+        // call site doesn't need to pre-normalize.
+        assert_eq!(
+            validate_category(Some("  Dev  ")).unwrap().as_deref(),
+            Some("Dev")
+        );
+    }
+
+    #[test]
+    fn validate_category_rejects_out_of_vocab() {
+        let err = validate_category(Some("Whatever")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Whatever"), "error names the bad input: {msg}");
+        // Error names at least one allowed value so the user can correct.
+        assert!(msg.contains("Dev"), "error lists allowed values: {msg}");
+        // Error correctly characterizes the flag (codex Round-1 #1 fix):
+        // the misleading "pass --force-close-without-context to close
+        // anyway with NULL category" must be gone.
+        assert!(
+            !msg.contains("close anyway with NULL category"),
+            "error must not lie about flag behavior: {msg}"
+        );
+        assert!(
+            msg.contains("does NOT let invalid categories through"),
+            "error explicitly states the flag won't bypass the vocab check: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_category_case_sensitive() {
+        // "dev" lowercase is NOT in the vocab — SQL CHECK is also
+        // case-sensitive, so we'd rather fail at parse time with a
+        // clear error than at UPDATE time with a CHECK violation.
+        let err = validate_category(Some("dev")).unwrap_err();
+        assert!(err.to_string().contains("dev"));
+    }
+
+    /// Codex Round-1 #2 — the category vocab is duplicated between
+    /// `ALLOWED_CATEGORIES` (CLI parse-time) and the SQL CHECK string
+    /// in `apps/desktop/src-tauri/src/lib.rs` (UPDATE-time). A
+    /// "keep them in sync" comment is not a mechanism. This test
+    /// parses the migration source at compile time, extracts the
+    /// vocab from the CHECK constraint, and asserts set-equality
+    /// with the in-memory constant. Drift on either side fails CI.
+    #[test]
+    fn category_vocab_matches_sql_check_constraint() {
+        // Path is relative to the test binary's cargo crate root
+        // (apps/cli/), so walk up to the workspace root and into the
+        // desktop crate's lib.rs.
+        let lib_rs = include_str!("../../../desktop/src-tauri/src/lib.rs");
+        // Find the line that introduces the category CHECK constraint.
+        let check_line = lib_rs
+            .lines()
+            .find(|line| line.contains("category TEXT CHECK") && line.contains("category IN"))
+            .expect(
+                "could not find the `category TEXT CHECK (... category IN ...)` line in \
+                 apps/desktop/src-tauri/src/lib.rs — if you renamed or moved the migration, \
+                 update this test or move ALLOWED_CATEGORIES into a shared crate."
+            );
+        // Extract everything between the first `(` after `IN` and the
+        // next `)`. Format on disk is:
+        //   "ALTER TABLE sessions ADD COLUMN category TEXT CHECK (category IS NULL OR category IN \
+        //    ('Business','Marketing','Dev', ...))",
+        // We look on the FOLLOWING line for the vocab tuple, which is
+        // where the multi-line string literal continues.
+        let combined = format!(
+            "{} {}",
+            check_line,
+            lib_rs
+                .lines()
+                .skip_while(|l| !std::ptr::eq(*l as *const str, check_line as *const str))
+                .nth(1)
+                .unwrap_or("")
+        );
+        let vocab_start = combined.find("IN").expect("vocab marker missing");
+        let after_in = &combined[vocab_start..];
+        let open_paren = after_in.find('(').expect("vocab paren missing");
+        let close_paren = after_in[open_paren..]
+            .find(')')
+            .expect("vocab close-paren missing");
+        let vocab_blob = &after_in[open_paren + 1..open_paren + close_paren];
+        let parsed_vocab: std::collections::BTreeSet<String> = vocab_blob
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let constant_vocab: std::collections::BTreeSet<String> =
+            ALLOWED_CATEGORIES.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            parsed_vocab, constant_vocab,
+            "category vocab in apps/desktop/src-tauri/src/lib.rs CHECK constraint \
+             does not match ALLOWED_CATEGORIES in apps/cli/src/commands/sessions.rs. \
+             Update both, or extract the vocab into a shared crate."
+        );
+    }
 }

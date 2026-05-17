@@ -2,7 +2,7 @@
 
 > **Purpose:** a single doc capturing (a) everything shipped during the maintenance sprint with test status, (b) what's queued with priority, and (c) **a copy-paste session-kickoff prompt for each remaining item** so work can resume cleanly across multiple sessions/days.
 >
-> **Last updated:** 2026-05-17. Maintained in OSS repo. Mirror not required (this is the master log).
+> **Last updated:** 2026-05-17 (PR 3 closure-time coordinator enforcement landed). Maintained in OSS repo. Mirror not required (this is the master log).
 
 ---
 
@@ -40,6 +40,15 @@ All commits listed below ran through their relevant slice of `docs/RELEASE_TESTI
 | `637109f` | 5 gstack agent records (positioning, devex, ceo, designer, office-hours) + `.claude/skills/ato-warroom/SKILL.md` section 4a (three seat types: generalist / agent / skill / hook) + section 4b (parallel vs sequential) | Live A/B test on minimax: specialist vs generalist on same prompt |
 | `908e1c6` | Skill section 4c: session discipline (one subject per session, never re-open off-topic, smoke tests get throwaway session) | Applied retroactively to PMF session — moved smoke turns 32-33 to a separate "agent-flow smoke test" session |
 | `259c99e` | `commands/COMMANDS_SPLIT_PLAN.md` — 29-PR plan for splitting commands.rs (war-room reviewed) | §5C war-room: codex `[REFINE]` with 5 issues all applied; pr-reviewer `[APPROVE-PR-1]` |
+
+### Sessions UX polish wave (2026-05-17)
+
+| Commit | What | Test |
+|---|---|---|
+| `20c63f9` | PR 1 — explicit "Coord" + "+" badge groups replace the ★-prefix cluster on SessionsList card | §5B visual verification |
+| `dee47a7` | PR 2 — schema: `sessions.category` with CHECK on controlled vocab + `sessions.team` free-form + two indexes | §3 + §4 + manual ALTER dogfood |
+| `348fd9e` | PR 4 — category badge + team display rendered on SessionsList card | §5B visual verification (TS types + Tauri SELECT already wired) |
+| **PR 3 (pending commit, 2026-05-17)** | **Closure-time coordinator enforcement of `category` + `team`.** Coordinator prompt asks for both; parse-time validator hard-fails on out-of-vocab category; soft-warns on NULL; `--force-close-without-context` suppresses warning. `validate_category` owns trim + empty-coalesce. UPDATE uses COALESCE on category+team so a weaker re-close can't erase taxonomy. Drift-killer test parses `apps/desktop/src-tauri/src/lib.rs` CHECK at compile time and asserts set-equality with `ALLOWED_CATEGORIES`. `ato review` auto-close passes `force_close_without_context=true` to silence dual stderr. | §3 ✓ §4 ✓ §5B mechanical smoke + SQL UPDATE/CHECK exercise ✓; §5B live LLM round-trip BLOCKED on local decrypt cliff (pubkey rotation) — v2.7.2 actionable UX correctly fires. §5C codex-reviewer + pr-reviewer both `[REFINE]` with 7 issues total, all applied. Awaits Will sign-off + push. |
 
 ### Strategy / docs
 
@@ -408,8 +417,13 @@ Items 6+7 (Knowledge + Agent⇄Skill bundled wave) — when their trigger fires
 - [x] Maintenance sprint item 5 PLAN — `COMMANDS_SPLIT_PLAN.md` (`259c99e`)
 - [x] Release testing procedure (`5544803`)
 - [ ] v2.7.1 Homebrew tap update — next session
-- [ ] commands.rs PR 1 (shared.rs)
-- [ ] Sessions UX polish (4 sub-PRs)
+- [x] commands.rs PR 1 (shared.rs) — `2e0069c` + `73d7583`
+- [x] Sessions UX polish PR 1 — coordinator/participants badge split (`20c63f9`)
+- [x] Sessions UX polish PR 2 — schema for `category` + `team` (`dee47a7`)
+- [ ] Sessions UX polish PR 3 — closure-time coordinator enforcement (this session 2026-05-17; war-room reviewed + fixes applied; awaits Will sign-off + push)
+- [x] Sessions UX polish PR 4 — SessionsList card surfaces category + team (`348fd9e`)
+- [ ] Sessions UX polish PR 5 — **Runs IA collapse: merge History tab into Sessions, WhatsApp-feed model (single-run + multi-round in one list with card-level marker)** — design decided 2026-05-17, see `memory/project_ato_runs_tab_collapse.md`
+- [ ] Sessions UX polish PR 6 — filter UI (category dropdown, team dropdown, click-tag-to-filter) — defer until PR 5 ships so the filters are designed against the unified feed shape
 - [ ] commands.rs PR 2-29
 - [ ] Auto-Optimization Pro feature
 - [ ] Knowledge Source Adapters + Agent ⇄ Skill linkage wave

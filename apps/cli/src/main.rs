@@ -384,9 +384,9 @@ enum SessionsSub {
     /// Delete a session (does NOT clean up the underlying runtime's history)
     Delete { id: String },
     /// Close a session — the coordinator agent generates a title,
-    /// summary, topic tags, and inferred project_id from the turn
-    /// history, all persisted on the session row. A closed session
-    /// can be reopened with `ato sessions reopen`.
+    /// summary, topic tags, category, team, and inferred project_id
+    /// from the turn history, all persisted on the session row. A
+    /// closed session can be reopened with `ato sessions reopen`.
     Close {
         id: String,
         /// Override the coordinator agent slug. Defaults to the
@@ -397,6 +397,15 @@ enum SessionsSub {
         /// Override the summarizer model.
         #[arg(long)]
         model: Option<String>,
+        /// Suppress the warning emitted to stderr when the coordinator
+        /// omits `category` or `team` from its JSON response. Closing
+        /// still proceeds in either case (NULL columns are allowed by
+        /// the schema); this flag just acknowledges the gap so scripted
+        /// closes don't trip alerting on stderr noise. Does NOT bypass
+        /// the parse-time validation of an out-of-vocab category — that
+        /// remains a hard error.
+        #[arg(long = "force-close-without-context", default_value_t = false)]
+        force_close_without_context: bool,
     },
     /// Reopen a previously-closed session. The next dispatch can
     /// continue the conversation; the next close will refresh the
@@ -1034,9 +1043,17 @@ fn main() -> Result<()> {
                 id,
                 agent_slug,
                 model,
+                force_close_without_context,
             } => {
                 let conn = db::open_readwrite(&db_path)?;
-                commands::sessions::close(&conn, &id, agent_slug, model, &opts)
+                commands::sessions::close(
+                    &conn,
+                    &id,
+                    agent_slug,
+                    model,
+                    force_close_without_context,
+                    &opts,
+                )
             }
             SessionsSub::Reopen { id } => {
                 let conn = db::open_readwrite(&db_path)?;

@@ -244,7 +244,16 @@ fn auto_close_review_session(session_id: &str, db_path: &PathBuf, opts: &Opts) {
             return;
         }
     };
-    match sessions::close(&conn, session_id, None, None, opts) {
+    // Auto-close from `ato review` runs as a side effect of the
+    // review verb, not as a user-intentional taxonomy-tagging moment.
+    // Surfacing the "category/team not provided" warning here would
+    // emit two stderr lines on every CI invocation of `ato review`
+    // (pr-reviewer Round-2 finding #7). Pass `true` so the auto-close
+    // path is silent on missing taxonomy. A user who wants taxonomy
+    // on a review session can still close it manually before the
+    // review fires (the close is idempotent → already-closed sessions
+    // are skipped here).
+    match sessions::close(&conn, session_id, None, None, true, opts) {
         Ok(()) => { /* sessions::close already emits its own confirmation. */ }
         Err(e) => {
             // Common non-fatal cases:
