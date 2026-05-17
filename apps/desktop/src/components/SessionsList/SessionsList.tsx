@@ -226,6 +226,28 @@ const NEW_SESSION_RUNTIMES = [
 
 type StatusFilter = "all" | "open" | "closed";
 
+// PR 6 (2026-05-17) — category filter vocab. Mirrors
+// `ALLOWED_CATEGORIES` in apps/cli/src/commands/sessions.rs and the
+// SQL CHECK in apps/desktop/src-tauri/src/lib.rs. The drift-killer
+// unit test on the Rust side catches CHECK ↔ vocab mismatches at
+// build time; this UI list is a cosmetic affordance — if the
+// backend ever adds an 11th category before this list catches up,
+// the existing rows just won't appear in the dropdown until it
+// does. Capitalized exactly as stored so the equality check below
+// works without normalization.
+const CATEGORY_VOCAB = [
+  "Business",
+  "Marketing",
+  "Dev",
+  "Frontend",
+  "Backend",
+  "Design",
+  "Security",
+  "Compliance",
+  "Ops",
+  "Other",
+] as const;
+
 // PR 5b (2026-05-17) — kind filter: ALL shows both real sessions and
 // ephemeral single-shot dispatches; SESSIONS shows only multi-turn
 // rooms from the `sessions` table; SINGLE_RUNS shows only standalone
@@ -242,19 +264,59 @@ type KindFilter = "all" | "sessions" | "single_runs";
 /// filtered list; tokens that look like a single word are matched
 /// individually so users can type "review consensus" and find rows
 /// where both words appear somewhere.
+// PR 6 — single source of truth for the row predicate. The main
+// filter chain and the per-dropdown count chains all run through
+// this, optionally with one field skipped (so the dropdowns show
+// "what selecting this option would yield given every OTHER active
+// filter"). Codex Round-1 #3: extracting this prevents the three
+// places from drifting when the next filter lands.
+interface FilterFields {
+  status: StatusFilter;
+  kind: KindFilter;
+  category: string | null;
+  team: string | null;
+  tag: string | null;
+}
+function rowMatchesFilters(
+  s: SessionListRow,
+  f: FilterFields,
+  skip?: keyof FilterFields,
+): boolean {
+  if (skip !== "kind") {
+    if (f.kind === "sessions" && s.rowKind !== "session") return false;
+    if (f.kind === "single_runs" && s.rowKind !== "ephemeral") return false;
+  }
+  if (skip !== "status") {
+    if (f.status === "open" && s.status !== "open") return false;
+    if (f.status === "closed" && s.status !== "closed") return false;
+  }
+  // PR 6 — taxonomy filters. Category + team only exist on real
+  // sessions (PR 3 closure path); a category or team filter therefore
+  // implicitly scopes to sessions, dropping ephemerals.
+  if (skip !== "category" && f.category !== null && s.category !== f.category)
+    return false;
+  if (skip !== "team" && f.team !== null && s.team !== f.team) return false;
+  // Tag filter: row matches when it carries the exact tag string.
+  // Tags are sanitized to kebab-case at close time, so equality is
+  // the right comparison (no case folding needed).
+  if (skip !== "tag" && f.tag !== null && !s.tags.includes(f.tag)) return false;
+  return true;
+}
+
 function filterSessions(
   sessions: SessionListRow[],
   query: string,
   status: StatusFilter,
   kind: KindFilter,
+  category: string | null,
+  team: string | null,
+  tag: string | null,
 ): SessionListRow[] {
   const trimmed = query.trim().toLowerCase();
   const tokens = trimmed.length === 0 ? [] : trimmed.split(/\s+/);
+  const f: FilterFields = { status, kind, category, team, tag };
   return sessions.filter((s) => {
-    if (kind === "sessions" && s.rowKind !== "session") return false;
-    if (kind === "single_runs" && s.rowKind !== "ephemeral") return false;
-    if (status === "open" && s.status !== "open") return false;
-    if (status === "closed" && s.status !== "closed") return false;
+    if (!rowMatchesFilters(s, f)) return false;
     if (tokens.length === 0) return true;
     // Build a single haystack string per row so each token can run a
     // cheap String.includes. Avoids re-allocating arrays inside the
@@ -289,6 +351,14 @@ export default function SessionsList() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
+  // PR 6 — taxonomy filters. null means "no scoping"; a non-null
+  // string filters to rows that exactly match. Category is gated by
+  // the controlled vocab (PR 3); team is free-form so the dropdown
+  // options are derived from distinct values in the loaded data.
+  // Tag filter is set by clicking a tag chip on any card.
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [teamFilter, setTeamFilter] = useState<string | null>(null);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   // Debounce the search input by 300ms before firing the backend turn
   // search. Typing fast shouldn't fire a query on every keystroke —
   // the metadata filter runs instantly, the content search lags
@@ -335,6 +405,9 @@ export default function SessionsList() {
           searchQuery,
           statusFilter,
           kindFilter,
+          categoryFilter,
+          teamFilter,
+          tagFilter,
         );
         if (!contentSearchEnabled || contentMatchIds.size === 0) {
           return metaMatched;
@@ -343,11 +416,15 @@ export default function SessionsList() {
         // matches (also gated by status filter to keep the chips
         // honest).
         const metaIds = new Set(metaMatched.map((s) => s.id));
+        const f: FilterFields = {
+          status: statusFilter,
+          kind: kindFilter,
+          category: categoryFilter,
+          team: teamFilter,
+          tag: tagFilter,
+        };
         return sessionsQ.data.filter((s) => {
-          if (kindFilter === "sessions" && s.rowKind !== "session") return false;
-          if (kindFilter === "single_runs" && s.rowKind !== "ephemeral") return false;
-          if (statusFilter === "open" && s.status !== "open") return false;
-          if (statusFilter === "closed" && s.status !== "closed") return false;
+          if (!rowMatchesFilters(s, f)) return false;
           return metaIds.has(s.id) || contentMatchIds.has(s.id);
         });
       })()
@@ -473,6 +550,122 @@ export default function SessionsList() {
               );
             })}
           </div>
+          {/* PR 6 — taxonomy filters: category dropdown + team
+              dropdown. Both implicitly scope to sessions (ephemerals
+              have neither). Counts shown next to each option reflect
+              how many rows match the value under the currently-active
+              kind/status/tag filters, so the dropdown stays honest
+              about what's actually selectable. */}
+          {(() => {
+            // Per-dropdown counts use the shared rowMatchesFilters with
+            // the active field SKIPPED, so each option shows what
+            // selecting it would actually yield given the other active
+            // filters. Predicate logic stays in one place
+            // (codex Round-1 #3).
+            const f: FilterFields = {
+              status: statusFilter,
+              kind: kindFilter,
+              category: categoryFilter,
+              team: teamFilter,
+              tag: tagFilter,
+            };
+            const rowsForCategoryCount = sessionsQ.data!.filter((s) =>
+              rowMatchesFilters(s, f, "category")
+            );
+            const rowsForTeamCount = sessionsQ.data!.filter((s) =>
+              rowMatchesFilters(s, f, "team")
+            );
+            // Team options are free-form, so derive from distinct
+            // values present in the relevant subset. Codex Round-1 #4:
+            // also include the currently-selected team even when its
+            // count is 0 under the other active filters, so the select
+            // doesn't render an "invalid" value (selected but absent
+            // from options). Sorted for stable dropdown order.
+            const teamOptionSet = new Set(
+              rowsForTeamCount
+                .map((s) => s.team)
+                .filter((t): t is string => typeof t === "string" && t.length > 0)
+            );
+            if (teamFilter !== null) teamOptionSet.add(teamFilter);
+            const teamOptions = Array.from(teamOptionSet).sort();
+            return (
+              <div className="flex items-center gap-2 text-xs flex-wrap">
+                <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
+                  Taxonomy
+                </span>
+                <label className="flex items-center gap-1">
+                  <span className="text-cs-muted">category:</span>
+                  <select
+                    value={categoryFilter ?? ""}
+                    onChange={(e) =>
+                      setCategoryFilter(e.target.value === "" ? null : e.target.value)
+                    }
+                    className="bg-cs-card border border-cs-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-cs-accent"
+                  >
+                    <option value="">All</option>
+                    {CATEGORY_VOCAB.map((c) => {
+                      const n = rowsForCategoryCount.filter((s) => s.category === c).length;
+                      return (
+                        <option key={c} value={c} disabled={n === 0 && categoryFilter !== c}>
+                          {c} ({n})
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1">
+                  <span className="text-cs-muted">team:</span>
+                  <select
+                    value={teamFilter ?? ""}
+                    onChange={(e) =>
+                      setTeamFilter(e.target.value === "" ? null : e.target.value)
+                    }
+                    className="bg-cs-card border border-cs-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-cs-accent"
+                    disabled={teamOptions.length === 0}
+                  >
+                    <option value="">All</option>
+                    {teamOptions.map((t) => {
+                      const n = rowsForTeamCount.filter((s) => s.team === t).length;
+                      return (
+                        <option key={t} value={t}>
+                          {t} ({n})
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                {tagFilter !== null && (
+                  <span
+                    className="flex items-center gap-1 px-2 py-1 rounded-md border border-cs-accent bg-cs-accent/10 text-cs-accent"
+                    title="Active tag filter — click X to clear"
+                  >
+                    tag: <span className="font-mono">{tagFilter}</span>
+                    <button
+                      type="button"
+                      onClick={() => setTagFilter(null)}
+                      className="ml-1 hover:opacity-70"
+                      aria-label="clear tag filter"
+                    >
+                      <X size={10} />
+                    </button>
+                  </span>
+                )}
+                {(categoryFilter || teamFilter || tagFilter) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCategoryFilter(null);
+                      setTeamFilter(null);
+                      setTagFilter(null);
+                    }}
+                    className="text-cs-muted hover:text-cs-text underline-offset-2 hover:underline"
+                  >
+                    clear taxonomy
+                  </button>
+                )}
+              </div>
+            );
+          })()}
           {/* Status chips — lifecycle filter that applies to SESSIONS
               ONLY. Ephemerals carry `execution_logs.status` values
               ("success"/"error"/"unknown") which aren't open/closed,
@@ -514,12 +707,40 @@ export default function SessionsList() {
                 </button>
               );
             })}
-            {(searchQuery || statusFilter !== "all") && (
+            {(searchQuery ||
+              statusFilter !== "all" ||
+              kindFilter !== "all" ||
+              categoryFilter !== null ||
+              teamFilter !== null ||
+              tagFilter !== null) && (
               <span className="text-cs-muted ml-auto">
                 {filteredSessions.length} of {sessionsQ.data.length} shown
               </span>
             )}
           </div>
+          {/* PR 7 (2026-05-17) — lifecycle chip count reconciliation
+              footer. The lifecycle chips' "All (N)" counts ephemerals
+              too, but "Open + Closed" only sums sessions, so the
+              numbers don't naturally add up to N. A small breakdown
+              line below removes the visual mystery: "N total · S
+              sessions · E ephemerals" matches what "All" actually
+              contains. Hidden when the user has narrowed via search
+              or any filter to avoid double-redundancy with the "X of
+              Y shown" line above. (pr-reviewer Round-2 nit on PR 5c.) */}
+          {!searchQuery &&
+            statusFilter === "all" &&
+            kindFilter === "all" &&
+            categoryFilter === null &&
+            teamFilter === null &&
+            tagFilter === null && (
+              <div className="text-[10px] text-cs-muted opacity-70">
+                {sessionsQ.data!.length} total ·{" "}
+                {sessionsQ.data!.filter((r) => r.rowKind === "session").length} sessions
+                ·{" "}
+                {sessionsQ.data!.filter((r) => r.rowKind === "ephemeral").length} ephemerals
+                · Open/Closed apply to sessions only
+              </div>
+            )}
         </div>
       )}
 
@@ -827,9 +1048,43 @@ export default function SessionsList() {
                   <div className="mt-2 flex items-center gap-1 flex-wrap">
                     <Tag size={10} className="text-cs-muted" />
                     {s.tags.map((tag) => (
+                      // PR 6 — tag chips become click-to-filter. The
+                      // outer card is a button (opens the session), so
+                      // a nested button is invalid HTML; use a span
+                      // with role=button + onClick. stopPropagation so
+                      // the click sets the filter without also opening
+                      // the session detail.
                       <span
                         key={tag}
-                        className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/10 text-cs-accent"
+                        role="button"
+                        tabIndex={0}
+                        aria-pressed={tagFilter === tag}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Toggle: clicking the already-active tag
+                          // clears the filter (matches the aria-pressed
+                          // toggle semantics).
+                          setTagFilter(tagFilter === tag ? null : tag);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setTagFilter(tagFilter === tag ? null : tag);
+                          }
+                        }}
+                        title={
+                          tagFilter === tag
+                            ? `Clear tag filter (currently "${tag}")`
+                            : `Filter to sessions tagged "${tag}"`
+                        }
+                        className={cn(
+                          "px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer transition-colors",
+                          "focus:outline-none focus-visible:ring-2 focus-visible:ring-cs-accent focus-visible:ring-offset-1 focus-visible:ring-offset-cs-bg",
+                          tagFilter === tag
+                            ? "bg-cs-accent text-cs-bg ring-1 ring-cs-accent"
+                            : "bg-cs-accent/10 text-cs-accent hover:bg-cs-accent/20"
+                        )}
                       >
                         {tag}
                       </span>
