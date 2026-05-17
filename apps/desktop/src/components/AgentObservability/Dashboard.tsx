@@ -97,7 +97,7 @@ export default function Dashboard() {
           <p className="mt-1 text-xs text-cs-muted max-w-2xl">
             {t(
               "observability.subtitle",
-              "Every dispatch — from the desktop Run button, Quick Test, MCP run_agent, group routing, or cron — lands in ~/.ato/agent-logs.jsonl. This dashboard reads the file directly. Cloud retention + cross-device aggregation are Pro features."
+              "Every dispatch — from the desktop Run button, Quick Test, MCP run_agent, group routing, ato dispatch CLI, or cron — lands in the local execution_logs table. This dashboard reads it directly with full agent / runtime / cost / status detail. Cloud retention + cross-device aggregation are Pro features."
             )}
           </p>
         </div>
@@ -324,7 +324,12 @@ function TraceRow({ trace, onClick }: { trace: AgentTraceLine; onClick: () => vo
       ) : (
         <XCircle size={12} className="text-cs-danger shrink-0" />
       )}
-      <code className="font-mono text-cs-text shrink-0">{trace.slug ?? "unknown"}</code>
+      {/* 2026-05-17 — slug fallback. Generalist dispatches (no
+          --agent flag) have a NULL agent_slug; show "(generalist)"
+          so the row is informative rather than "unknown". */}
+      <code className="font-mono text-cs-text shrink-0">
+        {trace.slug ?? <span className="text-cs-muted italic">generalist</span>}
+      </code>
       {trace.runtime && (
         <span
           className={cn(

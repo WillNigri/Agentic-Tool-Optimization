@@ -15032,45 +15032,124 @@ pub struct PerAgentMetrics {
     pub last_run_at: Option<String>,
 }
 
-fn load_agent_log_lines(filter: &AgentTraceFilter) -> Vec<AgentTraceLine> {
-    let path = home_dir().join(".ato").join("agent-logs.jsonl");
-    if !path.exists() {
-        return Vec::new();
+/// 2026-05-17 — Insights dashboard data source.
+///
+/// Historically read `~/.ato/agent-logs.jsonl` — an append-only log
+/// written by an early dispatch logger that stopped writing structured
+/// events ~2026-05-08 and never carried agent_slug / status / prompt.
+/// The dashboard rendered "unknown" for every row and 0% success rate
+/// because the fields didn't exist on disk.
+///
+/// Switched to query `execution_logs` (SQLite) — the canonical source
+/// of truth that every dispatch path writes to. Same return shape
+/// (`AgentTraceLine`) so the React side doesn't change.
+fn load_agent_log_lines(conn: &rusqlite::Connection, filter: &AgentTraceFilter) -> Vec<AgentTraceLine> {
+    // Build the WHERE clause dynamically from the filter.
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(slug) = &filter.agent_slug {
+        where_parts.push("agent_slug = ?".to_string());
+        params.push(Box::new(slug.clone()));
     }
-    let content = match fs::read_to_string(&path) {
+    if let Some(runtime) = &filter.runtime {
+        where_parts.push("runtime = ?".to_string());
+        params.push(Box::new(runtime.clone()));
+    }
+    if let Some(status) = &filter.status {
+        match status.as_str() {
+            "ok" => where_parts.push("status = 'success'".to_string()),
+            "error" => where_parts.push("status = 'error'".to_string()),
+            _ => {}
+        }
+    }
+    if let Some(since) = &filter.since {
+        where_parts.push("created_at >= ?".to_string());
+        params.push(Box::new(since.clone()));
+    }
+
+    let where_sql = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_parts.join(" AND "))
+    };
+
+    let limit_sql = match filter.limit {
+        Some(n) => format!("LIMIT {}", n.min(10_000)),
+        None => "LIMIT 500".to_string(),
+    };
+
+    let sql = format!(
+        "SELECT created_at, duration_ms, runtime, agent_slug,
+                prompt, response, status, error_message, model, session_id
+           FROM execution_logs
+         {where_sql}
+          ORDER BY created_at DESC
+         {limit_sql}"
+    );
+
+    let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
 
-    let mut all: Vec<AgentTraceLine> = content
-        .lines()
-        .rev() // newest first (file is append-only)
-        .filter_map(|line| serde_json::from_str::<AgentTraceLine>(line).ok())
-        .collect();
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-    // Apply filters in-place.
-    if let Some(slug) = &filter.agent_slug {
-        all.retain(|t| t.slug.as_deref() == Some(slug));
-    }
-    if let Some(runtime) = &filter.runtime {
-        all.retain(|t| t.runtime.as_deref() == Some(runtime));
-    }
-    if let Some(status) = &filter.status {
-        match status.as_str() {
-            "ok" => all.retain(|t| t.ok == Some(true)),
-            "error" => all.retain(|t| t.ok == Some(false)),
-            _ => {} // "all" or unknown → keep
+    let rows = stmt.query_map(rusqlite::params_from_iter(params_refs.iter()), |r| {
+        let created_at: Option<String> = r.get(0)?;
+        let duration_ms: Option<i64> = r.get(1)?;
+        let runtime: Option<String> = r.get(2)?;
+        let agent_slug: Option<String> = r.get(3)?;
+        let prompt: Option<String> = r.get(4)?;
+        let response: Option<String> = r.get(5)?;
+        let status: Option<String> = r.get(6)?;
+        let error_message: Option<String> = r.get(7)?;
+        let model: Option<String> = r.get(8)?;
+        let session_id: Option<String> = r.get(9)?;
+
+        let ok = status.as_deref().map(|s| s == "success");
+        let prompt_preview = prompt.as_ref().map(|p| truncate_for_preview(p, 240));
+        let response_preview = response.as_ref().map(|p| truncate_for_preview(p, 240));
+
+        // Stuff `model` + `session_id` into the extra map so the React
+        // side can render them without a type change.
+        let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+        if let Some(m) = model {
+            extra.insert("model".to_string(), serde_json::Value::String(m));
         }
-    }
-    if let Some(since) = &filter.since {
-        all.retain(|t| t.ts.as_deref().map(|ts| ts >= since.as_str()).unwrap_or(false));
-    }
-    if let Some(limit) = filter.limit {
-        if all.len() > limit {
-            all.truncate(limit);
+        if let Some(sid) = session_id {
+            extra.insert("sessionId".to_string(), serde_json::Value::String(sid));
         }
+
+        Ok(AgentTraceLine {
+            ts: created_at,
+            duration_ms,
+            runtime,
+            slug: agent_slug,
+            file_path: None,
+            prompt_preview,
+            response_preview,
+            ok,
+            error: error_message,
+            source: Some("execution_logs".to_string()),
+            routed_to: None,
+            extra,
+        })
+    });
+
+    match rows {
+        Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
     }
-    all
+}
+
+fn truncate_for_preview(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{}…", head)
+    }
 }
 
 fn percentile(sorted: &[i64], pct: f64) -> Option<i64> {
@@ -15082,12 +15161,20 @@ fn percentile(sorted: &[i64], pct: f64) -> Option<i64> {
 }
 
 #[tauri::command]
-pub fn read_agent_traces(filter: AgentTraceFilter) -> Result<Vec<AgentTraceLine>, String> {
-    Ok(load_agent_log_lines(&filter))
+pub fn read_agent_traces(
+    db: State<'_, DbState>,
+    filter: AgentTraceFilter,
+) -> Result<Vec<AgentTraceLine>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    Ok(load_agent_log_lines(&conn, &filter))
 }
 
 #[tauri::command]
-pub fn get_agent_metrics(filter: AgentTraceFilter) -> Result<AgentMetrics, String> {
+pub fn get_agent_metrics(
+    db: State<'_, DbState>,
+    filter: AgentTraceFilter,
+) -> Result<AgentMetrics, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
     // For aggregations we want every line that matches the runtime/status/
     // since filters but ignoring `limit` so totals are accurate.
     let aggregate_filter = AgentTraceFilter {
@@ -15097,7 +15184,7 @@ pub fn get_agent_metrics(filter: AgentTraceFilter) -> Result<AgentMetrics, Strin
         since: filter.since.clone(),
         limit: None,
     };
-    let lines = load_agent_log_lines(&aggregate_filter);
+    let lines = load_agent_log_lines(&conn, &aggregate_filter);
 
     let total = lines.len();
     let mut successful = 0usize;
@@ -15487,13 +15574,19 @@ pub fn evaluate_recent_traces(
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
     };
 
-    let traces = load_agent_log_lines(&AgentTraceFilter {
-        agent_slug: Some(agent_slug),
-        runtime: None,
-        status: None,
-        since: None,
-        limit: Some(last_n),
-    });
+    let traces = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        load_agent_log_lines(
+            &conn,
+            &AgentTraceFilter {
+                agent_slug: Some(agent_slug),
+                runtime: None,
+                status: None,
+                since: None,
+                limit: Some(last_n),
+            },
+        )
+    };
 
     let evaluated: Vec<EvaluatedTrace> = traces
         .into_iter()

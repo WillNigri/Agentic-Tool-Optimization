@@ -68,7 +68,11 @@ export default function TraceExplorer({ trace, onClose }: Props) {
             )}
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-cs-text truncate">
-                {trace.slug ?? t("traceExplorer.unknown", "Unknown agent")}
+                {trace.slug ?? (
+                  <span className="text-cs-muted italic">
+                    {t("traceExplorer.generalist", "generalist")}
+                  </span>
+                )}
               </h2>
               <p className="text-[11px] text-cs-muted">
                 {trace.ts && (
