@@ -65,8 +65,20 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
             |r| r.get(0),
         )
         .map_err(|e| anyhow!("no active key for provider '{}': {}", provider, e))?;
-    crate::encryption::decrypt(&encrypted)
-        .context("decrypt llm_api_keys.encrypted_key")
+    // Same hardened error context as api_dispatch::resolve_api_key — see
+    // there for the full story on the 2026-05-14 master-key cliff and
+    // why a metadata-only "Save" in the GUI doesn't recover orphaned rows.
+    crate::encryption::decrypt(&encrypted).with_context(|| {
+        format!(
+            "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
+             cannot be authenticated under the current master key — almost always this means \
+             the macOS keychain master_key was rotated, orphaning the stored ciphertext. \
+             Fix: re-enter the {} API key in ATO → Settings → API Keys (paste the actual key \
+             value; just hitting Save bumps `updated_at` without re-encrypting). \
+             Alternative: set the provider's env var in the shell to bypass the stored key.",
+            provider, provider,
+        )
+    })
 }
 
 /// Per-runtime auth-mode preference, stored in `settings` as

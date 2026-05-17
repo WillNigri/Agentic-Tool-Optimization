@@ -928,6 +928,13 @@ fn run_api(
         }
     }
 
+    // The DB row at line ~843 was written with `cost_usd` — the JSON
+    // result must match. Earlier this was `None`, which made `ato
+    // dispatch` (and every wrapper that parses its JSON output) report
+    // cost = null on every API-runtime success even though the DB had
+    // the right value. Surfaced 2026-05-17 by Round 8 dogfood: google +
+    // minimax dispatches looked like NULL-cost regressions; they were
+    // really JSON-only blind spots.
     let result = DispatchResult {
         id: id.clone(),
         runtime: provider.slug.to_string(),
@@ -938,7 +945,7 @@ fn run_api(
         duration_ms,
         tokens_in,
         tokens_out,
-        cost_usd_estimated: None,
+        cost_usd_estimated: cost_usd,
         created_at: now,
     };
 

@@ -91,8 +91,19 @@ pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<Stri
     // rows (the pre-2.4.8 format). The CLI hits the same OS keychain
     // entry the desktop uses, so a row written by either is
     // decryptable by either.
-    crate::encryption::decrypt(&encrypted)
-        .context("decrypt llm_api_keys.encrypted_key")
+    crate::encryption::decrypt(&encrypted).with_context(|| {
+        format!(
+            "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
+             cannot be authenticated under the current master key — almost always this means \
+             the macOS keychain master_key entry was rotated or refreshed after the key was \
+             saved, orphaning the stored ciphertext (the 2026-05-14 cliff pattern). \
+             \n\nFix: re-enter the {} API key in ATO → Settings → API Keys. The masked preview \
+             hides the value — you must paste the actual key text to trigger re-encryption \
+             (just hitting Save bumps `updated_at` without re-encrypting).\
+             \n\nAlternative: set ${}=<your-key> in the shell to bypass the stored key entirely.",
+            provider.slug, provider.slug, provider.env_var,
+        )
+    })
 }
 
 /// One message in the chat-completions `messages` array. `role` is
