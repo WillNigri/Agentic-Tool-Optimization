@@ -5,13 +5,7 @@ const MINIMAP_W = 160;
 const MINIMAP_H = 100;
 const NODE_H = 85;
 
-const RUNTIME_COLORS: Record<string, string> = {
-  claude: "#f97316",
-  codex: "#22c55e",
-  gemini: "#3b82f6",
-  openclaw: "#06b6d4",
-  hermes: "#a855f7",
-};
+import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
 
 const KIND_COLORS: Record<string, string> = {
   runtime: "#00FFB2",

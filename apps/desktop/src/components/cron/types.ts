@@ -2,7 +2,12 @@
 // Cron Monitoring Types
 // ---------------------------------------------------------------------------
 
-export type AgentRuntime = "claude" | "codex" | "openclaw" | "hermes";
+// 2026-05-18 — AgentRuntime used to be hand-typed as the 4 CLI
+// runtimes only. The codebase actively dispatches to gemini /
+// minimax / grok / deepseek / qwen / openrouter too; the type lied.
+// Re-exported from the canonical runtime registry so adding a runtime
+// updates this type for free.
+export type { RuntimeId as AgentRuntime } from "@/lib/runtimes";
 
 export type CronJobStatus =
   | "healthy"

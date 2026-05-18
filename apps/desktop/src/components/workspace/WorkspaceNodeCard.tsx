@@ -18,13 +18,7 @@ const KIND_ICONS: Record<WorkspaceNodeKind, typeof Bot> = {
   memory: BookOpen,
 };
 
-const RUNTIME_COLORS: Record<string, string> = {
-  claude: "#f97316",
-  codex: "#22c55e",
-  gemini: "#3b82f6",
-  openclaw: "#06b6d4",
-  hermes: "#a855f7",
-};
+import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
 
 const STATUS_COLORS: Record<string, string> = {
   online: "#22c55e",

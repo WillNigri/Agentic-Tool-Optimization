@@ -13,28 +13,26 @@
 // The `_` prefix marks this as an internal-to-the-SessionsList-dir
 // module; if anything in here grows into broader reusable utility it
 // should move up to `apps/desktop/src/lib/`.
+//
+// 2026-05-18 — RUNTIME_COLORS used to live here as one of TEN copies
+// of the same map across the codebase. Now sources from the single
+// runtime registry (`lib/runtimes.ts`). Re-exported as RUNTIME_COLORS
+// (a Record<string, string> facade) so existing call sites in this
+// directory don't need to flip imports en masse.
 
 import { cn } from "@/lib/utils";
+import { RUNTIME_REGISTRY, runtimeTw } from "@/lib/runtimes";
 
-export const RUNTIME_COLORS: Record<string, string> = {
-  claude: "text-orange-400 bg-orange-400/10",
-  codex: "text-green-400 bg-green-400/10",
-  gemini: "text-blue-400 bg-blue-400/10",
-  google: "text-blue-400 bg-blue-400/10",
-  hermes: "text-purple-400 bg-purple-400/10",
-  openclaw: "text-cyan-400 bg-cyan-400/10",
-  minimax: "text-pink-400 bg-pink-400/10",
-  grok: "text-slate-400 bg-slate-400/10",
-  deepseek: "text-indigo-400 bg-indigo-400/10",
-  qwen: "text-amber-400 bg-amber-400/10",
-  openrouter: "text-violet-400 bg-violet-400/10",
-  anthropic: "text-orange-400 bg-orange-400/10",
-};
+/** Facade matching the legacy shape. Read-only — callers should
+ *  prefer `runtimeTw(rt)` for safer fallback handling. */
+export const RUNTIME_COLORS: Record<string, string> = Object.fromEntries(
+  Object.entries(RUNTIME_REGISTRY).map(([id, meta]) => [id, meta.tw]),
+);
 
 export function runtimeBadge(rt: string) {
   return cn(
     "px-1.5 py-0.5 rounded text-xs font-medium capitalize",
-    RUNTIME_COLORS[rt] || "text-cs-muted bg-cs-border"
+    runtimeTw(rt),
   );
 }
 

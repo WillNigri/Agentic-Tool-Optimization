@@ -36,9 +36,7 @@ interface CanvasEdge {
   color: string;
 }
 
-const RUNTIME_COLORS: Record<string, string> = {
-  claude: "#f97316", codex: "#22c55e", gemini: "#3b82f6", openclaw: "#06b6d4", hermes: "#a855f7",
-};
+import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
 const KIND_ICONS = { runtime: Cpu, skill: Sparkles, mcp: Server, memory: BookOpen };
 
 export default function WorkspaceCanvas() {

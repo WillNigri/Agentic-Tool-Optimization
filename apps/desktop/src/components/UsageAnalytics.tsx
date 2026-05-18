@@ -47,12 +47,8 @@ import {
 } from "@/lib/api";
 import { formatNumber, formatCurrency, cn } from "@/lib/utils";
 
-const RUNTIME_COLORS: Record<string, string> = {
-  claude: "#f97316", // orange-500
-  codex: "#22c55e", // green-500
-  hermes: "#a855f7", // purple-500
-  openclaw: "#06b6d4", // cyan-500
-};
+// 2026-05-18 — sourced from the canonical runtime registry.
+import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
 
 const STATUS_COLORS = {
   success: "#22c55e",

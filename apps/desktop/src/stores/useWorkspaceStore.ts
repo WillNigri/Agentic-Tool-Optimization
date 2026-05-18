@@ -53,13 +53,10 @@ interface WorkspaceStore {
   clear: () => void;
 }
 
-const RUNTIME_COLORS: Record<string, string> = {
-  claude: "#f97316",
-  codex: "#22c55e",
-  gemini: "#3b82f6",
-  openclaw: "#06b6d4",
-  hermes: "#a855f7",
-};
+// 2026-05-18 — was a local copy of 5 hex colors. Now sourced from
+// the canonical runtime registry (lib/runtimes.ts) so adding MiniMax /
+// Grok / etc. updates the workspace canvas for free.
+import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
 
 function autoLayout(bundle: ProjectBundle): { nodes: WorkspaceNode[]; edges: WorkspaceEdge[] } {
   const nodes: WorkspaceNode[] = [];

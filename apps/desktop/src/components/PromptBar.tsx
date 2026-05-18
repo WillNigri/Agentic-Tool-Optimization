@@ -51,6 +51,7 @@ import { listAgentGroups, dispatchToGroup, type AgentGroup } from "@/lib/agentGr
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 import { estimateUsage } from "@/lib/pricing";
 import type { AgentRuntime } from "@/components/cron/types";
+import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
 import ApprovalDialog, { extractSkillFromResponse } from "./ApprovalDialog";
 import MarkdownContent from "./MarkdownContent";
 
@@ -58,38 +59,41 @@ const isTauri =
   typeof window !== "undefined" &&
   ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
 
-// v2.3.23 Phase 6.x-B — picker is now data-driven from
+// v2.3.23 Phase 6.x-B — picker is data-driven from
 // `list_available_runtimes` (CLI runtimes + API providers with active
-// keys). This map defines the rendering metadata for any slug the
-// command can return; the picker filters by which slugs come back
-// available=true.
+// keys). The rendering metadata used to live here as a 10-entry local
+// map; 2026-05-18 elegance push sources it from the canonical runtime
+// registry (lib/runtimes.ts) so adding a new LLM doesn't require
+// touching this file. RUNTIME_META is now a thin shape adapter that
+// projects the registry into the {label, icon, color} tuple this
+// component already consumed — keeps every existing call site stable.
 const RUNTIME_META: Record<
   string,
   { label: string; icon: typeof Terminal; color: string }
-> = {
-  claude: { label: "Claude", icon: Terminal, color: "#f97316" },
-  codex: { label: "Codex", icon: Cpu, color: "#22c55e" },
-  gemini: { label: "Gemini", icon: Globe, color: "#4285f4" },
-  openclaw: { label: "OpenClaw", icon: Server, color: "#06b6d4" },
-  hermes: { label: "Hermes", icon: Globe, color: "#a855f7" },
-  minimax: { label: "MiniMax", icon: Cpu, color: "#1456ff" },
-  grok: { label: "Grok", icon: Cpu, color: "#fff" },
-  deepseek: { label: "DeepSeek", icon: Cpu, color: "#4d6bfe" },
-  qwen: { label: "Qwen", icon: Cpu, color: "#7c3aed" },
-  openrouter: { label: "OpenRouter", icon: Globe, color: "#10b981" },
-};
+> = Object.fromEntries(
+  (Object.keys(RUNTIME_REGISTRY) as RuntimeId[]).map((id) => {
+    const m = RUNTIME_REGISTRY[id];
+    return [id, { label: m.label, icon: m.icon, color: m.hex }];
+  }),
+);
 
+// RUNTIME_OPTIONS is the dropdown source when the live availability
+// query (`list_available_runtimes`) hasn't returned yet — historically
+// this was a hand-maintained 4-entry list of CLI runtimes only, which
+// meant the picker silently lost gemini / minimax / grok / etc. Now
+// derived from the registry: every runtime is offered at startup, and
+// the live query disables the ones that aren't ready.
 const RUNTIME_OPTIONS: {
   id: AgentRuntime;
   label: string;
   icon: typeof Terminal;
   color: string;
-}[] = [
-  { id: "claude", label: "Claude", icon: Terminal, color: "#f97316" },
-  { id: "codex", label: "Codex", icon: Cpu, color: "#22c55e" },
-  { id: "openclaw", label: "OpenClaw", icon: Server, color: "#06b6d4" },
-  { id: "hermes", label: "Hermes", icon: Globe, color: "#a855f7" },
-];
+}[] = (Object.keys(RUNTIME_REGISTRY) as RuntimeId[]).map((id) => ({
+  id,
+  label: RUNTIME_REGISTRY[id].label,
+  icon: RUNTIME_REGISTRY[id].icon,
+  color: RUNTIME_REGISTRY[id].hex,
+}));
 
 interface AvailableRuntimeRow {
   slug: string;
