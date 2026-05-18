@@ -34,6 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import SingleRunDetailView from "./SingleRunDetailView";
 import WarRoomDetailView from "./WarRoomDetailView";
+import ChatThreadDetailView from "./ChatThreadDetailView";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { useUiStore } from "@/stores/useUiStore";
 import {
@@ -97,7 +98,12 @@ interface SessionListRow {
   // for before PR 5 collapsed them into one unified feed). The
   // frontend uses this to pick the card variant + the
   // click-into-detail route in PR 5b/5c.
-  rowKind: "session" | "single_run" | "war_room";
+  // 2026-05-18 — Path A consolidation: chat threads from the
+  // bottom-pane Chat tab land in this feed as a fourth kind so the
+  // Sessions tab is one inbox for every conversation type. The bottom
+  // pane keeps writing to its own `chat_threads` table for now;
+  // sessions_view's list_sessions_inner UNIONs the two on read.
+  rowKind: "session" | "single_run" | "war_room" | "chat";
 }
 
 interface SessionTurn {
@@ -267,7 +273,7 @@ const CATEGORY_VOCAB = [
 // values (success/error/unknown) so they pass through the "all"
 // status bucket only. PR 5c dropped the History tab and added the
 // single-run click-into-detail panel — see SingleRunDetailView.tsx.
-type KindFilter = "all" | "sessions" | "single_runs" | "war_rooms";
+type KindFilter = "all" | "sessions" | "single_runs" | "war_rooms" | "chats";
 
 /// Case-insensitive substring search across every human-readable
 /// field on a session row plus the 8-char id prefix. Returns the
@@ -296,6 +302,7 @@ function rowMatchesFilters(
     if (f.kind === "sessions" && s.rowKind !== "session") return false;
     if (f.kind === "single_runs" && s.rowKind !== "single_run") return false;
     if (f.kind === "war_rooms" && s.rowKind !== "war_room") return false;
+    if (f.kind === "chats" && s.rowKind !== "chat") return false;
   }
   if (skip !== "status") {
     if (f.status === "open" && s.status !== "open") return false;
@@ -358,6 +365,7 @@ type OpenSelection =
   | { kind: "session"; id: string }
   | { kind: "single_run"; id: string }
   | { kind: "war_room"; id: string }
+  | { kind: "chat"; id: string }
   | null;
 
 export default function SessionsList() {
@@ -523,6 +531,14 @@ export default function SessionsList() {
       />
     );
   }
+  if (openSelection?.kind === "chat") {
+    return (
+      <ChatThreadDetailView
+        threadId={openSelection.id}
+        onBack={() => setOpenSelection(null)}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -610,6 +626,7 @@ export default function SessionsList() {
                 ["sessions", "Sessions"],
                 ["single_runs", "Single runs"],
                 ["war_rooms", "War rooms"],
+                ["chats", "Chats"],
               ] as [KindFilter, string][]).map(([k, label]) => {
                 const count =
                   k === "all"
@@ -618,7 +635,9 @@ export default function SessionsList() {
                       ? rowsForKindCount.filter((row) => row.rowKind === "session").length
                       : k === "single_runs"
                         ? rowsForKindCount.filter((row) => row.rowKind === "single_run").length
-                        : rowsForKindCount.filter((row) => row.rowKind === "war_room").length;
+                        : k === "war_rooms"
+                          ? rowsForKindCount.filter((row) => row.rowKind === "war_room").length
+                          : rowsForKindCount.filter((row) => row.rowKind === "chat").length;
                 return (
                 <button
                   key={k}
@@ -851,6 +870,10 @@ export default function SessionsList() {
                 {sessionsQ.data!.filter((r) => r.rowKind === "session").length} sessions
                 ·{" "}
                 {sessionsQ.data!.filter((r) => r.rowKind === "single_run").length} single-runs
+                ·{" "}
+                {sessionsQ.data!.filter((r) => r.rowKind === "war_room").length} war-rooms
+                ·{" "}
+                {sessionsQ.data!.filter((r) => r.rowKind === "chat").length} chats
                 · Open/Closed apply to sessions only
               </div>
             )}
@@ -910,6 +933,77 @@ export default function SessionsList() {
             // single-run branch so the type-narrowing flows cleanly.
             // PR 14c — clickable: routes to WarRoomDetailView which
             // lists the constituent dispatches per seat.
+            // 2026-05-18 — Path A consolidation: chat threads from the
+            // bottom-pane Chat tab. Renders before session/war-room
+            // branches so type-narrowing flows cleanly. The card mirrors
+            // the war-room/single-run/session card shape (kind pill at
+            // position 0, runtime badge, right-aligned meta cluster,
+            // title on its own row, body preview) so the four variants
+            // feel like one feed at a 60px scan.
+            //
+            // Click-into-detail: today, opening the chat surfaces the
+            // assistant-side reply preview only (we have no full chat
+            // transcript view yet — the bottom pane is the live surface).
+            // Path B (multi-launcher refactor) will give chat threads a
+            // proper detail view; for now, clicking just keeps the user
+            // on Sessions with the row marked open. Per "ship as is"
+            // (Path A is the cheap UNION), this is fine — users still
+            // SEE their chats in the inbox, which is what was missing.
+            if (s.rowKind === "chat") {
+              return (
+                <button
+                  key={s.id}
+                  onClick={() =>
+                    setOpenSelection({ kind: "chat", id: s.id })
+                  }
+                  title={`Chat thread ${s.id}`}
+                  className="w-full text-left border rounded-lg p-4 transition-colors border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
+                >
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span
+                      aria-label="chat"
+                      className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-muted/15 text-cs-muted"
+                      title="Bottom-pane chat thread. One-on-one conversation, can hop runtimes per message."
+                    >
+                      🗨 chat
+                    </span>
+                    <span
+                      className={cn(runtimeBadge(s.runtime))}
+                      title={`Most recent runtime: ${runtimeDisplay(s.runtime)}`}
+                    >
+                      {s.runtime}
+                    </span>
+                    <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
+                      <span>
+                        {s.turnCount} msg{s.turnCount !== 1 ? "s" : ""}
+                      </span>
+                      <span>{formatTime(s.lastUsedAt)}</span>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-sm font-medium text-cs-text truncate">
+                    {s.title || (
+                      <span className="text-cs-muted italic font-normal">
+                        untitled chat
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
+                    <span>
+                      runtime:{" "}
+                      <span className="text-cs-text">{runtimeDisplay(s.runtime)}</span>
+                    </span>
+                    <span>
+                      kind: <span className="text-cs-text">bottom-pane chat</span>
+                    </span>
+                  </div>
+                  {s.lastAssistantPreview && (
+                    <div className="mt-2 text-xs text-cs-muted line-clamp-2">
+                      {s.lastAssistantPreview}
+                    </div>
+                  )}
+                </button>
+              );
+            }
             if (s.rowKind === "war_room") {
               const participantCount = s.runtimesUsed.length;
               return (

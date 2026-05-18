@@ -530,13 +530,113 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         });
     }
 
-    // Merge: real sessions + single-runs + war-rooms, sorted by their
-    // unified timestamp (last_used_at, which equals created_at for
-    // single-runs). Stable sort so two rows with the same timestamp
-    // keep their intra-list order, which is good for determinism in
-    // tests.
+    // 2026-05-18 — Path A: bottom-pane chat threads land in the Sessions
+    // feed as a fourth row_kind. Per Will: "the chats we have in the
+    // bottom of the app should also appear in the sessions." Chat
+    // threads remain their own table (no migration); we just teach the
+    // feed to UNION them so the user has ONE inbox for every
+    // conversation kind. Path B (migrating chat_threads into the
+    // sessions table) lives behind a multi-launcher refactor of the
+    // bottom pane — not in scope here.
+    //
+    // Card shape: title comes from chat_threads.title (already
+    // human-readable, no truncation needed). Runtime = the runtime of
+    // the most recent assistant turn (chat_threads doesn't pin to one;
+    // each message records which runtime answered). Preview = the
+    // most recent assistant message's content, truncated to 160 chars
+    // to match the session/war-room preview convention.
+    let mut ct_stmt = conn.prepare(
+        "SELECT id, title, created_at, COALESCE(last_message_at, created_at) AS last_at,
+                message_count, project_id
+           FROM chat_threads
+          WHERE archived = 0
+          ORDER BY last_at DESC
+          LIMIT ?1",
+    )?;
+    let chats: Vec<SessionListRow> = ct_stmt
+        .query_map([limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,                 // id
+                r.get::<_, String>(1)?,                 // title
+                r.get::<_, String>(2)?,                 // created_at
+                r.get::<_, String>(3)?,                 // last_at
+                r.get::<_, i64>(4)?,                    // message_count
+                r.get::<_, Option<String>>(5)?,         // project_id
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|(id, title, created_at, last_at, message_count, project_id)| {
+            // Last assistant message — runtime + content preview. Two
+            // small queries per thread, fine for the default limit. Each
+            // is O(log N) on the (thread_id, created_at) index.
+            let mut last_rt_stmt = conn.prepare_cached(
+                "SELECT runtime FROM chat_messages
+                  WHERE thread_id = ?1 AND role = 'assistant' AND runtime IS NOT NULL
+                  ORDER BY created_at DESC
+                  LIMIT 1",
+            ).ok();
+            let runtime: String = last_rt_stmt
+                .as_mut()
+                .and_then(|s| s.query_row([&id], |r| r.get::<_, String>(0)).ok())
+                .unwrap_or_else(|| "chat".to_string());
+
+            let mut last_msg_stmt = conn.prepare_cached(
+                "SELECT content FROM chat_messages
+                  WHERE thread_id = ?1 AND role = 'assistant'
+                  ORDER BY created_at DESC
+                  LIMIT 1",
+            ).ok();
+            let preview: Option<String> = last_msg_stmt
+                .as_mut()
+                .and_then(|s| s.query_row([&id], |r| r.get::<_, String>(0)).ok())
+                .map(|s| {
+                    if s.chars().count() > 160 {
+                        let head: String = s.chars().take(160).collect();
+                        format!("{}…", head)
+                    } else {
+                        s
+                    }
+                });
+
+            SessionListRow {
+                id,
+                runtime: runtime.clone(),
+                agent_slug: None,
+                title: Some(title),
+                created_at,
+                last_used_at: last_at,
+                turn_count: message_count,
+                runtimes_used: vec![runtime],
+                agents_used: Vec::new(),
+                total_cost_usd: None,
+                last_assistant_preview: preview,
+                // Lifecycle isn't really applicable to chat threads —
+                // they're always "open" in practice (archived rows are
+                // filtered out in the WHERE clause above). Match the
+                // session convention so the lifecycle filter doesn't
+                // need a fourth special case.
+                status: "open".to_string(),
+                closed_at: None,
+                auto_title: None,
+                summary: None,
+                tags: Vec::new(),
+                project_id,
+                project_name: None,
+                category: None,
+                team: None,
+                row_kind: "chat".to_string(),
+            }
+        })
+        .collect();
+
+    // Merge: real sessions + single-runs + war-rooms + chat threads,
+    // sorted by their unified timestamp (last_used_at, which equals
+    // created_at for single-runs). Stable sort so two rows with the
+    // same timestamp keep their intra-list order, which is good for
+    // determinism in tests.
     enriched.extend(single_runs);
     enriched.extend(war_rooms);
+    enriched.extend(chats);
     enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
     enriched.truncate(limit as usize);
     Ok(enriched)
