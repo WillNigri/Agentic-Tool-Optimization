@@ -74,6 +74,12 @@ interface SessionListRow {
   summary: string | null;
   tags: string[];
   projectId: string | null;
+  // PR 15 (2026-05-18) — human-readable project name resolved by
+  // the Tauri LEFT JOIN against the projects table. Prefer this
+  // for display; projectId stays the canonical identifier. NULL
+  // when projectId is NULL or when the join doesn't find a row
+  // (project deleted, session retains the snapshot id).
+  projectName: string | null;
   // 2026-05-17 — Sessions UX polish PR 2 + 4. category is a
   // controlled-vocab work-band tag (Business / Marketing / Dev /
   // Frontend / etc.); team is a free-form owner label. Both are
@@ -1199,8 +1205,18 @@ export default function SessionsList() {
                   {s.projectId && (
                     <span>
                       project:{" "}
-                      <span className="text-cs-text font-mono">
-                        {s.projectId}
+                      {/* PR 15 — prefer the resolved human name from
+                          the projects JOIN; fall back to the 8-char id
+                          prefix when the name doesn't resolve (project
+                          deleted but session retains the snapshot
+                          id). Hover-title shows the full id either way
+                          so the canonical reference is one mouse-over
+                          away. */}
+                      <span
+                        className="text-cs-text font-mono"
+                        title={`project_id: ${s.projectId}`}
+                      >
+                        {s.projectName ?? s.projectId.slice(0, 8)}
                       </span>
                     </span>
                   )}

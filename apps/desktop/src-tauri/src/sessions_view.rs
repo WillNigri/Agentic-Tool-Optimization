@@ -85,6 +85,13 @@ pub struct SessionListRow {
     pub summary: Option<String>,
     pub tags: Vec<String>,
     pub project_id: Option<String>,
+    /// PR 15 (2026-05-18) — human-readable project name resolved at
+    /// query time via LEFT JOIN against the projects table. The
+    /// frontend prefers this for display; project_id stays the
+    /// canonical identifier. NULL when project_id is NULL or when
+    /// the join doesn't find a row (project deleted but session
+    /// retains the snapshot id).
+    pub project_name: Option<String>,
     /// 2026-05-17 — Sessions UX polish PR 2 + 4. Controlled-vocab tag
     /// for the work band (Business / Marketing / Dev / Frontend / etc.)
     /// + free-form team label. NULL on pre-PR-2 rows; populated by the
@@ -170,11 +177,17 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // of 'open' but pre-migration rows on a partially-upgraded install
     // could still surface NULL on read (defensive — the ALTER carries
     // the default forward, but the cost of being safe is zero).
+    // PR 15 — LEFT JOIN against projects so the row carries both the
+    // canonical id (project_id) AND the human-readable name
+    // (project_name). Falls back to NULL on the name when the row
+    // was tagged with an id whose project was later deleted; the
+    // frontend then renders the short-form id.
     let mut stmt = conn.prepare(
         "SELECT s.id, s.runtime, s.agent_slug, s.title, s.created_at, s.last_used_at, s.turn_count,
                 COALESCE(s.status, 'open'), s.closed_at, s.auto_title, s.summary, s.tags_json, s.project_id,
-                s.category, s.team
+                s.category, s.team, p.name
            FROM sessions s
+           LEFT JOIN projects p ON p.id = s.project_id
           ORDER BY s.last_used_at DESC
           LIMIT ?1",
     )?;
@@ -203,6 +216,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 summary: r.get(10)?,
                 tags,
                 project_id: r.get(12)?,
+                project_name: r.get(15)?,
                 category: r.get(13)?,
                 team: r.get(14)?,
                 row_kind: "session".to_string(),
@@ -385,6 +399,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 summary: None,
                 tags: Vec::new(),
                 project_id: None,
+                project_name: None,
                 category: None,
                 team: None,
                 row_kind: "single_run".to_string(),
@@ -508,6 +523,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             summary: None,
             tags: Vec::new(),
             project_id: None,
+            project_name: None,
             category: None,
             team: None,
             row_kind: "war_room".to_string(),
