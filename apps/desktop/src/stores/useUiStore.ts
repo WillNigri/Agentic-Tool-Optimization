@@ -47,6 +47,29 @@ interface UiState {
   pendingOpenAgentTab: string | null;
   openAgentDetail: (slug: string, tab?: string | null) => void;
   consumePendingOpenAgent: () => { slug: string | null; tab: string | null };
+
+  /** PR-C First-Chat Wizard (2026-05-18) — when set, SessionsList
+   *  opens the detail view for this row as soon as it mounts. Lets
+   *  the wizard fire a war-room and land the user directly on the
+   *  WarRoomDetailView without depending on a session-tab refresh
+   *  picking up the new row. Consumed once by SessionsList. */
+  pendingOpenSessionKind: "session" | "war_room" | "single_run" | null;
+  pendingOpenSessionId: string | null;
+  openSessionDetail: (
+    kind: "session" | "war_room" | "single_run",
+    id: string
+  ) => void;
+  consumePendingOpenSession: () => {
+    kind: "session" | "war_room" | "single_run" | null;
+    id: string | null;
+  };
+
+  /** PR-C — whether the First-Chat Wizard modal is open. Lives in the
+   *  store so any surface (Home CTA, command palette, demo runner) can
+   *  open it. */
+  firstChatOpen: boolean;
+  openFirstChat: () => void;
+  closeFirstChat: () => void;
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -93,4 +116,19 @@ export const useUiStore = create<UiState>((set, get) => ({
     if (slug) set({ pendingOpenAgentSlug: null, pendingOpenAgentTab: null });
     return { slug, tab };
   },
+
+  pendingOpenSessionKind: null,
+  pendingOpenSessionId: null,
+  openSessionDetail: (kind, id) =>
+    set({ pendingOpenSessionKind: kind, pendingOpenSessionId: id }),
+  consumePendingOpenSession: () => {
+    const kind = get().pendingOpenSessionKind;
+    const id = get().pendingOpenSessionId;
+    if (id) set({ pendingOpenSessionKind: null, pendingOpenSessionId: null });
+    return { kind, id };
+  },
+
+  firstChatOpen: false,
+  openFirstChat: () => set({ firstChatOpen: true }),
+  closeFirstChat: () => set({ firstChatOpen: false }),
 }));

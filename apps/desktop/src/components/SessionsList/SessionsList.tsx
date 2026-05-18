@@ -35,6 +35,7 @@ import { cn } from "@/lib/utils";
 import SingleRunDetailView from "./SingleRunDetailView";
 import WarRoomDetailView from "./WarRoomDetailView";
 import { useProjectStore } from "@/stores/useProjectStore";
+import { useUiStore } from "@/stores/useUiStore";
 import {
   runtimeBadge,
   formatTime,
@@ -361,6 +362,20 @@ type OpenSelection =
 
 export default function SessionsList() {
   const [openSelection, setOpenSelection] = useState<OpenSelection>(null);
+  const consumePendingOpenSession = useUiStore(
+    (s) => s.consumePendingOpenSession
+  );
+  // PR-C First-Chat Wizard (2026-05-18) — drain any pending detail
+  // request on mount. The wizard sets this before navigating to the
+  // Sessions tab so the user lands directly on the new war-room
+  // instead of the list. Consumed once so a later navigation doesn't
+  // re-open a stale id.
+  useEffect(() => {
+    const pending = consumePendingOpenSession();
+    if (pending.id && pending.kind) {
+      setOpenSelection({ kind: pending.kind, id: pending.id });
+    }
+  }, [consumePendingOpenSession]);
   const [showNew, setShowNew] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");

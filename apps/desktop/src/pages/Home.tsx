@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Sparkles, Bot, Activity, AlertCircle, ArrowRight, Plus, Settings, Play } from "lucide-react";
 import CreateAgentWizard, { type WizardPath } from "@/components/CreateAgentWizard";
+import FirstChatWizard from "@/components/FirstChatWizard";
 import RuntimeHealthBanner from "@/components/RuntimeHealthBanner";
 import { queryAllAgentStatuses } from "@/lib/api";
 import { listAgents, type Agent } from "@/lib/agents";
@@ -83,6 +84,11 @@ export default function Home({
   const uiCreateAgentOpen = useUiStore((s) => s.createAgentOpen);
   const uiCreateAgentPath = useUiStore((s) => s.createAgentPath);
   const closeUiCreateAgent = useUiStore((s) => s.closeCreateAgent);
+  // PR-C — First-Chat Wizard. Home's primary CTA opens it; the store
+  // surface lets command-palette / demo runner trigger it too.
+  const firstChatOpen = useUiStore((s) => s.firstChatOpen);
+  const openFirstChat = useUiStore((s) => s.openFirstChat);
+  const closeFirstChat = useUiStore((s) => s.closeFirstChat);
   const requestShell = useTerminalStore((s) => s.requestShell);
 
   const runInShell = async (agent: Agent) => {
@@ -192,10 +198,10 @@ export default function Home({
             <button
               type="button"
               className="inline-flex items-center gap-2 rounded-lg bg-cs-accent px-4 py-2.5 sm:px-5 sm:py-3 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover transition whitespace-nowrap"
-              onClick={() => launch("guided")}
+              onClick={openFirstChat}
             >
               <Sparkles size={16} />
-              {t("home.startGuided", "Open a war room")}
+              {t("home.startGuided", "Start a war-room")}
             </button>
             <button
               type="button"
@@ -362,6 +368,12 @@ export default function Home({
           setWizard(null);
           closeUiCreateAgent();
         }}
+      />
+
+      <FirstChatWizard
+        open={firstChatOpen}
+        onClose={closeFirstChat}
+        onOpenSettings={onOpenSettings}
       />
 
       {runningAgent && (

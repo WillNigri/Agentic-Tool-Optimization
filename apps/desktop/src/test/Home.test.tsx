@@ -19,10 +19,11 @@ describe("Home (T1+T9)", () => {
   it("renders the war-room + specialist-agent CTAs in the hero", () => {
     // v2.4.6 positioning rewrite — the hero CTAs moved from
     // "Start with chat" / "Quick setup" (v1.4.0) to the war-room
-    // framing. Keep matching loose enough that copy tweaks to the
-    // subhint don't break this.
+    // framing. PR-C (2026-05-18) flipped the primary CTA's verb from
+    // "Open a war room" to "Start a war-room" when the click target
+    // moved off CreateAgentWizard onto FirstChatWizard.
     renderHome();
-    expect(screen.getByRole("button", { name: /Open a war room/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Start a war-room/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Build a specialist agent/i })).toBeInTheDocument();
   });
 
