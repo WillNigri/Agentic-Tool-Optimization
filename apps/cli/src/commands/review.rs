@@ -612,6 +612,7 @@ fn run_review(
             reviewer.dispatch_model(),
             reviewer.agent_slug(),
             Some(session_id.clone()),
+            None, // PR 14 — review dispatches are session-scoped, not parallel war-room
             false, // no streaming for review (we want the full reply)
             false, // no JSONL
             true,  // Tier 2 — reviewers get function-calling tools when their flavor supports it
@@ -708,6 +709,7 @@ fn run_consensus_pass(
             reviewer.dispatch_model(),
             reviewer.agent_slug(),
             Some(session_id.clone()),
+            None, // PR 14 — consensus round is session-scoped
             false,
             false,
             true, // tools enabled — consensus reviewers may want to re-check claims

@@ -96,12 +96,37 @@ pub struct DispatchResult {
     pub created_at: String,
 }
 
+/// PR 14 (2026-05-18) — tag a freshly-inserted execution_log row
+/// with a shared war_room_id so parallel R1 dispatches can be
+/// grouped into a single "war-room" card on the Sessions feed.
+/// Idempotent + null-safe: when war_room_id is None this is a
+/// no-op, when the log id doesn't exist the UPDATE matches 0 rows
+/// (returns Ok). Called RIGHT AFTER each of the 3 INSERT sites in
+/// this module so the column is set in the same logical write
+/// even though it's a follow-up SQL statement.
+fn tag_war_room_id(
+    conn: &rusqlite::Connection,
+    log_id: &str,
+    war_room_id: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(id) = war_room_id {
+        if !id.is_empty() {
+            conn.execute(
+                "UPDATE execution_logs SET war_room_id = ?1 WHERE id = ?2",
+                rusqlite::params![id, log_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run(
     runtime_name: &str,
     prompt: &str,
     model: Option<String>,
     agent_slug_for_event: Option<String>,
     session_id: Option<String>,
+    war_room_id: Option<String>,
     stream: bool,
     stream_jsonl: bool,
     with_tools: bool,
@@ -217,6 +242,7 @@ pub fn run(
             model,
             agent_slug_for_event,
             session_id,
+            war_room_id,
             db_path,
             opts,
         );
@@ -234,6 +260,7 @@ pub fn run(
             model,
             agent_slug_for_event,
             session,
+            war_room_id,
             stream,
             stream_jsonl,
             with_tools,
@@ -494,6 +521,9 @@ pub fn run(
             agent_slug_for_event.as_deref(),
         ],
     ).context("Failed to write execution_logs row")?;
+    // PR 14 — tag with war_room_id when set so the Sessions feed can
+    // group this row into a war-room synthetic card.
+    tag_war_room_id(&conn, &id, war_room_id.as_deref())?;
 
     // v2.3.27 Phase 6.x — quota capture. On error, try to parse a
     // reset time from the message and persist it so the next
@@ -643,6 +673,7 @@ fn run_api(
     model_override: Option<String>,
     agent_slug_for_event: Option<String>,
     session: Option<crate::commands::sessions::Session>,
+    war_room_id: Option<String>,
     stream: bool,
     stream_jsonl: bool,
     with_tools: bool,
@@ -862,6 +893,8 @@ fn run_api(
         ],
     )
     .context("Failed to write execution_logs row")?;
+    // PR 14 — war_room_id tag (API-dispatch path).
+    tag_war_room_id(&conn, &id, war_room_id.as_deref())?;
 
     if status == "error" {
         crate::events_publisher::publish_dispatch_failed(
@@ -997,6 +1030,7 @@ fn run_remote(
     model: Option<String>,
     agent_slug_for_event: Option<String>,
     session_id: Option<String>,
+    war_room_id: Option<String>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -1107,6 +1141,8 @@ fn run_remote(
         ],
     )
     .context("Failed to write execution_logs row (remote)")?;
+    // PR 14 — war_room_id tag (remote-dispatch path).
+    tag_war_room_id(&conn, &id, war_room_id.as_deref())?;
 
     let result = DispatchResult {
         id: id.clone(),

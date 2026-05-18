@@ -1219,6 +1219,27 @@ pub fn init_database(conn: &Connection) {
             ON sessions(team, last_used_at DESC)",
         [],
     );
+    // PR 14 (Sessions UX polish, 2026-05-18) — war-room cohesion.
+    // Today's R1-parallel war-room methodology fires N standalone
+    // dispatches (no --session) so they don't collide on
+    // session_turns' PRIMARY KEY (session_id, turn_index). The
+    // tradeoff was visual: N separate single-run cards instead of
+    // one war-room. Fix: a shared `war_room_id` UUID tags
+    // execution_logs rows that belong to the same parallel round.
+    // The Sessions feed groups by it into a synthetic "war-room"
+    // row that aggregates participating runtimes + personas +
+    // cost. NULL on everything pre-PR-14 (no migration needed for
+    // back-compat). Indexed for the group-by query.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN war_room_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_war_room_id
+            ON execution_logs(war_room_id, created_at DESC)
+          WHERE war_room_id IS NOT NULL",
+        [],
+    );
     // v2.3.32 Phase 6 Slice A.2 — unified turn history. Stateful
     // runtimes (claude --resume) and stateless API providers
     // (minimax etc.) both dual-write into this table on every

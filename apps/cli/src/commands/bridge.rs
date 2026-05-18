@@ -396,6 +396,7 @@ pub fn run_loop(
             None, // model override is per-mention, future work
             None, // no agent label
             Some(primary_session_id.to_string()),
+            None, // PR 14 — bridge turns are session-scoped, not parallel war-room rounds
             false, // bridge doesn't stream individual turns
             false, // no JSONL output during bridge loop
             false, // no tools — bridge participants generate convos, not deep-dive reviews

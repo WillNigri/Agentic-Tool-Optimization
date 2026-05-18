@@ -97,6 +97,16 @@ enum Commands {
         /// `ato sessions new` returns the id to pass here.
         #[arg(long)]
         session: Option<String>,
+        /// PR 14 (Sessions UX polish, 2026-05-18) — tag this dispatch
+        /// with a shared war-room id so parallel R1 dispatches across
+        /// runtimes are grouped into a single "war-room" card in the
+        /// Sessions feed. Any UUID-shaped string is accepted; users
+        /// typically generate one with `uuidgen` and pass it to N
+        /// `ato dispatch` calls. Standalone dispatches (no --session)
+        /// + the same --war-room-id = one logical war-room round
+        /// without colliding on session_turns' PRIMARY KEY.
+        #[arg(long = "war-room-id")]
+        war_room_id: Option<String>,
         /// v2.3.33 Phase 6 Slice B — after the response, scan for
         /// `@<runtime>` mentions and bridge the conversation to that
         /// runtime, then loop until `[CONSENSUS]` or --max-rounds.
@@ -870,6 +880,7 @@ fn main() -> Result<()> {
             model,
             agent,
             session,
+            war_room_id,
             tag_bridge,
             max_rounds,
             stream,
@@ -892,6 +903,7 @@ fn main() -> Result<()> {
                 model,
                 agent,
                 session.clone(),
+                war_room_id,
                 stream,
                 stream_jsonl,
                 false, // ato dispatch top-level — no tools; that's ato review's surface
