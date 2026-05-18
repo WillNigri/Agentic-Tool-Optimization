@@ -14,10 +14,12 @@ pub mod models;
 pub mod usage_billing;
 pub mod knowledge;
 pub mod posts;
+pub mod analytics;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
 pub use posts::*;
+pub use analytics::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -3872,46 +3874,6 @@ pub fn record_local_config_change(
     Ok(())
 }
 
-// ── v2.3.2 Phase 2 — Local-mode regressions + cost recommendations ────
-//
-// Thin Tauri wrappers around the algorithm in `local_insights.rs`. The
-// GUI's RegressionsPanel + CostBenchmarksPanel call these as a fallback
-// when the cloud routes 401 (signed-out or expired token). Same result
-// shape so the existing UI components don't need to fork.
-
-#[tauri::command]
-pub fn compute_regressions_local(
-    days: Option<i64>,
-    window_hours: Option<i64>,
-    min_samples: Option<i64>,
-) -> Result<crate::local_insights::LocalRegressionsResult, String> {
-    let db_path = crate::get_db_path();
-    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-    crate::local_insights::compute_regressions_local(
-        &conn,
-        days.unwrap_or(30),
-        window_hours.unwrap_or(168),
-        min_samples.unwrap_or(20),
-    )
-    .map_err(|e| e.to_string())
-}
-
-// `compute_cost_recommendations_local` moved to commands/usage_billing.rs
-// (PR 3 of the commands.rs split).
-
-// v2.6 PR-A — billing-surface summary feeding both the "Last 7 days
-// at a glance" header card and the by-surface group-by toggle in
-// CostBenchmarksPanel. Local-only (passive observations + ATO's own
-// dispatches both land in execution_logs).
-#[tauri::command]
-pub fn compute_billing_surface_summary(
-    days: Option<i64>,
-) -> Result<crate::local_insights::BillingSurfaceSummary, String> {
-    let db_path = crate::get_db_path();
-    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-    crate::local_insights::compute_billing_surface_summary(&conn, days.unwrap_or(7))
-        .map_err(|e| e.to_string())
-}
 
 // ── v2.1.0 Replay infra ─────────────────────────────────────────────────
 //
@@ -10272,58 +10234,6 @@ pub fn export_telemetry_events(
     Ok(count)
 }
 
-/// Get aggregated usage statistics for analytics dashboard
-#[tauri::command]
-pub fn get_analytics_summary(
-    db: State<'_, DbState>,
-) -> Result<serde_json::Value, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-
-    // Get skill counts
-    let skill_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM skills",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    // Get workflow counts
-    let workflow_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM workflows",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    // Get notification channel counts
-    let channel_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM notification_channels WHERE enabled = 1",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    // Get cron job counts
-    let cron_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    // Get recent execution counts (last 7 days)
-    let recent_executions: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM cron_executions WHERE executed_at > datetime('now', '-7 days')",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    Ok(json!({
-        "skills": skill_count,
-        "workflows": workflow_count,
-        "notificationChannels": channel_count,
-        "cronJobs": cron_count,
-        "recentExecutions": recent_executions,
-        "sessionId": uuid::Uuid::new_v4().to_string(),
-        "generatedAt": chrono::Utc::now().to_rfc3339()
-    }))
-}
 
 // ── Audit Logging Commands ──────────────────────────────────────────────
 
@@ -10757,41 +10667,6 @@ pub fn get_monitoring_snapshot(
     })
 }
 
-#[tauri::command]
-pub fn get_token_timeline(
-    db: State<'_, DbState>,
-    hours: Option<u32>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let hours = hours.unwrap_or(24);
-
-    let mut stmt = conn.prepare(&format!(
-        "SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) as hour,
-                runtime,
-                COALESCE(SUM(tokens_in), 0) as total_in,
-                COALESCE(SUM(tokens_out), 0) as total_out,
-                COUNT(*) as session_count
-         FROM execution_logs
-         WHERE created_at > datetime('now', '-{} hours')
-         GROUP BY hour, runtime
-         ORDER BY hour ASC",
-        hours
-    )).map_err(|e| e.to_string())?;
-
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |row| {
-        Ok(json!({
-            "hour": row.get::<_, String>(0)?,
-            "runtime": row.get::<_, String>(1)?,
-            "tokensIn": row.get::<_, i64>(2).unwrap_or(0),
-            "tokensOut": row.get::<_, i64>(3).unwrap_or(0),
-            "sessions": row.get::<_, i64>(4).unwrap_or(0)
-        }))
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
-
-    Ok(rows)
-}
 
 // ── Agents (v1.3.0 T3) ────────────────────────────────────────────────────
 //
