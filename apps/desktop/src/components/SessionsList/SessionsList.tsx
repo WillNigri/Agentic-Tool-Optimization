@@ -963,6 +963,31 @@ export default function SessionsList() {
                       {formatTime(s.lastUsedAt)}
                     </span>
                   </div>
+                  {/* PR 17 — meta line on the war-room card so it has
+                      parity with the session card's coordinator/team
+                      line. Shows the seat-count × round-count summary;
+                      the war-room title (first round's prompt prefix)
+                      already appears in the chip row above. */}
+                  <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
+                    <span>
+                      seats:{" "}
+                      <span className="text-cs-text">{participantCount}</span>
+                    </span>
+                    <span>
+                      kind:{" "}
+                      <span className="text-cs-text">parallel</span> · each seat
+                      fires independently within a round; across rounds every
+                      seat sees the full peer transcript
+                    </span>
+                  </div>
+                  {/* PR 17 — body preview: first-round prompt. Matches
+                      single-run + session cards which both surface a
+                      body line, so the Sessions feed feels uniform. */}
+                  {s.title && (
+                    <div className="mt-2 text-xs text-cs-muted line-clamp-2">
+                      {s.title}
+                    </div>
+                  )}
                 </button>
               );
             }
@@ -1042,6 +1067,27 @@ export default function SessionsList() {
                       {formatTime(s.lastUsedAt)}
                     </span>
                   </div>
+                  {/* PR 17 — meta line on the single-run card for parity
+                      with session (coord/team) and war-room (seats × rounds)
+                      meta lines. Tells the reader what they're about to
+                      open without having to parse the chip row. */}
+                  <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
+                    <span>
+                      runtime:{" "}
+                      <span className="text-cs-text">{runtimeDisplay(s.runtime)}</span>
+                    </span>
+                    {s.agentSlug && (
+                      <span>
+                        persona:{" "}
+                        <span className="text-cs-accent">
+                          {personaDisplay(s.agentSlug)}
+                        </span>
+                      </span>
+                    )}
+                    <span>
+                      kind: <span className="text-cs-text">single dispatch</span>
+                    </span>
+                  </div>
                   {responsePreview && (
                     <div className="mt-2 text-xs text-cs-muted line-clamp-2 font-mono">
                       {responsePreview}
@@ -1067,6 +1113,7 @@ export default function SessionsList() {
               <button
                 key={s.id}
                 onClick={() => setOpenSelection({ kind: "session", id: s.id })}
+                title={`Session ${s.id}`}
                 className={cn(
                   "w-full text-left border rounded-lg transition-colors p-4",
                   s.status === "closed"
@@ -1075,16 +1122,28 @@ export default function SessionsList() {
                 )}
               >
                 <div className="flex items-center gap-3 flex-wrap">
+                  {/* PR 17 (2026-05-18) — kind marker on session cards
+                      for parity with war-room (⚔) + single-run (⚡)
+                      cards. Without this, the Sessions feed had three
+                      card variants with different "what is this"
+                      affordances; the kind marker is the visual hook
+                      that says "I'm a session" at a 60px scan. */}
+                  <span
+                    aria-label="session"
+                    className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-muted/15 text-cs-muted"
+                    title="Sequential multi-turn conversation. Each new turn sees prior turns via history replay."
+                  >
+                    💬 session
+                  </span>
                   {/* 2026-05-17 — coordinator vs participants split into
                       explicit labelled groups. Previously rendered as a
                       single badge cluster with a ★ prefix on the
                       coordinator — too easy to miss when the card has 4+
-                      runtime badges (see e.g. cross-runtime war-rooms with
-                      `Codex Claude Minimax Google` chips). Now: "Coord"
-                      label + ring-accented coordinator badge, separator,
-                      "+" label + dimmed participant badges. The session's
-                      anchor runtime is always shown as coordinator even
-                      if no turns have been recorded yet. */}
+                      runtime badges. Now: "Coord" label + ring-accented
+                      coordinator badge, separator, "+" label + dimmed
+                      participant badges. The session's anchor runtime is
+                      always shown as coordinator even if no turns have
+                      been recorded yet. */}
                   <div className="flex items-center gap-1">
                     <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
                       Coord
@@ -1306,9 +1365,12 @@ export default function SessionsList() {
                     ))}
                   </div>
                 )}
-                <div className="mt-2 text-[10px] text-cs-muted font-mono opacity-60 truncate">
-                  {s.id}
-                </div>
+                {/* PR 17 (2026-05-18) — raw UUID moved to a hover-
+                    only tooltip on the card. Will flagged the
+                    Sessions feed for visual inconsistency: war-room
+                    + single-run cards don't show their UUID; only
+                    sessions did. Consistency wins; the UUID is one
+                    mouse-over away when needed. */}
               </button>
             );
           })}
