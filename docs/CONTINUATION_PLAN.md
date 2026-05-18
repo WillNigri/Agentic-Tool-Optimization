@@ -443,10 +443,88 @@ Items 6+7 (Knowledge + Agent⇄Skill bundled wave) — when their trigger fires
 - [x] PR 13 — keychain ACL-as-NoEntry root-cause fix (`5ba3dd2`). First-run sentinel `~/.ato/.master_key_initialized` disambiguates "truly fresh" from "ACL-masked NoEntry"; migration step writes sentinel on first successful read so existing installs gain protection. Mirrored across `apps/cli/src/encryption.rs` and `apps/desktop/src-tauri/src/encryption.rs`. Today's `ATO_MASTER_KEY_B64` workaround is no longer needed for production users.
 - [ ] **PR 14 — war-room cohesion**: today's Round-1-parallel methodology fires N standalone dispatches per round, showing as N separate single-run cards instead of one logical war-room. Two designs on the table: (a) add `war_room_id` UUID to `execution_logs`, group cards sharing the same id, (b) shift methodology so Round-1-parallel goes into a single session with parallel turns. Both candidate PR shapes captured in chat 2026-05-17.
 - [ ] **60s Loom post-ship recording** — office-hours falsifier: if the Loom doesn't clear 500 X views in 48h, the IA collapse was not user-pulled and the team pivots to the Create Agent wizard next, not more sessions polish.
-- [ ] commands.rs PR 2-29
+- [ ] commands.rs PR 16-29 — 12 PRs remaining (see [Elegance day 2026-05-18 progress](#elegance-day-2026-05-18) below)
 - [ ] Auto-Optimization Pro feature
 - [ ] Knowledge Source Adapters + Agent ⇄ Skill linkage wave
 - [x] Loom recording — Will handling
+
+---
+
+## Elegance day — 2026-05-18
+
+Mission: push every part of the codebase to **85-90% elegance** across four fronts (surface UX, frontend organization, backend organization, database schema, runtime type system). Single-day push to consolidate the v2.6+ surface and pay down the maintenance debt that had accumulated through the rapid Sessions polish + Path A/B consolidation work.
+
+### Shipped today (16 commits)
+
+**User-facing arc — Path A/B consolidation + First-Chat Wizard:**
+- [x] **PR-C First-Chat Wizard** (`d367488`) — Home CTA "Start a war room" opens a one-screen modal with silent runtime detection + prompt input + Send. Replaces the old "Open a war room" CTA that launched CreateAgentWizard.
+- [x] **Path A: chat threads → Sessions feed UNION** (`82a76b0`) — `list_sessions_full` UNIONs `chat_threads` as a fourth `rowKind="chat"`. New 🗨 chat card variant + read-only `ChatThreadDetailView`. One inbox for every conversation type, no schema migration.
+- [x] **Path B: bottom-pane multi-launcher** (`cd3b11b`) — PromptBar's "+ New conversation" → 3-option dropdown: Quick chat (stays in pane) / Multi-turn session (Sessions tab + NewSessionModal) / War room (FirstChatWizard). `useUiStore.openNewSession()` cross-cutting flag.
+- [x] **Copy normalization round 1** (`00bc56b`) — "war-room" → "war room" hyphenation cleanup, Sessions tab description rewrite, prompt + i18n coverage in en/pt/es.
+- [x] **Copy normalization round 2** (`a9deb0d`) — empty-state CTA points to bottom-pane "+ New" menu, lifecycle footer reads cleanly, PromptBar input placeholder is now dynamic: `"Ask {{runtime}} anything…"`.
+
+**Elegance push #1 — Single runtime registry** (`4cc89de`):
+- New `apps/desktop/src/lib/runtimes.ts` — canonical `RUNTIME_REGISTRY` with `{label, icon, hex, tw, kind}` per runtime, `RuntimeId` type, helpers.
+- Replaced 10× in-component RUNTIME_COLORS duplicates with imports of `RUNTIME_HEX_COLORS` (workspace canvas, analytics, etc.).
+- Fixed stale `AgentRuntime` type (`"claude" | "codex" | "openclaw" | "hermes"` → re-export of `RuntimeId` covering all 10 runtimes).
+- PromptBar's `RUNTIME_OPTIONS` picker now derived from registry — every runtime offered at startup, live availability disables the not-ready ones.
+
+**Elegance push #2 — SessionsList.tsx split** (`a52262b`):
+- 2493 → 1379 lines (-44%) by extracting `SessionTranscriptView.tsx` (884 lines) + `NewSessionModal.tsx` (168 lines).
+- Shared types + helpers (`SessionTranscript`, `runtimeDisplay`, `inferCoordinatorTarget`, `NEW_SESSION_RUNTIMES`, etc.) consolidated into `_helpers.ts`.
+
+**Elegance push #3 — Commands.rs split (12 PRs shipped, 12 remaining):**
+- [x] PR 2 — `models.rs` (4 cmds) (`126eb39`)
+- [x] PR 3 — `usage_billing.rs` (4 cmds) (`a3df24a`)
+- [x] PR 4 — `knowledge.rs` (4 cmds + RAG pipeline) (`15e2d35`)
+- [x] PR 5 — `posts.rs` (5 cmds) (`a61bf16`)
+- [x] PR 6 — `analytics.rs` (4 cmds) (`b4ebabd`)
+- [x] PR 7 — `files_paths.rs` (3 cmds) (`ec6c6bb`)
+- [x] PR 8 — `onboarding.rs` (1 cmd + structs) (`2012e11`)
+- [x] PR 11 — `context.rs` (5 cmds) (`1f2c912`)
+- [x] PR 12 — `workflows.rs` (5 cmds) (`bb425bb`)
+- [x] PR 13 — `workflow_webhooks.rs` (7 cmds) (`086dfce`)
+- [x] PR 14 — `notifications.rs` (6 cmds) (`77b2354`)
+- [x] PR 15 — `chat_threads.rs` (8 cmds) (`c5ad1a6`)
+- [ ] PR 9 — `security_policies.rs` — **deferred** (helper-coupling: `parse_approval_policies` is shared with `get_project_bundle`; revisit after agents extracts)
+- [ ] PR 10 — `external_deploy.rs` — **deferred** (helper-coupling: `get_project_bundle` depends on 10+ helpers with 18-30 callsites each)
+- [ ] PR 16 — `projects.rs` (7 cmds) — next session
+- [ ] PR 17 — `agent_hooks_evals.rs` (~5 cmds) — next session
+- [ ] PR 18 — `live_health.rs` (7 cmds)
+- [ ] PR 19 — `events_activity.rs` (7 cmds)
+- [ ] PR 20 — `recipes.rs` (7 cmds)
+- [ ] PR 21 — `auth_cloud.rs` (7 cmds)
+- [ ] PR 22 — `execution_logs.rs` (7 cmds)
+- [ ] PR 23 — `runtimes.rs` (9 cmds)
+- [ ] PR 24 — `settings_config.rs` (13 cmds)
+- [ ] PR 25 — `secrets_env.rs` (15 cmds)
+- [ ] PR 26 — `cron.rs` (17 cmds)
+- [ ] PR 27 — `skills_mcps.rs` (23 cmds)
+- [ ] PR 28 — `agents.rs` (~50 cmds) — the elephant; do last
+- [ ] PR 29 — cleanup (`helpers.rs` finalization)
+
+`apps/desktop/src-tauri/src/commands/mod.rs` shrank from **17,270 → 14,012 lines** (-3,258, -19%). Still big but moving.
+
+### Held for war-room consultation (do NOT touch without group sign-off)
+
+1. **Path B Stage 2: `chat_threads` → `sessions` schema migration.** Path A's read-side UNION is in place; the full storage unification needs schema + backfill + PromptBar refactor. War-room before scoping.
+2. **`execution_logs` table audit.** That table gained 5 columns in the last month (session_id, parent_run_id, war_room_id, war_room_round, project_id) with 3 more coming in v2.6 PR-A (dispatch_kind, billing_surface, provider_session_id). Worth war-rooming whether it should split before more columns land.
+
+### Status across the four elegance fronts
+
+| Front | Start (morning) | End (today) | Bar (85%) |
+|---|---|---|---|
+| **Surface (user-visible)** | 85% | ~92% | ✓ above |
+| **Runtime type system** | 40% | ~92% | ✓ above |
+| **Frontend organization** | — | ~72% | ⚠ — PromptBar still 1500 lines, 4 card variants still inline in SessionsList |
+| **Backend organization** | 30% | ~50% | ⚠ — 12 more commands.rs PRs to ship |
+| **Database schema** | 50% | 50% | ✗ — Path B Stage 2 + execution_logs audit are war-room-worthy |
+
+### What dogfooded green today
+
+- Runtime registry: PromptBar picker shows all 10 runtimes; sends are color-coded correctly; cards render runtime badges from one source.
+- SessionsList: chat threads appear as 🗨 cards; clicking opens read-only transcript; new conversations are launchable from the bottom-pane "+ New" dropdown.
+- Build matrix: `cargo check rc=0`, `vite build rc=0`, `vitest 20/20` after every commit.
 
 ---
 

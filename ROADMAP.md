@@ -270,6 +270,31 @@ Four bugs Will surfaced in the Insights panel; all four about the panel reportin
 
 Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
 
+### v2.7.5 — Consolidation arc + elegance day (Released 2026-05-18)
+
+The day was a single-themed push: drive every layer of the codebase to **85-90% elegance** across surface, frontend organization, backend organization, runtime type system, and database schema. Driven by Will's observation that surface polish had outpaced the foundation, and that the foundation needed to catch up before more features land.
+
+**User-visible arc — one inbox, one launcher:**
+- **First-Chat Wizard** (PR-C). Home CTA "Start a war room" → single-screen modal with silent runtime detection + prompt + Send. Replaces the previous CreateAgentWizard launch on that CTA.
+- **Path A — chat threads UNION into Sessions feed.** `list_sessions_full` now reads chat threads alongside sessions / single-runs / war-rooms. One inbox. New 🗨 chat card + read-only `ChatThreadDetailView`. No schema migration.
+- **Path B — bottom-pane multi-launcher.** PromptBar's "+ New conversation" becomes a 3-option dropdown: Quick chat (stays in pane) / Multi-turn session (Sessions tab + NewSessionModal) / War room (FirstChatWizard).
+- **Copy normalization (×2 rounds).** "war-room" → "war room" hyphenation across en/pt/es i18n + components. Sessions tab description rewrite. PromptBar input placeholder now dynamic: `"Ask {{runtime}} anything…"` instead of hardcoded "Claude."
+
+**Frontend foundation:**
+- **Single runtime registry** (`apps/desktop/src/lib/runtimes.ts`). Replaces 10× in-component `RUNTIME_COLORS` duplicates + a stale 4-entry `AgentRuntime` type + a stale PromptBar `RUNTIME_OPTIONS` picker that silently dropped 6 of 10 runtimes. New `RUNTIME_REGISTRY` is the canonical map; helpers (`runtimeBadge`/`runtimeHex`/`runtimeLabel`/`runtimeIcon`) provide safe fallback for legacy values. Adding a runtime is now one entry.
+- **SessionsList.tsx split.** 2493 → 1379 lines (-44%) by extracting `SessionTranscriptView.tsx` (884 lines) and `NewSessionModal.tsx` (168 lines). Shared types/helpers (`SessionTranscript`, `runtimeDisplay`, `inferCoordinatorTarget`, `NEW_SESSION_RUNTIMES`) consolidated into `_helpers.ts`.
+
+**Backend foundation — commands.rs split (12 of 24 PRs shipped):**
+- PR 2 `models.rs` (4 cmds), PR 3 `usage_billing.rs` (4), PR 4 `knowledge.rs` (4 + full RAG pipeline), PR 5 `posts.rs` (5), PR 6 `analytics.rs` (4), PR 7 `files_paths.rs` (3), PR 8 `onboarding.rs` (1+structs), PR 11 `context.rs` (5), PR 12 `workflows.rs` (5), PR 13 `workflow_webhooks.rs` (7), PR 14 `notifications.rs` (6), PR 15 `chat_threads.rs` (8).
+- `apps/desktop/src-tauri/src/commands/mod.rs`: **17,270 → 14,012 lines** (-19%). 12 PRs remain.
+- PR 9 (`security_policies`) + PR 10 (`external_deploy`) deferred — both depend on cross-cutting helpers (`file_ref` 30 callsites, `collect_skills_for_project` 18 callsites, `parse_*` parsers) that need to migrate to their natural domains first. Revisit after the larger domain extractions land.
+
+**Held for war-room consultation (do NOT touch unilaterally):**
+- **Path B Stage 2** — `chat_threads` → `sessions` storage unification (schema + backfill + PromptBar refactor).
+- **`execution_logs` audit** — that table gained 5 columns this month with 3 more coming in v2.6 PR-A; worth war-rooming whether it splits before more columns land.
+
+Build matrix green throughout — `cargo check rc=0`, `vite build rc=0`, `vitest 20/20` after every commit. Full progress + status in `docs/CONTINUATION_PLAN.md` § "Elegance day — 2026-05-18".
+
 ### v2.6 — Universal multi-LLM observation tier (Planned, next milestone)
 
 Passive observation of native CLI sessions (Claude Code, Codex CLI, etc.) plus billing-surface tagging on every dispatch — under the war-room mission, this is the layer that lets you see what every LLM ran on this machine, not just what ATO dispatched. Plan locked 2026-05-14; full doc at `/Users/beatriznigri/.claude/plans/peaceful-strolling-kay.md`.
