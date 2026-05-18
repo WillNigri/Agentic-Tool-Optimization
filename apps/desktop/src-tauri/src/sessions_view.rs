@@ -758,6 +758,13 @@ pub struct SingleRunDetail {
     pub tokens_out: Option<i64>,
     pub cost_usd_estimated: Option<f64>,
     pub auth_mode: Option<String>,
+    /// PR 16 (2026-05-18) — war-room round (1-indexed) for rows that
+    /// participate in a multi-turn war-room. NULL for single-run
+    /// dispatches (which have no war_room_id) and for rows
+    /// pre-PR-16 (backfilled to 1 by the migration). The frontend's
+    /// WarRoomDetailView groups by this to render rounds as
+    /// stacked sections.
+    pub war_room_round: Option<i64>,
 }
 
 /// First-Chat Wizard (2026-05-18) — fire a war-room from the
@@ -783,11 +790,36 @@ pub struct SingleRunDetail {
 /// row with status="error", so the war-room card + drill-in view
 /// render the failure visibly rather than dropping the seat
 /// silently.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WarRoomDispatchResult {
+    pub war_room_id: String,
+    pub round: i64,
+}
+
+/// First-Chat Wizard + multi-round war-rooms (PR 16-PR-B,
+/// 2026-05-18). Fans out parallel dispatches across N runtimes
+/// sharing a war_room_id + round. Two modes:
+///
+/// 1. `war_room_id = None` → mints a new UUID, dispatches at
+///    round 1. This is the wizard's "start a war-room" entry.
+/// 2. `war_room_id = Some(uuid), round = Some(N)` → continues an
+///    existing war-room at round N. The CLI's
+///    build_war_room_history_prefix synthesizes the prior-rounds
+///    transcript on each seat's behalf before the LLM call.
+///
+/// Best-effort error handling: if a single seat fails (rate
+/// limit, decrypt error), the war-room still surfaces the other
+/// replies. Failures land in execution_logs with status="error"
+/// and surface in the war-room detail view + the next round's
+/// synthesis (per Will: humans need to understand what happened).
 #[tauri::command]
 pub fn dispatch_war_room(
     runtimes: Vec<String>,
     prompt: String,
-) -> Result<String, String> {
+    war_room_id: Option<String>,
+    round: Option<i64>,
+) -> Result<WarRoomDispatchResult, String> {
     if runtimes.is_empty() {
         return Err("dispatch_war_room: at least one runtime required".to_string());
     }
@@ -795,7 +827,11 @@ pub fn dispatch_war_room(
         return Err("dispatch_war_room: prompt cannot be empty".to_string());
     }
     let bin = resolve_ato_binary()?;
-    let war_room_id = uuid::Uuid::new_v4().to_string();
+    let war_room_id = war_room_id
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let round = round.unwrap_or(1);
+    let round_str = round.to_string();
     // Spawn all N dispatches in parallel. wait() on each child
     // collects exit status without serializing them. Stdout is
     // captured (not piped to terminal) since the CLI's --quiet
@@ -810,6 +846,8 @@ pub fn dispatch_war_room(
             &prompt,
             "--war-room-id",
             &war_room_id,
+            "--war-room-round",
+            &round_str,
             "--quiet",
         ]);
         cmd.stdout(Stdio::piped());
@@ -851,7 +889,10 @@ pub fn dispatch_war_room(
             }
         }
     }
-    Ok(war_room_id)
+    Ok(WarRoomDispatchResult {
+        war_room_id,
+        round,
+    })
 }
 
 /// PR 14c (2026-05-18) — war-room drill-in. Returns the
@@ -869,10 +910,11 @@ pub fn get_war_room_constituents(
     let mut stmt = conn
         .prepare(
             "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
-                    created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode
+                    created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
+                    war_room_round
                FROM execution_logs
               WHERE war_room_id = ?1
-              ORDER BY created_at ASC",
+              ORDER BY war_room_round ASC, created_at ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows: Vec<SingleRunDetail> = stmt
@@ -892,6 +934,7 @@ pub fn get_war_room_constituents(
                 tokens_out: r.get(11)?,
                 cost_usd_estimated: r.get(12)?,
                 auth_mode: r.get(13)?,
+                war_room_round: r.get(14)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -915,7 +958,8 @@ pub fn get_single_run_detail(
     // pulling session-turn data into the wrong detail view.
     conn.query_row(
         "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
-                created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode
+                created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
+                war_room_round
            FROM execution_logs
           WHERE id = ?1 AND session_id IS NULL",
         [&log_id],
@@ -935,6 +979,7 @@ pub fn get_single_run_detail(
                 tokens_out: r.get(11)?,
                 cost_usd_estimated: r.get(12)?,
                 auth_mode: r.get(13)?,
+                war_room_round: r.get(14)?,
             })
         },
     )

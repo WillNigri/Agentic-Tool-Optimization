@@ -13,8 +13,9 @@
 // difference — see the war-room vs session table in the PR 14
 // commit message.
 
-import { Loader2 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { Loader2, Send } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { cn } from "@/lib/utils";
@@ -26,6 +27,11 @@ import {
 } from "./_helpers";
 import type { SingleRunDetail } from "./SingleRunDetailView";
 
+interface WarRoomDispatchResult {
+  warRoomId: string;
+  round: number;
+}
+
 export default function WarRoomDetailView({
   warRoomId,
   onBack,
@@ -33,11 +39,46 @@ export default function WarRoomDetailView({
   warRoomId: string;
   onBack: () => void;
 }) {
+  const qc = useQueryClient();
   const q = useQuery<SingleRunDetail[]>({
     queryKey: ["war-room-constituents", warRoomId],
     queryFn: () =>
       invoke<SingleRunDetail[]>("get_war_room_constituents", { warRoomId }),
     staleTime: 60_000,
+  });
+  // PR 16-PR-B — "Send next round" input state. Disabled while a
+  // round is in flight (the parallel dispatches block this Tauri
+  // call until all seats return, so the loading flag tracks the
+  // user's intent reliably).
+  const [nextRoundPrompt, setNextRoundPrompt] = useState("");
+  const sendNextRound = useMutation({
+    mutationFn: async ({
+      runtimes,
+      prompt,
+      round,
+    }: {
+      runtimes: string[];
+      prompt: string;
+      round: number;
+    }) => {
+      return await invoke<WarRoomDispatchResult>("dispatch_war_room", {
+        runtimes,
+        prompt,
+        warRoomId,
+        round,
+      });
+    },
+    onSuccess: async () => {
+      // Re-fetch constituents so the new round's cards appear.
+      // The list_sessions_full cache also gets invalidated so the
+      // war-room card on Sessions shows the new participant count
+      // and last-used timestamp.
+      await qc.invalidateQueries({
+        queryKey: ["war-room-constituents", warRoomId],
+      });
+      await qc.invalidateQueries({ queryKey: ["sessions-full"] });
+      setNextRoundPrompt("");
+    },
   });
 
   if (q.isLoading) {
@@ -120,26 +161,64 @@ export default function WarRoomDetailView({
           </span>
         </div>
         <p className="text-[11px] text-cs-muted">
-          Each card below is one seat's independent reply — no seat saw
-          another's response (R1-parallel methodology). For a back-and-forth
-          conversation, see Sessions.
+          Within a round, every seat fires in parallel and doesn't see the
+          others' replies. Between rounds, every seat sees the FULL transcript
+          of prior rounds before the next dispatch. For a sequential back-and-
+          forth (each turn anchored on the prior), see Sessions instead.
         </p>
       </div>
 
-      {/* One card per constituent dispatch. */}
-      <div className="space-y-3">
-        {rows.map((d) => {
-          const isErr = d.status !== "success";
-          return (
-            <div
-              key={d.id}
-              className={cn(
-                "rounded-lg border p-4 space-y-3",
-                isErr
-                  ? "border-cs-danger/40 bg-cs-card/40"
-                  : "border-cs-border/60 bg-cs-card/60",
-              )}
-            >
+      {/* PR 16-PR-B — group by round. Rows are already sorted by
+          (war_room_round ASC, created_at ASC) on the Tauri side. */}
+      {(() => {
+        // Build round buckets. NULL warRoomRound collapses to 1
+        // (matches the backfill migration).
+        const rounds: Map<number, SingleRunDetail[]> = new Map();
+        for (const r of rows) {
+          const idx = r.warRoomRound ?? 1;
+          if (!rounds.has(idx)) rounds.set(idx, []);
+          rounds.get(idx)!.push(r);
+        }
+        const sortedRoundKeys = Array.from(rounds.keys()).sort((a, b) => a - b);
+        const latestRound = sortedRoundKeys.at(-1) ?? 1;
+        const nextRound = latestRound + 1;
+        // Distinct (runtime, agent_slug) pairs from THE LATEST
+        // round drive the next-round dispatch. Per Will's spec
+        // war-room seats don't change mid-conversation — same seats
+        // re-fire each round.
+        const latestSeats = rounds.get(latestRound) ?? [];
+        const nextRoundRuntimes = latestSeats.map((r) => r.runtime);
+        return (
+          <>
+            {sortedRoundKeys.map((roundIdx) => {
+              const seats = rounds.get(roundIdx)!;
+              return (
+                <section key={roundIdx} className="space-y-3">
+                  <h3 className="text-[10px] uppercase tracking-wider text-cs-muted font-bold flex items-center gap-2">
+                    <span className="px-1.5 py-0.5 rounded bg-cs-accent/10 text-cs-accent">
+                      Round {roundIdx}
+                    </span>
+                    <span className="opacity-60">
+                      {seats.length} seat{seats.length !== 1 ? "s" : ""} —
+                      fired in parallel
+                      {roundIdx > 1
+                        ? "; each seat saw every prior round's replies"
+                        : ""}
+                    </span>
+                  </h3>
+                  <div className="space-y-3">
+                    {seats.map((d) => {
+                      const isErr = d.status !== "success";
+                      return (
+                        <div
+                          key={d.id}
+                          className={cn(
+                            "rounded-lg border p-4 space-y-3",
+                            isErr
+                              ? "border-cs-danger/40 bg-cs-card/40"
+                              : "border-cs-border/60 bg-cs-card/60",
+                          )}
+                        >
               <div className="flex flex-wrap items-center gap-3">
                 <span className={runtimeBadge(d.runtime)}>{d.runtime}</span>
                 {d.agentSlug && (
@@ -213,18 +292,86 @@ export default function WarRoomDetailView({
 
               {d.errorMessage && (
                 <div className="rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-3">
-                  <div className="text-[10px] uppercase tracking-wider text-cs-danger font-medium mb-2">
-                    Error
+                          <div className="text-[10px] uppercase tracking-wider text-cs-danger font-medium mb-2">
+                            Error
+                          </div>
+                          <pre className="text-xs text-cs-text whitespace-pre-wrap break-words font-mono">
+                            {d.errorMessage}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  );
+                    })}
                   </div>
-                  <pre className="text-xs text-cs-text whitespace-pre-wrap break-words font-mono">
-                    {d.errorMessage}
-                  </pre>
+                </section>
+              );
+            })}
+
+            {/* PR 16-PR-B — "Send round N+1" input. Same seats
+                re-fire in parallel; each will see the full
+                transcript of rounds 1..N when forming its R_(N+1)
+                reply. Disabled while a round is in flight. */}
+            {nextRoundRuntimes.length > 0 && (
+              <section className="rounded-lg border border-cs-accent/40 bg-cs-card p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wider text-cs-accent font-bold">
+                    Send round {nextRound}
+                  </span>
+                  <span className="text-[10px] text-cs-muted">
+                    same {nextRoundRuntimes.length} seat
+                    {nextRoundRuntimes.length !== 1 ? "s" : ""} re-fire in
+                    parallel; each will see rounds 1–{latestRound} replies
+                  </span>
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+                <textarea
+                  value={nextRoundPrompt}
+                  onChange={(e) => setNextRoundPrompt(e.target.value)}
+                  placeholder={`Round ${nextRound} prompt — what do you want each seat to react to given the prior rounds?`}
+                  rows={3}
+                  className="w-full bg-cs-bg-raised border border-cs-border rounded-md p-2 text-xs font-mono focus:outline-none focus:border-cs-accent resize-none"
+                  disabled={sendNextRound.isPending}
+                />
+                {sendNextRound.isError && (
+                  <div className="text-xs text-cs-danger">
+                    {sendNextRound.error instanceof Error
+                      ? sendNextRound.error.message
+                      : String(sendNextRound.error)}
+                  </div>
+                )}
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      sendNextRound.mutate({
+                        runtimes: nextRoundRuntimes,
+                        prompt: nextRoundPrompt.trim(),
+                        round: nextRound,
+                      })
+                    }
+                    disabled={
+                      sendNextRound.isPending || nextRoundPrompt.trim() === ""
+                    }
+                    className="inline-flex items-center gap-2 rounded-md bg-cs-accent text-cs-bg px-3 py-1.5 text-xs font-medium hover:opacity-90 disabled:opacity-40"
+                  >
+                    {sendNextRound.isPending ? (
+                      <>
+                        <Loader2 size={12} className="animate-spin" />
+                        Firing round {nextRound}…
+                      </>
+                    ) : (
+                      <>
+                        <Send size={12} />
+                        Send round {nextRound}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </section>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

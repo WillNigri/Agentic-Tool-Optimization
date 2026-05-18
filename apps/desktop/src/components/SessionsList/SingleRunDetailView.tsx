@@ -39,6 +39,11 @@ export interface SingleRunDetail {
   tokensOut: number | null;
   costUsdEstimated: number | null;
   authMode: string | null;
+  // PR 16 (2026-05-18) — war-room round (1-indexed) for rows that
+  // participate in a multi-turn war-room. NULL on single-run rows
+  // and on pre-PR-16 backfilled rows (which all became round 1).
+  // WarRoomDetailView groups by this.
+  warRoomRound: number | null;
 }
 
 export default function SingleRunDetailView({
