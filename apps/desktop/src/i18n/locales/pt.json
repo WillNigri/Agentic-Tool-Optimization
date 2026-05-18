@@ -72,7 +72,7 @@
     "heroTitle": "Sua sala de guerra local para humanos e LLMs.",
     "heroSubtitle": "Decidam juntos, chamem ferramentas reais, saiam com um audit trail assinado. Coloque seus LLMs na mesma conversa — Claude, GPT, Gemini, Grok, MiniMax, e mais de 15 outros. Empurre de volta. Cite o repo. Tome a decisao.",
     "heroUseCases": "Debates estrategicos · Pre-mortems · Decisoes de arquitetura · Code review · Auditorias de seguranca",
-    "startGuided": "Abrir uma war room",
+    "startGuided": "Iniciar uma war room",
     "startQuick": "Criar um agente especialista",
     "quickHint": "Persona em cima de qualquer runtime — @security-specialist no Gemini, @perf-reviewer no MiniMax, etc. Coloque eles numa war room.",
     "recentAgents": "Agentes recentes",
@@ -290,7 +290,14 @@
     "placeholder": "Pergunte via MCP — contexto, skills, uso, servidores... (simulado)",
     "placeholderReal": "Pergunte ao Claude — usa sua assinatura do Claude Code",
     "thinking": "Consultando via MCP...",
-    "clear": "Limpar historico"
+    "clear": "Limpar historico",
+    "startNew": "Iniciar nova",
+    "newQuickChat": "Conversa rapida",
+    "newQuickChatTitle": "Conversa um-a-um neste painel. Usa o runtime/agente selecionado; pode trocar de runtime por mensagem.",
+    "newSession": "Sessao multi-turno",
+    "newSessionTitle": "Sessao multi-turno com ciclo de vida (aberta / fechada / resumo do coordenador). Abre na aba Sessoes.",
+    "newWarRoom": "War room",
+    "newWarRoomTitle": "Dispara o mesmo prompt para todos os LLMs conectados em paralelo. Abre o First-Chat Wizard."
   },
   "skills": {
     "title": "Gerenciador de Skills",

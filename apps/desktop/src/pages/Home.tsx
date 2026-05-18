@@ -201,7 +201,7 @@ export default function Home({
               onClick={openFirstChat}
             >
               <Sparkles size={16} />
-              {t("home.startGuided", "Start a war-room")}
+              {t("home.startGuided", "Start a war room")}
             </button>
             <button
               type="button"

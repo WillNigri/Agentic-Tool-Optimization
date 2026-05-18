@@ -20,10 +20,13 @@ describe("Home (T1+T9)", () => {
     // v2.4.6 positioning rewrite — the hero CTAs moved from
     // "Start with chat" / "Quick setup" (v1.4.0) to the war-room
     // framing. PR-C (2026-05-18) flipped the primary CTA's verb from
-    // "Open a war room" to "Start a war-room" when the click target
-    // moved off CreateAgentWizard onto FirstChatWizard.
+    // "Open a war room" to "Start a war room" when the click target
+    // moved off CreateAgentWizard onto FirstChatWizard. Elegance-pass
+    // (2026-05-18) normalized "war-room" → "war room" for standalone
+    // noun usage; the hyphenated compound-modifier form
+    // ("war-room dispatch") stays where applicable.
     renderHome();
-    expect(screen.getByRole("button", { name: /Start a war-room/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Start a war room/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Build a specialist agent/i })).toBeInTheDocument();
   });
 

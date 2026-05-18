@@ -559,8 +559,9 @@ export default function SessionsList() {
             Sessions
           </h2>
           <p className="text-sm text-cs-muted mt-1">
-            Sticky multi-turn conversations. Cross-runtime sessions (Phase 6 Slice B) show every
-            runtime that contributed. Click a session to read or continue.
+            One inbox for every conversation — multi-turn sessions, single-shot
+            runs, war rooms, and bottom-pane chats. Click any card to read or
+            continue. Start new ones from the bottom pane.
           </p>
         </div>
         <button
@@ -1029,7 +1030,7 @@ export default function SessionsList() {
                     <span
                       aria-label="war room"
                       className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-accent/15 text-cs-accent"
-                      title={`War-room ${s.id.slice(0, 8)} — ${participantCount} parallel seats`}
+                      title={`War room ${s.id.slice(0, 8)} — ${participantCount} parallel seats`}
                     >
                       ⚔ war room
                     </span>

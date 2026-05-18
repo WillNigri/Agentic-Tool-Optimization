@@ -195,7 +195,7 @@ export default function FirstChatWizard({
                 id="first-chat-title"
                 className="text-base font-semibold text-cs-text"
               >
-                {t("firstChat.title", "Start a war-room")}
+                {t("firstChat.title", "Start a war room")}
               </h2>
               <p className="mt-0.5 text-xs text-cs-muted">
                 {t(
@@ -254,7 +254,7 @@ export default function FirstChatWizard({
             <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 px-3 py-2 text-xs text-cs-text">
               {fire.error instanceof Error
                 ? fire.error.message
-                : t("firstChat.dispatchError", "Could not start war-room.")}
+                : t("firstChat.dispatchError", "Could not start war room.")}
             </div>
           )}
         </div>
@@ -329,7 +329,7 @@ function RuntimeCounter({
         <span>
           {t(
             "firstChat.noRuntimes",
-            "No LLMs connected. Add a CLI subscription or API key to start a war-room."
+            "No LLMs connected. Add a CLI subscription or API key to start a war room."
           )}
         </span>
         <button

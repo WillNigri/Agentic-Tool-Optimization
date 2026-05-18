@@ -79,7 +79,7 @@
     "heroTitle": "Your local war room for humans and LLMs.",
     "heroSubtitle": "Decide together, call real tools, walk out with a signed audit trail. Drop in any of your LLMs — Claude, GPT, Gemini, Grok, MiniMax, and 15+ more. Push back on them. Cite the repo. Ship the decision.",
     "heroUseCases": "Strategy debates · Pre-mortems · Architecture decisions · Code review · Security audits",
-    "startGuided": "Start a war-room",
+    "startGuided": "Start a war room",
     "startQuick": "Build a specialist agent",
     "quickHint": "Persona on top of any runtime — @security-specialist on Gemini, @perf-reviewer on MiniMax, etc. Drop them into a war room session.",
     "recentAgents": "Recent agents",
@@ -348,7 +348,14 @@
     "placeholder": "Ask via MCP — context, skills, usage, servers... (simulated)",
     "placeholderReal": "Ask Claude anything — uses your Claude Code subscription",
     "thinking": "Querying via MCP...",
-    "clear": "Clear history"
+    "clear": "Clear history",
+    "startNew": "Start new",
+    "newQuickChat": "Quick chat",
+    "newQuickChatTitle": "One-on-one chat in this pane. Picks the runtime/agent currently selected; can hop runtimes per message.",
+    "newSession": "Multi-turn session",
+    "newSessionTitle": "Multi-turn session with lifecycle (open / close / coordinator summary). Opens in the Sessions tab.",
+    "newWarRoom": "War room",
+    "newWarRoomTitle": "Fire the same prompt to every connected LLM in parallel. Opens the First-Chat Wizard."
   },
   "skills": {
     "title": "Skills Manager",

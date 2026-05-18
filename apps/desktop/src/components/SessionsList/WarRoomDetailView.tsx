@@ -98,7 +98,7 @@ export default function WarRoomDetailView({
           ← Back to Sessions
         </button>
         <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 p-4 text-sm text-cs-text">
-          Could not load war-room
+          Could not load war room
           {q.error instanceof Error ? `: ${q.error.message}` : ""}.
         </div>
       </div>
@@ -136,7 +136,7 @@ export default function WarRoomDetailView({
         <div className="flex flex-wrap items-center gap-3">
           <span
             className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-accent/15 text-cs-accent"
-            title={`War-room ${warRoomId.slice(0, 8)}`}
+            title={`War room ${warRoomId.slice(0, 8)}`}
           >
             ⚔ war room
           </span>
