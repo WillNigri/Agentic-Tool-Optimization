@@ -11,7 +11,9 @@
 
 pub mod shared;
 pub mod models;
+pub mod usage_billing;
 pub use models::*;
+pub use usage_billing::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -1742,30 +1744,8 @@ pub fn get_local_config() -> Result<Vec<LocalMcpServer>, String> {
     Ok(seen.into_values().collect())
 }
 
-#[tauri::command]
-pub fn get_local_usage() -> Result<UsageSummary, String> {
-    // Return zeros — real usage tracking would parse Claude's session logs
-    Ok(UsageSummary {
-        today: UsagePeriod { input_tokens: 0, output_tokens: 0, cost_cents: 0 },
-        week: UsagePeriod { input_tokens: 0, output_tokens: 0, cost_cents: 0 },
-        month: UsagePeriod { input_tokens: 0, output_tokens: 0, cost_cents: 0 },
-    })
-}
-
-#[tauri::command]
-pub fn get_daily_usage(_days: u32) -> Result<Vec<DailyUsage>, String> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub fn get_burn_rate() -> Result<BurnRate, String> {
-    Ok(BurnRate {
-        tokens_per_hour: 0,
-        cost_per_hour: 0.0,
-        estimated_hours_to_limit: None,
-        limit: Some(200000),
-    })
-}
+// `get_local_usage` / `get_daily_usage` / `get_burn_rate` moved to
+// commands/usage_billing.rs (PR 3 of the commands.rs split).
 
 #[tauri::command]
 pub fn get_config_files() -> Result<Vec<ConfigFile>, String> {
@@ -4146,20 +4126,8 @@ pub fn compute_regressions_local(
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn compute_cost_recommendations_local(
-    days: Option<i64>,
-    min_runs: Option<i64>,
-) -> Result<crate::local_insights::LocalCostRecsResult, String> {
-    let db_path = crate::get_db_path();
-    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-    crate::local_insights::compute_cost_recommendations_local(
-        &conn,
-        days.unwrap_or(30),
-        min_runs.unwrap_or(10),
-    )
-    .map_err(|e| e.to_string())
-}
+// `compute_cost_recommendations_local` moved to commands/usage_billing.rs
+// (PR 3 of the commands.rs split).
 
 // v2.6 PR-A — billing-surface summary feeding both the "Last 7 days
 // at a glance" header card and the by-surface group-by toggle in
