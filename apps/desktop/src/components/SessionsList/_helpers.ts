@@ -57,3 +57,140 @@ export function personaDisplay(slug: string): string {
 export function personaBadge(): string {
   return "px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-accent/10 text-cs-accent border border-cs-accent/20";
 }
+
+// 2026-05-18 — elegance push #2. The following types + helpers used to
+// live inline in SessionsList.tsx; moving them here so SessionTranscriptView
+// and NewSessionModal can also import them without re-declaring or
+// reaching back into the parent.
+
+export interface SessionTurn {
+  turnIndex: number;
+  role: string;
+  text: string;
+  runtime: string;
+  createdAt: string;
+  // 2026-05-16 — null for generalist dispatches, slug otherwise.
+  agentSlug: string | null;
+}
+
+// 2026-05-16 — cost-receipts panel data shape, mirrors the backend
+// SessionCostBreakdown / SessionCostRow.
+export interface SessionCostRow {
+  runtime: string;
+  agentSlug: string | null;
+  totalTurns: number;
+  successfulTurns: number;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  totalDurationMs: number | null;
+  costNullTurns: number;
+  totalCostUsd: number;
+  // 2026-05-16 — from execution_logs.auth_mode (authoritative per-row)
+  // with a runtime-string fallback for pre-auth-mode rows.
+  billingMode: string; // "subscription" | "api_key" | "local"
+}
+
+export interface SessionCostBreakdown {
+  sessionId: string;
+  totalCostUsd: number;
+  totalTurns: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  totalDurationMs: number;
+  rows: SessionCostRow[];
+}
+
+export interface SessionTranscript {
+  id: string;
+  runtime: string;
+  agentSlug: string | null;
+  title: string | null;
+  turns: SessionTurn[];
+  status: "open" | "closed";
+  closedAt: string | null;
+  autoTitle: string | null;
+  summary: string | null;
+  tags: string[];
+  projectId: string | null;
+}
+
+export interface CloseSessionResult {
+  id: string;
+  status: string;
+  autoTitle: string | null;
+  summary: string | null;
+  tags: string[];
+  projectId: string | null;
+  coordinatorRuntime: string;
+  coordinatorModel: string | null;
+  durationMs: number;
+}
+
+// Pretty-name lookup for runtimes. Used in chat-bubble sender labels
+// where "google" or "minimax" alone is opaque. Pairs with the model
+// when known (e.g. "Google AI · Gemini 2.5 Flash"). Falls back to the
+// capitalized runtime slug for unknown values.
+//
+// Different from `runtimeLabel(rt)` in lib/runtimes.ts — the registry
+// label is the SHORT form for badges ("Claude", "Codex"); this is the
+// LONG form for chat-bubble sender lines ("Claude", "OpenAI Codex").
+// Keeping both is intentional — badges and sender labels have
+// different density constraints.
+const RUNTIME_DISPLAY: Record<string, string> = {
+  claude: "Claude",
+  codex: "OpenAI Codex",
+  gemini: "Google Gemini",
+  google: "Google Gemini",
+  hermes: "Hermes",
+  openclaw: "OpenClaw",
+  minimax: "MiniMax",
+  grok: "xAI Grok",
+  deepseek: "DeepSeek",
+  qwen: "Qwen",
+  openrouter: "OpenRouter",
+  anthropic: "Anthropic",
+};
+
+export function runtimeDisplay(rt: string): string {
+  return RUNTIME_DISPLAY[rt] ?? rt.replace(/^[a-z]/, (c) => c.toUpperCase());
+}
+
+// Heuristic to detect when a `user`-role turn was authored by the
+// `ato review` orchestrator (or another scripted dispatch) versus a
+// human-typed prompt. The orchestrator's prompts have a predictable
+// opener — "# Code review request for `<runtime>`" or "<runtime> —
+// consensus round." — that we lean on to flip the rendered sender from
+// "You" to "ATO Coordinator → @<addressee>". Best-effort: if neither
+// pattern matches, treat as human input. (No false positives observed
+// for human prose in 2026-05-15 dogfooding, but the regex is narrow
+// enough to fix if one shows up.)
+export function inferCoordinatorTarget(text: string): string | null {
+  const m1 = text.match(
+    /^\s*#\s*Code review request for\s+`([a-z][a-z0-9_-]*)`/i
+  );
+  if (m1) return m1[1];
+  const m2 = text.match(
+    /^\s*([a-z][a-z0-9_-]*)\s+—\s+consensus round/i
+  );
+  if (m2) return m2[1];
+  return null;
+}
+
+// Two-letter avatar from the speaker label. "MiniMax" → "Mi",
+// "Google Gemini" → "GG", "ATO Coordinator" → "AC". Easier to scan
+// in a chat list than a generic robot icon.
+export function avatarInitials(label: string): string {
+  const words = label.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  return label.slice(0, 2).toUpperCase();
+}
+
+// Runtimes offered in the New Session / Continue dropdowns. Mirrors
+// the registry the CLI's dispatch path resolves through (CLI runtimes
+// + the api_providers crate). Derived from the canonical runtime
+// registry rather than hand-maintained — adding a runtime to
+// lib/runtimes.ts populates this for free.
+import { RUNTIME_IDS } from "@/lib/runtimes";
+export const NEW_SESSION_RUNTIMES: string[] = RUNTIME_IDS as unknown as string[];
