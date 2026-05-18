@@ -587,13 +587,34 @@ jobs:
   # with `repo` scope on the tap repo to enable this step. Without that
   # secret the step is allowed to fail without breaking the release —
   # binaries + latest.json upload still succeed.
+  # Twice in a row (v2.7.3, v2.7.4) the tap got sha256s that didn't
+  # match the live release artifacts. Root cause: this job was
+  # parallel with `notarize-macos`. The notarize job downloads the
+  # signed-but-not-notarized .dmg, runs `xcrun stapler staple`
+  # (MUTATES bytes), then re-uploads with --clobber. While that's
+  # in progress, this job's `sleep 30` + curl was sometimes fast
+  # enough to read the pre-staple bytes — committing a sha256
+  # that 2-3 minutes later no longer matched the artifact users
+  # would download.
+  #
+  # Fix: add `notarize-macos` to `needs:`. continue-on-error on
+  # notarize-macos still lets update-homebrew run even if
+  # notarization fails (degrades to signed-but-not-notarized
+  # release; Gatekeeper shows the soft "developer not verified"
+  # prompt, but the brew install hash check still passes).
   update-homebrew:
-    needs: build
+    needs: [build, notarize-macos]
     runs-on: macos-latest
     continue-on-error: true
     if: ${{ vars.PUBLISH_HOMEBREW != 'false' }}
     steps:
       - name: Wait for release assets
+        # 30s of belt-and-suspenders even though `needs:
+        # notarize-macos` already gates on the staple+re-upload
+        # completing. The notarize job uses `gh release upload
+        # --clobber` which goes through GitHub's S3 backend; tiny
+        # CDN propagation lag in the worst case is what this
+        # absorbs.
         run: sleep 30
 
       - name: Get SHA256 checksums
