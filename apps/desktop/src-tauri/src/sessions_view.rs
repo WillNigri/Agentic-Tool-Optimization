@@ -760,6 +760,52 @@ pub struct SingleRunDetail {
     pub auth_mode: Option<String>,
 }
 
+/// PR 14c (2026-05-18) — war-room drill-in. Returns the
+/// constituent execution_logs rows that share a war_room_id, each
+/// as a SingleRunDetail. Frontend renders them as a list of
+/// per-seat cards so the user can see what each seat actually
+/// said. Ordered by created_at ASC so the read order mirrors the
+/// dispatch order.
+#[tauri::command]
+pub fn get_war_room_constituents(
+    db: State<'_, DbState>,
+    war_room_id: String,
+) -> Result<Vec<SingleRunDetail>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
+                    created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode
+               FROM execution_logs
+              WHERE war_room_id = ?1
+              ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<SingleRunDetail> = stmt
+        .query_map([&war_room_id], |r| {
+            Ok(SingleRunDetail {
+                id: r.get(0)?,
+                runtime: r.get(1)?,
+                agent_slug: r.get(2)?,
+                model: r.get(3)?,
+                status: r.get(4)?,
+                prompt: r.get(5)?,
+                response: r.get(6)?,
+                error_message: r.get(7)?,
+                created_at: r.get(8)?,
+                duration_ms: r.get(9)?,
+                tokens_in: r.get(10)?,
+                tokens_out: r.get(11)?,
+                cost_usd_estimated: r.get(12)?,
+                auth_mode: r.get(13)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 #[tauri::command]
 pub fn get_single_run_detail(
     db: State<'_, DbState>,

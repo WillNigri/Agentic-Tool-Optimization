@@ -1719,6 +1719,9 @@ pub fn run() {
             // PR 5c — single-shot single-run dispatch detail (read of
             // execution_logs rows that don't have a session)
             sessions_view::get_single_run_detail,
+            // PR 14c — war-room drill-in: returns the participating
+            // execution_logs for a given war_room_id
+            sessions_view::get_war_room_constituents,
             // v2.3.43 — sessions GUI completion: New / Continue / Bridge
             sessions_view::create_session,
             sessions_view::dispatch_into_session,

@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import SingleRunDetailView from "./SingleRunDetailView";
+import WarRoomDetailView from "./WarRoomDetailView";
 import { useProjectStore } from "@/stores/useProjectStore";
 import {
   runtimeBadge,
@@ -352,7 +353,11 @@ function filterSessions(
 // session uuid and an execution_log uuid live in the same string
 // space, so the discriminator is required for routing. `null`
 // means the list is showing.
-type OpenSelection = { kind: "session" | "single_run"; id: string } | null;
+type OpenSelection =
+  | { kind: "session"; id: string }
+  | { kind: "single_run"; id: string }
+  | { kind: "war_room"; id: string }
+  | null;
 
 export default function SessionsList() {
   const [openSelection, setOpenSelection] = useState<OpenSelection>(null);
@@ -491,6 +496,14 @@ export default function SessionsList() {
     return (
       <SingleRunDetailView
         logId={openSelection.id}
+        onBack={() => setOpenSelection(null)}
+      />
+    );
+  }
+  if (openSelection?.kind === "war_room") {
+    return (
+      <WarRoomDetailView
+        warRoomId={openSelection.id}
         onBack={() => setOpenSelection(null)}
       />
     );
@@ -880,18 +893,18 @@ export default function SessionsList() {
             // PR 14b — war-room synthetic card. Groups N single-runs
             // sharing a war_room_id into one card. Renders before the
             // single-run branch so the type-narrowing flows cleanly.
-            // Card is intentionally NON-INTERACTIVE for v1 (display-
-            // only): a dedicated drill-in view that lists the
-            // participating single-runs is PR 14c. The user can still
-            // see each constituent dispatch as its own single-run
-            // card by switching to the "Single runs" kind filter.
+            // PR 14c — clickable: routes to WarRoomDetailView which
+            // lists the constituent dispatches per seat.
             if (s.rowKind === "war_room") {
               const participantCount = s.runtimesUsed.length;
               return (
-                <div
+                <button
                   key={s.id}
-                  title={`War room ${s.id.slice(0, 8)} — ${participantCount} parallel seats. PR 14c will add click-into to list participating dispatches.`}
-                  className="w-full text-left border rounded-lg p-4 border-cs-accent/30 bg-cs-card/70 cursor-default"
+                  onClick={() =>
+                    setOpenSelection({ kind: "war_room", id: s.id })
+                  }
+                  title={`War room ${s.id.slice(0, 8)} — open to see each seat's response.`}
+                  className="w-full text-left border rounded-lg p-4 transition-colors border-cs-accent/30 bg-cs-card/70 hover:border-cs-accent"
                 >
                   <div className="flex items-center gap-3 flex-wrap">
                     <span
@@ -950,7 +963,7 @@ export default function SessionsList() {
                       {formatTime(s.lastUsedAt)}
                     </span>
                   </div>
-                </div>
+                </button>
               );
             }
             if (s.rowKind === "single_run") {
