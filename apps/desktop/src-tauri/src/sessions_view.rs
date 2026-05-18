@@ -760,6 +760,100 @@ pub struct SingleRunDetail {
     pub auth_mode: Option<String>,
 }
 
+/// First-Chat Wizard (2026-05-18) — fire a war-room from the
+/// desktop in one Tauri call. The wizard hands us a prompt + the
+/// list of enabled runtimes; this command mints a war_room_id and
+/// spawns N parallel `ato dispatch <runtime> "<prompt>" --war-room-id
+/// <uuid> --quiet` subprocesses, waits for all to return, and
+/// reports the war_room_id back so the frontend can route to
+/// WarRoomDetailView.
+///
+/// Why a dedicated command instead of N invoke("prompt_agent")
+/// calls from the frontend: prompt_agent doesn't accept a
+/// war_room_id (and threading it through every existing dispatch
+/// path is a bigger refactor than this onboarding-flow shortcut
+/// warrants). The CLI already accepts --war-room-id (PR 14a), so
+/// shelling out to it inherits all the existing dispatch
+/// behavior — quotas, byok, signed-binary handling, cost
+/// recording — without re-implementing any of it.
+///
+/// Best-effort error handling: if a single seat fails (e.g., one
+/// runtime hits a rate limit), the war-room still surfaces the
+/// other replies. The CLI writes the failed seat's execution_log
+/// row with status="error", so the war-room card + drill-in view
+/// render the failure visibly rather than dropping the seat
+/// silently.
+#[tauri::command]
+pub fn dispatch_war_room(
+    runtimes: Vec<String>,
+    prompt: String,
+) -> Result<String, String> {
+    if runtimes.is_empty() {
+        return Err("dispatch_war_room: at least one runtime required".to_string());
+    }
+    if prompt.trim().is_empty() {
+        return Err("dispatch_war_room: prompt cannot be empty".to_string());
+    }
+    let bin = resolve_ato_binary()?;
+    let war_room_id = uuid::Uuid::new_v4().to_string();
+    // Spawn all N dispatches in parallel. wait() on each child
+    // collects exit status without serializing them. Stdout is
+    // captured (not piped to terminal) since the CLI's --quiet
+    // flag emits compact JSON we don't need to parse here — the
+    // execution_logs row is the source of truth.
+    let mut children: Vec<(String, std::process::Child)> = Vec::with_capacity(runtimes.len());
+    for runtime in &runtimes {
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "dispatch",
+            runtime,
+            &prompt,
+            "--war-room-id",
+            &war_room_id,
+            "--quiet",
+        ]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        match cmd.spawn() {
+            Ok(child) => children.push((runtime.clone(), child)),
+            Err(e) => {
+                // Don't fail the whole war-room if one runtime
+                // can't even spawn — the others will still land
+                // their replies. Frontend will see the missing
+                // seat by virtue of it not appearing in
+                // get_war_room_constituents.
+                eprintln!(
+                    "dispatch_war_room: spawn failed for runtime {}: {}",
+                    runtime, e
+                );
+            }
+        }
+    }
+    // Wait for all children. Any error here gets logged but
+    // doesn't fail the command — partial war-rooms are still
+    // valuable. The CLI itself records error rows when an
+    // individual dispatch fails (timeout, quota, etc.).
+    for (runtime, mut child) in children {
+        match child.wait() {
+            Ok(status) => {
+                if !status.success() {
+                    eprintln!(
+                        "dispatch_war_room: runtime {} exited non-zero ({:?})",
+                        runtime, status.code()
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "dispatch_war_room: wait failed for runtime {}: {}",
+                    runtime, e
+                );
+            }
+        }
+    }
+    Ok(war_room_id)
+}
+
 /// PR 14c (2026-05-18) — war-room drill-in. Returns the
 /// constituent execution_logs rows that share a war_room_id, each
 /// as a SingleRunDetail. Frontend renders them as a list of

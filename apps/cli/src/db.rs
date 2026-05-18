@@ -95,6 +95,29 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
           WHERE war_room_id IS NOT NULL",
         [],
     );
+    // PR 16 (2026-05-18) — war-rooms evolve to multi-turn. Mirror
+    // of the desktop migration so CLI-only users (no desktop ever
+    // opened) get the war_room_round column without hitting "no
+    // such column" on `tag_war_room` UPDATEs. See lib.rs for the
+    // full semantics; in one sentence: the prior single-round war-
+    // room becomes round 1 of an N-round sequence. Within a round
+    // seats fire in parallel and don't see each other; across
+    // rounds every seat sees the full transcript.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN war_room_round INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE execution_logs SET war_room_round = 1
+          WHERE war_room_id IS NOT NULL AND war_room_round IS NULL",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_war_room_round
+            ON execution_logs(war_room_id, war_room_round, created_at ASC)
+          WHERE war_room_id IS NOT NULL",
+        [],
+    );
 
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT

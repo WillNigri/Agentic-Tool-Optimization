@@ -1240,6 +1240,36 @@ pub fn init_database(conn: &Connection) {
           WHERE war_room_id IS NOT NULL",
         [],
     );
+    // PR 16 (2026-05-18) — war-rooms evolve from single-turn to
+    // multi-turn. The PR 14 model was "single round = one user
+    // prompt fans out to N seats, each replies independently."
+    // That's now just round 1 of an arbitrarily-long war-room.
+    //
+    // The rules still hold within each round: seats fire in
+    // parallel, none sees the others' replies before all return.
+    // Between rounds, every seat (including their own prior reply)
+    // sees the FULL transcript of all prior rounds. Round N's
+    // user prompt is the user adding a new question with all R1..
+    // R(N-1) replies as context.
+    //
+    // war_room_round is 1-indexed. NULL only on non-war-room rows.
+    // Backfill rule: pre-PR-16 war-room rows had no round column —
+    // they all become round 1 (the only round they had).
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN war_room_round INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE execution_logs SET war_room_round = 1
+          WHERE war_room_id IS NOT NULL AND war_room_round IS NULL",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_war_room_round
+            ON execution_logs(war_room_id, war_room_round, created_at ASC)
+          WHERE war_room_id IS NOT NULL",
+        [],
+    );
     // v2.3.32 Phase 6 Slice A.2 — unified turn history. Stateful
     // runtimes (claude --resume) and stateless API providers
     // (minimax etc.) both dual-write into this table on every
@@ -1722,6 +1752,9 @@ pub fn run() {
             // PR 14c — war-room drill-in: returns the participating
             // execution_logs for a given war_room_id
             sessions_view::get_war_room_constituents,
+            // First-Chat Wizard (2026-05-18) — fan-out parallel
+            // dispatches across N runtimes sharing a war_room_id
+            sessions_view::dispatch_war_room,
             // v2.3.43 — sessions GUI completion: New / Continue / Bridge
             sessions_view::create_session,
             sessions_view::dispatch_into_session,

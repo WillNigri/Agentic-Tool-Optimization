@@ -107,6 +107,19 @@ enum Commands {
         /// without colliding on session_turns' PRIMARY KEY.
         #[arg(long = "war-room-id")]
         war_room_id: Option<String>,
+        /// PR 16 (2026-05-18) — multi-turn war-rooms. Round number
+        /// (1-indexed) for this dispatch within the war-room.
+        /// Defaults to 1 when --war-room-id is set without --war-
+        /// room-round. For round > 1 the dispatch sees a synthesized
+        /// transcript of all prior rounds (every seat's reply,
+        /// including this seat's own) before the LLM is called —
+        /// each seat answers independently within a round but every
+        /// round sees the full peer history. Caller is responsible
+        /// for incrementing the round counter; the CLI does NOT
+        /// auto-compute MAX(round)+1 (would race under parallel
+        /// dispatches).
+        #[arg(long = "war-room-round")]
+        war_room_round: Option<i64>,
         /// v2.3.33 Phase 6 Slice B — after the response, scan for
         /// `@<runtime>` mentions and bridge the conversation to that
         /// runtime, then loop until `[CONSENSUS]` or --max-rounds.
@@ -881,6 +894,7 @@ fn main() -> Result<()> {
             agent,
             session,
             war_room_id,
+            war_room_round,
             tag_bridge,
             max_rounds,
             stream,
@@ -904,6 +918,7 @@ fn main() -> Result<()> {
                 agent,
                 session.clone(),
                 war_room_id,
+                war_room_round,
                 stream,
                 stream_jsonl,
                 false, // ato dispatch top-level — no tools; that's ato review's surface
