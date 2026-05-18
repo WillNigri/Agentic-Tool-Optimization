@@ -18,6 +18,7 @@ pub mod analytics;
 pub mod files_paths;
 pub mod onboarding;
 pub mod context;
+pub mod workflows;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -26,6 +27,7 @@ pub use analytics::*;
 pub use files_paths::*;
 pub use onboarding::*;
 pub use context::*;
+pub use workflows::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -2281,76 +2283,6 @@ pub async fn prompt_claude(prompt: String) -> Result<String, String> {
     }
 }
 
-// ── Workflow Persistence ──────────────────────────────────────────────────
-
-pub fn workflows_dir() -> PathBuf {
-    let mut path = home_dir();
-    path.push(".ato");
-    path.push("workflows");
-    fs::create_dir_all(&path).ok();
-    path
-}
-
-#[tauri::command]
-pub fn list_workflows() -> Result<Vec<serde_json::Value>, String> {
-    let dir = workflows_dir();
-    let mut workflows = Vec::new();
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "json") {
-                if let Some(content) = read_file_lossy(&path) {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-                        workflows.push(parsed);
-                    }
-                }
-            }
-        }
-    }
-    Ok(workflows)
-}
-
-#[tauri::command]
-pub fn save_workflow(workflow: String) -> Result<(), String> {
-    let parsed: serde_json::Value = serde_json::from_str(&workflow)
-        .map_err(|e| format!("Invalid workflow JSON: {}", e))?;
-    let id = parsed.get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Workflow must have an id".to_string())?;
-
-    // Sanitize filename
-    let safe_id: String = id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-
-    let path = workflows_dir().join(format!("{}.json", safe_id));
-    fs::write(&path, &workflow).map_err(|e| format!("Failed to write workflow: {}", e))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn load_workflow(id: String) -> Result<serde_json::Value, String> {
-    let safe_id: String = id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let path = workflows_dir().join(format!("{}.json", safe_id));
-    let content = read_file_lossy(&path)
-        .ok_or_else(|| format!("Workflow not found: {}", id))?;
-    serde_json::from_str::<serde_json::Value>(&content)
-        .map_err(|e| format!("Invalid workflow JSON: {}", e))
-}
-
-#[tauri::command]
-pub fn delete_workflow(id: String) -> Result<(), String> {
-    let safe_id: String = id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let path = workflows_dir().join(format!("{}.json", safe_id));
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("Failed to delete workflow: {}", e))?;
-    }
-    Ok(())
-}
 
 // ── Multi-Agent Runtime ──────────────────────────────────────────────────
 
@@ -8657,20 +8589,6 @@ pub struct WorkflowWebhook {
     pub trigger_count: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowTemplate {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub category: String,
-    pub tags: Vec<String>,
-    pub version: String,
-    pub is_built_in: bool,
-    pub nodes: serde_json::Value,
-    pub edges: serde_json::Value,
-}
-
 /// Register a webhook for a workflow
 #[tauri::command]
 pub fn register_workflow_webhook(
@@ -8788,60 +8706,6 @@ pub fn toggle_workflow_webhook(state: State<DbState>, webhook_id: String, enable
         params![if enabled { 1 } else { 0 }, &webhook_id],
     ).map_err(|e| e.to_string())?;
     Ok(())
-}
-
-/// List built-in workflow templates
-#[tauri::command]
-pub fn list_workflow_templates() -> Result<Vec<WorkflowTemplate>, String> {
-    // Built-in templates defined in Rust (matching frontend templates)
-    let templates = vec![
-        WorkflowTemplate {
-            id: "tpl-webhook-to-slack".to_string(),
-            name: "Webhook to Slack".to_string(),
-            description: "Receive webhook, process with Claude, post to Slack".to_string(),
-            category: "Notifications".to_string(),
-            tags: vec!["webhook".to_string(), "slack".to_string(), "notifications".to_string()],
-            version: "1.0.0".to_string(),
-            is_built_in: true,
-            nodes: serde_json::json!([]),
-            edges: serde_json::json!([]),
-        },
-        WorkflowTemplate {
-            id: "tpl-parallel-deploy".to_string(),
-            name: "Parallel Deployment".to_string(),
-            description: "Deploy to multiple environments in parallel with retry".to_string(),
-            category: "CI/CD".to_string(),
-            tags: vec!["parallel".to_string(), "deployment".to_string(), "retry".to_string()],
-            version: "1.0.0".to_string(),
-            is_built_in: true,
-            nodes: serde_json::json!([]),
-            edges: serde_json::json!([]),
-        },
-        WorkflowTemplate {
-            id: "tpl-error-handling".to_string(),
-            name: "Error Handling Pipeline".to_string(),
-            description: "Process data with error handling and fallback".to_string(),
-            category: "Data Processing".to_string(),
-            tags: vec!["error-handling".to_string(), "try-catch".to_string(), "fallback".to_string()],
-            version: "1.0.0".to_string(),
-            is_built_in: true,
-            nodes: serde_json::json!([]),
-            edges: serde_json::json!([]),
-        },
-        WorkflowTemplate {
-            id: "tpl-data-transform".to_string(),
-            name: "Data Transform Pipeline".to_string(),
-            description: "Transform data with variables and conditional logic".to_string(),
-            category: "Data Processing".to_string(),
-            tags: vec!["variables".to_string(), "transform".to_string(), "decision".to_string()],
-            version: "1.0.0".to_string(),
-            is_built_in: true,
-            nodes: serde_json::json!([]),
-            edges: serde_json::json!([]),
-        },
-    ];
-
-    Ok(templates)
 }
 
 // ── v0.5.5: Notifications Service ─────────────────────────────────────────
