@@ -944,24 +944,28 @@ export default function SessionsList() {
                         ))}
                       </div>
                     )}
-                    <span className="text-sm text-cs-text truncate flex-1 min-w-0">
-                      {s.title || (
-                        <span className="text-cs-muted italic">
-                          untitled war room
+                    {/* PR 17 follow-up — right-side meta cluster.
+                        Title moved to its own row below (line below)
+                        so it doesn't get pushed by chip overflow. */}
+                    <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
+                      <span>
+                        {participantCount} seat
+                        {participantCount !== 1 ? "s" : ""}
+                      </span>
+                      {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
+                        <span className="font-mono">
+                          ${s.totalCostUsd.toFixed(4)}
                         </span>
                       )}
-                    </span>
-                    <span className="text-xs text-cs-muted">
-                      {participantCount} seat{participantCount !== 1 ? "s" : ""}
-                    </span>
-                    {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
-                      <span className="text-xs text-cs-muted font-mono">
-                        ${s.totalCostUsd.toFixed(4)}
+                      <span>{formatTime(s.lastUsedAt)}</span>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-sm font-medium text-cs-text truncate">
+                    {s.title || (
+                      <span className="text-cs-muted italic font-normal">
+                        untitled war room
                       </span>
                     )}
-                    <span className="text-xs text-cs-muted">
-                      {formatTime(s.lastUsedAt)}
-                    </span>
                   </div>
                   {/* PR 17 — meta line on the war-room card so it has
                       parity with the session card's coordinator/team
@@ -1044,20 +1048,24 @@ export default function SessionsList() {
                         {personaDisplay(s.agentSlug)}
                       </span>
                     )}
-                    <span className="text-sm text-cs-text truncate flex-1 min-w-0 font-mono text-xs">
-                      {promptPreview}
-                    </span>
-                    {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
-                      <span
-                        className="text-xs text-cs-muted font-mono"
-                        title="Estimated cost from execution_logs.cost_usd_estimated."
-                      >
-                        ${s.totalCostUsd.toFixed(4)}
-                      </span>
-                    )}
-                    <span className="text-xs text-cs-muted">
-                      {formatTime(s.lastUsedAt)}
-                    </span>
+                    {/* PR 17 follow-up — right-side meta cluster.
+                        Title moved to its own row below at uniform
+                        text-sm font-medium (was previously
+                        text-xs font-mono — typography drift). */}
+                    <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
+                      {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
+                        <span
+                          className="font-mono"
+                          title="Estimated cost from execution_logs.cost_usd_estimated."
+                        >
+                          ${s.totalCostUsd.toFixed(4)}
+                        </span>
+                      )}
+                      <span>{formatTime(s.lastUsedAt)}</span>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-sm font-medium text-cs-text truncate">
+                    {promptPreview}
                   </div>
                   {/* PR 17 — meta line on the single-run card for parity
                       with session (coord/team) and war-room (seats × rounds)
@@ -1216,33 +1224,32 @@ export default function SessionsList() {
                       {s.category}
                     </span>
                   )}
-                  <span className="text-sm font-medium text-cs-text truncate flex-1 min-w-0">
-                    {displayTitle || (
-                      <span className="text-cs-muted italic">
-                        untitled session
+                  {/* PR 17 follow-up — right-side meta cluster.
+                      Title moved to its own row below so chip
+                      overflow doesn't push the title's vertical
+                      rhythm out of sync with cards that have
+                      fewer chips. */}
+                  <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
+                    <span>
+                      {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
+                    </span>
+                    {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
+                      <span
+                        className="font-mono"
+                        title="Estimated session cost (sum of execution_logs). Open the session to see the per-runtime breakdown including which rows are metered API vs subscription-estimate."
+                      >
+                        ${s.totalCostUsd.toFixed(4)}
                       </span>
                     )}
-                  </span>
-                  <span className="text-xs text-cs-muted">
-                    {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
-                  </span>
-                  {/* 2026-05-16 — session-total cost pill. Shows the
-                      summed cost from execution_logs.cost_usd_estimated.
-                      Sum mixes metered + subscription-estimate rows; the
-                      Receipts panel inside has the proper per-row labels.
-                      Hidden when no execution_logs rows reference the
-                      session (pre-session-id-on-logs). */}
-                  {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
-                    <span
-                      className="text-xs text-cs-muted font-mono"
-                      title="Estimated session cost (sum of execution_logs). Open the session to see the per-runtime breakdown including which rows are metered API vs subscription-estimate."
-                    >
-                      ${s.totalCostUsd.toFixed(4)}
+                    <span>{formatTime(s.lastUsedAt)}</span>
+                  </div>
+                </div>
+                <div className="mt-2 text-sm font-medium text-cs-text truncate">
+                  {displayTitle || (
+                    <span className="text-cs-muted italic font-normal">
+                      untitled session
                     </span>
                   )}
-                  <span className="text-xs text-cs-muted">
-                    {formatTime(s.lastUsedAt)}
-                  </span>
                 </div>
                 {/* 2026-05-16 — coordinator + project line. Coordinator
                     is the session's anchor runtime (where the session
