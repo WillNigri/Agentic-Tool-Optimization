@@ -228,8 +228,63 @@ The Sessions list is meant to be readable months later. That only works when eac
 2. **Never re-open a closed session for a different topic.** `ato sessions reopen` is for genuinely continuing the same conversation. New question = new session.
 3. **Smoke tests, schema verification, ack pings — separate throwaway session, always.** Anything you'd regret seeing as the preview of a strategic session is the wrong dispatch to send there.
 4. **Title and summary are part of the deliverable, not metadata.** A coordinator-generated summary of "Ack." because the last turn was a smoke test permanently degrades the row as a navigation artifact.
-5. **Name sessions at creation time.** Convention: `<topic> war-room — <scope> <YYYY-MM-DD>`.
+5. **Name sessions at creation time.** Convention: `<topic> — <scope> <YYYY-MM-DD>`.
 6. **When in doubt, create a new session.** Sessions are free; cluttering one is irreversible.
+
+### War rooms vs sessions — two topologies for multi-LLM work
+
+ATO captures multi-AI conversations under **two distinct shapes**, because the question you're asking determines which one is right. They live side-by-side in the Runs → Sessions feed and have different cards, different storage, and different click-into views.
+
+|  | **Session (sequential)** | **War room (parallel)** |
+|---|---|---|
+| **Storage** | `sessions` table + `session_turns` (PRIMARY KEY `session_id, turn_index`) | N rows in `execution_logs` sharing a `war_room_id` UUID |
+| **Topology** | Turn 2 sees turn 1's reply via history replay; turn 3 sees both; etc. | No seat sees another's reply — every dispatch is independent |
+| **Cross-runtime** | One anchor runtime + cross-runtime turns appended (Phase 6 Slice B) | Each seat IS a different runtime by design |
+| **Lifecycle** | `Open → Closed`; coordinator runs `ato sessions close` and emits `auto_title` + `summary` + `tags` + `category` + `team` | None. Each constituent dispatch is "done" the moment it returns. No close, no summary. |
+| **Concurrent inserts** | Sequential by definition — `session_turns` PK is safe | Standalone dispatches — no shared-table race |
+| **What it captures** | Decision evolution: how the proposal sharpened from round 1 → round 2 → ratified | Independent first-pass opinions, no anchoring bias |
+| **Use when** | Refinement, escalation, ratification, "let me see what each seat would say *given* the prior seat" | Wedge discovery, falsifier-finding, "what would 4 different LLMs say *without* seeing each other" |
+| **UI card** | Coord / + participants badges, persona cluster, summary, lifecycle chip, category + team + project | `⚔ war room` marker, co-equal seats badges (no Coord / +), participant count + sum cost. No lifecycle, no summary. |
+| **Click-into** | Full transcript view with WhatsApp-style bubbles + cost receipts panel | Vertical stack of per-seat cards — each card has one runtime + one agent + one prompt + one response |
+
+**Cookbook — same question, two shapes:**
+
+```bash
+# WAR ROOM (R1 parallel) — "What do 4 different LLMs think about my pitch
+# without any of them influencing each other?"
+WR=$(uuidgen)
+ato dispatch minimax  --agent positioning      --war-room-id $WR "Critique my pitch: ..." &
+ato dispatch google   --agent devex            --war-room-id $WR "Critique my pitch: ..." &
+ato dispatch claude   --agent ceo              --war-room-id $WR "Critique my pitch: ..." &
+ato dispatch codex    --agent codex-reviewer   --war-room-id $WR "Critique my pitch: ..." &
+wait   # all four return; each was an independent reply
+```
+
+```bash
+# SESSION (R2 sequential) — "Now refine the consensus, with each seat seeing
+# the prior ones."
+SID=$(ato sessions new --runtime claude --title "Pitch ratification 2026-05-18" | jq -r .id)
+ato dispatch minimax --agent positioning    --session $SID "Round 2: name the strongest objection from R1 and sharpen it."
+ato dispatch google  --agent devex          --session $SID "Round 2: TTHW audit of the refined pitch."
+ato dispatch claude  --agent ceo            --session $SID "Round 2: 10-star reframe with the objections folded in."
+ato sessions close   $SID   # coordinator emits auto_title + summary + category=Marketing + team=founder
+```
+
+The **hybrid** pattern — war room for breadth, then session for depth — is the default for any non-trivial decision. The war-room gives you N independent priors; the session gives you the synthesis room. Full methodology with seat-pick + verdict-tag conventions lives in `.claude/skills/ato-warroom/SKILL.md` (sections 4a–4c).
+
+**When to pick which:**
+
+| Symptom | Use |
+|---|---|
+| "I want to surface variance — what would *different* LLMs say from cold?" | War room |
+| "Every seat agreed in R1 and that worries me" | War room with a generalist seat added |
+| "I need to ratify a decision and want each seat to react to the prior ones" | Session |
+| "The conversation needs to converge — I want the LAST turn to be a synthesis" | Session |
+| "I'm comparing one model vs another on the same task" | War room of size 2 |
+| "I'm running a multi-day decision with multiple rounds" | One session, multiple rounds (don't fragment) |
+| "I want to see if any LLM hallucinates the same thing all the others did" | War room — independence is the point |
+
+**One thing to remember:** the Sessions tab shows *both* in one feed (filter by the kind chip — "Sessions", "Single runs", "War rooms"). They share the audit trail; they differ in their conversation shape.
 
 #### Cross-runtime sessions
 

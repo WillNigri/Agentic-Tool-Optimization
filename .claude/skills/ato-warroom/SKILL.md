@@ -39,6 +39,43 @@ to run on a different model family so priors diverge, apply a
 failure-mode filter to the prompt template, then pick a position and
 record the audit trail in your deliverable.
 
+## War room ≠ session — pick the right shape for the question
+
+ATO captures multi-AI work under **two distinct shapes**. Picking the
+wrong one wastes the round.
+
+|  | **Session (sequential)** | **War room (parallel)** |
+|---|---|---|
+| **How it stores** | One `sessions` row + N `session_turns` rows | N `execution_logs` rows sharing a `war_room_id` UUID |
+| **Conversation shape** | Turn 2 sees turn 1's reply via history replay. Turn 3 sees both. Each new turn can react to and build on prior turns. | Each seat fires standalone — **no seat sees any other seat's reply**. Independent first-pass priors. |
+| **What it captures** | Decision evolution: how a proposal sharpened across rounds | Variance: how N different LLMs view the same question cold |
+| **Cross-runtime** | One anchor runtime; turns from other runtimes append as cross-runtime turns (Phase 6 Slice B) | Each seat IS a different runtime — that's the whole point |
+| **Lifecycle** | `Open → Closed`; `ato sessions close` runs a coordinator LLM over the transcript and emits `auto_title` + `summary` + `tags` + `category` + `team` + `project_id` | No lifecycle. Each dispatch is done the moment it returns. No close, no summary. |
+| **Concurrent inserts** | Sequential by definition — `session_turns` has `PRIMARY KEY (session_id, turn_index)` so two parallel inserts would collide on `max+1` | No shared-table race — every dispatch writes to its own `execution_logs` row |
+| **Use this when** | Refinement, escalation, ratification, "let me see what each seat would say *given* the prior seat's reply" | Wedge discovery, falsifier-finding, "what would these LLMs say *without* seeing each other" |
+| **CLI** | `ato sessions new --runtime <r>` → `ato dispatch <r> --session <sid>` (one at a time) | `WR=$(uuidgen)` → `ato dispatch <r> --war-room-id $WR` (N in parallel) |
+| **Desktop card** | Coord ★ + participants badges, persona cluster, summary, lifecycle chip, category/team/project | `⚔ war room` marker, **co-equal** seat badges (no Coord/+), participant count, sum cost |
+| **Click-into** | Full transcript view (WhatsApp bubbles + cost-receipts panel) | Vertical stack of per-seat cards (one runtime + one agent + one prompt + one response per card) |
+
+**The picking heuristic:** ask whether you want each seat to *react* to the others (session) or each seat to *not be influenced* by the others (war room). If the answer is "I don't know yet — I want to see both," run the **hybrid**: war room first for breadth, then a session with the synthesis as the opening turn for depth. That's the default for any non-trivial decision.
+
+**Symptom-to-shape table:**
+
+| Symptom | Pick |
+|---|---|
+| "I want variance — what would these LLMs say from cold?" | War room |
+| "Every seat agreed in R1 and that worries me" | War room with a generalist (no `--agent`) added — its raw priors break agreement-by-anchoring |
+| "I need to ratify a decision; each seat should react to the prior ones" | Session |
+| "The conversation needs to converge — the last turn should be the synthesis" | Session |
+| "I'm comparing one model vs another on the same task" | War room of size 2 |
+| "I'm running a multi-day decision with multiple rounds" | One session, multiple rounds. Don't fragment. |
+| "I want to see if all the LLMs hallucinate the same thing" | War room — independence is the whole signal |
+| "I want to capture cost/quality variance for a procurement decision" | War room — receipts side-by-side |
+
+**The `session_turns` PRIMARY KEY constraint is why we have both shapes.** If you try to fire N parallel `ato dispatch --session <id>` calls simultaneously, two of them will compute the same `max(turn_index) + 1` and one will fail on PK violation. War rooms exist as a separate topology *because* the parallel pattern doesn't fit the session storage model. Don't try to force it.
+
+**Audit recordkeeping:** PR descriptions and decision docs should NAME which shape was used and which session/war-room id, e.g. *"War room (4 seats, war_room_id `7D7FC9AF…`) for breadth; sequential session (`b1547c69…`, 3 seats, 6 turns) for synthesis. Verdict tag `[APPROVE]` unanimous in R2."* This makes the strength of the conclusion legible to whoever inherits the decision — independent agreement (war room) is stronger evidence than built agreement (session).
+
 ## Why have a war-room at all
 
 Three principles, stack-agnostic:
