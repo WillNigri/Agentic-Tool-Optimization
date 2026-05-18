@@ -903,8 +903,8 @@ export default function SessionsList() {
                   onClick={() =>
                     setOpenSelection({ kind: "war_room", id: s.id })
                   }
-                  title={`War room ${s.id.slice(0, 8)} — open to see each seat's response.`}
-                  className="w-full text-left border rounded-lg p-4 transition-colors border-cs-accent/30 bg-cs-card/70 hover:border-cs-accent"
+                  title={`War room ${s.id}`}
+                  className="w-full text-left border rounded-lg p-4 transition-colors border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
                 >
                   <div className="flex items-center gap-3 flex-wrap">
                     <span
@@ -1010,22 +1010,25 @@ export default function SessionsList() {
                   )}
                 >
                   <div className="flex items-center gap-3 flex-wrap">
-                    {/* PR 9 — leading ⚡ glyph (designer Round-1): the
-                        "lighter than a session card" treatment risked
-                        reading as muted/stale at a 60px scan. The glyph
-                        gives single-runs a distinct silhouette that's
-                        parseable before the eye reaches the prompt
-                        text. cs-accent at 0.7 opacity = present-but-not-
-                        competing with the live coordinator badges on
-                        session cards. aria-hidden so screen readers
-                        don't read it as content (the "single run" pill
-                        below carries the semantics). */}
+                    {/* PR 17 — leading kind marker pill for parity
+                        with war-room (⚔ WAR ROOM) and session
+                        (💬 SESSION). Replaces the previous "small
+                        glyph + mid-row 'single run' text pill" combo
+                        with a single position-0 pill. Status (error
+                        vs success) still encoded via the pill bg
+                        (danger tint on error) so the same pill does
+                        double duty. */}
                     <span
-                      aria-hidden="true"
-                      className="text-cs-accent opacity-70 text-xs leading-none"
-                      style={{ fontSize: "12px" }}
+                      aria-label="single run"
+                      className={cn(
+                        "px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide",
+                        isErr
+                          ? "bg-cs-danger/15 text-cs-danger"
+                          : "bg-cs-muted/15 text-cs-muted"
+                      )}
+                      title={`Single run · ${s.status}`}
                     >
-                      ⚡
+                      ⚡ single run
                     </span>
                     <span
                       className={cn(runtimeBadge(s.runtime))}
@@ -1041,17 +1044,6 @@ export default function SessionsList() {
                         {personaDisplay(s.agentSlug)}
                       </span>
                     )}
-                    <span
-                      className={cn(
-                        "px-1.5 py-0.5 rounded text-[10px] font-medium uppercase",
-                        isErr
-                          ? "bg-cs-danger/15 text-cs-danger"
-                          : "bg-cs-muted/15 text-cs-muted"
-                      )}
-                      title={`Single run · ${s.status}`}
-                    >
-                      single run
-                    </span>
                     <span className="text-sm text-cs-text truncate flex-1 min-w-0 font-mono text-xs">
                       {promptPreview}
                     </span>
