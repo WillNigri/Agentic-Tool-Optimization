@@ -80,6 +80,21 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         "CREATE INDEX IF NOT EXISTS idx_session_turns_agent_slug ON session_turns(agent_slug)",
         [],
     );
+    // PR 14a (2026-05-18) — war_room_id on execution_logs. Same
+    // CLI-only guard as the column above: a user dispatching from
+    // the CLI without ever opening the desktop needs this column to
+    // exist so `tag_war_room_id` in commands/dispatch.rs doesn't
+    // hit "no such column" on the follow-up UPDATE.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN war_room_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_war_room_id
+            ON execution_logs(war_room_id, created_at DESC)
+          WHERE war_room_id IS NOT NULL",
+        [],
+    );
 
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT

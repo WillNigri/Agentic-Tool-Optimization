@@ -89,7 +89,7 @@ interface SessionListRow {
   // for before PR 5 collapsed them into one unified feed). The
   // frontend uses this to pick the card variant + the
   // click-into-detail route in PR 5b/5c.
-  rowKind: "session" | "single_run";
+  rowKind: "session" | "single_run" | "war_room";
 }
 
 interface SessionTurn {
@@ -259,7 +259,7 @@ const CATEGORY_VOCAB = [
 // values (success/error/unknown) so they pass through the "all"
 // status bucket only. PR 5c dropped the History tab and added the
 // single-run click-into-detail panel — see SingleRunDetailView.tsx.
-type KindFilter = "all" | "sessions" | "single_runs";
+type KindFilter = "all" | "sessions" | "single_runs" | "war_rooms";
 
 /// Case-insensitive substring search across every human-readable
 /// field on a session row plus the 8-char id prefix. Returns the
@@ -287,6 +287,7 @@ function rowMatchesFilters(
   if (skip !== "kind") {
     if (f.kind === "sessions" && s.rowKind !== "session") return false;
     if (f.kind === "single_runs" && s.rowKind !== "single_run") return false;
+    if (f.kind === "war_rooms" && s.rowKind !== "war_room") return false;
   }
   if (skip !== "status") {
     if (f.status === "open" && s.status !== "open") return false;
@@ -574,13 +575,16 @@ export default function SessionsList() {
                 ["all", "All"],
                 ["sessions", "Sessions"],
                 ["single_runs", "Single runs"],
+                ["war_rooms", "War rooms"],
               ] as [KindFilter, string][]).map(([k, label]) => {
                 const count =
                   k === "all"
                     ? rowsForKindCount.length
                     : k === "sessions"
                       ? rowsForKindCount.filter((row) => row.rowKind === "session").length
-                      : rowsForKindCount.filter((row) => row.rowKind === "single_run").length;
+                      : k === "single_runs"
+                        ? rowsForKindCount.filter((row) => row.rowKind === "single_run").length
+                        : rowsForKindCount.filter((row) => row.rowKind === "war_room").length;
                 return (
                 <button
                   key={k}
@@ -867,6 +871,82 @@ export default function SessionsList() {
             // single-run cards render as non-interactive `div`s with a
             // tooltip explaining that the History tab still has the
             // full detail.
+            // PR 14b — war-room synthetic card. Groups N single-runs
+            // sharing a war_room_id into one card. Renders before the
+            // single-run branch so the type-narrowing flows cleanly.
+            // Card is intentionally NON-INTERACTIVE for v1 (display-
+            // only): a dedicated drill-in view that lists the
+            // participating single-runs is PR 14c. The user can still
+            // see each constituent dispatch as its own single-run
+            // card by switching to the "Single runs" kind filter.
+            if (s.rowKind === "war_room") {
+              const participantCount = s.runtimesUsed.length;
+              return (
+                <div
+                  key={s.id}
+                  title={`War room ${s.id.slice(0, 8)} — ${participantCount} parallel seats. PR 14c will add click-into to list participating dispatches.`}
+                  className="w-full text-left border rounded-lg p-4 border-cs-accent/30 bg-cs-card/70 cursor-default"
+                >
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span
+                      aria-label="war room"
+                      className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-accent/15 text-cs-accent"
+                      title={`War-room ${s.id.slice(0, 8)} — ${participantCount} parallel seats`}
+                    >
+                      ⚔ war room
+                    </span>
+                    {/* Participant runtime badges. All co-equal — no
+                        Coord/+ split since R1-parallel war-rooms are
+                        peers by design. */}
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
+                        seats
+                      </span>
+                      {s.runtimesUsed.map((r) => (
+                        <span
+                          key={r}
+                          className={cn(runtimeBadge(r))}
+                          title={`Participant runtime: ${r}`}
+                        >
+                          {r}
+                        </span>
+                      ))}
+                    </div>
+                    {s.agentsUsed.length > 0 && (
+                      <div className="flex items-center gap-1">
+                        {s.agentsUsed.map((slug) => (
+                          <span
+                            key={slug}
+                            className={personaBadge()}
+                            title={`Persona: ${personaDisplay(slug)}`}
+                          >
+                            {personaDisplay(slug)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <span className="text-sm text-cs-text truncate flex-1 min-w-0">
+                      {s.title || (
+                        <span className="text-cs-muted italic">
+                          untitled war room
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-xs text-cs-muted">
+                      {participantCount} seat{participantCount !== 1 ? "s" : ""}
+                    </span>
+                    {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
+                      <span className="text-xs text-cs-muted font-mono">
+                        ${s.totalCostUsd.toFixed(4)}
+                      </span>
+                    )}
+                    <span className="text-xs text-cs-muted">
+                      {formatTime(s.lastUsedAt)}
+                    </span>
+                  </div>
+                </div>
+              );
+            }
             if (s.rowKind === "single_run") {
               const promptPreview = s.title ?? "(no prompt recorded)";
               const responsePreview = s.lastAssistantPreview;

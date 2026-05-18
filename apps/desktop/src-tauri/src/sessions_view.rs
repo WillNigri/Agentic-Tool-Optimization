@@ -309,11 +309,17 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // 10k standalone dispatches doesn't slow the feed render. The
     // final Rust-side merge orders by timestamp DESC and truncates
     // the combined list to `limit`.
+    // PR 14b — single-runs now exclude rows that share a war_room_id;
+    // those land below as one synthetic "war-room" row per distinct
+    // war_room_id. A user dispatching `ato dispatch claude "..."`
+    // without --war-room-id (the common case) still gets a single-run
+    // card; only the explicit war-room workflow gets the group
+    // treatment.
     let mut eph_stmt = conn.prepare(
         "SELECT e.id, e.runtime, e.agent_slug, e.created_at, e.cost_usd_estimated,
                 e.prompt, e.response, e.model, e.status
            FROM execution_logs e
-          WHERE e.session_id IS NULL
+          WHERE e.session_id IS NULL AND e.war_room_id IS NULL
           ORDER BY e.created_at DESC
           LIMIT ?1",
     )?;
@@ -387,11 +393,134 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         .filter_map(|r| r.ok())
         .collect();
 
-    // Merge: real sessions + single-runs, sorted by their unified
-    // timestamp (last_used_at, which equals created_at for single-runs).
-    // Stable sort so two rows with the same timestamp keep their
-    // intra-list order, which is good for determinism in tests.
+    // PR 14b — war-room synthetic rows. Group execution_logs by
+    // war_room_id (where set), aggregate distinct runtimes + agents,
+    // sum cost. One synthetic row per distinct war_room_id. The
+    // frontend renders this with the row_kind="war_room" branch and
+    // routes click-into to a filtered view showing the constituent
+    // single-runs.
+    //
+    // Query strategy: SELECT distinct war_room_ids first (cheap with
+    // the partial index), then per-id aggregate inline. This is N
+    // small queries — fine for the typical war-room count (dozens
+    // per user, not thousands) and keeps the row shape clean.
+    let mut wr_ids_stmt = conn.prepare(
+        "SELECT war_room_id, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+           FROM execution_logs
+          WHERE war_room_id IS NOT NULL
+          GROUP BY war_room_id
+          ORDER BY last_at DESC
+          LIMIT ?1",
+    )?;
+    let war_room_ids: Vec<(String, String, String)> = wr_ids_stmt
+        .query_map([limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut war_rooms: Vec<SessionListRow> = Vec::with_capacity(war_room_ids.len());
+    for (wr_id, first_at, last_at) in war_room_ids {
+        // Distinct runtimes + agents, in first-spoken order. Same
+        // ordering convention as the session-side enrichment, so the
+        // frontend renders consistently across row_kinds.
+        let mut rt_stmt = conn.prepare_cached(
+            "SELECT runtime FROM execution_logs
+              WHERE war_room_id = ?1
+              GROUP BY runtime
+              ORDER BY MIN(created_at) ASC",
+        )?;
+        let runtimes: Vec<String> = rt_stmt
+            .query_map([&wr_id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut ag_stmt = conn.prepare_cached(
+            "SELECT agent_slug FROM execution_logs
+              WHERE war_room_id = ?1 AND agent_slug IS NOT NULL
+              GROUP BY agent_slug
+              ORDER BY MIN(created_at) ASC",
+        )?;
+        let agents: Vec<String> = ag_stmt
+            .query_map([&wr_id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Sum cost + count participants.
+        let mut sum_stmt = conn.prepare_cached(
+            "SELECT SUM(COALESCE(cost_usd_estimated, 0)), COUNT(*)
+               FROM execution_logs
+              WHERE war_room_id = ?1",
+        )?;
+        let (sum_cost, n_participants): (Option<f64>, i64) = sum_stmt
+            .query_row([&wr_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap_or((None, 0));
+
+        // First prompt of the war-room as a preview — the user's
+        // question that kicked it off. Title falls back to a short
+        // form of the war_room_id when no prompt is recorded.
+        let mut first_stmt = conn.prepare_cached(
+            "SELECT prompt FROM execution_logs
+              WHERE war_room_id = ?1
+              ORDER BY created_at ASC
+              LIMIT 1",
+        )?;
+        let first_prompt: Option<String> = first_stmt
+            .query_row([&wr_id], |r| r.get::<_, Option<String>>(0))
+            .unwrap_or(None);
+        let title = first_prompt.as_deref().map(|s| {
+            if s.chars().count() > 80 {
+                let head: String = s.chars().take(80).collect();
+                format!("{}…", head)
+            } else {
+                s.to_string()
+            }
+        });
+
+        // Anchor runtime = first runtime in the order list (i.e.,
+        // whichever seat fired first). Keeps the per-card runtime
+        // badge in a sensible slot; the full participant cluster is
+        // in runtimes_used.
+        let anchor_runtime = runtimes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        war_rooms.push(SessionListRow {
+            id: wr_id.clone(),
+            runtime: anchor_runtime,
+            agent_slug: None,
+            title,
+            created_at: first_at,
+            last_used_at: last_at,
+            turn_count: n_participants,
+            runtimes_used: runtimes,
+            agents_used: agents,
+            total_cost_usd: if n_participants > 0 {
+                sum_cost.or(Some(0.0))
+            } else {
+                None
+            },
+            last_assistant_preview: None,
+            status: "war_room".to_string(),
+            closed_at: None,
+            auto_title: None,
+            summary: None,
+            tags: Vec::new(),
+            project_id: None,
+            category: None,
+            team: None,
+            row_kind: "war_room".to_string(),
+        });
+    }
+
+    // Merge: real sessions + single-runs + war-rooms, sorted by their
+    // unified timestamp (last_used_at, which equals created_at for
+    // single-runs). Stable sort so two rows with the same timestamp
+    // keep their intra-list order, which is good for determinism in
+    // tests.
     enriched.extend(single_runs);
+    enriched.extend(war_rooms);
     enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
     enriched.truncate(limit as usize);
     Ok(enriched)
