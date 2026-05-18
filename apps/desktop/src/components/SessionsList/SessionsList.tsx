@@ -361,6 +361,46 @@ export default function SessionsList() {
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const [teamFilter, setTeamFilter] = useState<string | null>(null);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // PR 12 (codex Round-1 #3 hoist) — single source of truth for the
+  // active filter set, used by every count IIFE in the toolbar. Each
+  // chip / dropdown count IIFE re-uses this with one field skipped
+  // via `rowMatchesFilters(s, filterFields, "<field>")`. Adding a
+  // new filter field means updating this one literal; the chips
+  // can't drift.
+  const filterFields: FilterFields = {
+    status: statusFilter,
+    kind: kindFilter,
+    category: categoryFilter,
+    team: teamFilter,
+    tag: tagFilter,
+  };
+  // PR 9 — collapse the taxonomy row into a `Filters ▾` disclosure
+  // (designer Round-1: filter chrome stack was dense — kind chips +
+  // lifecycle chips + taxonomy row + tag chips = 4 mechanisms above
+  // the list). Default closed; auto-open ONLY on the 0→>0
+  // transition (codex Round-1 #1 fix: previous shape kept reopening
+  // the disclosure on every render while a filter was active, so a
+  // user couldn't close it without first clearing the filter). The
+  // ref tracks the previous count so we can detect the transition.
+  const taxonomyActiveCount =
+    (categoryFilter !== null ? 1 : 0) +
+    (teamFilter !== null ? 1 : 0) +
+    (tagFilter !== null ? 1 : 0);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const prevTaxonomyCountRef = useRef(taxonomyActiveCount);
+  useEffect(() => {
+    const prev = prevTaxonomyCountRef.current;
+    if (prev === 0 && taxonomyActiveCount > 0) {
+      // Fresh filter activation (e.g., user clicked a tag chip on a
+      // card). Reveal the disclosure so the active-tag pill is
+      // visible and clearable.
+      setFiltersOpen(true);
+    }
+    // Intentionally NOT auto-closing on the >0→0 transition — the
+    // user may want to set another filter without re-clicking the
+    // toggle.
+    prevTaxonomyCountRef.current = taxonomyActiveCount;
+  }, [taxonomyActiveCount]);
   // Debounce the search input by 300ms before firing the backend turn
   // search. Typing fast shouldn't fire a query on every keystroke —
   // the metadata filter runs instantly, the content search lags
@@ -524,18 +564,24 @@ export default function SessionsList() {
               have a lifecycle and are filtered out when a status is
               selected. */}
           <div className="flex items-center gap-2 text-xs">
-            {([
-              ["all", "All"],
-              ["sessions", "Sessions"],
-              ["single_runs", "Single runs"],
-            ] as [KindFilter, string][]).map(([k, label]) => {
-              const count =
-                k === "all"
-                  ? sessionsQ.data!.length
-                  : k === "sessions"
-                    ? sessionsQ.data!.filter((row) => row.rowKind === "session").length
-                    : sessionsQ.data!.filter((row) => row.rowKind === "single_run").length;
-              return (
+            {(() => {
+              // PR 12 — kind chips count contextually via the hoisted
+              // `filterFields` (codex Round-1 #3).
+              const rowsForKindCount = sessionsQ.data!.filter((s) =>
+                rowMatchesFilters(s, filterFields, "kind")
+              );
+              return ([
+                ["all", "All"],
+                ["sessions", "Sessions"],
+                ["single_runs", "Single runs"],
+              ] as [KindFilter, string][]).map(([k, label]) => {
+                const count =
+                  k === "all"
+                    ? rowsForKindCount.length
+                    : k === "sessions"
+                      ? rowsForKindCount.filter((row) => row.rowKind === "session").length
+                      : rowsForKindCount.filter((row) => row.rowKind === "single_run").length;
+                return (
                 <button
                   key={k}
                   onClick={() => setKindFilter(k)}
@@ -550,7 +596,8 @@ export default function SessionsList() {
                   <span className="ml-1 opacity-60">({count})</span>
                 </button>
               );
-            })}
+              });
+            })()}
           </div>
           {/* PR 6 — taxonomy filters: category dropdown + team
               dropdown. Both implicitly scope to sessions (single-runs
@@ -559,23 +606,14 @@ export default function SessionsList() {
               kind/status/tag filters, so the dropdown stays honest
               about what's actually selectable. */}
           {(() => {
-            // Per-dropdown counts use the shared rowMatchesFilters with
-            // the active field SKIPPED, so each option shows what
-            // selecting it would actually yield given the other active
-            // filters. Predicate logic stays in one place
-            // (codex Round-1 #3).
-            const f: FilterFields = {
-              status: statusFilter,
-              kind: kindFilter,
-              category: categoryFilter,
-              team: teamFilter,
-              tag: tagFilter,
-            };
+            // Per-dropdown counts reuse the hoisted `filterFields`
+            // (PR 12 codex Round-1 #3): every count IIFE in the
+            // toolbar pulls from the same source-of-truth set.
             const rowsForCategoryCount = sessionsQ.data!.filter((s) =>
-              rowMatchesFilters(s, f, "category")
+              rowMatchesFilters(s, filterFields, "category")
             );
             const rowsForTeamCount = sessionsQ.data!.filter((s) =>
-              rowMatchesFilters(s, f, "team")
+              rowMatchesFilters(s, filterFields, "team")
             );
             // Team options are free-form, so derive from distinct
             // values present in the relevant subset. Codex Round-1 #4:
@@ -591,10 +629,36 @@ export default function SessionsList() {
             if (teamFilter !== null) teamOptionSet.add(teamFilter);
             const teamOptions = Array.from(teamOptionSet).sort();
             return (
-              <div className="flex items-center gap-2 text-xs flex-wrap">
-                <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
-                  Taxonomy
-                </span>
+              <div className="space-y-2">
+                {/* PR 9+10 — replace the "Taxonomy" label with a
+                    Filters ▾ disclosure. "Taxonomy" was internal
+                    vocabulary (positioning Round-1); "Filters" is
+                    what users actually search for. Closed by
+                    default; auto-opens when any filter activates. */}
+                <button
+                  type="button"
+                  onClick={() => setFiltersOpen((v) => !v)}
+                  className="flex items-center gap-2 text-xs text-cs-muted hover:text-cs-text"
+                  aria-expanded={filtersOpen}
+                  aria-controls="sessions-filters-region"
+                >
+                  <span className="text-[10px] uppercase tracking-wider font-medium">
+                    Filters
+                  </span>
+                  {taxonomyActiveCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/15 text-cs-accent">
+                      {taxonomyActiveCount} active
+                    </span>
+                  )}
+                  <span className="text-[10px]">{filtersOpen ? "▾" : "▸"}</span>
+                </button>
+                {filtersOpen && (
+              <div
+                id="sessions-filters-region"
+                role="region"
+                aria-label="Session filters"
+                className="flex items-center gap-2 text-xs flex-wrap"
+              >
                 <label className="flex items-center gap-1">
                   <span className="text-cs-muted">category:</span>
                   <select
@@ -662,8 +726,10 @@ export default function SessionsList() {
                     }}
                     className="text-cs-muted hover:text-cs-text underline-offset-2 hover:underline"
                   >
-                    clear taxonomy
+                    clear filters
                   </button>
+                )}
+              </div>
                 )}
               </div>
             );
@@ -683,11 +749,17 @@ export default function SessionsList() {
                 (sessions only)
               </span>
             </span>
-            {(["all", "open", "closed"] as StatusFilter[]).map((s) => {
-              const count =
-                s === "all"
-                  ? sessionsQ.data!.length
-                  : sessionsQ.data!.filter((row) => row.status === s).length;
+            {(() => {
+              // PR 12 — lifecycle chips count contextually via the
+              // hoisted `filterFields` (codex Round-1 #3).
+              const rowsForStatusCount = sessionsQ.data!.filter((s) =>
+                rowMatchesFilters(s, filterFields, "status")
+              );
+              return (["all", "open", "closed"] as StatusFilter[]).map((s) => {
+                const count =
+                  s === "all"
+                    ? rowsForStatusCount.length
+                    : rowsForStatusCount.filter((row) => row.status === s).length;
               return (
                 <button
                   key={s}
@@ -708,7 +780,8 @@ export default function SessionsList() {
                   <span className="ml-1 opacity-60">({count})</span>
                 </button>
               );
-            })}
+              });
+            })()}
             {(searchQuery ||
               statusFilter !== "all" ||
               kindFilter !== "all" ||
@@ -753,18 +826,23 @@ export default function SessionsList() {
       ) : !sessionsQ.data || sessionsQ.data.length === 0 ? (
         <div className="text-center py-12 text-cs-muted">
           <MessagesSquare size={48} className="mx-auto mb-4 opacity-50" />
-          <p>No sessions yet</p>
-          <p className="text-sm mt-2 max-w-md mx-auto">
-            Open a sticky conversation with{" "}
+          <p className="text-cs-text text-base">Compare any AI · keep the receipts.</p>
+          <p className="text-sm mt-3 max-w-md mx-auto">
+            This is where your dispatches and multi-AI rooms land so you can compare
+            runs side-by-side later. Try{" "}
+            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">
+              ato dispatch claude "hello"
+            </code>{" "}
+            for a single run, or{" "}
             <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">
               ato sessions new --runtime claude
             </code>{" "}
-            then dispatch into it with{" "}
-            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">
-              ato dispatch claude "..." --session &lt;id&gt;
-            </code>
-            . Cross-runtime bridges via{" "}
-            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">--tag-bridge</code>.
+            to start a multi-turn room you can bring other models into.
+          </p>
+          <p className="text-xs mt-2 max-w-md mx-auto opacity-70">
+            Cross-runtime turns: dispatch a different runtime with{" "}
+            <code className="bg-cs-card/60 px-1 rounded">--session &lt;id&gt;</code>{" "}
+            and the same conversation picks them up.
           </p>
         </div>
       ) : filteredSessions.length === 0 ? (
@@ -808,6 +886,23 @@ export default function SessionsList() {
                   )}
                 >
                   <div className="flex items-center gap-3 flex-wrap">
+                    {/* PR 9 — leading ⚡ glyph (designer Round-1): the
+                        "lighter than a session card" treatment risked
+                        reading as muted/stale at a 60px scan. The glyph
+                        gives single-runs a distinct silhouette that's
+                        parseable before the eye reaches the prompt
+                        text. cs-accent at 0.7 opacity = present-but-not-
+                        competing with the live coordinator badges on
+                        session cards. aria-hidden so screen readers
+                        don't read it as content (the "single run" pill
+                        below carries the semantics). */}
+                    <span
+                      aria-hidden="true"
+                      className="text-cs-accent opacity-70 text-xs leading-none"
+                      style={{ fontSize: "12px" }}
+                    >
+                      ⚡
+                    </span>
                     <span
                       className={cn(runtimeBadge(s.runtime))}
                       title={`Runtime: ${runtimeDisplay(s.runtime)}`}
@@ -1081,11 +1176,20 @@ export default function SessionsList() {
                             : `Filter to sessions tagged "${tag}"`
                         }
                         className={cn(
-                          "px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer transition-colors",
+                          // PR 9 — pressed-state designer note: the
+                          // color-only delta (bg + text inversion)
+                          // fails for users with color vision
+                          // deficiency. Add font-weight + letter-
+                          // spacing so the active tag also reads as
+                          // "different" by typography even if the
+                          // color contrast collapses. tracking-wide ≈
+                          // 0.025em letter-spacing; font-bold = 700
+                          // vs the default 500.
+                          "px-1.5 py-0.5 rounded text-[10px] cursor-pointer transition-colors",
                           "focus:outline-none focus-visible:ring-2 focus-visible:ring-cs-accent focus-visible:ring-offset-1 focus-visible:ring-offset-cs-bg",
                           tagFilter === tag
-                            ? "bg-cs-accent text-cs-bg ring-1 ring-cs-accent"
-                            : "bg-cs-accent/10 text-cs-accent hover:bg-cs-accent/20"
+                            ? "bg-cs-accent text-cs-bg ring-1 ring-cs-accent font-bold tracking-wide"
+                            : "bg-cs-accent/10 text-cs-accent hover:bg-cs-accent/20 font-medium"
                         )}
                       >
                         {tag}
