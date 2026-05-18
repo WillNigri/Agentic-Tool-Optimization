@@ -373,18 +373,28 @@ export default function SessionsList() {
   const consumePendingOpenSession = useUiStore(
     (s) => s.consumePendingOpenSession
   );
+  const consumePendingOpenNewSession = useUiStore(
+    (s) => s.consumePendingOpenNewSession
+  );
+  const [showNew, setShowNew] = useState(false);
   // PR-C First-Chat Wizard (2026-05-18) — drain any pending detail
   // request on mount. The wizard sets this before navigating to the
   // Sessions tab so the user lands directly on the new war-room
   // instead of the list. Consumed once so a later navigation doesn't
   // re-open a stale id.
+  //
+  // Path B (2026-05-18) — also drain the "open New session modal"
+  // flag set by the bottom-pane multi-launcher. Same one-shot pattern:
+  // consume on mount, modal opens, future navigations don't re-trigger.
   useEffect(() => {
     const pending = consumePendingOpenSession();
     if (pending.id && pending.kind) {
       setOpenSelection({ kind: pending.kind, id: pending.id });
     }
-  }, [consumePendingOpenSession]);
-  const [showNew, setShowNew] = useState(false);
+    if (consumePendingOpenNewSession()) {
+      setShowNew(true);
+    }
+  }, [consumePendingOpenSession, consumePendingOpenNewSession]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");

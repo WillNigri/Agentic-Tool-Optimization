@@ -15,6 +15,8 @@ import {
   Server,
   Globe,
   MessageSquarePlus,
+  MessageSquare,
+  Swords,
   History,
   Paperclip,
   Trash2,
@@ -44,6 +46,7 @@ import {
 } from "@/lib/chatThreads";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { useDemoStore } from "@/stores/useDemoStore";
+import { useUiStore } from "@/stores/useUiStore";
 import { listAgentGroups, dispatchToGroup, type AgentGroup } from "@/lib/agentGroups";
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 import { estimateUsage } from "@/lib/pricing";
@@ -118,6 +121,18 @@ export default function PromptBar() {
   const queryClient = useQueryClient();
   const activeProject = useProjectStore((s) => s.activeProject);
   const activeProjectId = activeProject?.id ?? null;
+
+  // Path B (2026-05-18) — bottom pane is a multi-launcher. The
+  // "+ New conversation" affordance opens three kinds: quick chat
+  // (current behavior, stays here), multi-turn session (navigates to
+  // the Sessions tab with NewSessionModal auto-opened), and war room
+  // (opens the FirstChatWizard from any surface). Group dispatch is
+  // already accessible via the existing agent picker — no separate
+  // launcher option needed.
+  const setSection = useUiStore((s) => s.setSection);
+  const setSubTab = useUiStore((s) => s.setSubTab);
+  const openNewSession = useUiStore((s) => s.openNewSession);
+  const openFirstChat = useUiStore((s) => s.openFirstChat);
 
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -861,6 +876,22 @@ export default function PromptBar() {
     setExpanded(false);
   };
 
+  // Path B launchers — close the dropdown, route to the appropriate
+  // surface. NewSession + WarRoom navigate away from the bottom pane
+  // because their detail views live in the Sessions tab; QuickChat
+  // (above) stays in place. Group dispatch is reached via the existing
+  // agent picker so no fourth entry here.
+  const launchNewSession = () => {
+    setShowThreadPicker(false);
+    setSection("runs");
+    setSubTab("ato.subtab.runs", "sessions");
+    openNewSession();
+  };
+  const launchWarRoom = () => {
+    setShowThreadPicker(false);
+    openFirstChat();
+  };
+
   const removeThread = async (id: string) => {
     await deleteChatThread(id);
     if (currentThreadId === id) setCurrentThreadId(null);
@@ -919,14 +950,64 @@ export default function PromptBar() {
             <>
               <div className="fixed inset-0 z-30" onClick={() => setShowThreadPicker(false)} />
               <div className="absolute top-full left-0 mt-1 w-80 max-h-80 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
-                <button
-                  type="button"
-                  onClick={newThread}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-xs border-b border-cs-border text-cs-accent hover:bg-cs-accent/5"
-                >
-                  <MessageSquarePlus size={12} />
-                  {t("prompt.newThread", "New conversation")}
-                </button>
+                {/* Path B (2026-05-18) — multi-launcher header. Three
+                    kinds of "new conversation" the bottom pane can
+                    start: quick chat (stays here), session (Sessions
+                    tab + NewSessionModal), war room (FirstChatWizard).
+                    The label "+ New" replaces the single-purpose
+                    "New conversation" since the bottom pane is now
+                    the launcher for every conversation type, not just
+                    chat threads. */}
+                <div className="border-b border-cs-border">
+                  <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-cs-muted">
+                    {t("prompt.startNew", "Start new")}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={newThread}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cs-accent hover:bg-cs-accent/5"
+                    title={t(
+                      "prompt.newQuickChatTitle",
+                      "One-on-one chat in this pane. Picks the runtime/agent currently selected; can hop runtimes per message."
+                    )}
+                  >
+                    <MessageSquarePlus size={12} />
+                    <span className="flex-1 text-left">
+                      🗨 {t("prompt.newQuickChat", "Quick chat")}
+                    </span>
+                    <span className="text-[10px] text-cs-muted">here</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={launchNewSession}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cs-text hover:bg-cs-border/40"
+                    title={t(
+                      "prompt.newSessionTitle",
+                      "Multi-turn session with lifecycle (open / close / coordinator summary). Opens in the Sessions tab."
+                    )}
+                  >
+                    <MessageSquare size={12} className="text-cs-muted" />
+                    <span className="flex-1 text-left">
+                      💬 {t("prompt.newSession", "Multi-turn session")}
+                    </span>
+                    <span className="text-[10px] text-cs-muted">Sessions tab</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={launchWarRoom}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cs-text hover:bg-cs-border/40"
+                    title={t(
+                      "prompt.newWarRoomTitle",
+                      "Fire the same prompt to every connected LLM in parallel. Opens the First-Chat Wizard."
+                    )}
+                  >
+                    <Swords size={12} className="text-cs-accent" />
+                    <span className="flex-1 text-left">
+                      ⚔ {t("prompt.newWarRoom", "War room")}
+                    </span>
+                    <span className="text-[10px] text-cs-muted">wizard</span>
+                  </button>
+                </div>
                 {(threadsQuery.data ?? []).length === 0 ? (
                   <p className="px-3 py-3 text-[11px] text-cs-muted">
                     {t("prompt.noThreads", "No conversations yet.")}

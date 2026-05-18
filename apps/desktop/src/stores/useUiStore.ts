@@ -70,6 +70,15 @@ interface UiState {
   firstChatOpen: boolean;
   openFirstChat: () => void;
   closeFirstChat: () => void;
+
+  /** Path B (2026-05-18) — when set, SessionsList auto-opens the
+   *  NewSessionModal on mount. The bottom-pane multi-launcher uses
+   *  this to route "Multi-turn session" → Sessions tab + open
+   *  the modal without depending on a click on the existing
+   *  "+ New session" button. Consumed once per fire. */
+  pendingOpenNewSession: boolean;
+  openNewSession: () => void;
+  consumePendingOpenNewSession: () => boolean;
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -131,4 +140,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   firstChatOpen: false,
   openFirstChat: () => set({ firstChatOpen: true }),
   closeFirstChat: () => set({ firstChatOpen: false }),
+
+  pendingOpenNewSession: false,
+  openNewSession: () => set({ pendingOpenNewSession: true }),
+  consumePendingOpenNewSession: () => {
+    const v = get().pendingOpenNewSession;
+    if (v) set({ pendingOpenNewSession: false });
+    return v;
+  },
 }));
