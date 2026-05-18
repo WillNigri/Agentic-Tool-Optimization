@@ -1509,7 +1509,14 @@ export default function PromptBar() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={isTauri ? t("prompt.placeholderReal") : t("prompt.placeholder")}
+            placeholder={
+              isTauri
+                ? t("prompt.placeholderReal", {
+                    runtime: currentRuntime.label,
+                    defaultValue: "Ask {{runtime}} anything…",
+                  })
+                : t("prompt.placeholder")
+            }
             className="w-full bg-cs-bg border border-cs-border rounded-lg pl-9 pr-3 py-2 text-sm text-cs-text placeholder:text-cs-muted/60 focus:outline-none focus:border-cs-accent/50 font-mono"
             disabled={isLoading}
           />

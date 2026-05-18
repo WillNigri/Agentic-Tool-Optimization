@@ -882,10 +882,12 @@ export default function SessionsList() {
                 ·{" "}
                 {sessionsQ.data!.filter((r) => r.rowKind === "single_run").length} single-runs
                 ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "war_room").length} war-rooms
+                {sessionsQ.data!.filter((r) => r.rowKind === "war_room").length} war rooms
                 ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "chat").length} chats
-                · Open/Closed apply to sessions only
+                {sessionsQ.data!.filter((r) => r.rowKind === "chat").length} chats.{" "}
+                <span className="opacity-80">
+                  Open / Closed lifecycle applies to sessions only.
+                </span>
               </div>
             )}
         </div>
@@ -900,21 +902,20 @@ export default function SessionsList() {
           <MessagesSquare size={48} className="mx-auto mb-4 opacity-50" />
           <p className="text-cs-text text-base">Compare any AI · keep the receipts.</p>
           <p className="text-sm mt-3 max-w-md mx-auto">
-            This is where your dispatches and multi-AI rooms land so you can compare
-            runs side-by-side later. Try{" "}
+            This is your inbox for every conversation — quick chats, multi-turn
+            sessions, war rooms, and single-shot dispatches. Start one from the
+            bottom pane's{" "}
+            <span className="text-cs-accent">+ New</span> menu, or from the CLI:
+            {" "}
             <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">
               ato dispatch claude "hello"
-            </code>{" "}
-            for a single run, or{" "}
-            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text">
-              ato sessions new --runtime claude
-            </code>{" "}
-            to start a multi-turn room you can bring other models into.
+            </code>
+            .
           </p>
           <p className="text-xs mt-2 max-w-md mx-auto opacity-70">
             Cross-runtime turns: dispatch a different runtime with{" "}
             <code className="bg-cs-card/60 px-1 rounded">--session &lt;id&gt;</code>{" "}
-            and the same conversation picks them up.
+            and the same session picks them up.
           </p>
         </div>
       ) : filteredSessions.length === 0 ? (

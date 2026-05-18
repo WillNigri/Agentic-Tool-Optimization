@@ -346,7 +346,7 @@
   },
   "prompt": {
     "placeholder": "Ask via MCP — context, skills, usage, servers... (simulated)",
-    "placeholderReal": "Ask Claude anything — uses your Claude Code subscription",
+    "placeholderReal": "Ask {{runtime}} anything…",
     "thinking": "Querying via MCP...",
     "clear": "Clear history",
     "startNew": "Start new",

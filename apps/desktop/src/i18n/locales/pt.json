@@ -288,7 +288,7 @@
   },
   "prompt": {
     "placeholder": "Pergunte via MCP — contexto, skills, uso, servidores... (simulado)",
-    "placeholderReal": "Pergunte ao Claude — usa sua assinatura do Claude Code",
+    "placeholderReal": "Pergunte ao {{runtime}}…",
     "thinking": "Consultando via MCP...",
     "clear": "Limpar historico",
     "startNew": "Iniciar nova",
