@@ -37,13 +37,20 @@ interface Props {
 
 // Map agent runtime → the LLM provider whose key is needed. Self-hosted
 // runtimes (openclaw / hermes) don't need API keys; this returns null.
+// 2026-05-20 — extended for the v2.3.21 API-key dispatch surface
+// (minimax/grok/deepseek/qwen/openrouter); each maps to its provider slug.
 function providerForRuntime(runtime: AgentRuntime): string | null {
   switch (runtime) {
-    case "claude":   return "anthropic";
-    case "codex":    return "openai";
-    case "gemini":   return "gemini";
-    case "openclaw": return null; // self-hosted via SSH
-    case "hermes":   return null; // self-hosted runtime
+    case "claude":     return "anthropic";
+    case "codex":      return "openai";
+    case "gemini":     return "gemini";
+    case "openclaw":   return null; // self-hosted via SSH
+    case "hermes":     return null; // self-hosted runtime
+    case "minimax":    return "minimax";
+    case "grok":       return "xai";
+    case "deepseek":   return "deepseek";
+    case "qwen":       return "qwen";
+    case "openrouter": return "openrouter";
   }
 }
 
@@ -94,7 +101,7 @@ export default function AuthRequirements({ kind, runtime }: Props) {
 
   const { data: keys = [], isLoading: keysLoading } = useQuery({
     queryKey: ["llm-api-keys"],
-    queryFn: listLlmApiKeys,
+    queryFn: () => listLlmApiKeys(),
     staleTime: 5_000,
   });
 
@@ -115,7 +122,7 @@ export default function AuthRequirements({ kind, runtime }: Props) {
   // 2026-05-08.
   if (kind === "external") {
     const matching = keys.filter(
-      (k) => CHAT_PROVIDERS.includes(k.provider as typeof CHAT_PROVIDERS[number]) && k.is_active,
+      (k) => CHAT_PROVIDERS.includes(k.provider as typeof CHAT_PROVIDERS[number]) && k.isActive,
     );
     return (
       <div className="space-y-2">
@@ -143,7 +150,7 @@ export default function AuthRequirements({ kind, runtime }: Props) {
     );
   }
 
-  const matching = keys.filter((k) => k.provider === provider && k.is_active);
+  const matching = keys.filter((k) => k.provider === provider && k.isActive);
 
   return (
     <div className="space-y-2">
@@ -265,7 +272,7 @@ function KeyAvailability({
 function KeyList({
   keys,
 }: {
-  keys: { id: string; name: string; key_preview: string; provider: string }[];
+  keys: { id: string; name: string; keyPreview: string; provider: string }[];
 }) {
   return (
     <div className="space-y-1">
@@ -276,7 +283,7 @@ function KeyList({
         >
           <KeyRound size={10} className="text-cs-muted" />
           <span className="text-cs-text font-medium">{k.name}</span>
-          <code className="font-mono text-cs-muted">{k.key_preview}</code>
+          <code className="font-mono text-cs-muted">{k.keyPreview}</code>
         </div>
       ))}
     </div>

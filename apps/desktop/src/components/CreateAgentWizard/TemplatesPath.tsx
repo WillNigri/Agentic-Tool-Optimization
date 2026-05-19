@@ -9,6 +9,7 @@ import {
   Globe,
   Search,
   Sparkles,
+  type LucideIcon,
 } from "lucide-react";
 import { AGENT_TEMPLATES, type AgentTemplate } from "@/lib/agentTemplates";
 import { cn } from "@/lib/utils";
@@ -22,7 +23,7 @@ interface Props {
   onPick: (template: AgentTemplate) => void;
 }
 
-const ICONS: Record<AgentTemplate["icon"], React.ComponentType<{ size?: number; className?: string }>> = {
+const ICONS: Record<AgentTemplate["icon"], LucideIcon> = {
   "git-pull-request": GitPullRequest,
   feather: Feather,
   binary: Binary,
