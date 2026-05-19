@@ -30,6 +30,10 @@ function templateToDraft(tpl: AgentTemplate): QuickDraft {
     description: tpl.description,
     systemPrompt: tpl.systemPrompt,
     projectId: null,
+    // Templates are always "internal" agents — they run locally on the
+    // developer's CLI subscription. The "external" kind is a wizard-only
+    // distinction the user opts into in the Quick form (v2.0 split).
+    kind: "internal",
     skills: [],
     // Pre-select recommended MCPs only if the user already has them configured;
     // for this draft we just pre-fill the slugs and let QuickPath's MultiSelect

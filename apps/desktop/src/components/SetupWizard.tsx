@@ -544,7 +544,7 @@ function VerifyStep({
                         {rt.status.details.authenticated ? "Authenticated" : "Not authenticated"}
                       </span>
                     )}
-                    {rt.status.details.apiKeyEnv && (
+                    {!!rt.status.details.apiKeyEnv && (
                       <span>
                         API Key: {String(rt.status.details.apiKeyEnv)}
                       </span>

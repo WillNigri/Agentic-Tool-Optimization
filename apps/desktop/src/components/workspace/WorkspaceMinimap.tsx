@@ -5,7 +5,7 @@ const MINIMAP_W = 160;
 const MINIMAP_H = 100;
 const NODE_H = 85;
 
-import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
+import { runtimeHex } from "@/lib/runtimes";
 
 const KIND_COLORS: Record<string, string> = {
   runtime: "#00FFB2",
@@ -67,7 +67,7 @@ export default function WorkspaceMinimap({ canvasRect }: { canvasRect?: DOMRect 
         {nodes.map((n) => {
           const x = (n.x - bounds.minX) * mapScale;
           const y = (n.y - bounds.minY) * mapScale;
-          const color = n.runtime ? (RUNTIME_COLORS[n.runtime] ?? KIND_COLORS[n.kind]) : KIND_COLORS[n.kind] ?? "#666";
+          const color = n.runtime ? (runtimeHex(n.runtime) ?? KIND_COLORS[n.kind]) : KIND_COLORS[n.kind] ?? "#666";
           return (
             <rect
               key={n.id}

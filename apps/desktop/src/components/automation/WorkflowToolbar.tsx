@@ -174,7 +174,14 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
           >
             {/* Runtime filter tabs */}
             {(() => {
-              const runtimes = [...new Set(workflows.map((w) => w.nodes[0]?.runtime).filter(Boolean))];
+              const runtimes: string[] = [
+                ...new Set(
+                  workflows
+                    .map((w) => w.nodes[0]?.runtime)
+                    .filter((rt): rt is NonNullable<typeof rt> => Boolean(rt))
+                    .map((rt) => String(rt)),
+                ),
+              ];
               if (runtimes.length <= 1) return null;
               const COLORS: Record<string, string> = { claude: "#f97316", openclaw: "#06b6d4", codex: "#22c55e", hermes: "#a855f7" };
               return (

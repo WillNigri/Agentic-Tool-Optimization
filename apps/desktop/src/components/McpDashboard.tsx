@@ -305,14 +305,14 @@ export default function McpDashboard() {
                                 <p className="text-xs font-mono font-medium text-purple-400">{tool.name}</p>
                                 <p className="text-[10px] text-cs-muted line-clamp-2">{tool.description || "No description"}</p>
                               </div>
-                              {tool.inputSchema && (
+                              {!!tool.inputSchema && (
                                 <Code size={10} className="text-cs-muted shrink-0" />
                               )}
                             </div>
                             {/* Expanded tool schema + rewrite suggester */}
                             {expandedTools === tool.name && (
                               <div className="mt-2 pt-2 border-t border-cs-border space-y-2">
-                                {tool.inputSchema && (
+                                {!!tool.inputSchema && (
                                   <div>
                                     <p className="text-[10px] text-cs-muted uppercase mb-1">Input Schema</p>
                                     <pre className="text-[10px] font-mono text-cs-muted bg-cs-card rounded p-2 overflow-x-auto max-h-32">

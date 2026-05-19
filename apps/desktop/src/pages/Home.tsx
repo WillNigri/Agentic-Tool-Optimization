@@ -20,7 +20,7 @@ import { shellRequestForAgent, getRuntimeCapability } from "@/lib/runtimeCapabil
 type RecentAgent = {
   id: string;
   displayName: string;
-  runtime: "claude" | "codex" | "gemini" | "openclaw" | "hermes";
+  runtime: string;
   lastUsedAt: number | null;
 };
 
@@ -42,7 +42,7 @@ interface HomeProps {
   recentAgents?: RecentAgent[];
   recentRuns?: RecentRun[];
   alerts?: Alert[];
-  onCreateAgent?: (path: "guided" | "quick") => void;
+  onCreateAgent?: (path: WizardPath) => void;
   onOpenAgent?: (agentId: string) => void;
   onOpenRun?: (runId: string) => void;
   onOpenSettings?: () => void;

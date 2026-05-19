@@ -60,7 +60,7 @@ Reply with ONLY valid JSON in this exact shape (no markdown fences, no commentar
   "reasoning": "<1 sentence on why this stack fits the goal>"
 }`;
 
-const RUNTIME_DEFAULT_MODEL: Record<AgentRuntime, string> = {
+const RUNTIME_DEFAULT_MODEL: Partial<Record<AgentRuntime, string>> = {
   claude: "claude-sonnet-4-6",
   codex: "gpt-4.1",
   gemini: "gemini-2.0-flash-exp",
@@ -85,7 +85,7 @@ export async function suggestStack(goal: string): Promise<StackSuggestion> {
       const parsed = parseSuggestionJson(text);
       return {
         runtime,
-        model: parsed.model || RUNTIME_DEFAULT_MODEL[runtime],
+        model: parsed.model || RUNTIME_DEFAULT_MODEL[runtime] || "claude-sonnet-4-6",
         displayName: parsed.displayName,
         description: parsed.description,
         systemPrompt: parsed.systemPrompt,

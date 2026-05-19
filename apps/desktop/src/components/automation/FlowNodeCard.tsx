@@ -20,6 +20,8 @@ const EXEC_RING_COLORS: Record<ExecutionNodeStatus, string> = {
   running: "#FFB800",
   completed: "#00FFB2",
   failed: "#FF4466",
+  skipped: "#6b7280",
+  retrying: "#a78bfa",
 };
 
 export default function FlowNodeCard({

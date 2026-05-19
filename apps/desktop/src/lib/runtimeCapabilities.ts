@@ -39,7 +39,9 @@ export type RuntimeCapability = {
   mcpConfigPath?: string;
 };
 
-const CAPABILITIES: Record<AgentRuntime, RuntimeCapability> = {
+// Partial — covers CLI runtimes. API providers fall back at the call site
+// (see getRuntimeCapability below which already handles undefined).
+const CAPABILITIES: Partial<Record<AgentRuntime, RuntimeCapability>> = {
   claude: {
     label: "Claude Code",
     dotClass: "bg-orange-500",
@@ -111,14 +113,18 @@ const CAPABILITIES: Record<AgentRuntime, RuntimeCapability> = {
 };
 
 export function getRuntimeCapability(runtime: AgentRuntime): RuntimeCapability {
-  return CAPABILITIES[runtime] ?? CAPABILITIES.claude;
+  // CAPABILITIES.claude is always present (asserted by the literal above);
+  // the `!` keeps the return type non-nullable for callers.
+  return CAPABILITIES[runtime] ?? CAPABILITIES.claude!;
 }
 
 export function listRuntimeCapabilities(): { runtime: AgentRuntime; cap: RuntimeCapability }[] {
-  return (Object.keys(CAPABILITIES) as AgentRuntime[]).map((rt) => ({
-    runtime: rt,
-    cap: CAPABILITIES[rt],
-  }));
+  return (Object.keys(CAPABILITIES) as AgentRuntime[])
+    .map((rt) => {
+      const cap = CAPABILITIES[rt];
+      return cap ? { runtime: rt, cap } : null;
+    })
+    .filter((x): x is { runtime: AgentRuntime; cap: RuntimeCapability } => x !== null);
 }
 
 /** Build a free-text prompt to send via promptAgent() (single-shot mode).

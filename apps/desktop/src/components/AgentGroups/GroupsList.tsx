@@ -27,7 +27,8 @@ import GroupDetail from "./GroupDetail";
 // biggest leverage point: one mega-agent with 30 tools is brittle; 4
 // specialized agents with 6-8 tools each + a router is robust.
 
-const RUNTIME_DOT: Record<AgentGroup["runtime"], string> = {
+// Partial — covers CLI runtimes; API providers fall back at the call site.
+const RUNTIME_DOT: Partial<Record<AgentGroup["runtime"], string>> = {
   claude: "bg-orange-500",
   codex: "bg-green-500",
   gemini: "bg-blue-500",
@@ -162,7 +163,7 @@ export default function GroupsList() {
                   <span
                     className={cn(
                       "inline-block w-2 h-2 rounded-full shrink-0",
-                      RUNTIME_DOT[g.runtime]
+                      RUNTIME_DOT[g.runtime] ?? "bg-slate-400"
                     )}
                   />
                   <div className="flex-1 min-w-0">

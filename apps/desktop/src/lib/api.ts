@@ -9,7 +9,7 @@
 
 import * as tauriApi from './tauri-api';
 import * as mock from './mock-data';
-import type { ProjectBundle } from './tauri-api';
+import type { ProjectBundle, WritePreview } from './tauri-api';
 
 // Re-export all types so components can import from api.ts instead of tauri-api.ts
 export type {
@@ -381,9 +381,9 @@ export async function writeAgentConfigFile(path: string, content: string, option
   return mock.mockWriteResult;
 }
 
-export async function previewWriteAgentConfigFile(path: string, newContent: string) {
+export async function previewWriteAgentConfigFile(path: string, newContent: string): Promise<WritePreview> {
   if (isTauri) return tauriApi.previewWriteAgentConfigFile(path, newContent);
-  return mock.mockWritePreview;
+  return mock.mockWritePreview as WritePreview;
 }
 
 export async function validateSettingsJson(content: string) {

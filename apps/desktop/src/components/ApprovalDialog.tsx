@@ -85,7 +85,8 @@ export default function ApprovalDialog({
         name: skillName,
         description: "",
         scope,
-        runtime,
+        // Skills only apply to CLI runtimes; narrow at the call site.
+        runtime: runtime as "claude" | "codex" | "openclaw" | "hermes",
         content,
         isDirectory: false,
       });

@@ -9,7 +9,7 @@ import ErrorBoundary from "@/components/ErrorBoundary";
 
 const WorkspaceCanvasLazy = lazy(() => import("./WorkspaceCanvas"));
 
-import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
+import { runtimeHex } from "@/lib/runtimes";
 
 export default function WorkspaceView() {
   const [viewMode, setViewMode] = useState<"grid" | "canvas">("grid");
@@ -124,7 +124,7 @@ function GridView({ bundle }: { bundle: ProjectBundle }) {
               {allSkills.map((skill) => (
                 <div key={skill.id} className="rounded-lg border border-cs-border bg-cs-card px-3 py-2">
                   <div className="flex items-center gap-2">
-                    <Sparkles size={12} style={{ color: RUNTIME_COLORS[skill.runtime] ?? "#00FFB2" }} />
+                    <Sparkles size={12} style={{ color: runtimeHex(skill.runtime) ?? "#00FFB2" }} />
                     <span className="text-xs font-medium truncate">{skill.name}</span>
                     <div className={cn("w-1.5 h-1.5 rounded-full ml-auto shrink-0", skill.enabled ? "bg-green-400" : "bg-gray-500")} />
                   </div>
@@ -175,7 +175,7 @@ function GridView({ bundle }: { bundle: ProjectBundle }) {
 }
 
 function RuntimeCard({ name, runtime, active, skillCount }: { name: string; runtime: string; active: boolean; skillCount: number }) {
-  const color = RUNTIME_COLORS[runtime] ?? "#666";
+  const color = runtimeHex(runtime) ?? "#666";
   return (
     <div className={cn("rounded-xl border px-4 py-3", active ? "" : "opacity-40")} style={{
       borderColor: active ? `${color}66` : undefined,

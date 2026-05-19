@@ -542,7 +542,7 @@ export default function AutomationFlow() {
                       // this slug; component reads + clears it on mount.
                       localStorage.setItem(
                         "ato.insights.preselectAgentSlug",
-                        selectedNode.agentName,
+                        selectedNode.agentName ?? "",
                       );
                     } catch {
                       // localStorage failure is non-fatal — user lands

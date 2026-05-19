@@ -4,9 +4,9 @@
 # Catches type errors and broken unit tests before they get committed.
 # Heavier checks (release builds, CLI smoke) live in pre-push.
 #
-# tsc is NOT in this gate yet — 151 pre-existing TS errors (TS6310 was
-# hiding them). Joining the gate by EOW 2026-05-22 once the debt clears.
-# See ROADMAP.md § "v2.7.5 → v2.7.6 — Gate + TS cleanup week" for the plan.
+# 2026-05-20 — tsc joined the gate after the v2.7.6 TS debt cleanup
+# (151 → 0 errors in 7 root-cause fixes + 1-day grind). Every commit
+# now goes through Rust check, type check, and vitest before landing.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -21,6 +21,9 @@ step "cargo check (apps/desktop/src-tauri)"
 # shifting it left saves catching a CLI break at push time after a 30s build.
 step "cargo check (apps/cli)"
 (cd apps/cli && cargo check --quiet) || fail "cargo check CLI"
+
+step "tsc --noEmit (apps/desktop)"
+(cd apps/desktop && npx tsc --noEmit) || fail "tsc"
 
 step "vitest (apps/desktop)"
 (cd apps/desktop && npx vitest run --reporter=dot) || fail "vitest"

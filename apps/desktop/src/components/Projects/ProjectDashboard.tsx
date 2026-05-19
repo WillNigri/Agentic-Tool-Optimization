@@ -134,7 +134,7 @@ export default function ProjectDashboard({ project, onBack }: ProjectDashboardPr
   const [showEmptySections, setShowEmptySections] = useState(false);
 
   const sectionHasContent = useMemo<Record<string, boolean>>(() => {
-    if (!data || activeRuntime !== "claude") return {};
+    if (!data || activeRuntime !== "claude") return {} as Record<string, boolean>;
     return {
       memory: data.memoryFiles.some((f) => f.exists),
       skills: data.skills.length > 0,

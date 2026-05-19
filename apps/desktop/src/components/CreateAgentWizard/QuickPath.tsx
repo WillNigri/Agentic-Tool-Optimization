@@ -211,8 +211,8 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
         if (initialScaffold.memoryPolicy) {
           try {
             await updateAgentMemoryPolicy(agent.id, {
-              summarizeAfterMessages: initialScaffold.memoryPolicy.summarizeAfterMessages,
-              keepRecentMessages: initialScaffold.memoryPolicy.keepRecentMessages,
+              summarizeAfter: initialScaffold.memoryPolicy.summarizeAfterMessages,
+              keepLastK: initialScaffold.memoryPolicy.keepRecentMessages,
               summarizerModel: "",
             });
           } catch {

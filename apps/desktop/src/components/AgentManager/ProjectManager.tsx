@@ -78,7 +78,7 @@ export default function ProjectManager() {
   // Update project mutation
   const updateMutation = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) =>
-      updateProject(id, name, undefined),
+      updateProject(id, name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       setEditingProject(null);

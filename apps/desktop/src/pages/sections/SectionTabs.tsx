@@ -13,7 +13,11 @@ export type TabDef = {
   id: string;
   label: string;
   icon: LucideIcon;
-  Component: ComponentType<unknown>;
+  // Sections render their tab components with no props — they read their
+  // own state from stores. Accept any component shape (regular + lazy)
+  // since the actual props bag is always empty at the call site.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Component: ComponentType<any>;
 };
 
 interface SectionTabsProps {

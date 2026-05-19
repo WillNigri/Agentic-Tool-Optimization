@@ -36,7 +36,7 @@ interface CanvasEdge {
   color: string;
 }
 
-import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
+import { runtimeHex } from "@/lib/runtimes";
 const KIND_ICONS = { runtime: Cpu, skill: Sparkles, mcp: Server, memory: BookOpen };
 
 export default function WorkspaceCanvas() {
@@ -85,7 +85,7 @@ export default function WorkspaceCanvas() {
     for (const rt of runtimes) {
       if (!rt.has) continue;
       const rid = `rt-${rt.key}`;
-      const color = RUNTIME_COLORS[rt.key];
+      const color = runtimeHex(rt.key);
       n.push({ id: rid, label: rt.label, kind: "runtime", color, x: rx, y: 60, w: 200, h: 70, active: true, detail: `${rt.skills.length} skills`, runtime: rt.key });
 
       let sx = rx - 20;

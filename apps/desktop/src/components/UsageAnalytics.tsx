@@ -48,7 +48,7 @@ import {
 import { formatNumber, formatCurrency, cn } from "@/lib/utils";
 
 // 2026-05-18 — sourced from the canonical runtime registry.
-import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
+import { runtimeHex } from "@/lib/runtimes";
 
 const STATUS_COLORS = {
   success: "#22c55e",
@@ -418,7 +418,7 @@ export default function UsageAnalytics() {
                         {executionMetrics.executionsByRuntime.map((entry) => (
                           <Cell
                             key={entry.runtime}
-                            fill={RUNTIME_COLORS[entry.runtime] || "#6b7280"}
+                            fill={runtimeHex(entry.runtime) || "#6b7280"}
                           />
                         ))}
                       </Pie>

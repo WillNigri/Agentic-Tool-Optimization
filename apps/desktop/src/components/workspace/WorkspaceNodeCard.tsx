@@ -18,7 +18,7 @@ const KIND_ICONS: Record<WorkspaceNodeKind, typeof Bot> = {
   memory: BookOpen,
 };
 
-import { RUNTIME_HEX_COLORS as RUNTIME_COLORS } from "@/lib/runtimes";
+import { runtimeHex } from "@/lib/runtimes";
 
 const STATUS_COLORS: Record<string, string> = {
   online: "#22c55e",
@@ -36,7 +36,7 @@ export default function WorkspaceNodeCard({
   onDoubleClick,
 }: WorkspaceNodeCardProps) {
   const Icon = KIND_ICONS[node.kind];
-  const accentColor = node.runtime ? RUNTIME_COLORS[node.runtime] : "#00FFB2";
+  const accentColor = node.runtime ? runtimeHex(node.runtime) : "#00FFB2";
   const statusColor = STATUS_COLORS[node.status];
 
   if (node.hidden) return null;
