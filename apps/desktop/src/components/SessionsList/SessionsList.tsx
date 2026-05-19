@@ -46,68 +46,17 @@ import {
   personaBadge,
   runtimeDisplay,
   RUNTIME_COLORS,
+  type SessionListRow,
 } from "./_helpers";
+import {
+  ChatCard,
+  WarRoomCard,
+  SingleRunCard,
+  SessionCard,
+} from "./SessionCards";
 
-interface SessionListRow {
-  id: string;
-  runtime: string;
-  agentSlug: string | null;
-  title: string | null;
-  createdAt: string;
-  lastUsedAt: string;
-  turnCount: number;
-  runtimesUsed: string[];
-  // 2026-05-16 — distinct agent slugs that appeared on assistant turns
-  // in this session, in first-spoken order. Empty when every dispatch
-  // was a generalist (no --agent). Drives the persona-badge cluster
-  // on the SessionsList card.
-  agentsUsed: string[];
-  // 2026-05-16 — session-total cost USD. NULL when no execution_logs
-  // rows reference this session (pre-session-id-on-logs sessions). 0.0
-  // when there are rows but all were on subscription (no metered cost).
-  totalCostUsd: number | null;
-  lastAssistantPreview: string | null;
-  // v2.6 Slice C — lifecycle + coordinator-generated metadata.
-  // PR 5a (2026-05-17) broadened the `status` literal from "open" |
-  // "closed" to a plain string so single-run rows (which carry the
-  // execution_log status like "success" / "error") flow through the
-  // same shape. UI code that checks lifecycle still tests for "open"
-  // / "closed" explicitly; everything else falls through to the
-  // single-run card variant.
-  status: string;
-  closedAt: string | null;
-  autoTitle: string | null;
-  summary: string | null;
-  tags: string[];
-  projectId: string | null;
-  // PR 15 (2026-05-18) — human-readable project name resolved by
-  // the Tauri LEFT JOIN against the projects table. Prefer this
-  // for display; projectId stays the canonical identifier. NULL
-  // when projectId is NULL or when the join doesn't find a row
-  // (project deleted, session retains the snapshot id).
-  projectName: string | null;
-  // 2026-05-17 — Sessions UX polish PR 2 + 4. category is a
-  // controlled-vocab work-band tag (Business / Marketing / Dev /
-  // Frontend / etc.); team is a free-form owner label. Both are
-  // populated by the coordinator at close (PR 3); NULL on
-  // pre-PR-2 rows AND on single-run rows (taxonomy is a session-only
-  // concern — a single dispatch isn't worth taxonomizing).
-  category: string | null;
-  team: string | null;
-  // 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
-  // real multi-turn sessions (from the `sessions` table) and
-  // single-run dispatches (from `execution_logs` with
-  // session_id IS NULL — what the History tab was the only surface
-  // for before PR 5 collapsed them into one unified feed). The
-  // frontend uses this to pick the card variant + the
-  // click-into-detail route in PR 5b/5c.
-  // 2026-05-18 — Path A consolidation: chat threads from the
-  // bottom-pane Chat tab land in this feed as a fourth kind so the
-  // Sessions tab is one inbox for every conversation type. The bottom
-  // pane keeps writing to its own `chat_threads` table for now;
-  // sessions_view's list_sessions_inner UNIONs the two on read.
-  rowKind: "session" | "single_run" | "war_room" | "chat";
-}
+// SessionListRow moved to ./_helpers.ts (2026-05-19) so SessionCards/
+// can import it without reaching back through this file.
 
 // 2026-05-18 — elegance push #2. Shared types + helpers
 // (SessionTurn / SessionCostBreakdown / SessionTranscript /
@@ -808,568 +757,49 @@ export default function SessionsList() {
       ) : (
         <div className="space-y-2">
           {filteredSessions.map((s) => {
-            // PR 5b — single-run card variant. A single-run dispatch
-            // (`rowKind === "single_run"`) gets a lighter card: one
-            // runtime badge, persona (if any), the prompt prefix as
-            // title, response preview, cost, timestamp. No Coord/+
-            // group (only one runtime spoke), no closed-lock (no
-            // lifecycle), no category/team (taxonomy is a session-only
-            // concern). Click-into-detail lands in PR 5c — until then
-            // single-run cards render as non-interactive `div`s with a
-            // tooltip explaining that the History tab still has the
-            // full detail.
-            // PR 14b — war-room synthetic card. Groups N single-runs
-            // sharing a war_room_id into one card. Renders before the
-            // single-run branch so the type-narrowing flows cleanly.
-            // PR 14c — clickable: routes to WarRoomDetailView which
-            // lists the constituent dispatches per seat.
-            // 2026-05-18 — Path A consolidation: chat threads from the
-            // bottom-pane Chat tab. Renders before session/war-room
-            // branches so type-narrowing flows cleanly. The card mirrors
-            // the war-room/single-run/session card shape (kind pill at
-            // position 0, runtime badge, right-aligned meta cluster,
-            // title on its own row, body preview) so the four variants
-            // feel like one feed at a 60px scan.
-            //
-            // Click-into-detail: today, opening the chat surfaces the
-            // assistant-side reply preview only (we have no full chat
-            // transcript view yet — the bottom pane is the live surface).
-            // Path B (multi-launcher refactor) will give chat threads a
-            // proper detail view; for now, clicking just keeps the user
-            // on Sessions with the row marked open. Per "ship as is"
-            // (Path A is the cheap UNION), this is fine — users still
-            // SEE their chats in the inbox, which is what was missing.
+            // 2026-05-19 elegance push — the four card variants moved to
+            // SessionCards/ ({Chat,WarRoom,SingleRun,Session}Card.tsx).
+            // Pick by rowKind; chat/war-room/single-run render before the
+            // default session path so type-narrowing flows cleanly.
             if (s.rowKind === "chat") {
               return (
-                <button
+                <ChatCard
                   key={s.id}
-                  onClick={() =>
-                    setOpenSelection({ kind: "chat", id: s.id })
-                  }
-                  title={`Chat thread ${s.id}`}
-                  className="w-full text-left border rounded-lg p-4 transition-colors border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
-                >
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <span
-                      aria-label="chat"
-                      className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-muted/15 text-cs-muted"
-                      title="Bottom-pane chat thread. One-on-one conversation, can hop runtimes per message."
-                    >
-                      🗨 chat
-                    </span>
-                    <span
-                      className={cn(runtimeBadge(s.runtime))}
-                      title={`Most recent runtime: ${runtimeDisplay(s.runtime)}`}
-                    >
-                      {s.runtime}
-                    </span>
-                    <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
-                      <span>
-                        {s.turnCount} msg{s.turnCount !== 1 ? "s" : ""}
-                      </span>
-                      <span>{formatTime(s.lastUsedAt)}</span>
-                    </div>
-                  </div>
-                  <div className="mt-2 text-sm font-medium text-cs-text truncate">
-                    {s.title || (
-                      <span className="text-cs-muted italic font-normal">
-                        untitled chat
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
-                    <span>
-                      runtime:{" "}
-                      <span className="text-cs-text">{runtimeDisplay(s.runtime)}</span>
-                    </span>
-                    <span>
-                      kind: <span className="text-cs-text">bottom-pane chat</span>
-                    </span>
-                  </div>
-                  {s.lastAssistantPreview && (
-                    <div className="mt-2 text-xs text-cs-muted line-clamp-2">
-                      {s.lastAssistantPreview}
-                    </div>
-                  )}
-                </button>
+                  session={s}
+                  onOpen={() => setOpenSelection({ kind: "chat", id: s.id })}
+                />
               );
             }
             if (s.rowKind === "war_room") {
-              const participantCount = s.runtimesUsed.length;
               return (
-                <button
+                <WarRoomCard
                   key={s.id}
-                  onClick={() =>
+                  session={s}
+                  onOpen={() =>
                     setOpenSelection({ kind: "war_room", id: s.id })
                   }
-                  title={`War room ${s.id}`}
-                  className="w-full text-left border rounded-lg p-4 transition-colors border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
-                >
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <span
-                      aria-label="war room"
-                      className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-accent/15 text-cs-accent"
-                      title={`War room ${s.id.slice(0, 8)} — ${participantCount} parallel seats`}
-                    >
-                      ⚔ war room
-                    </span>
-                    {/* Participant runtime badges. All co-equal — no
-                        Coord/+ split since R1-parallel war-rooms are
-                        peers by design. */}
-                    <div className="flex items-center gap-1">
-                      <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
-                        seats
-                      </span>
-                      {s.runtimesUsed.map((r) => (
-                        <span
-                          key={r}
-                          className={cn(runtimeBadge(r))}
-                          title={`Participant runtime: ${r}`}
-                        >
-                          {r}
-                        </span>
-                      ))}
-                    </div>
-                    {s.agentsUsed.length > 0 && (
-                      <div className="flex items-center gap-1">
-                        {s.agentsUsed.map((slug) => (
-                          <span
-                            key={slug}
-                            className={personaBadge()}
-                            title={`Persona: ${personaDisplay(slug)}`}
-                          >
-                            {personaDisplay(slug)}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {/* PR 17 follow-up — right-side meta cluster.
-                        Title moved to its own row below (line below)
-                        so it doesn't get pushed by chip overflow. */}
-                    <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
-                      <span>
-                        {participantCount} seat
-                        {participantCount !== 1 ? "s" : ""}
-                      </span>
-                      {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
-                        <span className="font-mono">
-                          ${s.totalCostUsd.toFixed(4)}
-                        </span>
-                      )}
-                      <span>{formatTime(s.lastUsedAt)}</span>
-                    </div>
-                  </div>
-                  <div className="mt-2 text-sm font-medium text-cs-text truncate">
-                    {s.title || (
-                      <span className="text-cs-muted italic font-normal">
-                        untitled war room
-                      </span>
-                    )}
-                  </div>
-                  {/* PR 17 — meta line on the war-room card so it has
-                      parity with the session card's coordinator/team
-                      line. Shows the seat-count × round-count summary;
-                      the war-room title (first round's prompt prefix)
-                      already appears in the chip row above. */}
-                  <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
-                    <span>
-                      seats:{" "}
-                      <span className="text-cs-text">{participantCount}</span>
-                    </span>
-                    <span>
-                      kind:{" "}
-                      <span className="text-cs-text">parallel</span> · each seat
-                      fires independently within a round; across rounds every
-                      seat sees the full peer transcript
-                    </span>
-                  </div>
-                  {/* PR 17 — body preview: first-round prompt. Matches
-                      single-run + session cards which both surface a
-                      body line, so the Sessions feed feels uniform. */}
-                  {s.title && (
-                    <div className="mt-2 text-xs text-cs-muted line-clamp-2">
-                      {s.title}
-                    </div>
-                  )}
-                </button>
+                />
               );
             }
             if (s.rowKind === "single_run") {
-              const promptPreview = s.title ?? "(no prompt recorded)";
-              const responsePreview = s.lastAssistantPreview;
-              const isErr = s.status !== "success";
               return (
-                <button
+                <SingleRunCard
                   key={s.id}
-                  onClick={() =>
+                  session={s}
+                  onOpen={() =>
                     setOpenSelection({ kind: "single_run", id: s.id })
                   }
-                  title="Open the full prompt + response for this single-run dispatch."
-                  className={cn(
-                    "w-full text-left border rounded-lg p-4 transition-colors",
-                    isErr
-                      ? "border-cs-danger/40 bg-cs-card/40 hover:border-cs-danger/60"
-                      : "border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
-                  )}
-                >
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {/* PR 17 — leading kind marker pill for parity
-                        with war-room (⚔ WAR ROOM) and session
-                        (💬 SESSION). Replaces the previous "small
-                        glyph + mid-row 'single run' text pill" combo
-                        with a single position-0 pill. Status (error
-                        vs success) still encoded via the pill bg
-                        (danger tint on error) so the same pill does
-                        double duty. */}
-                    <span
-                      aria-label="single run"
-                      className={cn(
-                        "px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide",
-                        isErr
-                          ? "bg-cs-danger/15 text-cs-danger"
-                          : "bg-cs-muted/15 text-cs-muted"
-                      )}
-                      title={`Single run · ${s.status}`}
-                    >
-                      ⚡ single run
-                    </span>
-                    <span
-                      className={cn(runtimeBadge(s.runtime))}
-                      title={`Runtime: ${runtimeDisplay(s.runtime)}`}
-                    >
-                      {s.runtime}
-                    </span>
-                    {s.agentSlug && (
-                      <span
-                        className={personaBadge()}
-                        title={`Persona seat: ${personaDisplay(s.agentSlug)}`}
-                      >
-                        {personaDisplay(s.agentSlug)}
-                      </span>
-                    )}
-                    {/* PR 17 follow-up — right-side meta cluster.
-                        Title moved to its own row below at uniform
-                        text-sm font-medium (was previously
-                        text-xs font-mono — typography drift). */}
-                    <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
-                      {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
-                        <span
-                          className="font-mono"
-                          title="Estimated cost from execution_logs.cost_usd_estimated."
-                        >
-                          ${s.totalCostUsd.toFixed(4)}
-                        </span>
-                      )}
-                      <span>{formatTime(s.lastUsedAt)}</span>
-                    </div>
-                  </div>
-                  <div className="mt-2 text-sm font-medium text-cs-text truncate">
-                    {promptPreview}
-                  </div>
-                  {/* PR 17 — meta line on the single-run card for parity
-                      with session (coord/team) and war-room (seats × rounds)
-                      meta lines. Tells the reader what they're about to
-                      open without having to parse the chip row. */}
-                  <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
-                    <span>
-                      runtime:{" "}
-                      <span className="text-cs-text">{runtimeDisplay(s.runtime)}</span>
-                    </span>
-                    {s.agentSlug && (
-                      <span>
-                        persona:{" "}
-                        <span className="text-cs-accent">
-                          {personaDisplay(s.agentSlug)}
-                        </span>
-                      </span>
-                    )}
-                    <span>
-                      kind: <span className="text-cs-text">single dispatch</span>
-                    </span>
-                  </div>
-                  {responsePreview && (
-                    <div className="mt-2 text-xs text-cs-muted line-clamp-2 font-mono">
-                      {responsePreview}
-                    </div>
-                  )}
-                </button>
+                />
               );
             }
-            // Real-session card path below — unchanged from PR 4.
-            // Prefer the coordinator-generated auto_title when present
-            // (it's distilled from the actual conversation); fall back
-            // to the user-supplied title, then to a muted "untitled".
-            const displayTitle = s.autoTitle || s.title;
-            // For closed sessions, the summary is a better preview than
-            // the last assistant turn (which is often a tool result or
-            // mid-thought fragment). For open sessions, keep the live
-            // last-turn preview so users see what's happening now.
-            const previewText =
-              s.status === "closed" && s.summary
-                ? s.summary
-                : s.lastAssistantPreview;
             return (
-              <button
+              <SessionCard
                 key={s.id}
-                onClick={() => setOpenSelection({ kind: "session", id: s.id })}
-                title={`Session ${s.id}`}
-                className={cn(
-                  "w-full text-left border rounded-lg transition-colors p-4",
-                  s.status === "closed"
-                    ? "border-cs-border/60 bg-cs-card/60 hover:border-cs-accent/40"
-                    : "border-cs-border bg-cs-card hover:border-cs-accent/40 hover:bg-cs-border/20"
-                )}
-              >
-                <div className="flex items-center gap-3 flex-wrap">
-                  {/* PR 17 (2026-05-18) — kind marker on session cards
-                      for parity with war-room (⚔) + single-run (⚡)
-                      cards. Without this, the Sessions feed had three
-                      card variants with different "what is this"
-                      affordances; the kind marker is the visual hook
-                      that says "I'm a session" at a 60px scan. */}
-                  <span
-                    aria-label="session"
-                    className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-muted/15 text-cs-muted"
-                    title="Sequential multi-turn conversation. Each new turn sees prior turns via history replay."
-                  >
-                    💬 session
-                  </span>
-                  {/* 2026-05-17 — coordinator vs participants split into
-                      explicit labelled groups. Previously rendered as a
-                      single badge cluster with a ★ prefix on the
-                      coordinator — too easy to miss when the card has 4+
-                      runtime badges. Now: "Coord" label + ring-accented
-                      coordinator badge, separator, "+" label + dimmed
-                      participant badges. The session's anchor runtime is
-                      always shown as coordinator even if no turns have
-                      been recorded yet. */}
-                  <div className="flex items-center gap-1">
-                    <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
-                      Coord
-                    </span>
-                    <span
-                      className={cn(
-                        runtimeBadge(s.runtime),
-                        "ring-1 ring-cs-accent/70"
-                      )}
-                      title={`Coordinator runtime: ${runtimeDisplay(s.runtime)} — orchestrated this session`}
-                    >
-                      {s.runtime}
-                    </span>
-                  </div>
-                  {(() => {
-                    const participants = s.runtimesUsed.filter(
-                      (r) => r !== s.runtime
-                    );
-                    if (participants.length === 0) return null;
-                    return (
-                      <div className="flex items-center gap-1">
-                        <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
-                          +
-                        </span>
-                        {participants.map((r) => (
-                          <span
-                            key={r}
-                            className={cn(runtimeBadge(r), "opacity-75")}
-                            title={`Participant runtime: ${runtimeDisplay(r)} — contributed turns to this session`}
-                          >
-                            {r}
-                          </span>
-                        ))}
-                      </div>
-                    );
-                  })()}
-                  {/* 2026-05-16 — persona cluster. Renders the distinct
-                      seat slugs that spoke in this session, in first-
-                      spoken order. Empty (so the cluster is hidden) for
-                      generalist-only sessions. */}
-                  {s.agentsUsed.length > 0 && (
-                    <div className="flex items-center gap-1">
-                      {s.agentsUsed.map((slug) => (
-                        <span
-                          key={slug}
-                          className={personaBadge()}
-                          title={`Persona seat: ${personaDisplay(slug)}`}
-                        >
-                          {personaDisplay(slug)}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {s.status === "closed" && (
-                    <span
-                      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted"
-                      title={
-                        s.closedAt
-                          ? `Closed ${formatTime(s.closedAt)}`
-                          : "Closed"
-                      }
-                    >
-                      <Lock size={10} /> closed
-                    </span>
-                  )}
-                  {/* 2026-05-17 — Sessions UX polish PR 4. Category
-                      badge in the cs-accent (cyan) color sits between
-                      the closed-lock and the title so the work-band
-                      reads at a glance (Dev / Marketing / Backend /
-                      etc.). Hidden when NULL (pre-PR-2 rows or rows
-                      that closed without category — PR 3 will warn at
-                      close time). */}
-                  {s.category && (
-                    <span
-                      className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-accent/15 text-cs-accent"
-                      title={`Category: ${s.category} — populated by the coordinator at close`}
-                    >
-                      {s.category}
-                    </span>
-                  )}
-                  {/* PR 17 follow-up — right-side meta cluster.
-                      Title moved to its own row below so chip
-                      overflow doesn't push the title's vertical
-                      rhythm out of sync with cards that have
-                      fewer chips. */}
-                  <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
-                    <span>
-                      {s.turnCount} turn{s.turnCount !== 1 ? "s" : ""}
-                    </span>
-                    {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
-                      <span
-                        className="font-mono"
-                        title="Estimated session cost (sum of execution_logs). Open the session to see the per-runtime breakdown including which rows are metered API vs subscription-estimate."
-                      >
-                        ${s.totalCostUsd.toFixed(4)}
-                      </span>
-                    )}
-                    <span>{formatTime(s.lastUsedAt)}</span>
-                  </div>
-                </div>
-                <div className="mt-2 text-sm font-medium text-cs-text truncate">
-                  {displayTitle || (
-                    <span className="text-cs-muted italic font-normal">
-                      untitled session
-                    </span>
-                  )}
-                </div>
-                {/* 2026-05-16 — coordinator + project line. Coordinator
-                    is the session's anchor runtime (where the session
-                    was created). The session-level agent slug (when
-                    set) is the agent the SESSION was anchored to —
-                    separate from the per-turn personas in the cluster
-                    above. Project shows which project the conversation
-                    is scoped to. */}
-                <div className="mt-1 flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-cs-muted">
-                  <span>
-                    coordinator:{" "}
-                    <span className="text-cs-text">
-                      {runtimeDisplay(s.runtime)}
-                    </span>
-                    {s.agentSlug && (
-                      <>
-                        {" / "}
-                        <span className="text-cs-accent">
-                          {personaDisplay(s.agentSlug)}
-                        </span>
-                      </>
-                    )}
-                  </span>
-                  {s.projectId && (
-                    <span>
-                      project:{" "}
-                      {/* PR 15 — prefer the resolved human name from
-                          the projects JOIN; fall back to the 8-char id
-                          prefix when the name doesn't resolve (project
-                          deleted but session retains the snapshot
-                          id). Hover-title shows the full id either way
-                          so the canonical reference is one mouse-over
-                          away. */}
-                      <span
-                        className="text-cs-text font-mono"
-                        title={`project_id: ${s.projectId}`}
-                      >
-                        {s.projectName ?? s.projectId.slice(0, 8)}
-                      </span>
-                    </span>
-                  )}
-                  {/* 2026-05-17 — Sessions UX polish PR 4. Team is a
-                      free-form owner/band label (founder / frontend /
-                      backend / ops / etc.). Sits alongside project so
-                      the metadata line reads "coordinator · project ·
-                      team" left-to-right. Hidden when NULL. */}
-                  {s.team && (
-                    <span>
-                      team:{" "}
-                      <span className="text-cs-text font-mono">{s.team}</span>
-                    </span>
-                  )}
-                </div>
-                {previewText && (
-                  <div className="mt-2 text-xs text-cs-muted line-clamp-2">
-                    {previewText}
-                  </div>
-                )}
-                {s.tags.length > 0 && (
-                  <div className="mt-2 flex items-center gap-1 flex-wrap">
-                    <Tag size={10} className="text-cs-muted" />
-                    {s.tags.map((tag) => (
-                      // PR 6 — tag chips become click-to-filter. The
-                      // outer card is a button (opens the session), so
-                      // a nested button is invalid HTML; use a span
-                      // with role=button + onClick. stopPropagation so
-                      // the click sets the filter without also opening
-                      // the session detail.
-                      <span
-                        key={tag}
-                        role="button"
-                        tabIndex={0}
-                        aria-pressed={tagFilter === tag}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          // Toggle: clicking the already-active tag
-                          // clears the filter (matches the aria-pressed
-                          // toggle semantics).
-                          setTagFilter(tagFilter === tag ? null : tag);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setTagFilter(tagFilter === tag ? null : tag);
-                          }
-                        }}
-                        title={
-                          tagFilter === tag
-                            ? `Clear tag filter (currently "${tag}")`
-                            : `Filter to sessions tagged "${tag}"`
-                        }
-                        className={cn(
-                          // PR 9 — pressed-state designer note: the
-                          // color-only delta (bg + text inversion)
-                          // fails for users with color vision
-                          // deficiency. Add font-weight + letter-
-                          // spacing so the active tag also reads as
-                          // "different" by typography even if the
-                          // color contrast collapses. tracking-wide ≈
-                          // 0.025em letter-spacing; font-bold = 700
-                          // vs the default 500.
-                          "px-1.5 py-0.5 rounded text-[10px] cursor-pointer transition-colors",
-                          "focus:outline-none focus-visible:ring-2 focus-visible:ring-cs-accent focus-visible:ring-offset-1 focus-visible:ring-offset-cs-bg",
-                          tagFilter === tag
-                            ? "bg-cs-accent text-cs-bg ring-1 ring-cs-accent font-bold tracking-wide"
-                            : "bg-cs-accent/10 text-cs-accent hover:bg-cs-accent/20 font-medium"
-                        )}
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {/* PR 17 (2026-05-18) — raw UUID moved to a hover-
-                    only tooltip on the card. Will flagged the
-                    Sessions feed for visual inconsistency: war-room
-                    + single-run cards don't show their UUID; only
-                    sessions did. Consistency wins; the UUID is one
-                    mouse-over away when needed. */}
-              </button>
+                session={s}
+                onOpen={() => setOpenSelection({ kind: "session", id: s.id })}
+                tagFilter={tagFilter}
+                setTagFilter={setTagFilter}
+              />
             );
           })}
         </div>

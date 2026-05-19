@@ -63,6 +63,34 @@ export function personaBadge(): string {
 // and NewSessionModal can also import them without re-declaring or
 // reaching back into the parent.
 
+// 2026-05-19 — elegance push: SessionListRow moved out of SessionsList.tsx
+// so the SessionCards/ split can import it without reaching back. The row
+// is the shape `list_sessions_full` returns from the Tauri backend; one row
+// for every kind of conversation in the unified feed.
+export interface SessionListRow {
+  id: string;
+  runtime: string;
+  agentSlug: string | null;
+  title: string | null;
+  createdAt: string;
+  lastUsedAt: string;
+  turnCount: number;
+  runtimesUsed: string[];
+  agentsUsed: string[];
+  totalCostUsd: number | null;
+  lastAssistantPreview: string | null;
+  status: string;
+  closedAt: string | null;
+  autoTitle: string | null;
+  summary: string | null;
+  tags: string[];
+  projectId: string | null;
+  projectName: string | null;
+  category: string | null;
+  team: string | null;
+  rowKind: "session" | "single_run" | "war_room" | "chat";
+}
+
 export interface SessionTurn {
   turnIndex: number;
   role: string;
