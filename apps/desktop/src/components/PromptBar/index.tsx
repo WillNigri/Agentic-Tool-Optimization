@@ -835,14 +835,16 @@ export default function PromptBar() {
 
   // ── Thread actions ─────────────────────────────────────────────────────
 
+  // 2026-05-19 — lazy thread creation. Previously this eagerly wrote a
+  // `chat_threads` row with 0 messages, which is exactly the ghost-row
+  // pattern Will caught dogfooding ("New conversation · 19/05/2026,
+  // 0 msgs" appearing in Sessions even when no message was sent). The
+  // empty-row filter in SessionsList (v2.7.6) was a band-aid; this
+  // kills it at the source. The actual create happens in
+  // ensureThread() (line ~406) on the first message — that path is
+  // already lazy.
   const newThread = async () => {
-    const t = await createChatThread({
-      title: defaultThreadTitle(""),
-      projectId: activeProjectId,
-      agentId,
-    });
-    setCurrentThreadId(t.id);
-    void queryClient.invalidateQueries({ queryKey: ["chat-threads", activeProjectId] });
+    setCurrentThreadId(null);
     setShowThreadPicker(false);
     setExpanded(false);
   };
