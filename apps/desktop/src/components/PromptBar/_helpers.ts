@@ -91,6 +91,34 @@ export function messagesToAgentHistory(messages: ChatMessage[]): AgentMessage[] 
     }));
 }
 
+/** Compact relative-time string for the thread-history dropdown.
+ *  WhatsApp-style: `3m` / `2h` / `yesterday` / `Mon` / `Apr 14`.
+ *  2026-05-19 truncation war-room (claude + codex unanimous): full
+ *  locale timestamps in the dropdown read as noise; relative reads
+ *  as recency at a glance. */
+export function formatThreadAge(iso: string | null): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 7) {
+    // Day name (Mon / Tue / …)
+    return new Date(iso).toLocaleDateString(undefined, { weekday: "short" });
+  }
+  // Older — short month + day (Apr 14)
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 /** Stitch a thread's prior history into a single prompt the runtime will
  *  treat as one big request. Used for the no-agent path so cross-runtime
  *  swaps mid-thread still carry context. The framing instruction is short

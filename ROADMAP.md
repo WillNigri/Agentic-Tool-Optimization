@@ -270,6 +270,36 @@ Four bugs Will surfaced in the Insights panel; all four about the panel reportin
 
 Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
 
+### Path to 85+ on all five elegance fronts (war-roomed 2026-05-19)
+
+Honest audit after v2.7.6 dogfood pass: the "85%+ across all 5 fronts" framing in earlier release notes was aspirational, not measured. Real scores: TS gate ~95, DB schema ~85, Backend org ~70 (`commands/mod.rs` still 9,133 lines + 3 other Rust files over 1,500), Frontend org ~65 (`PromptBar/index.tsx` 1,501 lines), Surface ~55 (7 UX bugs caught in one dogfood session — chevron-hidden launcher, FirstChatWizard not globally mounted, SessionsList pending-flag subscription wrong, NewSessionModal hidden behind detail view, line-through pills, subtab routing bug, 0-msg ghost rows). Weighted average ~70%.
+
+War-room id `1DF02DA9-125E-4A98-B78D-083BA605A80B` (claude + codex; gemini skipped — keychain rotation cliff locked the API key) ordered the work to get every front honestly above 85.
+
+**v2.7.7 — frontend seam + write-path discipline**
+- Bundle: extract `PromptBar/InputRow.tsx` + collapse 4 picker booleans (`showRuntimePicker` / `showAgentPicker` / `showThreadPicker` / `showRoomTypePicker`) into `openPicker: "runtime"|"agent"|"thread"|"roomType"|null` discriminated union. Closes latent backdrop-stacking bug (multiple `fixed inset-0 z-30` overlays open simultaneously catch the wrong close click). Frontend 65 → 80.
+- Shared `useQuery({queryKey:["enabled-runtimes"]})` between `PromptBar` + `FirstChatWizard`. Kills duplicated `queryAllAgentStatuses` + `listLlmApiKeys` subscriptions. Frontend 80 → 83.
+- Split `sessions_view.rs` (1,635 lines) before lazy row creation lands on top of it. Backend 70 → 75.
+
+**v2.7.8 — surface fix + the backend elephant**
+- Lazy row creation at write points: don't write `chat_threads` on focus, don't write `sessions` pre-first-turn, don't write war-room row pre-dispatch. Replaces v2.7.6 list-side filter band-aid. Surface 55 → 70.
+- **Mandatory pre-tag dogfood pass.** Tauri-webdriver script encoding the 7-step golden path (cold launch → FirstChatWizard from Home → FirstChatWizard from PromptBar → session-without-turn → war-room-and-return → toggle runtime readiness with wizard+PromptBar both open → assert no ghost rows, no hidden modals, no dead affordances). Wired into pre-push hook for `v*.*.*` tag commits only. Both reviewers picked this over snapshot diffs / component error boundaries / vitest expansion. Surface 70 → 85.
+- `commands/mod.rs` PR 28 — extract `agents.rs` (~50 commands; "the elephant"). Drops `mod.rs` to ~5,000 lines. Backend 75 → 81.
+
+**v2.8.0 — backend file surgery + keychain durability**
+- Split `lib.rs` (2,370 lines) — schema init / Tauri command registration / structs. Backend 81 → 85.
+- Split `recipes_engine.rs` (2,245 lines) — engine / triggers / actions. Backend 85 → 88.
+- Versioned master-key + identity-change detection. Today's keychain rotation cliff (memory `feedback_dev_build_keychain.md`) silently orphans every stored API key when the macOS keychain ACL identity changes. Real users hit this on signing-cert rollover, macOS version upgrades, keychain resets. Ship `master_key_v2` with re-encryption transaction on rotation instead of orphaning ciphertext; prompt-to-re-enter on identity change instead of silent rotate. Surface 85 → 87.
+- `anchor_runtime` column on `chat_threads` → ships the WhatsApp-row LLM-icon column the v2.7.6 truncation war-room shipped without. Surface 87 → 88.
+
+**Projected scores after v2.8.0 lands:** TS 96, DB schema 87, Backend org 88, Frontend org 83, Surface 87. Weighted average ~89%. Frontend may need a second pass (`PromptBar/_helpers.ts` audit + SessionsList second cut) to clear 85.
+
+**Dropped from milestone gating** (do as housekeeping, not release-blockers): `cron.rs` unused-fn warnings (`cron_to_schtasks_xml_trigger`, `build_schtasks_xml`) → gate by `#[cfg(target_os="windows")]` opportunistically; untracked artifacts (`yc-session.md`, `codeelegancesession.txt`, two unused `Cargo.lock` files in `packages/ato-{posts,recipes}/`).
+
+**Process change:** release notes claim per-front percentages only when there's a linked measurement (file LOC delta, bug count, test pass count). Stops the "85%+ across all 5" language from leaking into release notes without numbers backing it.
+
+War-room transcripts: `docs/reviews/elegance-roadmap-war-room-2026-05-19.md` (forthcoming write-up of both seats' answers).
+
 ### v2.7.6 — Elegance day part II: TS cliff cleared + 5 fronts at 85%+ (Released 2026-05-19)
 
 Continuation of the 2026-05-18 elegance arc. Single goal: clear the 151-error TypeScript debt cliff (hidden behind a `noEmit:true + composite:true` tsconfig misconfig) and push all 5 elegance fronts to 85%+ in one day.

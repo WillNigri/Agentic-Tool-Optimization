@@ -232,6 +232,13 @@ export default function SessionsList() {
     }
     if (pendingOpenNewSession) {
       if (consumePendingOpenNewSession()) {
+        // 2026-05-19 — if a detail view is open (session / chat /
+        // war-room / single-run transcript), the early-return at
+        // line 347 prevents the `<NewSessionModal>` JSX from ever
+        // rendering. Close the detail view first so the modal can
+        // mount. War-room launcher doesn't hit this because the
+        // FirstChatWizard is mounted globally in Dashboard.tsx.
+        setOpenSelection(null);
         setShowNew(true);
       }
     }

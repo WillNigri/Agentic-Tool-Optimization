@@ -60,12 +60,14 @@ import {
   MAX_ATTACHMENT_BYTES,
   RUNTIME_META,
   RUNTIME_OPTIONS,
+  formatThreadAge,
   isProbablyBinary,
   messagesToAgentHistory,
   simulateMock,
   stitchThreadIntoPrompt,
 } from "./_helpers";
 import { ChatRow } from "./ChatRow";
+import { RoomTypePicker } from "./RoomTypePicker";
 
 const isTauri =
   typeof window !== "undefined" &&
@@ -911,135 +913,126 @@ export default function PromptBar() {
             <>
               <div className="fixed inset-0 z-30" onClick={() => setShowThreadPicker(false)} />
               <div className="absolute top-full left-0 mt-1 w-80 max-h-80 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
-                {/* Path B (2026-05-18) — multi-launcher header. Three
-                    kinds of "new conversation" the bottom pane can
-                    start: quick chat (stays here), session (Sessions
-                    tab + NewSessionModal), war room (FirstChatWizard).
-                    The label "+ New" replaces the single-purpose
-                    "New conversation" since the bottom pane is now
-                    the launcher for every conversation type, not just
-                    chat threads. */}
-                <div className="border-b border-cs-border">
-                  <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-cs-muted">
-                    {t("prompt.startNew", "Start new")}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={newThread}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cs-accent hover:bg-cs-accent/5"
-                    title={t(
-                      "prompt.newQuickChatTitle",
-                      "One-on-one chat in this pane. Picks the runtime/agent currently selected; can hop runtimes per message."
-                    )}
-                  >
-                    <MessageSquarePlus size={12} />
-                    <span className="flex-1 text-left">
-                      🗨 {t("prompt.newQuickChat", "Quick chat")}
-                    </span>
-                    <span className="text-[10px] text-cs-muted">here</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={launchNewSession}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cs-text hover:bg-cs-border/40"
-                    title={t(
-                      "prompt.newSessionTitle",
-                      "Multi-turn session with lifecycle (open / close / coordinator summary). Opens in the Sessions tab."
-                    )}
-                  >
-                    <MessageSquare size={12} className="text-cs-muted" />
-                    <span className="flex-1 text-left">
-                      💬 {t("prompt.newSession", "Multi-turn session")}
-                    </span>
-                    <span className="text-[10px] text-cs-muted">Sessions tab</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={launchWarRoom}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cs-text hover:bg-cs-border/40"
-                    title={t(
-                      "prompt.newWarRoomTitle",
-                      "Fire the same prompt to every connected LLM in parallel. Opens the First-Chat Wizard."
-                    )}
-                  >
-                    <Swords size={12} className="text-cs-accent" />
-                    <span className="flex-1 text-left">
-                      ⚔ {t("prompt.newWarRoom", "War room")}
-                    </span>
-                    <span className="text-[10px] text-cs-muted">wizard</span>
-                  </button>
-                </div>
-                {(threadsQuery.data ?? []).length === 0 ? (
-                  <p className="px-3 py-3 text-[11px] text-cs-muted">
-                    {t("prompt.noThreads", "No conversations yet.")}
-                  </p>
-                ) : (
-                  (threadsQuery.data ?? []).map((thr) => {
-                    const isCurrent = thr.id === currentThreadId;
-                    const isRenaming = renamingThread?.id === thr.id;
+                {/* 2026-05-19 — the three Start-new launchers (Quick
+                    chat / Multi-turn session / War room) moved to the
+                    inline "+ New ▾" picker on the input row. This
+                    dropdown is now thread-history only — fast pickup
+                    of recent conversations for power users. Whether
+                    to truncate to last 3-4 is open; pending war-room
+                    with the design seats. */}
+                {/* 2026-05-19 truncation war-room (claude + codex
+                    unanimous structural calls + CTO synthesis on cap=5
+                    and one-line WhatsApp row): hard cap at last 5,
+                    sorted by lastMessageAt desc. Drop msg-count + full
+                    timestamp from the row; compact relative time on
+                    the right. Footer link routes to Sessions for the
+                    full archive. */}
+                {(() => {
+                  const allThreads = threadsQuery.data ?? [];
+                  const sorted = [...allThreads].sort((a, b) => {
+                    const aTs = a.lastMessageAt
+                      ? new Date(a.lastMessageAt).getTime()
+                      : 0;
+                    const bTs = b.lastMessageAt
+                      ? new Date(b.lastMessageAt).getTime()
+                      : 0;
+                    return bTs - aTs;
+                  });
+                  const capped = sorted.slice(0, 5);
+                  const remaining = sorted.length - capped.length;
+                  if (allThreads.length === 0) {
                     return (
-                      <div
-                        key={thr.id}
-                        className={cn(
-                          "group flex items-center gap-1 px-3 py-1.5 transition-colors",
-                          isCurrent ? "bg-cs-accent/5" : "hover:bg-cs-bg"
-                        )}
-                      >
-                        {isRenaming ? (
-                          <input
-                            type="text"
-                            value={renamingThread.title}
-                            onChange={(e) =>
-                              setRenamingThread({ id: thr.id, title: e.target.value })
-                            }
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") void commitRename();
-                              if (e.key === "Escape") setRenamingThread(null);
-                            }}
-                            onBlur={() => void commitRename()}
-                            autoFocus
-                            className="flex-1 bg-cs-bg border border-cs-accent/40 rounded px-2 py-0.5 text-xs text-cs-text focus:outline-none"
-                          />
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setCurrentThreadId(thr.id);
-                              setShowThreadPicker(false);
-                              setExpanded(true);
-                            }}
-                            onDoubleClick={() =>
-                              setRenamingThread({ id: thr.id, title: thr.title })
-                            }
-                            className="flex-1 min-w-0 text-left text-xs"
+                      <p className="px-3 py-3 text-[11px] text-cs-muted">
+                        {t("prompt.noThreads", "No conversations yet.")}
+                      </p>
+                    );
+                  }
+                  return (
+                    <>
+                      {capped.map((thr) => {
+                        const isCurrent = thr.id === currentThreadId;
+                        const isRenaming = renamingThread?.id === thr.id;
+                        return (
+                          <div
+                            key={thr.id}
+                            className={cn(
+                              "group flex items-center gap-2 px-3 py-1.5 transition-colors",
+                              isCurrent ? "bg-cs-accent/5" : "hover:bg-cs-bg"
+                            )}
                           >
-                            <div className={cn(
-                              "truncate font-medium",
-                              isCurrent ? "text-cs-accent" : "text-cs-text"
-                            )}>
-                              {thr.title}
-                            </div>
-                            <div className="text-[10px] text-cs-muted truncate">
-                              {thr.messageCount} {t("prompt.msgs", "msgs")}
-                              {thr.lastMessageAt && ` · ${new Date(thr.lastMessageAt).toLocaleString()}`}
-                            </div>
-                          </button>
-                        )}
+                            {isRenaming ? (
+                              <input
+                                type="text"
+                                value={renamingThread.title}
+                                onChange={(e) =>
+                                  setRenamingThread({ id: thr.id, title: e.target.value })
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") void commitRename();
+                                  if (e.key === "Escape") setRenamingThread(null);
+                                }}
+                                onBlur={() => void commitRename()}
+                                autoFocus
+                                className="flex-1 bg-cs-bg border border-cs-accent/40 rounded px-2 py-0.5 text-xs text-cs-text focus:outline-none"
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCurrentThreadId(thr.id);
+                                  setShowThreadPicker(false);
+                                  setExpanded(true);
+                                }}
+                                onDoubleClick={() =>
+                                  setRenamingThread({ id: thr.id, title: thr.title })
+                                }
+                                title={`${thr.title} · ${thr.messageCount} msgs`}
+                                className="flex-1 min-w-0 text-left text-xs flex items-center gap-2"
+                              >
+                                <span className={cn(
+                                  "truncate flex-1 font-medium",
+                                  isCurrent ? "text-cs-accent" : "text-cs-text"
+                                )}>
+                                  {thr.title}
+                                </span>
+                                <span className="text-[10px] text-cs-muted shrink-0">
+                                  {formatThreadAge(thr.lastMessageAt)}
+                                </span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void removeThread(thr.id);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 text-cs-muted hover:text-cs-danger shrink-0 p-1"
+                              aria-label={t("common.delete", "Delete")}
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {remaining > 0 && (
                         <button
                           type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void removeThread(thr.id);
+                          onClick={() => {
+                            setShowThreadPicker(false);
+                            setSection("runs");
+                            setSubTab("ato.subtab.runs", "sessions");
                           }}
-                          className="opacity-0 group-hover:opacity-100 text-cs-muted hover:text-cs-danger shrink-0 p-1"
-                          aria-label={t("common.delete", "Delete")}
+                          className="w-full border-t border-cs-border px-3 py-2 text-[11px] text-cs-muted hover:text-cs-accent hover:bg-cs-bg flex items-center justify-center gap-1"
                         >
-                          <Trash2 size={10} />
+                          {t("prompt.seeAllThreads", {
+                            count: allThreads.length,
+                            defaultValue: "See all {{count}} conversations →",
+                          })}
                         </button>
-                      </div>
-                    );
-                  })
-                )}
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </>
           )}
@@ -1165,6 +1158,16 @@ export default function PromptBar() {
         >
           {expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
         </button>
+
+        {/* Room-type launcher — extracted to RoomTypePicker.tsx per the
+            2026-05-19 elegance war-room. Sits on the input row so
+            Quick chat / Session / War room are discoverable without
+            hunting for the chevron in the thread header. */}
+        <RoomTypePicker
+          onQuickChat={() => inputRef.current?.focus()}
+          onNewSession={launchNewSession}
+          onWarRoom={launchWarRoom}
+        />
 
         {/* Runtime selector */}
         <div className="relative shrink-0">
