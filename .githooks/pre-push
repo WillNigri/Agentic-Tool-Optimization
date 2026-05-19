@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Pre-push gate — full checks (target ≤2min).
+#
+# Runs everything pre-commit does, plus release builds and the ATO CLI
+# agentic-usage smoke. If a push makes it through this gate, every
+# read-only CLI surface returns clean and every build still compiles.
+#
+# What's NOT here:
+# - tsc — see ROADMAP.md § "Gate + TS cleanup week" (joins by 2026-05-22).
+# - `ato dispatch` / `runtimes test-providers` — paid LLM calls. Belong in
+#   the release script and a daily `ato doctor` cron, not in routine push.
+# - mutating CLI commands — those need a throwaway test DB harness; future work.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+step() { printf "\033[1;36m→\033[0m %s\n" "$1"; }
+fail() { printf "\033[1;31m✗ pre-push gate failed at: %s\033[0m\n" "$1"; exit 1; }
+
+step "cargo check (apps/desktop/src-tauri)"
+(cd apps/desktop/src-tauri && cargo check --quiet) || fail "cargo check"
+
+step "cargo build --release (apps/cli)"
+(cd apps/cli && cargo build --release --quiet) || fail "cargo build CLI"
+
+step "vite build (apps/desktop)"
+(cd apps/desktop && npx vite build > /dev/null 2>&1) || fail "vite build"
+
+step "vitest (apps/desktop)"
+(cd apps/desktop && npx vitest run --reporter=dot) || fail "vitest"
+
+step "ato CLI agentic-usage smoke (19 read-only commands)"
+ATO="apps/cli/target/release/ato"
+[ -x "$ATO" ] || fail "ato binary missing at $ATO"
+
+SMOKE_CMDS=(
+  "--help"
+  "runtimes status"
+  "runtimes health"
+  "runtimes list-remote"
+  "sessions list"
+  "agents list"
+  "recipes list"
+  "recipes templates"
+  "events recent"
+  "posts list"
+  "posts pending"
+  "dispatches recent"
+  "runs live"
+  "regressions list"
+  "cost recommendations"
+  "mesh discovered"
+  "daemon status"
+  "ratchet list"
+  "ratchet status"
+)
+
+for cmd in "${SMOKE_CMDS[@]}"; do
+  # Word-split intentional — each entry is "subcommand args" as one string.
+  if ! $ATO $cmd > /dev/null 2>&1; then
+    fail "ato $cmd"
+  fi
+done
+
+printf "\033[1;32m✓ pre-push gate passed (%d CLI commands)\033[0m\n" "${#SMOKE_CMDS[@]}"

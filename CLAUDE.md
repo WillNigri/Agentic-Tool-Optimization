@@ -19,6 +19,7 @@ services/mcp-server/ # Standalone MCP server for AI coding tools (stdio, 8 tools
 - `npm run dev:mcp` — Start MCP server in dev mode
 - `npx tauri build` — Build desktop app for distribution
 - `npm run build` — Build all packages
+- `./scripts/install-hooks.sh` — **Run once after clone.** Installs git pre-commit (cargo check + vitest) and pre-push (above + vite build + cargo build CLI + 19 ato CLI smoke commands). Never bypass with `--no-verify`. tsc joins the gate by EOW 2026-05-22 (see ROADMAP.md for the 151-error cleanup plan).
 
 ## Desktop App
 

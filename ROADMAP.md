@@ -270,6 +270,23 @@ Four bugs Will surfaced in the Insights panel; all four about the panel reportin
 
 Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
 
+### v2.7.6 — Gate + TS cleanup week (Active, 2026-05-18 → 2026-05-22)
+
+Five-day push to land an enforced quality gate and clear a 151-error TS debt cliff that was hiding behind a tsconfig misconfig. Driven by Will's call: every commit/merge/push/tag/release should run the full test suite, and the codebase should end the week with zero red gates.
+
+**Deliverables by EOW 2026-05-22:**
+- **`.githooks/pre-commit`** (≤30s) — `cargo check` (src-tauri) + `vitest run`. Catches type and unit regressions before commit.
+- **`.githooks/pre-push`** (≤2min) — above + `vite build` + `cargo build --release` (CLI) + 19 read-only `ato` CLI commands (`runtimes status/health/list-remote`, `sessions list`, `agents list`, `recipes list/templates`, `events recent`, `posts list/pending`, `dispatches recent`, `runs live`, `regressions list`, `cost recommendations`, `mesh discovered`, `daemon status`, `ratchet list/status`, plus `--help`). Catches CLI surface regressions before push.
+- **`scripts/install-hooks.sh`** — one-shot installer; points `git config core.hooksPath` at `.githooks/` so the gate ships with the repo. Documented in CLAUDE.md Commands section.
+- **tsc joins the gate** — by Fri end of day. `tsconfig.node.json`'s incompatible `noEmit:true + composite:true` pairing is what hid 151 real errors (`import.meta.env` typing, prop mismatches, React Query overloads, etc.). Dropping `noEmit` exposes them; cleanup runs in parallel with the elegance push.
+- **Elegance push interleaved** — `commands.rs` PRs 17-29 + frontend (PromptBar/SessionsList card variants) ship alongside TS cleanup. Target: 85%+ across all 5 elegance fronts.
+
+**Out of scope this week (separate cron / release script):**
+- `ato dispatch` / `runtimes test-providers` (paid LLM probes) — daily `ato doctor` cron answers "are my keys alive?"; a release-only script answers "does each provider end-to-end work before I tag?" Wasting money per push makes the gate hated.
+- Mutating CLI commands in smoke (need a throwaway test-DB harness; future).
+
+**Working agreement:** never `--no-verify`. If a hook blocks, fix the underlying issue. Architectural revisions go through multi-round ATO war-rooms (`ato dispatch` to claude / codex / minimax reviewers in a shared session), not through Claude sub-Agents — keeps the receipts.
+
 ### v2.7.5 — Consolidation arc + elegance day (Released 2026-05-18)
 
 The day was a single-themed push: drive every layer of the codebase to **85-90% elegance** across surface, frontend organization, backend organization, runtime type system, and database schema. Driven by Will's observation that surface polish had outpaced the foundation, and that the foundation needed to catch up before more features land.
