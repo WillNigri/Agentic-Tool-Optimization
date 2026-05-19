@@ -25,11 +25,11 @@ interface Props {
   onCloned: () => void;
 }
 
-interface SkillInfo {
-  path: string;
-  name: string;
-  runtime: string;
-}
+// 2026-05-20 — SkillInfo was a hand-typed subset of LocalSkill that
+// drifted when LocalSkill gained more fields. Aliased to the canonical
+// shape so the useQuery generic agrees with what getProjectSkills returns.
+import type { LocalSkill } from "@/lib/api";
+type SkillInfo = LocalSkill;
 
 export default function CloneSkillModal({ targetProject, onClose, onCloned }: Props) {
   const { t } = useTranslation();
@@ -58,7 +58,7 @@ export default function CloneSkillModal({ targetProject, onClose, onCloned }: Pr
   const cloneMutation = useMutation({
     mutationFn: async () => {
       if (!selectedSkill) throw new Error("No skill selected");
-      return cloneSkill(selectedSkill.path, targetProject.path, targetRuntime);
+      return cloneSkill(selectedSkill.filePath, targetProject.path, targetRuntime);
     },
     onSuccess: () => {
       onCloned();
@@ -76,7 +76,7 @@ export default function CloneSkillModal({ targetProject, onClose, onCloned }: Pr
   const filteredSkills = sourceSkills.filter(
     (skill) =>
       skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      skill.path.toLowerCase().includes(searchQuery.toLowerCase())
+      skill.filePath.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const getRuntimeColor = (runtime: string) => {
@@ -194,16 +194,16 @@ export default function CloneSkillModal({ targetProject, onClose, onCloned }: Pr
                 <div className="divide-y divide-cs-border">
                   {filteredSkills.map((skill) => (
                     <label
-                      key={skill.path}
+                      key={skill.filePath}
                       className={cn(
                         "flex items-center gap-3 p-2.5 cursor-pointer hover:bg-cs-border/30 transition-colors",
-                        selectedSkill?.path === skill.path && "bg-cs-accent/5"
+                        selectedSkill?.filePath === skill.filePath && "bg-cs-accent/5"
                       )}
                     >
                       <input
                         type="radio"
                         name="skill"
-                        checked={selectedSkill?.path === skill.path}
+                        checked={selectedSkill?.filePath === skill.filePath}
                         onChange={() => setSelectedSkill(skill)}
                         className="rounded-full border-cs-border text-cs-accent focus:ring-cs-accent"
                       />
@@ -220,7 +220,7 @@ export default function CloneSkillModal({ targetProject, onClose, onCloned }: Pr
                           </span>
                         </div>
                         <p className="text-xs text-cs-muted truncate mt-0.5">
-                          {skill.path}
+                          {skill.filePath}
                         </p>
                       </div>
                     </label>

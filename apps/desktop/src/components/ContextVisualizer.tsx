@@ -25,9 +25,11 @@ const RUNTIME_TABS: { id: AgentRuntime; label: string; icon: typeof Terminal; co
   { id: "hermes", label: "Hermes", icon: Globe, color: "#a855f7" },
 ];
 
-// Runtime-specific dependency examples for the detail view
+// Runtime-specific dependency examples for the detail view. Partial map —
+// the demo data only covers the CLI runtimes; API providers fall back to
+// the claude entry at the call site.
 type DepType = "system" | "config" | "skill" | "mcp";
-const RUNTIME_DEPENDENCIES: Record<AgentRuntime, { name: string; path: string; tokens: number; type: DepType; loaded: boolean }[]> = {
+const RUNTIME_DEPENDENCIES: Partial<Record<AgentRuntime, { name: string; path: string; tokens: number; type: DepType; loaded: boolean }[]>> = {
   claude: [
     { name: "CLAUDE.md", path: "CLAUDE.md", tokens: 2100, type: "config", loaded: true },
     { name: "System Prompt", path: "(built-in)", tokens: 28450, type: "system", loaded: true },
@@ -59,8 +61,9 @@ const RUNTIME_DEPENDENCIES: Record<AgentRuntime, { name: string; path: string; t
   ],
 };
 
-// Permissions vary by runtime — only Claude has the full tool permission system
-const RUNTIME_PERMISSIONS: Record<AgentRuntime, { tool: string; scope: string; status: "allowed" | "ask" | "denied" }[]> = {
+// Permissions vary by runtime — only Claude has the full tool permission
+// system. Partial map; API providers + others fall back to empty.
+const RUNTIME_PERMISSIONS: Partial<Record<AgentRuntime, { tool: string; scope: string; status: "allowed" | "ask" | "denied" }[]>> = {
   claude: [
     { tool: "Read", scope: "global", status: "allowed" },
     { tool: "Write", scope: "project", status: "allowed" },
@@ -302,7 +305,7 @@ export default function ContextVisualizer() {
                     }}
                     labelStyle={{ color: "#e8e8f0" }}
                     formatter={(value: number) => [
-                      t('context.tokens', { count: formatNumber(value) }),
+                      t('context.tokens', { count: value, formatted: formatNumber(value) }),
                       "",
                     ]}
                   />
@@ -334,8 +337,12 @@ export default function ContextVisualizer() {
                   key={cat.name}
                   onClick={() => {
                     if (isClickable && filePath) {
-                      // For remote files, use the context file reader
-                      const resolved = filePath.replace("~", process.env.HOME || "/root");
+                      // For remote files, use the context file reader.
+                      // Strip leading "~/" since the file viewer resolves
+                      // home itself; we can't read process.env in the browser
+                      // and a desktop-app round-trip would be overkill for a
+                      // display path.
+                      const resolved = filePath.replace(/^~\//, "");
                       setViewingFile(resolved);
                     }
                   }}
@@ -351,7 +358,7 @@ export default function ContextVisualizer() {
                   <div className="min-w-0 flex-1">
                     <p className="text-sm truncate">{cat.name}</p>
                     <p className="text-xs text-cs-muted">
-                      {t('context.tokens', { count: formatNumber(cat.tokens) })}
+                      {t('context.tokens', { count: cat.tokens, formatted: formatNumber(cat.tokens) })}
                     </p>
                   </div>
                   {isClickable && <ExternalLink size={12} className="text-cs-muted/40 shrink-0" />}
@@ -379,7 +386,7 @@ export default function ContextVisualizer() {
             </div>
           </div>
 
-          {RUNTIME_DEPENDENCIES[activeRuntime].map((dep) => {
+          {(RUNTIME_DEPENDENCIES[activeRuntime] ?? []).map((dep) => {
             const isClickable = dep.path !== "(built-in)" && !dep.path.startsWith("npx ");
             return (
               <div
@@ -415,7 +422,7 @@ export default function ContextVisualizer() {
 
           <div className="card !p-3 border-dashed">
             <p className="text-xs text-cs-muted text-center">
-              {t('context.totalDeps', { count: RUNTIME_DEPENDENCIES[activeRuntime].length, tokens: formatNumber(RUNTIME_DEPENDENCIES[activeRuntime].reduce((s, d) => s + d.tokens, 0)) })}
+              {t('context.totalDeps', { count: (RUNTIME_DEPENDENCIES[activeRuntime] ?? []).length, tokens: formatNumber((RUNTIME_DEPENDENCIES[activeRuntime] ?? []).reduce((s, d) => s + d.tokens, 0)) })}
             </p>
           </div>
         </div>
@@ -431,7 +438,7 @@ export default function ContextVisualizer() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {RUNTIME_PERMISSIONS[activeRuntime].map((perm) => (
+            {(RUNTIME_PERMISSIONS[activeRuntime] ?? []).map((perm) => (
               <div key={perm.tool} className="card flex items-center gap-3 !py-3">
                 <div className={cn(
                   "w-8 h-8 rounded-lg flex items-center justify-center text-xs font-mono font-bold shrink-0",

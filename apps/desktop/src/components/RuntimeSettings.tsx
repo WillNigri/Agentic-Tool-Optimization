@@ -6,6 +6,7 @@ import {
   Terminal, Globe, Cpu, Bot, ChevronDown, Check, X, Loader2,
   RefreshCw, Save, Wifi, WifiOff, Settings2, FileText, ExternalLink,
   FileCheck, FileX,
+  type LucideIcon,
 } from "lucide-react";
 import { detectAgentRuntimes, queryAllAgentStatuses } from "@/lib/api";
 import * as tauriApi from "@/lib/api";
@@ -24,7 +25,7 @@ interface RuntimeField {
 interface RuntimeMeta {
   id: "claude" | "openclaw" | "codex" | "hermes";
   name: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: LucideIcon;
   color: string;
   description: string;
   fields: RuntimeField[];

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
-import { Terminal, Key, Check, X, ExternalLink, Cpu, Bot, Globe, Sparkles } from "lucide-react";
+import { Terminal, Key, Check, X, ExternalLink, Cpu, Bot, Globe, Sparkles, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { queryAllAgentStatuses, listLlmApiKeys } from "@/lib/api";
@@ -33,7 +33,7 @@ const BYOK_RUNTIMES: RuntimeId[] = ["claude", "codex", "gemini"];
 type RuntimeMeta = {
   id: RuntimeId;
   name: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: LucideIcon;
   providerLabel: string; // shown in the API key card
   cliCommand: string;
 };

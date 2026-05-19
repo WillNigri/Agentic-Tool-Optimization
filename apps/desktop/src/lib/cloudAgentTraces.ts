@@ -57,6 +57,11 @@ export interface CloudAgentTrace {
   cost_usd: number | null;
   error: string | null;
   source: string | null;
+  // 2026-05-20 — Optional response text; the cloud backend may carry
+  // inline response on Pro plans, otherwise consumers fetch the
+  // response via getReplayJob / similar. TraceCompareModal's
+  // `if (!baselineTrace.response)` is the documented fallback pattern.
+  response?: string | null;
   metadata: Record<string, unknown> | null;
   // v2.1.0 — relative file paths the agent touched during this dispatch.
   // Captured by mtime diff in the desktop layer; null for traces from
