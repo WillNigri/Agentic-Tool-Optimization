@@ -672,10 +672,12 @@ function KindConfigEditor({
 function Field({
   label,
   required,
+  hint,
   children,
 }: {
   label: string;
   required?: boolean;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -685,6 +687,11 @@ function Field({
         {required && <span className="text-cs-danger ml-0.5">*</span>}
       </span>
       {children}
+      {hint && (
+        <span className="mt-1 block text-[10px] text-cs-muted leading-snug">
+          {hint}
+        </span>
+      )}
     </label>
   );
 }

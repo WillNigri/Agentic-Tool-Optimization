@@ -220,7 +220,7 @@ export default function CommandPalette({ onNavigate }: Props) {
     const groupCommands: Command[] = agentGroups.map((g) => ({
       id: `group.${g.id}`,
       label: `@${g.slug}`,
-      hint: `${g.dispatch_kind} · ${g.runtime}${g.description ? ` · ${g.description.slice(0, 60)}` : ""}`,
+      hint: `${g.dispatchKind} · ${g.runtime}${g.description ? ` · ${g.description.slice(0, 60)}` : ""}`,
       icon: Network,
       group: t("cmdk.groupGroups", "Agent Groups"),
       run: () => {
@@ -232,7 +232,7 @@ export default function CommandPalette({ onNavigate }: Props) {
     // Cron jobs: render label as the human schedule + the dispatch
     // target. Hint shows enabled/disabled state.
     const cronCommands: Command[] = crons.map((c) => {
-      const cronAny = c as Record<string, unknown>;
+      const cronAny = c as unknown as Record<string, unknown>;
       const id = String(cronAny.id ?? "");
       const name = (cronAny.name as string) || (cronAny.agentSlug as string) || id;
       const schedule = (cronAny.schedule as string) || (cronAny.cron as string) || "";
@@ -285,7 +285,9 @@ export default function CommandPalette({ onNavigate }: Props) {
     const secretCommands: Command[] = secrets.map((s) => ({
       id: `secret.${s.id}`,
       label: s.name,
-      hint: s.scope || t("cmdk.secretGlobal", "global"),
+      // Secret doesn't carry a scope today; surface the runtime tag instead
+      // (or fall back to "global" for cross-runtime secrets).
+      hint: s.runtime || t("cmdk.secretGlobal", "global"),
       icon: KeyRound,
       group: t("cmdk.groupSecrets", "Secrets"),
       run: () => {

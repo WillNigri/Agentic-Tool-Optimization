@@ -206,7 +206,7 @@ export type CreateSkillData = tauriApi.CreateSkillData;
 export async function getSkills(): Promise<Skill[]> {
   if (isTauri) return tauriApi.getSkills();
   if (await isCloudAvailable()) return fetchApi<Skill[]>('/skills');
-  return mock.mockSkills;
+  return mock.mockSkills as Skill[];
 }
 
 export async function getSkillDetail(id: string): Promise<SkillDetail> {
@@ -250,6 +250,7 @@ export async function createSkill(data: CreateSkillData): Promise<SkillDetail> {
   const filePath = data.isDirectory ? `${basePath}${data.name}/` : `${basePath}${data.name}.md`;
   const newDetail: SkillDetail = {
     id, name: data.name, description: data.description, filePath, scope: data.scope,
+    runtime: 'claude', project: null,
     tokenCount: Math.round(data.content.length / 4), enabled: true, contentHash: id,
     content: data.content,
     frontmatter: { name: data.name, description: data.description, allowedTools: data.allowedTools, model: data.model },
@@ -365,7 +366,7 @@ export async function listProjects() {
 
 export async function getProjectBundle(projectPath: string): Promise<ProjectBundle> {
   if (isTauri) return tauriApi.getProjectBundle(projectPath);
-  return mock.mockProjectBundle as ProjectBundle;
+  return mock.mockProjectBundle as unknown as ProjectBundle;
 }
 
 // ---- Safe File Read/Write (Batch 1+) ----
