@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Send,
-  Loader2,
   ChevronUp,
   ChevronDown,
   Sparkles,
@@ -14,7 +13,7 @@ import {
   Paperclip,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { listAgents, parseMemoryPolicy, type Agent } from "@/lib/agents";
+import { listAgents, type Agent } from "@/lib/agents";
 import {
   promptAgentWithHistoryStream,
   promptAgentStream,
@@ -41,7 +40,6 @@ import { estimateUsage } from "@/lib/pricing";
 import type { AgentRuntime } from "@/components/cron/types";
 import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
 import ApprovalDialog, { extractSkillFromResponse } from "../ApprovalDialog";
-import MarkdownContent from "../MarkdownContent";
 
 import {
   AvailableRuntimeRow,
@@ -54,11 +52,11 @@ import {
   simulateMock,
   stitchThreadIntoPrompt,
 } from "./_helpers";
-import { ChatRow } from "./ChatRow";
 import { RoomTypePicker } from "./RoomTypePicker";
 import { RuntimePicker } from "./RuntimePicker";
 import { AgentPicker } from "./AgentPicker";
 import { ThreadHistoryHeader } from "./ThreadHistoryHeader";
+import { ChatHistoryView } from "./ChatHistoryView";
 import { useEnabledRuntimes } from "@/lib/enabledRuntimes";
 
 const isTauri =
@@ -926,92 +924,21 @@ export default function PromptBar() {
         }}
       />
 
-      {/* Chat history — flex-1 with min-h-0 so it shares the parent's
-          height with header + form instead of overflowing them. The
-          previous `max-h-80` capped at 320px which equaled the entire
-          parent height, pushing the form offscreen. */}
-      {expanded && messages.length > 0 && (
-        <div className="flex-1 min-h-0 overflow-y-auto border-b border-cs-border">
-          <div className="p-3 space-y-3">
-            {messages.map((msg) => (
-              <ChatRow key={msg.id} msg={msg} />
-            ))}
-            {isLoading && (
-              <div className="flex gap-2.5">
-                <div
-                  className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
-                  style={{
-                    background: `${currentRuntime.color}15`,
-                    border: `1px solid ${currentRuntime.color}30`,
-                  }}
-                >
-                  {streamingText ? (
-                    <RuntimeIcon size={12} style={{ color: currentRuntime.color }} />
-                  ) : (
-                    <Loader2
-                      size={12}
-                      style={{ color: currentRuntime.color }}
-                      className="animate-spin"
-                    />
-                  )}
-                </div>
-                <div className="rounded-lg px-3 py-2 bg-cs-bg border border-cs-border max-w-[85%]">
-                  {streamingText ? (
-                    <div className="relative">
-                      <MarkdownContent content={streamingText} />
-                      <span className="inline-block w-1.5 h-3 bg-cs-accent ml-0.5 animate-pulse align-middle" />
-                    </div>
-                  ) : (
-                    <span className="text-xs text-cs-muted">
-                      {selectedGroup
-                        ? t("prompt.routingThroughGroup", "Routing through {{group}}…", {
-                            group: selectedGroup.slug,
-                          })
-                        : selectedAgent
-                        ? t("prompt.thinkingWithAgent", "Thinking — @{{agent}}…", {
-                            agent: selectedAgent.slug,
-                          })
-                        : t("prompt.thinkingPlain", "Thinking…")}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
-      )}
-
-      {/* Multi-turn status banner */}
-      {selectedAgent && messages.length > 0 && (() => {
-        const policy = parseMemoryPolicy(selectedAgent);
-        const willSummarize = messages.length > policy.summarizeAfter;
-        const within = policy.summarizeAfter - messages.length;
-        if (!willSummarize && within > 5) return null;
-        return (
-          <div
-            className={cn(
-              "px-3 py-1 text-[10px] border-t",
-              willSummarize
-                ? "border-cs-accent/30 bg-cs-accent/5 text-cs-accent"
-                : "border-cs-border bg-cs-bg-raised text-cs-muted"
-            )}
-          >
-            {willSummarize
-              ? t(
-                  "prompt.willSummarize",
-                  "Next message: {{n}} prior turns will be summarized; last {{k}} kept verbatim.",
-                  {
-                    n: messages.length - policy.keepLastK,
-                    k: policy.keepLastK,
-                  }
-                )
-              : t("prompt.nearSummarize", "{{n}} more turns until summarization fires.", {
-                  n: within,
-                })}
-          </div>
-        );
-      })()}
+      {/* Chat history + thinking indicator + summary banner — all
+          extracted to ChatHistoryView.tsx per the 2026-05-19 elegance
+          push. Auto-scroll on new turns / streaming-text growth lives
+          inside the component now. */}
+      <ChatHistoryView
+        messages={messages}
+        isLoading={isLoading}
+        streamingText={streamingText}
+        selectedAgent={selectedAgent}
+        selectedGroup={selectedGroup}
+        currentRuntime={currentRuntime}
+        RuntimeIcon={RuntimeIcon}
+        messagesEndRef={messagesEndRef}
+        expanded={expanded}
+      />
 
       {/* Input bar */}
       <form onSubmit={handleSubmit} className="shrink-0 flex items-center gap-2 px-3 py-2.5">
