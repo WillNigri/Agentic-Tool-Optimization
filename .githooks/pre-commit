@@ -15,7 +15,12 @@ step() { printf "\033[1;36m→\033[0m %s\n" "$1"; }
 fail() { printf "\033[1;31m✗ pre-commit gate failed at: %s\033[0m\n" "$1"; exit 1; }
 
 step "cargo check (apps/desktop/src-tauri)"
-(cd apps/desktop/src-tauri && cargo check --quiet) || fail "cargo check"
+(cd apps/desktop/src-tauri && cargo check --quiet) || fail "cargo check desktop"
+
+# Added per v2.7.6 review (claude MEDIUM #2): CLI is half the Rust surface;
+# shifting it left saves catching a CLI break at push time after a 30s build.
+step "cargo check (apps/cli)"
+(cd apps/cli && cargo check --quiet) || fail "cargo check CLI"
 
 step "vitest (apps/desktop)"
 (cd apps/desktop && npx vitest run --reporter=dot) || fail "vitest"

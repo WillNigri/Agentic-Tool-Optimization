@@ -9419,7 +9419,12 @@ async fn should_fire_hook(hook: &AgentHook, user_prompt: &str) -> bool {
             Err(_) => true,
         }
     } else {
-        true
+        // Unknown fire_mode (DB row written by a newer build, hand edit,
+        // or unsupported migration). Default-deny rather than always-fire:
+        // skipping is the safer failure mode — never silently leaks data
+        // or burns tokens for a rule we can't evaluate. Flagged by claude
+        // reviewer in the v2.7.6 review (MEDIUM #3, 2026-05-18).
+        false
     }
 }
 
