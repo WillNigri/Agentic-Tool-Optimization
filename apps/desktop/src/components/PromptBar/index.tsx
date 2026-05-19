@@ -3,8 +3,6 @@ import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Send,
-  Bot,
-  X,
   Loader2,
   ChevronUp,
   ChevronDown,
@@ -13,17 +11,11 @@ import {
   AlertCircle,
   Cpu,
   Server,
-  Globe,
   MessageSquarePlus,
-  MessageSquare,
-  Swords,
   History,
   Paperclip,
   Trash2,
   FolderKanban,
-  Check,
-  Network,
-  ArrowRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listAgents, parseMemoryPolicy, type Agent } from "@/lib/agents";
@@ -68,6 +60,8 @@ import {
 } from "./_helpers";
 import { ChatRow } from "./ChatRow";
 import { RoomTypePicker } from "./RoomTypePicker";
+import { RuntimePicker } from "./RuntimePicker";
+import { AgentPicker } from "./AgentPicker";
 import { useEnabledRuntimes } from "@/lib/enabledRuntimes";
 
 const isTauri =
@@ -1183,288 +1177,35 @@ export default function PromptBar() {
           onWarRoom={launchWarRoom}
         />
 
-        {/* Runtime selector */}
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => setShowRuntimePicker(!showRuntimePicker)}
-            data-demo-id="runtime-picker"
-            className="flex items-center gap-1 px-2 py-1.5 rounded-lg border border-cs-border hover:border-opacity-60 transition-colors"
-            style={{ borderColor: `${currentRuntime.color}40` }}
-          >
-            <RuntimeIcon size={12} style={{ color: currentRuntime.color }} />
-            <span
-              className="text-[10px] font-medium"
-              style={{ color: currentRuntime.color }}
-            >
-              {currentRuntime.label}
-            </span>
-          </button>
+        {/* Runtime selector — extracted to RuntimePicker.tsx per the
+            2026-05-19 elegance war-room (matches RoomTypePicker
+            precedent). Popover state lives in the orchestrator's
+            openPicker union so only one popover is open at a time. */}
+        <RuntimePicker
+          runtime={runtime}
+          setRuntime={setRuntime}
+          availableRuntimes={availableRuntimes}
+          open={showRuntimePicker}
+          setOpen={setShowRuntimePicker}
+        />
 
-          {showRuntimePicker && (
-            <>
-              <div
-                className="fixed inset-0 z-30"
-                onClick={() => setShowRuntimePicker(false)}
-              />
-              <div className="absolute bottom-full left-0 mb-1 w-44 rounded-lg border border-cs-border bg-cs-card shadow-xl z-40 overflow-hidden">
-                {(() => {
-                  // Use the queried list when available, else the
-                  // legacy 4-CLI hardcoded list. Filter to available
-                  // rows; render API providers as a separate group
-                  // with a clear "CLI dispatch only" hint.
-                  const rows: AvailableRuntimeRow[] = availableRuntimes
-                    ? availableRuntimes.filter((r) => r.available)
-                    : RUNTIME_OPTIONS.map((o) => ({
-                        slug: o.id,
-                        label: o.label,
-                        kind: "cli" as const,
-                        available: true,
-                        reason: "ok",
-                      }));
-                  const cliRows = rows.filter((r) => r.kind === "cli");
-                  const apiRows = rows.filter((r) => r.kind === "api");
-                  const renderRow = (r: AvailableRuntimeRow) => {
-                    const meta = RUNTIME_META[r.slug] ?? {
-                      label: r.label,
-                      icon: Globe,
-                      color: "#888",
-                    };
-                    const Icon = meta.icon;
-                    const isApi = r.kind === "api";
-                    // v2.3.26 Phase 6.x-C: GUI dispatch for API
-                    // providers now wired via prompt_api_provider
-                    // Tauri command. The "API" tag stays as a label
-                    // (different billing model — flat-rate
-                    // subscription via key) but the runtime is
-                    // fully clickable + dispatchable.
-                    return (
-                      <button
-                        key={r.slug}
-                        type="button"
-                        onClick={() => {
-                          setRuntime(r.slug as AgentRuntime);
-                          setShowRuntimePicker(false);
-                        }}
-                        title={
-                          isApi
-                            ? `${meta.label} — API provider (subscription via API key)`
-                            : meta.label
-                        }
-                        className={cn(
-                          "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors",
-                          runtime === r.slug ? "bg-cs-accent/5" : "hover:bg-cs-bg"
-                        )}
-                      >
-                        <Icon size={12} style={{ color: meta.color }} />
-                        <span
-                          className="flex-1 text-left"
-                          style={{ color: runtime === r.slug ? meta.color : undefined }}
-                        >
-                          {meta.label}
-                        </span>
-                        {isApi ? (
-                          <span className="text-[9px] uppercase tracking-wide text-cs-muted">
-                            API
-                          </span>
-                        ) : null}
-                      </button>
-                    );
-                  };
-                  return (
-                    <>
-                      {cliRows.map(renderRow)}
-                      {apiRows.length > 0 ? (
-                        <div className="px-3 pt-2 pb-1 text-[9px] uppercase tracking-wide text-cs-muted border-t border-cs-border">
-                          API providers
-                        </div>
-                      ) : null}
-                      {apiRows.map(renderRow)}
-                    </>
-                  );
-                })()}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* Agent / Group selector */}
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => setShowAgentPicker((v) => !v)}
-            data-demo-id="agent-picker"
-            className={cn(
-              "flex items-center gap-1 px-2 py-1.5 rounded-lg border transition-colors",
-              selectedAgent || selectedGroup
-                ? "border-cs-accent/40 bg-cs-accent/5"
-                : "border-cs-border hover:border-cs-border/80"
-            )}
-            title={t("prompt.agentPickerTitle", "Pick an agent or group")}
-          >
-            {selectedGroup ? (
-              <Network size={12} className="text-cs-accent" />
-            ) : (
-              <Bot size={12} className={selectedAgent ? "text-cs-accent" : "text-cs-muted"} />
-            )}
-            <span
-              className={cn(
-                "text-[10px] font-medium font-mono",
-                selectedAgent || selectedGroup ? "text-cs-accent" : "text-cs-muted"
-              )}
-            >
-              {selectedGroup
-                ? `${selectedGroup.slug}/`
-                : selectedAgent
-                ? `@${selectedAgent.slug}`
-                : t("prompt.noAgent", "no agent")}
-            </span>
-          </button>
-
-          {showAgentPicker && (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setShowAgentPicker(false)} />
-              <div className="absolute bottom-full left-0 mb-1 w-72 max-h-80 overflow-y-auto rounded-lg border border-cs-border bg-cs-card shadow-xl z-40">
-                {/* No-agent / single-shot row */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAgentId(null);
-                    setGroupSlug(null);
-                    setShowAgentPicker(false);
-                    void stickAgentToThread(null);
-                  }}
-                  className={cn(
-                    "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors border-b border-cs-border",
-                    !agentId && !groupSlug
-                      ? "bg-cs-accent/5 text-cs-accent"
-                      : "text-cs-muted hover:bg-cs-bg"
-                  )}
-                >
-                  {!agentId && !groupSlug ? <Check size={11} /> : <X size={11} />}
-                  <span>{t("prompt.noAgent", "no agent")}</span>
-                  <span className="ml-auto text-[9px] text-cs-muted">single-shot</span>
-                </button>
-
-                {/* Groups section — when selected, prompt routes through the
-                    group's router. Shown above individual agents because
-                    they're the more powerful primitive. */}
-                {runtimeGroups.length > 0 && (
-                  <>
-                    <div className="px-3 py-1.5 text-[9px] uppercase tracking-wider text-cs-muted bg-cs-bg-raised/40 border-b border-cs-border">
-                      {t("prompt.groupsHeader", "Groups · routed dispatch")}
-                    </div>
-                    {runtimeGroups.map((g) => {
-                      const isActive = groupSlug === g.slug;
-                      const childCount = g.members.filter((m) => m.role === "child").length;
-                      return (
-                        <button
-                          key={g.id}
-                          type="button"
-                          onClick={() => {
-                            setGroupSlug(g.slug);
-                            setAgentId(null);
-                            setShowAgentPicker(false);
-                            void stickAgentToThread(null);
-                          }}
-                          className={cn(
-                            "w-full flex items-start gap-2 px-3 py-2 text-xs transition-colors text-left border-b border-cs-border/40",
-                            isActive ? "bg-cs-accent/5" : "hover:bg-cs-bg"
-                          )}
-                        >
-                          <Network
-                            size={11}
-                            className={cn(
-                              "shrink-0 mt-0.5",
-                              isActive ? "text-cs-accent" : "text-cs-muted"
-                            )}
-                          />
-                          <div className="min-w-0 flex-1">
-                            <code
-                              className={cn(
-                                "font-mono truncate",
-                                isActive ? "text-cs-accent" : "text-cs-text"
-                              )}
-                            >
-                              {g.slug}
-                            </code>
-                            <p className="text-[9px] text-cs-muted truncate">
-                              {t("prompt.groupChildren", "{{n}} children · router routes per prompt", {
-                                n: childCount,
-                              })}
-                            </p>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </>
-                )}
-
-                {/* Individual agents */}
-                {runtimeAgents.length > 0 && (
-                  <div className="px-3 py-1.5 text-[9px] uppercase tracking-wider text-cs-muted bg-cs-bg-raised/40 border-b border-cs-border">
-                    {t("prompt.agentsHeader", "Agents")}
-                  </div>
-                )}
-                {runtimeAgents.length === 0 && runtimeGroups.length === 0 ? (
-                  <p className="px-3 py-3 text-[11px] text-cs-muted">
-                    {t("prompt.noAgentsForRuntime", "No agents created for {{runtime}} yet.", {
-                      runtime,
-                    })}
-                  </p>
-                ) : (
-                  runtimeAgents.map((a) => {
-                    const policy = parseMemoryPolicy(a);
-                    return (
-                      <button
-                        key={a.id}
-                        type="button"
-                        onClick={() => {
-                          setAgentId(a.id);
-                          setGroupSlug(null);
-                          setShowAgentPicker(false);
-                          void stickAgentToThread(a.id);
-                        }}
-                        className={cn(
-                          "w-full flex items-start gap-2 px-3 py-2 text-xs transition-colors text-left",
-                          agentId === a.id ? "bg-cs-accent/5" : "hover:bg-cs-bg"
-                        )}
-                      >
-                        <Bot
-                          size={11}
-                          className={cn(
-                            "shrink-0 mt-0.5",
-                            agentId === a.id ? "text-cs-accent" : "text-cs-muted"
-                          )}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <code
-                            className={cn(
-                              "font-mono truncate",
-                              agentId === a.id ? "text-cs-accent" : "text-cs-text"
-                            )}
-                          >
-                            @{a.slug}
-                          </code>
-                          <p className="text-[9px] text-cs-muted truncate">
-                            {t(
-                              "prompt.summarizesAfter",
-                              "summarizes after {{n}} msgs · keeps last {{k}}",
-                              {
-                                n: policy.summarizeAfter,
-                                k: policy.keepLastK,
-                              }
-                            )}
-                          </p>
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </>
-          )}
-        </div>
+        {/* Agent / Group selector — extracted to AgentPicker.tsx per
+            the 2026-05-19 elegance war-room. Same shared-popover-state
+            pattern as RuntimePicker. */}
+        <AgentPicker
+          runtime={runtime}
+          agentId={agentId}
+          setAgentId={setAgentId}
+          groupSlug={groupSlug}
+          setGroupSlug={setGroupSlug}
+          selectedAgent={selectedAgent}
+          selectedGroup={selectedGroup}
+          runtimeAgents={runtimeAgents}
+          runtimeGroups={runtimeGroups}
+          stickAgentToThread={stickAgentToThread}
+          open={showAgentPicker}
+          setOpen={setShowAgentPicker}
+        />
 
         {/* File attachment */}
         <button
