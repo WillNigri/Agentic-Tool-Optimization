@@ -68,6 +68,7 @@ import {
 } from "./_helpers";
 import { ChatRow } from "./ChatRow";
 import { RoomTypePicker } from "./RoomTypePicker";
+import { useEnabledRuntimes } from "@/lib/enabledRuntimes";
 
 const isTauri =
   typeof window !== "undefined" &&
@@ -120,25 +121,14 @@ export default function PromptBar() {
       typeof next === "function" ? next(showRuntimePicker) : next;
     setOpenPicker(nextValue ? "runtime" : null);
   };
-  // v2.3.23 Phase 6.x-B — populated by list_available_runtimes.
-  // Picker iterates over this when present, falling back to the
-  // hardcoded RUNTIME_OPTIONS in dev/web (no Tauri) builds.
-  const [availableRuntimes, setAvailableRuntimes] = useState<AvailableRuntimeRow[] | null>(null);
-  useEffect(() => {
-    if (!isTauri) return;
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const rows = await invoke<AvailableRuntimeRow[]>("list_available_runtimes");
-        setAvailableRuntimes(rows);
-      } catch (e) {
-        // If the command isn't registered (old desktop binary), keep
-        // the fallback. Don't surface to the user — the dropdown
-        // still works with the hardcoded list.
-        console.warn("list_available_runtimes failed:", e);
-      }
-    })();
-  }, []);
+  // v2.7.7 — shared enabled-runtimes hook (was a local useState +
+  // useEffect that re-fetched on every PromptBar mount). React Query
+  // now caches by key `["enabled-runtimes"]` so PromptBar +
+  // FirstChatWizard hit one fetch and invalidate together when a key
+  // is added in Settings.
+  const enabledRuntimesQuery = useEnabledRuntimes();
+  const availableRuntimes: AvailableRuntimeRow[] | null =
+    enabledRuntimesQuery.data ?? null;
   const [agentId, setAgentId] = useState<string | null>(null);
   const showAgentPicker = openPicker === "agent";
   const setShowAgentPicker = (next: boolean | ((v: boolean) => boolean)) => {

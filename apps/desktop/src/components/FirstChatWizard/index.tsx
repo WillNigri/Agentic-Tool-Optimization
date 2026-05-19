@@ -20,91 +20,27 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Key, Loader2, Send, Settings, Swords, Terminal, X } from "lucide-react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
-import {
-  queryAllAgentStatuses,
-  listLlmApiKeys,
-  type AgentStatus,
-  type LlmApiKey,
-} from "@/lib/tauri-api";
-import {
-  RUNTIME_TO_PROVIDER,
-  type RuntimeId,
-} from "@/lib/runtimeAuth";
 import { useUiStore } from "@/stores/useUiStore";
 import { runtimeBadge } from "@/components/SessionsList/_helpers";
+import {
+  useEnabledRuntimes,
+  type EnabledRuntimeRow,
+} from "@/lib/enabledRuntimes";
 
 interface WarRoomDispatchResult {
   warRoomId: string;
   round: number;
 }
 
-// Subscription-capable runtime slugs the desktop currently surfaces.
-// Order is the visual order shown in the counter row. minimax/grok/
-// deepseek/qwen aren't here because they have no subscription path —
-// they enter the enabled list via the API-key branch below.
-const SUBSCRIPTION_RUNTIMES: RuntimeId[] = [
-  "claude",
-  "codex",
-  "gemini",
-  "openclaw",
-  "hermes",
-];
-
-// Provider slug → direct-API runtime slug. Only the direct-dispatch
-// providers belong here (the BYOK runtimes — claude/codex/gemini —
-// are matched via RUNTIME_TO_PROVIDER instead, so an "anthropic" key
-// counts as enabling claude rather than minting a separate row).
-const DIRECT_PROVIDER_RUNTIMES: Record<string, string> = {
-  minimax: "minimax",
-  grok: "grok",
-  deepseek: "deepseek",
-  qwen: "qwen",
-};
-
-interface EnabledRuntime {
-  runtime: string;
-  source: "subscription" | "api_key";
-}
-
-// Build the enabled-runtime list from subscriptions ∪ active API keys.
-// Deduplicates: if both a subscription and a key are present for the
-// same runtime, the subscription wins (more reliable; no quota cliff).
-function computeEnabledRuntimes(
-  statuses: AgentStatus[],
-  keys: LlmApiKey[]
-): EnabledRuntime[] {
-  const out = new Map<string, EnabledRuntime>();
-  for (const s of statuses) {
-    if (s.available && s.healthy) {
-      out.set(s.runtime, { runtime: s.runtime, source: "subscription" });
-    }
-  }
-  for (const k of keys) {
-    if (!k.isActive) continue;
-    const provider = k.provider.toLowerCase();
-    // BYOK match: anthropic/openai/google keys enable claude/codex/gemini.
-    let matched = false;
-    for (const rt of SUBSCRIPTION_RUNTIMES) {
-      if (RUNTIME_TO_PROVIDER[rt]?.includes(provider)) {
-        if (!out.has(rt)) {
-          out.set(rt, { runtime: rt, source: "api_key" });
-        }
-        matched = true;
-        break;
-      }
-    }
-    if (matched) continue;
-    // Direct-API match: minimax/grok/deepseek/qwen.
-    const direct = DIRECT_PROVIDER_RUNTIMES[provider];
-    if (direct && !out.has(direct)) {
-      out.set(direct, { runtime: direct, source: "api_key" });
-    }
-  }
-  return Array.from(out.values());
-}
+// v2.7.7 — runtime enablement now flows through useEnabledRuntimes()
+// (shared cache, single backend call, mirrors PromptBar). The old
+// SUBSCRIPTION_RUNTIMES + DIRECT_PROVIDER_RUNTIMES + computeEnabled-
+// Runtimes composition lived here because the wizard pre-dated the
+// unified `list_available_runtimes` Tauri command; backend composition
+// is now canonical so the frontend duplicate is gone.
 
 interface FirstChatWizardProps {
   open: boolean;
@@ -123,27 +59,14 @@ export default function FirstChatWizard({
   const setSubTab = useUiStore((s) => s.setSubTab);
   const openSessionDetail = useUiStore((s) => s.openSessionDetail);
 
-  const statusesQuery = useQuery<AgentStatus[]>({
-    queryKey: ["agent-statuses"],
-    queryFn: queryAllAgentStatuses,
-    enabled: open,
-    staleTime: 30_000,
-  });
-  const keysQuery = useQuery<LlmApiKey[]>({
-    queryKey: ["llm-api-keys"],
-    queryFn: () => listLlmApiKeys(),
-    enabled: open,
-    staleTime: 30_000,
-  });
-
-  const detecting = statusesQuery.isLoading || keysQuery.isLoading;
-  const enabled = useMemo(
-    () =>
-      computeEnabledRuntimes(
-        statusesQuery.data ?? [],
-        keysQuery.data ?? []
-      ),
-    [statusesQuery.data, keysQuery.data]
+  const enabledQuery = useEnabledRuntimes();
+  const detecting = enabledQuery.isLoading;
+  // Filter to only currently-dispatchable rows. `available=false` rows
+  // (binary missing, no key) shouldn't show in the war-room counter
+  // since the user can't fire to them anyway.
+  const enabled: EnabledRuntimeRow[] = useMemo(
+    () => (enabledQuery.data ?? []).filter((r) => r.available),
+    [enabledQuery.data]
   );
 
   // 2026-05-19 — Will: pills must be deselectable. Track explicit
@@ -157,7 +80,7 @@ export default function FirstChatWizard({
   const selected = useMemo(() => {
     const out = new Set<string>();
     for (const e of enabled) {
-      if (!excluded.has(e.runtime)) out.add(e.runtime);
+      if (!excluded.has(e.slug)) out.add(e.slug);
     }
     return out;
   }, [enabled, excluded]);
@@ -355,7 +278,7 @@ function RuntimeCounter({
   onAddSubscription,
 }: {
   detecting: boolean;
-  enabled: EnabledRuntime[];
+  enabled: EnabledRuntimeRow[];
   selected: Set<string>;
   onToggle: (slug: string) => void;
   onAddKey: () => void;
@@ -413,12 +336,12 @@ function RuntimeCounter({
           {t("firstChat.firingTo", "Firing to {{n}}:", { n: selected.size })}
         </span>
         {enabled.map((e) => {
-          const isOn = selected.has(e.runtime);
+          const isOn = selected.has(e.slug);
           return (
             <button
-              key={e.runtime}
+              key={e.slug}
               type="button"
-              onClick={() => onToggle(e.runtime)}
+              onClick={() => onToggle(e.slug)}
               title={
                 isOn
                   ? t("firstChat.clickToExclude", "Click to exclude")
@@ -426,12 +349,12 @@ function RuntimeCounter({
               }
               className={
                 isOn
-                  ? `${runtimeBadge(e.runtime)} cursor-pointer hover:opacity-80`
+                  ? `${runtimeBadge(e.slug)} cursor-pointer hover:opacity-80`
                   : "rounded-md border border-dashed border-cs-border/60 bg-transparent px-2 py-0.5 text-cs-muted hover:text-cs-text hover:border-cs-hover cursor-pointer"
               }
               aria-pressed={isOn}
             >
-              {e.runtime}
+              {e.slug}
             </button>
           );
         })}

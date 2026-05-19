@@ -145,10 +145,19 @@ export default function LlmApiKeys() {
     queryFn: () => listLlmApiKeys(),
   });
 
+  // v2.7.7 — every mutation here also invalidates the shared
+  // ["enabled-runtimes"] key so PromptBar + FirstChatWizard reflect
+  // the change immediately (adding a Gemini key flips google's
+  // `available` to true in both pickers without a manual refresh).
+  const invalidateKeyAndRuntimes = () => {
+    queryClient.invalidateQueries({ queryKey: ["llm-api-keys"] });
+    queryClient.invalidateQueries({ queryKey: ["enabled-runtimes"] });
+  };
+
   const saveMutation = useMutation({
     mutationFn: () => saveLlmApiKey(formProvider, formName || getProvider(formProvider).name, formKey, undefined, formRuntime || undefined),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["llm-api-keys"] });
+      invalidateKeyAndRuntimes();
       setShowAddForm(false);
       setFormProvider("anthropic");
       setFormName("");
@@ -159,18 +168,18 @@ export default function LlmApiKeys() {
 
   const toggleMutation = useMutation({
     mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) => toggleLlmApiKey(id, isActive),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llm-api-keys"] }),
+    onSuccess: invalidateKeyAndRuntimes,
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteLlmApiKey(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llm-api-keys"] }),
+    onSuccess: invalidateKeyAndRuntimes,
   });
 
   const rotateMutation = useMutation({
     mutationFn: ({ id, newKey }: { id: string; newKey: string }) => rotateLlmApiKey(id, newKey),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["llm-api-keys"] });
+      invalidateKeyAndRuntimes();
       setRotatingId(null);
       setNewRotateKey("");
     },
