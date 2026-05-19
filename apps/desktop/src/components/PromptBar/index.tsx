@@ -104,7 +104,22 @@ export default function PromptBar() {
   // in-flight dispatch. Cleared on done/error.
   const [streamingText, setStreamingText] = useState("");
   const [runtime, setRuntime] = useState<AgentRuntime>("claude");
-  const [showRuntimePicker, setShowRuntimePicker] = useState(false);
+  // 2026-05-19 elegance war-room call (claude + codex unanimous):
+  // collapse the 3 independent picker booleans into one discriminated
+  // union. Closes a latent bug — multiple `fixed inset-0 z-30`
+  // backdrops could stack when 2 popovers were open at once, and the
+  // wrong backdrop caught the close click. With a single source of
+  // truth only one popover is ever open. Each toggle/open also
+  // implicitly closes the others.
+  const [openPicker, setOpenPicker] = useState<
+    "runtime" | "agent" | "thread" | null
+  >(null);
+  const showRuntimePicker = openPicker === "runtime";
+  const setShowRuntimePicker = (next: boolean | ((v: boolean) => boolean)) => {
+    const nextValue =
+      typeof next === "function" ? next(showRuntimePicker) : next;
+    setOpenPicker(nextValue ? "runtime" : null);
+  };
   // v2.3.23 Phase 6.x-B — populated by list_available_runtimes.
   // Picker iterates over this when present, falling back to the
   // hardcoded RUNTIME_OPTIONS in dev/web (no Tauri) builds.
@@ -125,11 +140,20 @@ export default function PromptBar() {
     })();
   }, []);
   const [agentId, setAgentId] = useState<string | null>(null);
-  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const showAgentPicker = openPicker === "agent";
+  const setShowAgentPicker = (next: boolean | ((v: boolean) => boolean)) => {
+    const nextValue = typeof next === "function" ? next(showAgentPicker) : next;
+    setOpenPicker(nextValue ? "agent" : null);
+  };
   // Group dispatch — when set, prompt routes through the group's router
   // instead of going to a single agent. Mutually exclusive with agentId.
   const [groupSlug, setGroupSlug] = useState<string | null>(null);
-  const [showThreadPicker, setShowThreadPicker] = useState(false);
+  const showThreadPicker = openPicker === "thread";
+  const setShowThreadPicker = (next: boolean | ((v: boolean) => boolean)) => {
+    const nextValue =
+      typeof next === "function" ? next(showThreadPicker) : next;
+    setOpenPicker(nextValue ? "thread" : null);
+  };
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [renamingThread, setRenamingThread] = useState<{ id: string; title: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
