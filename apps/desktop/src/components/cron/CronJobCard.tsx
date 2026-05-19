@@ -1,26 +1,18 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Play, Loader2, Terminal, Cpu, Server, Globe, Link2, Pencil, Moon } from "lucide-react";
+import { Play, Loader2, Link2, Pencil, Moon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { CronJob, CronExecution, AgentRuntime } from "./types";
+import type { CronJob, CronExecution } from "./types";
 import ExecutionTimeline from "./ExecutionTimeline";
 import { cronToHuman, formatRelativeTime } from "@/lib/cron-utils";
 import { openclawRunCronJob } from "@/lib/api";
 import EditCronJobModal from "./EditCronJobModal";
+import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
 
-const RUNTIME_ICON: Record<AgentRuntime, typeof Terminal> = {
-  claude: Terminal,
-  codex: Cpu,
-  openclaw: Server,
-  hermes: Globe,
-};
-
-const RUNTIME_COLOR: Record<AgentRuntime, string> = {
-  claude: "#f97316",
-  codex: "#22c55e",
-  openclaw: "#06b6d4",
-  hermes: "#a855f7",
-};
+const runtimeIcon = (rt: string) =>
+  RUNTIME_REGISTRY[rt as RuntimeId]?.icon ?? RUNTIME_REGISTRY.claude.icon;
+const runtimeHex = (rt: string) =>
+  RUNTIME_REGISTRY[rt as RuntimeId]?.hex ?? "#94a3b8";
 
 const STATUS_COLORS: Record<string, { dot: string; text: string; label: string }> = {
   healthy: { dot: "bg-green-400", text: "text-green-400", label: "Healthy" },
@@ -50,8 +42,8 @@ export default function CronJobCard({
   const { t } = useTranslation();
   const [showEditModal, setShowEditModal] = useState(false);
   const [ocRunning, setOcRunning] = useState(false);
-  const RuntimeIcon = RUNTIME_ICON[job.runtime];
-  const runtimeColor = RUNTIME_COLOR[job.runtime];
+  const RuntimeIcon = runtimeIcon(job.runtime);
+  const runtimeColor = runtimeHex(job.runtime);
   const statusConfig = STATUS_COLORS[job.status] || STATUS_COLORS.healthy;
   const isOpenClaw = job.source === "openclaw-gateway";
 

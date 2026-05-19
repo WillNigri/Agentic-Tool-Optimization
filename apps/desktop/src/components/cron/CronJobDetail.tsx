@@ -8,17 +8,17 @@ import {
   Loader2,
   RotateCcw,
   Trash2,
-  Terminal,
-  Cpu,
-  Server,
-  Globe,
   Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { CronJob, CronExecution, AgentRuntime } from "./types";
+import type { CronJob, CronExecution } from "./types";
 import { cronToHuman, formatRelativeTime } from "@/lib/cron-utils";
 import { useCronStore } from "@/stores/useCronStore";
 import EditCronJobModal from "./EditCronJobModal";
+import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
+
+const runtimeIcon = (rt: string) =>
+  RUNTIME_REGISTRY[rt as RuntimeId]?.icon ?? RUNTIME_REGISTRY.claude.icon;
 import {
   BarChart,
   Bar,
@@ -28,13 +28,6 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-
-const RUNTIME_ICON: Record<AgentRuntime, typeof Terminal> = {
-  claude: Terminal,
-  codex: Cpu,
-  openclaw: Server,
-  hermes: Globe,
-};
 
 interface CronJobDetailProps {
   job: CronJob;
@@ -51,7 +44,7 @@ export default function CronJobDetail({ job, onClose }: CronJobDetailProps) {
   const retryExecution = useCronStore((s) => s.retryExecution);
   const deleteJob = useCronStore((s) => s.deleteJob);
   const toggleJob = useCronStore((s) => s.toggleJob);
-  const RuntimeIcon = RUNTIME_ICON[job.runtime];
+  const RuntimeIcon = runtimeIcon(job.runtime);
 
   const completedExecs = executions.filter((e) => e.status === "success" || e.status === "failed");
   const successCount = completedExecs.filter((e) => e.status === "success").length;

@@ -9,6 +9,7 @@
 
 import * as tauriApi from './tauri-api';
 import * as mock from './mock-data';
+import type { ProjectBundle } from './tauri-api';
 
 // Re-export all types so components can import from api.ts instead of tauri-api.ts
 export type {
@@ -362,9 +363,9 @@ export async function listProjects() {
   return mock.mockProjects;
 }
 
-export async function getProjectBundle(projectPath: string) {
+export async function getProjectBundle(projectPath: string): Promise<ProjectBundle> {
   if (isTauri) return tauriApi.getProjectBundle(projectPath);
-  return mock.mockProjectBundle;
+  return mock.mockProjectBundle as ProjectBundle;
 }
 
 // ---- Safe File Read/Write (Batch 1+) ----

@@ -4,19 +4,16 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
-  Terminal,
-  Cpu,
-  Server,
-  Globe,
   CheckCircle,
   AlertTriangle,
   X,
   Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { CronJob, CronExecution, AgentRuntime } from "./types";
+import type { CronJob, CronExecution } from "./types";
 import { parseCron, matchesCronDate } from "@/lib/cron-utils";
 import { useCronStore } from "@/stores/useCronStore";
+import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,19 +21,12 @@ import { useCronStore } from "@/stores/useCronStore";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-const RUNTIME_ICON: Record<AgentRuntime, typeof Terminal> = {
-  claude: Terminal,
-  codex: Cpu,
-  openclaw: Server,
-  hermes: Globe,
-};
-
-const RUNTIME_COLOR: Record<AgentRuntime, string> = {
-  claude: "#f97316",
-  codex: "#22c55e",
-  openclaw: "#06b6d4",
-  hermes: "#a855f7",
-};
+// 2026-05-20 — drove local maps to RUNTIME_REGISTRY; same icons + hex,
+// every runtime covered by the canonical source.
+const runtimeIcon = (rt: string) =>
+  RUNTIME_REGISTRY[rt as RuntimeId]?.icon ?? RUNTIME_REGISTRY.claude.icon;
+const runtimeColor = (rt: string) =>
+  RUNTIME_REGISTRY[rt as RuntimeId]?.hex ?? "#94a3b8";
 
 interface CalendarDay {
   date: Date;
@@ -223,8 +213,8 @@ function DayCell({ day, onSelectJob, onSelectExecution }: DayCellProps) {
       <div className="space-y-0.5">
         {day.jobs.slice(0, 4).map((job) => {
           const status = getJobDayStatus(job, day.executions, day.date);
-          const RuntimeIcon = RUNTIME_ICON[job.runtime];
-          const color = RUNTIME_COLOR[job.runtime];
+          const RuntimeIcon = runtimeIcon(job.runtime);
+          const color = runtimeColor(job.runtime);
           const time = getScheduledTime(job.schedule);
 
           // Find matching execution for click-to-inspect

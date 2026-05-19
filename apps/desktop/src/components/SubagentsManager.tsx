@@ -21,6 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { getSkills } from "@/lib/api";
 import type { AgentRuntime } from "@/components/cron/types";
+import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
 import { useRuntimeAgents } from "@/hooks/useRuntimeData";
 
 // ---------------------------------------------------------------------------
@@ -130,26 +131,27 @@ const TYPE_COLOR: Record<DisplayAgent["type"], string> = {
   custom: "border-rose-500/40 bg-rose-500/10 text-rose-400",
 };
 
-const RUNTIME_COLOR: Record<AgentRuntime, string> = {
-  claude: "border-orange-500/40 bg-orange-500/10 text-orange-400",
-  codex: "border-green-500/40 bg-green-500/10 text-green-400",
-  openclaw: "border-cyan-500/40 bg-cyan-500/10 text-cyan-400",
-  hermes: "border-purple-500/40 bg-purple-500/10 text-purple-400",
-};
+// 2026-05-20 — drove the three local runtime maps to RUNTIME_REGISTRY
+// (single source of truth). Adding a runtime updates this surface for
+// free. Border-tint badges use the runtime's tw color extracted to a
+// border variant (text-X-400 → border-X-500/40 bg-X-500/10).
+function runtimeTintCls(rt: string): string {
+  const tw = RUNTIME_REGISTRY[rt as RuntimeId]?.tw ?? "text-slate-400 bg-slate-400/10";
+  // Derive a "border-X-500/40 bg-X-500/10 text-X-400" string from the
+  // canonical "text-X-400 bg-X-400/10" entry. Cheap string surgery is
+  // good enough — the colors are tailwind-palette-derived already.
+  const colorMatch = tw.match(/text-(\w+)-400/);
+  const color = colorMatch?.[1] ?? "slate";
+  return `border-${color}-500/40 bg-${color}-500/10 text-${color}-400`;
+}
 
-const RUNTIME_DOT_COLOR: Record<AgentRuntime, string> = {
-  claude: "#f97316",
-  codex: "#22c55e",
-  openclaw: "#06b6d4",
-  hermes: "#a855f7",
-};
+function runtimeDotColor(rt: string): string {
+  return RUNTIME_REGISTRY[rt as RuntimeId]?.hex ?? "#94a3b8";
+}
 
-const RUNTIME_ICON: Record<AgentRuntime, typeof Bot> = {
-  claude: Terminal,
-  codex: Cpu,
-  openclaw: Server,
-  hermes: Globe,
-};
+function runtimeIconFor(rt: string) {
+  return RUNTIME_REGISTRY[rt as RuntimeId]?.icon ?? Bot;
+}
 
 function TypeBadge({ type }: { type: DisplayAgent["type"] }) {
   const Icon = TYPE_ICON[type];
@@ -167,12 +169,12 @@ function TypeBadge({ type }: { type: DisplayAgent["type"] }) {
 }
 
 function RuntimeBadge({ runtime }: { runtime: AgentRuntime }) {
-  const Icon = RUNTIME_ICON[runtime];
+  const Icon = runtimeIconFor(runtime);
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full border",
-        RUNTIME_COLOR[runtime]
+        runtimeTintCls(runtime)
       )}
     >
       <Icon size={12} />
@@ -540,8 +542,8 @@ export default function SubagentsManager() {
           All ({counts.all || 0})
         </button>
         {activeRuntimes.map((rt) => {
-          const color = RUNTIME_DOT_COLOR[rt];
-          const Icon = RUNTIME_ICON[rt];
+          const color = runtimeDotColor(rt);
+          const Icon = runtimeIconFor(rt);
           return (
             <button
               key={rt}
@@ -659,7 +661,7 @@ export default function SubagentsManager() {
                   <span key={rt} className="flex items-center gap-1">
                     <span
                       className="w-2 h-2 rounded-full"
-                      style={{ backgroundColor: RUNTIME_DOT_COLOR[rt] }}
+                      style={{ backgroundColor: runtimeDotColor(rt) }}
                     />
                     {rt}
                   </span>
