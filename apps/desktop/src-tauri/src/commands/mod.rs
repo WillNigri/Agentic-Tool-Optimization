@@ -26,6 +26,7 @@ pub mod projects;
 pub mod agent_hooks_evals;
 pub mod live_health;
 pub mod events_activity;
+pub mod recipes;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -42,6 +43,7 @@ pub use projects::*;
 pub use agent_hooks_evals::*;
 pub use live_health::*;
 pub use events_activity::*;
+pub use recipes::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -2347,70 +2349,6 @@ fn truncate_for_log(s: &str) -> String {
     const MAX: usize = 64 * 1024;
     if s.len() <= MAX { s.to_string() } else { format!("{}…[truncated]", &s[..MAX]) }
 }
-
-// ── v2.3.7 Phase 4 — Ops recipes Tauri commands ───────────────────────
-//
-// CRUD wrappers around the recipes module. CLI mirrors these via
-// `ato recipes <subcommand>`. The execution engine (subscribing to
-// events::bus and dispatching actions) is a separate follow-up.
-
-#[tauri::command]
-pub fn recipes_list() -> Result<Vec<crate::recipes::OpsRecipe>, String> {
-    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
-    crate::recipes::list(&conn)
-}
-
-#[tauri::command]
-pub fn recipes_get(slug: String) -> Result<Option<crate::recipes::OpsRecipe>, String> {
-    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
-    crate::recipes::get(&conn, &slug)
-}
-
-#[tauri::command]
-pub fn recipes_create(
-    input: crate::recipes::CreateRecipeInput,
-) -> Result<crate::recipes::OpsRecipe, String> {
-    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
-    crate::recipes::create(&conn, input)
-}
-
-#[tauri::command]
-pub fn recipes_set_enabled(slug: String, enabled: bool) -> Result<crate::recipes::OpsRecipe, String> {
-    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
-    crate::recipes::set_enabled(&conn, &slug, enabled)
-}
-
-#[tauri::command]
-pub fn recipes_delete(slug: String) -> Result<bool, String> {
-    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
-    crate::recipes::delete(&conn, &slug)
-}
-
-#[tauri::command]
-pub fn recipes_templates() -> Vec<crate::recipes::RecipeTemplate> {
-    crate::recipes::builtin_templates()
-}
-
-#[tauri::command]
-pub fn recipes_install_template(
-    slug: String,
-    rename_to: Option<String>,
-) -> Result<crate::recipes::OpsRecipe, String> {
-    let template = crate::recipes::template_by_slug(&slug)
-        .ok_or_else(|| format!("No template with slug '{}'.", slug))?;
-    let conn = rusqlite::Connection::open(crate::get_db_path()).map_err(|e| e.to_string())?;
-    let install_slug = rename_to.unwrap_or_else(|| template.slug.clone());
-    let input = crate::recipes::CreateRecipeInput {
-        slug: install_slug,
-        name: template.name,
-        description: Some(template.description),
-        trigger: template.trigger,
-        action: template.action,
-        enabled: true,
-    };
-    crate::recipes::create(&conn, input)
-}
-
 
 // v2.3.26 Phase 6.x-C — GUI-side API-provider dispatch.
 //
