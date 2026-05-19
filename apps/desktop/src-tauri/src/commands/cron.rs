@@ -710,6 +710,13 @@ fn unregister_systemd(job_id: &str) {
 // to fire the job. `schtasks /Create /XML <file> /TN <name> /F` registers
 // it; /Delete removes it.
 
+// 2026-05-19 — `#[cfg(any(target_os = "windows", test))]` so the
+// function compiles on Windows (where `register_schtasks` calls it)
+// AND under `cargo test` on any platform (the `cron_launchd_tests`
+// module exercises the XML generation as a portable unit test). Plain
+// cargo check on macOS used to surface this as `never used` because
+// neither the Windows caller nor the test caller was reachable.
+#[cfg(any(target_os = "windows", test))]
 fn cron_to_schtasks_xml_trigger(cron: &str) -> Result<String, String> {
     let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() != 5 {
@@ -849,6 +856,7 @@ fn cron_to_schtasks_xml_trigger(cron: &str) -> Result<String, String> {
     ))
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn build_schtasks_xml(job_id: &str, ato_binary: &str, cron: &str) -> Result<String, String> {
     let trigger = cron_to_schtasks_xml_trigger(cron)?;
     Ok(format!(
