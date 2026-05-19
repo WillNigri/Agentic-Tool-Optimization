@@ -29,6 +29,7 @@ pub mod events_activity;
 pub mod recipes;
 pub mod execution_logs;
 pub mod runtimes;
+pub mod settings_config;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -48,6 +49,7 @@ pub use events_activity::*;
 pub use recipes::*;
 pub use execution_logs::*;
 pub use runtimes::*;
+pub use settings_config::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -979,30 +981,6 @@ pub fn get_config_files() -> Result<Vec<ConfigFile>, String> {
             scope: scope.to_string(),
         }
     }).collect())
-}
-
-#[tauri::command]
-pub fn get_sync_status(db: State<'_, DbState>) -> Result<SyncStatus, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let enabled: bool = conn
-        .query_row("SELECT value FROM settings WHERE key = 'sync_enabled'", [], |row| {
-            let val: String = row.get(0)?;
-            Ok(val == "true")
-        })
-        .unwrap_or(false);
-
-    Ok(SyncStatus { enabled, last_sync_at: None, cloud_url: None })
-}
-
-#[tauri::command]
-pub fn set_sync_enabled(db: State<'_, DbState>, enabled: bool, _cloud_url: Option<String>) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES ('sync_enabled', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![if enabled { "true" } else { "false" }],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -6726,40 +6704,6 @@ pub fn get_usage_metrics(
 }
 
 
-// ── Telemetry Commands ───────────────────────────────────────────────────
-
-use telemetry::{TelemetryState, TelemetryEvent, TelemetrySettings};
-
-/// Get telemetry settings
-#[tauri::command]
-pub fn get_telemetry_settings(
-    state: State<'_, TelemetryState>,
-) -> Result<TelemetrySettings, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
-    Ok(settings.clone())
-}
-
-/// Update telemetry settings
-#[tauri::command]
-pub fn update_telemetry_settings(
-    state: State<'_, TelemetryState>,
-    enabled: bool,
-    endpoint: Option<String>,
-) -> Result<TelemetrySettings, String> {
-    let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
-    settings.enabled = enabled;
-    settings.endpoint = endpoint;
-
-    // Persist to config file
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("ato");
-    let _ = std::fs::create_dir_all(&config_dir);
-    let settings_path = config_dir.join("telemetry.json");
-    let _ = std::fs::write(&settings_path, serde_json::to_string_pretty(&*settings).unwrap_or_default());
-
-    Ok(settings.clone())
-}
 
 
 
