@@ -216,11 +216,16 @@ fn window_stats(
 ) -> Result<WindowStats> {
     let mut stmt = conn
         .prepare(
+            // 2026-05-19 war-room synthesis: filter dispatch_kind='active'.
+            // Passive-observation rows from Claude Code CLI won't carry
+            // an ATO agent_slug in practice, but the safety shouldn't be
+            // load-bearing on that coincidence.
             "SELECT duration_ms, status, COALESCE(cost_usd_estimated, 0)
                FROM execution_logs
               WHERE agent_slug = ?1
                 AND created_at >= ?2
-                AND created_at <  ?3",
+                AND created_at <  ?3
+                AND dispatch_kind = 'active'",
         )
         .map_err(to_string_err)?;
     let rows: Vec<(Option<i64>, String, f64)> = stmt
@@ -275,6 +280,7 @@ fn window_stats(
                     AND status != 'success'
                     AND created_at >= ?2
                     AND created_at <  ?3
+                    AND dispatch_kind = 'active'
                   ORDER BY created_at DESC
                   LIMIT 10",
             )
@@ -349,6 +355,9 @@ pub fn compute_cost_recommendations_local(
 
     let mut stmt = conn
         .prepare(
+            // 2026-05-19 war-room synthesis: filter dispatch_kind='active'
+            // so cost recommendations don't fold in passive-observation
+            // rows (which carry zero ATO-attributable cost anyway).
             "SELECT agent_slug, runtime,
                     COUNT(*) AS runs,
                     AVG(cost_usd_estimated) AS cost_per_run,
@@ -357,6 +366,7 @@ pub fn compute_cost_recommendations_local(
               WHERE agent_slug IS NOT NULL
                 AND created_at > ?1
                 AND cost_usd_estimated IS NOT NULL
+                AND dispatch_kind = 'active'
               GROUP BY agent_slug, runtime
              HAVING COUNT(*) >= ?2",
         )

@@ -46,11 +46,13 @@ pub fn get_execution_logs(
 
     // v2.3.41 — include session_id so the History panel can group
     // multi-turn conversations under one collapsible header.
+    // 2026-05-19 war-room synthesis: filter dispatch_kind='active' so
+    // History doesn't render passive-observation rows as ATO dispatches.
     let sql = match (&runtime, &status) {
-        (Some(_), Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE runtime = ?1 AND status = ?2 ORDER BY created_at DESC LIMIT ?3",
-        (Some(_), None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE runtime = ?1 ORDER BY created_at DESC LIMIT ?2",
-        (None, Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
-        (None, None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs ORDER BY created_at DESC LIMIT ?1",
+        (Some(_), Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE runtime = ?1 AND status = ?2 AND dispatch_kind = 'active' ORDER BY created_at DESC LIMIT ?3",
+        (Some(_), None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE runtime = ?1 AND dispatch_kind = 'active' ORDER BY created_at DESC LIMIT ?2",
+        (None, Some(_)) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE status = ?1 AND dispatch_kind = 'active' ORDER BY created_at DESC LIMIT ?2",
+        (None, None) => "SELECT id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, session_id, tool_calls_count, tool_calls_summary, agent_slug, model FROM execution_logs WHERE dispatch_kind = 'active' ORDER BY created_at DESC LIMIT ?1",
     };
 
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;

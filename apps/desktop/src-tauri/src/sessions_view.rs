@@ -329,11 +329,18 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // without --war-room-id (the common case) still gets a single-run
     // card; only the explicit war-room workflow gets the group
     // treatment.
+    // 2026-05-19 war-room synthesis: filter to dispatch_kind='active' so
+    // passive-observation rows (Claude Code / Codex CLI jsonl tail rows
+    // landing via v2.6 PR-A) don't synthesize as empty-prompt single_run
+    // cards. They lack the (prompt, response, model, agent_slug)
+    // invariants this card variant assumes.
     let mut eph_stmt = conn.prepare(
         "SELECT e.id, e.runtime, e.agent_slug, e.created_at, e.cost_usd_estimated,
                 e.prompt, e.response, e.model, e.status
            FROM execution_logs e
-          WHERE e.session_id IS NULL AND e.war_room_id IS NULL
+          WHERE e.session_id IS NULL
+            AND e.war_room_id IS NULL
+            AND e.dispatch_kind = 'active'
           ORDER BY e.created_at DESC
           LIMIT ?1",
     )?;

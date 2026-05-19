@@ -988,6 +988,24 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // 2026-05-19 execution_logs war-room synthesis (docs/reviews/
+    // execution-logs-war-room-2026-05-19.md): when v2.6 PR-A enables
+    // passive-observation writes, legacy read paths must default-filter
+    // to active rows. This view is the type-level handle for "real
+    // dispatches only" — point new code at it and the passive vs
+    // active distinction can never silently leak into Analytics /
+    // Sessions feed / Regressions / Replay.
+    //
+    // Keep `execution_logs` as the source of truth (cheaper than
+    // splitting tables); use this view for default reads, query
+    // execution_logs directly when you specifically want both kinds
+    // (`compute_billing_surface_summary` is the canonical example).
+    let _ = conn.execute(
+        "CREATE VIEW IF NOT EXISTS active_dispatches AS \
+            SELECT * FROM execution_logs WHERE dispatch_kind = 'active'",
+        [],
+    );
+
     // v2.6 PR-A — watcher_state. One row per (source, file_path).
     // byte_offset = where the next read should start so re-ingest is
     // idempotent across desktop restarts. last_seq = the largest

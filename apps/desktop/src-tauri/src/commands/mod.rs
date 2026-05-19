@@ -1443,8 +1443,12 @@ pub async fn start_replay(
     // start_replay previously only matched cloud_trace_id.
     let (source_id, source_runtime, _source_status, prompt) = {
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+        // 2026-05-19 war-room synthesis: filter dispatch_kind='active' so
+        // passive-observation rows (no prompt, no replayable spec) can't
+        // become a malformed start_replay source.
         let row = conn.query_row(
-            "SELECT id, runtime, status, prompt FROM execution_logs WHERE cloud_trace_id = ?1 OR id = ?1 LIMIT 1",
+            "SELECT id, runtime, status, prompt FROM execution_logs \
+             WHERE (cloud_trace_id = ?1 OR id = ?1) AND dispatch_kind = 'active' LIMIT 1",
             rusqlite::params![cloud_trace_id],
             |r| {
                 Ok((
@@ -4926,6 +4930,10 @@ pub fn get_usage_metrics(
     let days = days.unwrap_or(30);
     let interval = format!("-{} days", days);
 
+    // 2026-05-19 war-room synthesis: every get_usage_metrics query
+    // filters to dispatch_kind='active'. Passive-observation rows from
+    // v2.6 PR-A would otherwise inflate totals / tokens / per-runtime /
+    // per-day counts on the day passive observation goes live.
     // Total counts
     let (total, successful, failed): (i64, i64, i64) = conn.query_row(
         "SELECT
@@ -4933,7 +4941,7 @@ pub fn get_usage_metrics(
             SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
             SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
          FROM execution_logs
-         WHERE created_at > datetime('now', ?1)",
+         WHERE created_at > datetime('now', ?1) AND dispatch_kind = 'active'",
         params![&interval],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).unwrap_or((0, 0, 0));
@@ -4945,7 +4953,7 @@ pub fn get_usage_metrics(
             COALESCE(SUM(tokens_out), 0),
             AVG(duration_ms)
          FROM execution_logs
-         WHERE created_at > datetime('now', ?1)",
+         WHERE created_at > datetime('now', ?1) AND dispatch_kind = 'active'",
         params![&interval],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).unwrap_or((0, 0, None));
@@ -4957,7 +4965,7 @@ pub fn get_usage_metrics(
                 SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
          FROM execution_logs
-         WHERE created_at > datetime('now', ?1)
+         WHERE created_at > datetime('now', ?1) AND dispatch_kind = 'active'
          GROUP BY runtime"
     ).map_err(|e| e.to_string())?;
 
@@ -4974,14 +4982,14 @@ pub fn get_usage_metrics(
         .filter_map(|r| r.ok())
         .collect();
 
-    // Executions by day
+    // Executions by day (also filtered to active per war-room synthesis)
     let mut stmt = conn.prepare(
         "SELECT DATE(created_at),
                 COUNT(*),
                 SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
          FROM execution_logs
-         WHERE created_at > datetime('now', ?1)
+         WHERE created_at > datetime('now', ?1) AND dispatch_kind = 'active'
          GROUP BY DATE(created_at)
          ORDER BY DATE(created_at) ASC"
     ).map_err(|e| e.to_string())?;
@@ -5026,7 +5034,7 @@ pub fn get_monitoring_snapshot(
 
     let mut active_stmt = conn.prepare(
         "SELECT id, runtime, status, prompt, tokens_in, tokens_out, duration_ms, skill_name, created_at
-         FROM execution_logs WHERE status = 'running' ORDER BY created_at DESC"
+         FROM execution_logs WHERE status = 'running' AND dispatch_kind = 'active' ORDER BY created_at DESC"
     ).map_err(|e| e.to_string())?;
 
     let active_sessions: Vec<AgentSession> = active_stmt.query_map([], |row| {
@@ -5042,7 +5050,7 @@ pub fn get_monitoring_snapshot(
 
     let mut recent_stmt = conn.prepare(
         "SELECT id, runtime, status, prompt, tokens_in, tokens_out, duration_ms, skill_name, created_at
-         FROM execution_logs WHERE status != 'running' ORDER BY created_at DESC LIMIT 20"
+         FROM execution_logs WHERE status != 'running' AND dispatch_kind = 'active' ORDER BY created_at DESC LIMIT 20"
     ).map_err(|e| e.to_string())?;
 
     let recent_sessions: Vec<AgentSession> = recent_stmt.query_map([], |row| {
@@ -5056,28 +5064,32 @@ pub fn get_monitoring_snapshot(
     .filter_map(|r| r.ok())
     .collect();
 
+    // 2026-05-19 war-room synthesis: real-time monitoring counters
+    // filter dispatch_kind='active' so the dashboard shows ATO-fired
+    // work only. Passive observation has its own surface (v2.6 Insights
+    // → Live billing surface chip).
     let total_tokens_today: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0) FROM execution_logs WHERE created_at > datetime('now', '-1 day')",
+        "SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0) FROM execution_logs WHERE created_at > datetime('now', '-1 day') AND dispatch_kind = 'active'",
         [], |row| row.get(0)
     ).unwrap_or(0);
 
     let total_sessions_today: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM execution_logs WHERE created_at > datetime('now', '-1 day')",
+        "SELECT COUNT(*) FROM execution_logs WHERE created_at > datetime('now', '-1 day') AND dispatch_kind = 'active'",
         [], |row| row.get(0)
     ).unwrap_or(0);
 
     let errors_today: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM execution_logs WHERE status = 'error' AND created_at > datetime('now', '-1 day')",
+        "SELECT COUNT(*) FROM execution_logs WHERE status = 'error' AND created_at > datetime('now', '-1 day') AND dispatch_kind = 'active'",
         [], |row| row.get(0)
     ).unwrap_or(0);
 
     let avg_duration_ms: f64 = conn.query_row(
-        "SELECT COALESCE(AVG(duration_ms), 0) FROM execution_logs WHERE duration_ms IS NOT NULL AND created_at > datetime('now', '-1 day')",
+        "SELECT COALESCE(AVG(duration_ms), 0) FROM execution_logs WHERE duration_ms IS NOT NULL AND created_at > datetime('now', '-1 day') AND dispatch_kind = 'active'",
         [], |row| row.get(0)
     ).unwrap_or(0.0);
 
     let tokens_last_hour: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0) FROM execution_logs WHERE created_at > datetime('now', '-1 hour')",
+        "SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0) FROM execution_logs WHERE created_at > datetime('now', '-1 hour') AND dispatch_kind = 'active'",
         [], |row| row.get(0)
     ).unwrap_or(0);
     let token_rate_per_hour = tokens_last_hour as f64;
@@ -7937,11 +7949,14 @@ fn load_agent_log_lines(conn: &rusqlite::Connection, filter: &AgentTraceFilter) 
         params.push(Box::new(since.clone()));
     }
 
-    let where_sql = if where_parts.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", where_parts.join(" AND "))
-    };
+    // 2026-05-19 war-room synthesis: always filter dispatch_kind='active'.
+    // load_agent_log_lines feeds read_agent_traces + get_agent_metrics —
+    // the Insights → Agents panel and the AgentTraceLine wire. Passive-
+    // observation rows from v2.6 PR-A would otherwise pollute every
+    // agent metric.
+    where_parts.push("dispatch_kind = 'active'".to_string());
+
+    let where_sql = format!("WHERE {}", where_parts.join(" AND "));
 
     let limit_sql = match filter.limit {
         Some(n) => format!("LIMIT {}", n.min(10_000)),

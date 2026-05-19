@@ -122,6 +122,11 @@ pub fn get_token_timeline(
     let hours = hours.unwrap_or(24);
 
     let mut stmt = conn.prepare(&format!(
+        // 2026-05-19 war-room synthesis: filter to dispatch_kind='active'
+        // so passive-observation rows from v2.6 PR-A don't show up as a
+        // step-function on the day passive observation goes live.
+        // compute_billing_surface_summary (below) is the intentional
+        // cross-kind reader and stays unfiltered.
         "SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) as hour,
                 runtime,
                 COALESCE(SUM(tokens_in), 0) as total_in,
@@ -129,6 +134,7 @@ pub fn get_token_timeline(
                 COUNT(*) as session_count
          FROM execution_logs
          WHERE created_at > datetime('now', '-{} hours')
+           AND dispatch_kind = 'active'
          GROUP BY hour, runtime
          ORDER BY hour ASC",
         hours

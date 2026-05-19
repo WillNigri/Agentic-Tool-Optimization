@@ -88,6 +88,12 @@ LEFT JOIN execution_logs el ON el.id = (
 /// pre-order — callers usually want their own ORDER BY + LIMIT and a
 /// pre-ordered view forces an unnecessary sort if the caller wants a
 /// different order. Add `ORDER BY created_at DESC` at the call site.
+// 2026-05-19 war-room synthesis (docs/reviews/execution-logs-war-room-
+// 2026-05-19.md): filter dispatch_kind='active' so this view stays a
+// "real dispatches" surface even after v2.6 PR-A enables passive-
+// observation writes. The active_dispatches root-view in lib.rs would
+// be a cleaner source but views-over-views serialize less portably; the
+// explicit predicate keeps the SQL self-documenting.
 pub const V_RECENT_DISPATCHES: &str = "
 CREATE VIEW IF NOT EXISTS v_recent_dispatches AS
 SELECT
@@ -105,7 +111,8 @@ SELECT
   created_at,
   substr(prompt, 1, 200)   AS prompt_preview,
   substr(response, 1, 200) AS response_preview
-FROM execution_logs;
+FROM execution_logs
+WHERE dispatch_kind = 'active';
 ";
 
 /// Per-session aggregate covering everything the SessionsList card +
@@ -146,6 +153,10 @@ GROUP BY s.id;
 /// `agent_slug` as NULL for generalist turns and adds an explicit
 /// `is_generalist` boolean. SQLite groups NULLs together correctly in
 /// GROUP BY, so the rollup is still deterministic.
+// 2026-05-19 war-room synthesis: filter to dispatch_kind='active'. Cost
+// rollups inherently care about ATO-fired work — passive observation has
+// its own cost surface in `compute_billing_surface_summary` (which is
+// the intentional cross-kind reader; do NOT filter that one).
 pub const V_COST_BY_AGENT_RUNTIME: &str = "
 CREATE VIEW IF NOT EXISTS v_cost_by_agent_runtime AS
 SELECT
@@ -161,6 +172,7 @@ SELECT
   SUM(COALESCE(cost_usd_estimated, 0))              AS cost_usd,
   MAX(created_at)                                   AS last_at
 FROM execution_logs
+WHERE dispatch_kind = 'active'
 GROUP BY agent_slug, runtime, auth_mode;
 ";
 
