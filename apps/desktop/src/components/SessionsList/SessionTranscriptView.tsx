@@ -16,6 +16,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
   Bot,
+  GitBranch,
   Loader2,
   Sparkles,
   Send,
@@ -35,6 +36,7 @@ import {
   inferCoordinatorTarget,
   avatarInitials,
   NEW_SESSION_RUNTIMES,
+  RUNTIME_COLORS,
   type SessionTranscript,
   type SessionCostBreakdown,
   type CloseSessionResult,

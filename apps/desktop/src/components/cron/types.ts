@@ -5,9 +5,12 @@
 // 2026-05-18 — AgentRuntime used to be hand-typed as the 4 CLI
 // runtimes only. The codebase actively dispatches to gemini /
 // minimax / grok / deepseek / qwen / openrouter too; the type lied.
-// Re-exported from the canonical runtime registry so adding a runtime
-// updates this type for free.
-export type { RuntimeId as AgentRuntime } from "@/lib/runtimes";
+// Re-imported AND re-exported from the canonical runtime registry so
+// the rest of this file can reference `AgentRuntime` locally AND
+// downstream importers still get it — adding a runtime updates this
+// type everywhere for free.
+import type { RuntimeId as AgentRuntime } from "@/lib/runtimes";
+export type { AgentRuntime };
 
 export type CronJobStatus =
   | "healthy"

@@ -1,8 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 
-// v1.3.0 — Frontend wrappers for the Rust agents commands (T3).
+import type { RuntimeId as AgentRuntime } from "./runtimes";
 
-export type AgentRuntime = "claude" | "codex" | "gemini" | "openclaw" | "hermes";
+// v1.3.0 — Frontend wrappers for the Rust agents commands (T3).
+//
+// 2026-05-18 — AgentRuntime used to be hand-typed as just the 5 CLI
+// runtimes. After v2.3.21 added API-key dispatch (MiniMax/Grok/DeepSeek/
+// Qwen/OpenRouter) the wider union flowed through every callsite and
+// the narrow type here silently rejected valid values. Now re-exported
+// from the single source of truth at @/lib/runtimes so adding a runtime
+// updates this type for free.
+export type { AgentRuntime };
 
 /**
  * v2.0.0 — runs locally on the developer's laptop ("internal") or is designed
