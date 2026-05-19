@@ -17,9 +17,9 @@
 // the README/SKILL.md repositioning we shipped this morning ("ATO is
 // a local war room"); CreateAgent demotes to a secondary action.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Send, Settings, Swords, X } from "lucide-react";
+import { Key, Loader2, Send, Settings, Swords, Terminal, X } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -137,15 +137,44 @@ export default function FirstChatWizard({
   });
 
   const detecting = statusesQuery.isLoading || keysQuery.isLoading;
-  const enabled = computeEnabledRuntimes(
-    statusesQuery.data ?? [],
-    keysQuery.data ?? []
+  const enabled = useMemo(
+    () =>
+      computeEnabledRuntimes(
+        statusesQuery.data ?? [],
+        keysQuery.data ?? []
+      ),
+    [statusesQuery.data, keysQuery.data]
   );
+
+  // 2026-05-19 — Will: pills must be deselectable. Track explicit
+  // exclusions only; derive `selected` from enabled \ excluded. War-room
+  // (claude + codex, war_room_id F009D1D3…) was unanimous: a
+  // reseed-from-enabled effect re-includes deselected runtimes after a
+  // health flap. Storing `excluded` keeps manual opt-outs sticky across
+  // status churn while still auto-including newly-connected runtimes
+  // (they're absent from `excluded` by default).
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const selected = useMemo(() => {
+    const out = new Set<string>();
+    for (const e of enabled) {
+      if (!excluded.has(e.runtime)) out.add(e.runtime);
+    }
+    return out;
+  }, [enabled, excluded]);
+
+  const toggleRuntime = (slug: string) => {
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  };
 
   const fire = useMutation({
     mutationFn: async () => {
       return await invoke<WarRoomDispatchResult>("dispatch_war_room", {
-        runtimes: enabled.map((e) => e.runtime),
+        runtimes: Array.from(selected),
         prompt: prompt.trim(),
       });
     },
@@ -165,10 +194,19 @@ export default function FirstChatWizard({
   const canSend =
     !detecting &&
     !fire.isPending &&
-    enabled.length > 0 &&
+    selected.size > 0 &&
     prompt.trim().length > 0;
 
-  const handleOpenSettings = () => {
+  // Navigate to a specific Settings sub-tab so "Add API key" and
+  // "Set up CLI subscription" land on the right surface instead of
+  // dumping the user on whatever tab Settings was last on.
+  // 2026-05-19 war-room (codex) caught: the subtab write was inside
+  // the else branch — if a parent passed `onOpenSettings` (e.g.
+  // Dashboard does), the subtab routing was skipped entirely and the
+  // user landed on whatever Settings tab was last open. Always own
+  // the subtab write; the section nav is the optional override.
+  const goToSettings = (subTab: "api-keys" | "runtimes") => {
+    setSubTab("ato.subtab.settings", subTab);
     if (onOpenSettings) onOpenSettings();
     else setSection("settings");
     onClose();
@@ -247,7 +285,10 @@ export default function FirstChatWizard({
           <RuntimeCounter
             detecting={detecting}
             enabled={enabled}
-            onAdd={handleOpenSettings}
+            selected={selected}
+            onToggle={toggleRuntime}
+            onAddKey={() => goToSettings("api-keys")}
+            onAddSubscription={() => goToSettings("runtimes")}
           />
 
           {fire.isError && (
@@ -292,8 +333,8 @@ export default function FirstChatWizard({
                 <>
                   <Send size={14} />
                   {t("firstChat.send", "Send to {{n}} LLM", {
-                    n: enabled.length,
-                    count: enabled.length,
+                    n: selected.size,
+                    count: selected.size,
                   })}
                 </>
               )}
@@ -308,13 +349,25 @@ export default function FirstChatWizard({
 function RuntimeCounter({
   detecting,
   enabled,
-  onAdd,
+  selected,
+  onToggle,
+  onAddKey,
+  onAddSubscription,
 }: {
   detecting: boolean;
   enabled: EnabledRuntime[];
-  onAdd: () => void;
+  selected: Set<string>;
+  onToggle: (slug: string) => void;
+  onAddKey: () => void;
+  onAddSubscription: () => void;
 }) {
   const { t } = useTranslation();
+  // Soft "add another" — instead of slamming the user into Settings,
+  // surface an inline explainer so they understand we're showing every
+  // LLM they've already connected and that adding more means choosing
+  // between an API key or a CLI subscription. 2026-05-19 — Will's call.
+  const [showAddPanel, setShowAddPanel] = useState(false);
+
   if (detecting) {
     return (
       <div className="flex items-center gap-2 text-xs text-cs-muted">
@@ -325,41 +378,106 @@ function RuntimeCounter({
   }
   if (enabled.length === 0) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-md border border-cs-warning/40 bg-cs-warning/10 px-3 py-2 text-xs text-cs-text">
-        <span>
+      <div className="space-y-2">
+        <p className="rounded-md border border-cs-warning/40 bg-cs-warning/10 px-3 py-2 text-xs text-cs-text">
           {t(
             "firstChat.noRuntimes",
-            "No LLMs connected. Add a CLI subscription or API key to start a war room."
+            "No LLMs connected yet. You can either add an API key for direct dispatch, or set up a CLI subscription (Claude / Codex / Gemini)."
           )}
-        </span>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="inline-flex items-center gap-1 rounded border border-cs-border bg-cs-bg-raised px-2 py-1 text-[11px] font-medium text-cs-text hover:border-cs-hover whitespace-nowrap"
-        >
-          <Settings size={11} />
-          {t("firstChat.openSettings", "Open Settings")}
-        </button>
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onAddKey}
+            className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-bg-raised px-3 py-1.5 text-xs font-medium text-cs-text hover:border-cs-hover"
+          >
+            <Key size={12} />
+            {t("firstChat.addApiKey", "Add API key")}
+          </button>
+          <button
+            type="button"
+            onClick={onAddSubscription}
+            className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-bg-raised px-3 py-1.5 text-xs font-medium text-cs-text hover:border-cs-hover"
+          >
+            <Terminal size={12} />
+            {t("firstChat.addSubscription", "Set up CLI subscription")}
+          </button>
+        </div>
       </div>
     );
   }
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      <span className="text-cs-muted">
-        {t("firstChat.firingTo", "Firing to {{n}}:", { n: enabled.length })}
-      </span>
-      {enabled.map((e) => (
-        <span key={e.runtime} className={runtimeBadge(e.runtime)}>
-          {e.runtime}
+    <div className="space-y-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-cs-muted">
+          {t("firstChat.firingTo", "Firing to {{n}}:", { n: selected.size })}
         </span>
-      ))}
-      <button
-        type="button"
-        onClick={onAdd}
-        className="ml-1 inline-flex items-center gap-1 rounded border border-dashed border-cs-border px-2 py-0.5 text-[11px] text-cs-muted hover:border-cs-hover hover:text-cs-text"
-      >
-        + {t("firstChat.addAnother", "add another")}
-      </button>
+        {enabled.map((e) => {
+          const isOn = selected.has(e.runtime);
+          return (
+            <button
+              key={e.runtime}
+              type="button"
+              onClick={() => onToggle(e.runtime)}
+              title={
+                isOn
+                  ? t("firstChat.clickToExclude", "Click to exclude")
+                  : t("firstChat.clickToInclude", "Click to include")
+              }
+              className={
+                isOn
+                  ? `${runtimeBadge(e.runtime)} cursor-pointer hover:opacity-80`
+                  : "rounded-md border border-dashed border-cs-border/60 bg-transparent px-2 py-0.5 text-cs-muted hover:text-cs-text hover:border-cs-hover cursor-pointer"
+              }
+              aria-pressed={isOn}
+            >
+              {e.runtime}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setShowAddPanel((v) => !v)}
+          className="ml-1 inline-flex items-center gap-1 rounded border border-dashed border-cs-border px-2 py-0.5 text-[11px] text-cs-muted hover:border-cs-hover hover:text-cs-text"
+        >
+          + {t("firstChat.addAnother", "add another")}
+        </button>
+      </div>
+      {showAddPanel && (
+        <div className="rounded-md border border-cs-border bg-cs-bg-raised/60 p-3 space-y-2">
+          <p className="text-[11px] text-cs-muted leading-relaxed">
+            {t(
+              "firstChat.addExplainer",
+              "We show every LLM you've already connected. To add another, pick how you want to dispatch:"
+            )}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onAddKey}
+              className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-card px-3 py-1.5 text-xs font-medium text-cs-text hover:border-cs-hover"
+            >
+              <Key size={12} />
+              {t("firstChat.addApiKey", "Add API key")}
+            </button>
+            <button
+              type="button"
+              onClick={onAddSubscription}
+              className="inline-flex items-center gap-1.5 rounded-md border border-cs-border bg-cs-card px-3 py-1.5 text-xs font-medium text-cs-text hover:border-cs-hover"
+            >
+              <Terminal size={12} />
+              {t("firstChat.addSubscription", "Set up CLI subscription")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAddPanel(false)}
+              className="ml-auto inline-flex items-center gap-1 rounded px-3 py-1.5 text-[11px] text-cs-muted hover:text-cs-text"
+            >
+              {t("common.cancel", "Cancel")}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

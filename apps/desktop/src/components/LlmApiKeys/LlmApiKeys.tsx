@@ -16,6 +16,8 @@ import {
   Clock,
   Hash,
   ExternalLink,
+  Terminal,
+  ArrowRight,
 } from "lucide-react";
 import {
   listLlmApiKeys,
@@ -27,6 +29,7 @@ import {
   type LlmApiKey,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/useUiStore";
 
 interface LlmProviderDef {
   id: string;
@@ -124,6 +127,7 @@ function formatTimeAgo(dateStr: string): string {
 export default function LlmApiKeys() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const setSubTab = useUiStore((s) => s.setSubTab);
   const [showAddForm, setShowAddForm] = useState(false);
   const [revealedKeys, setRevealedKeys] = useState<Record<string, string>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -237,6 +241,25 @@ export default function LlmApiKeys() {
         >
           <Plus className="w-3.5 h-3.5" />
           Add Key
+        </button>
+      </div>
+
+      {/* 2026-05-19 — Will: API Keys page should make the subscription
+          path visible too, otherwise a user who lands here from the
+          war-room "+ add another" flow has no idea CLI subscriptions
+          (Claude / Codex / Gemini login) live next door. */}
+      <div className="flex items-start gap-3 rounded-md border border-cs-border bg-cs-bg-raised/40 px-3 py-2.5 text-xs">
+        <Terminal className="w-4 h-4 text-cs-muted shrink-0 mt-0.5" />
+        <p className="flex-1 text-cs-muted leading-relaxed">
+          Looking to dispatch via a CLI subscription (Claude Code, Codex, Gemini CLI) instead of an API key? Sign in with the CLI itself — ATO detects the session automatically.
+        </p>
+        <button
+          type="button"
+          onClick={() => setSubTab("ato.subtab.settings", "runtimes")}
+          className="inline-flex items-center gap-1 rounded border border-cs-border bg-cs-card px-2 py-1 text-[11px] font-medium text-cs-text hover:border-cs-hover whitespace-nowrap"
+        >
+          Open Runtimes
+          <ArrowRight className="w-3 h-3" />
         </button>
       </div>
 

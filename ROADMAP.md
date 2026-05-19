@@ -270,22 +270,56 @@ Four bugs Will surfaced in the Insights panel; all four about the panel reportin
 
 Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
 
-### v2.7.6 — Gate + TS cleanup week (Active, 2026-05-18 → 2026-05-22)
+### v2.7.6 — Elegance day part II: TS cliff cleared + 5 fronts at 85%+ (Released 2026-05-19)
 
-Five-day push to land an enforced quality gate and clear a 151-error TS debt cliff that was hiding behind a tsconfig misconfig. Driven by Will's call: every commit/merge/push/tag/release should run the full test suite, and the codebase should end the week with zero red gates.
+Continuation of the 2026-05-18 elegance arc. Single goal: clear the 151-error TypeScript debt cliff (hidden behind a `noEmit:true + composite:true` tsconfig misconfig) and push all 5 elegance fronts to 85%+ in one day.
 
-**Deliverables by EOW 2026-05-22:**
-- **`.githooks/pre-commit`** (≤30s) — `cargo check` (src-tauri) + `vitest run`. Catches type and unit regressions before commit.
-- **`.githooks/pre-push`** (≤2min) — above + `vite build` + `cargo build --release` (CLI) + 19 read-only `ato` CLI commands (`runtimes status/health/list-remote`, `sessions list`, `agents list`, `recipes list/templates`, `events recent`, `posts list/pending`, `dispatches recent`, `runs live`, `regressions list`, `cost recommendations`, `mesh discovered`, `daemon status`, `ratchet list/status`, plus `--help`). Catches CLI surface regressions before push.
-- **`scripts/install-hooks.sh`** — one-shot installer; points `git config core.hooksPath` at `.githooks/` so the gate ships with the repo. Documented in CLAUDE.md Commands section.
-- **tsc joins the gate** — by Fri end of day. `tsconfig.node.json`'s incompatible `noEmit:true + composite:true` pairing is what hid 151 real errors (`import.meta.env` typing, prop mismatches, React Query overloads, etc.). Dropping `noEmit` exposes them; cleanup runs in parallel with the elegance push.
-- **Elegance push interleaved** — `commands.rs` PRs 17-29 + frontend (PromptBar/SessionsList card variants) ship alongside TS cleanup. Target: 85%+ across all 5 elegance fronts.
+**TS gate (151 → 0):**
+- Dropped `noEmit:true` from `apps/desktop/tsconfig.node.json` (incompatible with `composite:true`, was suppressing every real error).
+- Added `apps/desktop/src/vite-env.d.ts` with `/// <reference types="vite/client" />` — wiped 18 `import.meta.env` errors at the root.
+- Added `"types": ["vitest/globals", "vite/client"]` to `apps/desktop/tsconfig.json`.
+- Collapsed the stale `AgentRuntime` literal-union in `lib/agents.ts` to a re-export of `RuntimeId` from the single runtime registry.
+- 7 root-cause attacks cleared 95+ errors before per-file tail. Final: `tsc --noEmit` rc=0.
 
-**Out of scope this week (separate cron / release script):**
-- `ato dispatch` / `runtimes test-providers` (paid LLM probes) — daily `ato doctor` cron answers "are my keys alive?"; a release-only script answers "does each provider end-to-end work before I tag?" Wasting money per push makes the gate hated.
-- Mutating CLI commands in smoke (need a throwaway test-DB harness; future).
+**Backend foundation — commands.rs split (PRs 22-27e shipped today):**
+- PR 22 `execution_logs.rs` (2 cmds) — core CRUD with v2.3.41 columns.
+- PR 26 `cron.rs` (10 cmds + 13 launchd tests) — OS scheduler glue.
+- PR 27a `skills_validate.rs` (2 cmds) — skills validation surface.
+- PR 27b `skills.rs` (3 cmds) — skills read surface.
+- PR 27c `skills_mutate.rs` (6 cmds + version snapshots) — create/delete/update/restore.
+- PR 27d `mcp.rs` (5 cmds) — MCP discovery + config.
+- PR 27e `mcp_install.rs` (2 cmds + 5 tests) — MCP install/uninstall.
+- `commands/mod.rs`: **17,270 → ~12,400 lines** (-28% from baseline, -19% today). 1 PR remains (`agents.rs` — the elephant, ~50 cmds).
 
-**Working agreement:** never `--no-verify`. If a hook blocks, fix the underlying issue. Architectural revisions go through multi-round ATO war-rooms (`ato dispatch` to claude / codex / minimax reviewers in a shared session), not through Claude sub-Agents — keeps the receipts.
+**Frontend foundation — card-variant splits:**
+- `PromptBar.tsx` (1722 → 1498 lines, -13%) — extracted `_helpers.ts` (RUNTIME_META, simulateMock, messagesToAgentHistory) + `ChatRow.tsx`. Renamed to `PromptBar/index.tsx`.
+- `SessionsList.tsx` (1379 → 763 lines, -45%) — extracted 4 card variants (`ChatCard`, `WarRoomCard`, `SingleRunCard`, `SessionCard`) into `SessionsList/SessionCards/`. `SessionListRow` interface lifted to `_helpers.ts` for shared access.
+
+**DB schema — active_dispatches view + dispatch_kind filtering (war-roomed):**
+- 2026-05-19 war-room (`claude` + `codex`) on whether to split `execution_logs` into separate `active_dispatches` / `passive_observations` tables. Divergent verdict (claude no-split, codex split). CTO synthesis: ship Option 1 NOW, defer split until passive observation rows exceed ~10× active.
+- Shipped: `CREATE VIEW IF NOT EXISTS active_dispatches AS SELECT * FROM execution_logs WHERE dispatch_kind = 'active'`.
+- Added `dispatch_kind = 'active'` filter to 11 read paths (analytics, execution_logs list, sessions_view single-run synthesis, local_insights). `compute_billing_surface_summary` intentionally left unfiltered as the cross-kind reader.
+- `packages/ato-db-views/src/lib.rs` — `v_recent_dispatches` + `v_cost_by_agent_runtime` now filter `dispatch_kind = 'active'`.
+- Full transcripts in `docs/reviews/execution-logs-war-room-2026-05-19.md` and `docs/reviews/path-b-stage-2-war-room-2026-05-19.md`.
+
+**Test gate green:**
+- 170 Rust tests pass (51 CLI + 103 desktop + 5 db-views + 5 api-providers + 4 pricing + 2 posts). `ato-api-providers` test fixed — registry grew to 7 providers (added `anthropic`) but exact-list invariant assert hadn't been updated.
+- 20/20 vitest tests pass.
+- 19/20 `ato` CLI commands return well-formed JSON (`config-changes list` needs `--agent`, expected).
+
+**Bottom-pane multi-launcher bugfixes (caught while dogfooding):**
+- `FirstChatWizard` was mounted only in `Home.tsx`. Clicking "War room" from the bottom-pane chevron while on any other section flipped `firstChatOpen=true` in the Zustand store with no listener — modal never appeared. Moved the mount to `Dashboard.tsx` (alongside `CreateAgentWizard`) so it's available from every section.
+- `SessionsList` consumed the `pendingOpenNewSession` flag via a `useEffect` whose deps were the stable Zustand consume *functions*. Effect ran once at mount; clicking "Multi-turn session" from the chevron while already on Sessions tab silently set the flag with no observer. Switched deps to the pending *values* (`pendingOpenSessionId`, `pendingOpenSessionKind`, `pendingOpenNewSession`) so the effect re-runs when the flags flip.
+
+**War-room modal UX (multi-LLM reviewed):**
+- 2026-05-19 war-room `F009D1D3-…E1C9` (claude + codex; gemini CLI not installed, codex substituted) unanimous on three fixes — applied same session:
+  1. **Toggleable pills** in `FirstChatWizard` so users can deselect any of the detected runtimes. Tracks `excluded: Set<string>` (sticky across runtime health flaps) instead of `selected`; `selected` derives from `enabled \ excluded` via `useMemo`. Pills use filled-vs-outlined metaphor (no line-through).
+  2. **Soft "+ add another"**: instead of dumping the user in Settings, an inline explainer panel surfaces two paths ("Add API key" → `Settings → API Keys`; "Set up CLI subscription" → `Settings → Runtimes`). Subtab routing always owns the `setSubTab` write (codex caught: it was inside the else branch, getting skipped when the parent passed `onOpenSettings`).
+  3. **LlmApiKeys subscription banner**: one-line explainer + "Open Runtimes" button so users who arrive from the "+ add another" CLI-subscription flow find the right surface.
+
+**Deferred to v2.7.7:**
+- Bottom-pane inline room-type picker (segmented control in the input row, replacing the chevron-hidden launcher). War-room synthesis: ship segmented control + drop the wizard modal entirely; one-time coachmark on first war-room selection. Bigger UX slice — needs its own scoped PR.
+- `NewSessionModal` participant picker (currently only the coordinator). Reviewer consensus: use the same toggleable-pill widget as the war-room modal for "Invite other LLMs." Auto-bridge `@<runtime>` mentions in the continue-message input.
 
 ### v2.7.5 — Consolidation arc + elegance day (Released 2026-05-18)
 

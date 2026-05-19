@@ -213,9 +213,12 @@ mod tests {
     #[test]
     fn registry_has_expected_providers() {
         let slugs: Vec<&str> = registry().iter().map(|p| p.slug).collect();
+        // 2026-05-19 — added "anthropic" between openrouter + google when
+        // BYOK Anthropic API key dispatch landed. Test was checking an
+        // exact-list invariant; update to keep ratcheting on additions.
         assert_eq!(
             slugs,
-            vec!["minimax", "grok", "deepseek", "qwen", "openrouter", "google"]
+            vec!["minimax", "grok", "deepseek", "qwen", "openrouter", "anthropic", "google"]
         );
     }
 

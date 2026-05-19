@@ -197,6 +197,16 @@ type OpenSelection =
 
 export default function SessionsList() {
   const [openSelection, setOpenSelection] = useState<OpenSelection>(null);
+  // 2026-05-19 — subscribe to the pending VALUES (not the consume
+  // functions) so the effect re-runs when the bottom-pane multi-launcher
+  // flips them while SessionsList is already mounted. Previously the
+  // effect deps were the stable consume function refs, so the effect
+  // only ran once on mount; clicking Multi-turn session from the
+  // chevron dropdown while on the Sessions tab silently set the flag
+  // with no listener.
+  const pendingOpenSessionKind = useUiStore((s) => s.pendingOpenSessionKind);
+  const pendingOpenSessionId = useUiStore((s) => s.pendingOpenSessionId);
+  const pendingOpenNewSession = useUiStore((s) => s.pendingOpenNewSession);
   const consumePendingOpenSession = useUiStore(
     (s) => s.consumePendingOpenSession
   );
@@ -214,14 +224,24 @@ export default function SessionsList() {
   // flag set by the bottom-pane multi-launcher. Same one-shot pattern:
   // consume on mount, modal opens, future navigations don't re-trigger.
   useEffect(() => {
-    const pending = consumePendingOpenSession();
-    if (pending.id && pending.kind) {
-      setOpenSelection({ kind: pending.kind, id: pending.id });
+    if (pendingOpenSessionId && pendingOpenSessionKind) {
+      const pending = consumePendingOpenSession();
+      if (pending.id && pending.kind) {
+        setOpenSelection({ kind: pending.kind, id: pending.id });
+      }
     }
-    if (consumePendingOpenNewSession()) {
-      setShowNew(true);
+    if (pendingOpenNewSession) {
+      if (consumePendingOpenNewSession()) {
+        setShowNew(true);
+      }
     }
-  }, [consumePendingOpenSession, consumePendingOpenNewSession]);
+  }, [
+    pendingOpenSessionKind,
+    pendingOpenSessionId,
+    pendingOpenNewSession,
+    consumePendingOpenSession,
+    consumePendingOpenNewSession,
+  ]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
@@ -312,10 +332,19 @@ export default function SessionsList() {
   // Union of metadata matches and content-match ids. When the query
   // is empty, contentMatchIds is empty and the filter is metadata-only
   // (which itself is empty-query => "all").
-  const filteredSessions = sessionsQ.data
+  // 2026-05-19 — hide zero-turn rows from the inbox. The bottom-pane
+  // chat creates a thread on focus, FirstChatWizard navigates here
+  // before the dispatch lands, NewSessionModal commits the row before
+  // the first turn is sent — every one of those paths leaves an empty
+  // ghost row. Filtering here is the v2.7.6 quick fix; lazy row
+  // creation at the write points is queued for v2.7.7.
+  const nonEmptyData = sessionsQ.data
+    ? sessionsQ.data.filter((s) => s.turnCount > 0)
+    : undefined;
+  const filteredSessions = nonEmptyData
     ? (() => {
         const metaMatched = filterSessions(
-          sessionsQ.data,
+          nonEmptyData,
           searchQuery,
           statusFilter,
           kindFilter,
@@ -337,7 +366,7 @@ export default function SessionsList() {
           team: teamFilter,
           tag: tagFilter,
         };
-        return sessionsQ.data.filter((s) => {
+        return nonEmptyData.filter((s) => {
           if (!rowMatchesFilters(s, f)) return false;
           return metaIds.has(s.id) || contentMatchIds.has(s.id);
         });
@@ -416,7 +445,7 @@ export default function SessionsList() {
           three status chips below let you scope to open or closed
           sessions; "All" is the default so the list looks the same as
           before by default. */}
-      {sessionsQ.data && sessionsQ.data.length > 0 && (
+      {nonEmptyData && nonEmptyData.length > 0 && (
         <div className="space-y-2">
           <div className="relative">
             <Search
@@ -456,7 +485,7 @@ export default function SessionsList() {
             {(() => {
               // PR 12 — kind chips count contextually via the hoisted
               // `filterFields` (codex Round-1 #3).
-              const rowsForKindCount = sessionsQ.data!.filter((s) =>
+              const rowsForKindCount = nonEmptyData!.filter((s) =>
                 rowMatchesFilters(s, filterFields, "kind")
               );
               return ([
@@ -504,10 +533,10 @@ export default function SessionsList() {
             // Per-dropdown counts reuse the hoisted `filterFields`
             // (PR 12 codex Round-1 #3): every count IIFE in the
             // toolbar pulls from the same source-of-truth set.
-            const rowsForCategoryCount = sessionsQ.data!.filter((s) =>
+            const rowsForCategoryCount = nonEmptyData!.filter((s) =>
               rowMatchesFilters(s, filterFields, "category")
             );
-            const rowsForTeamCount = sessionsQ.data!.filter((s) =>
+            const rowsForTeamCount = nonEmptyData!.filter((s) =>
               rowMatchesFilters(s, filterFields, "team")
             );
             // Team options are free-form, so derive from distinct
@@ -647,7 +676,7 @@ export default function SessionsList() {
             {(() => {
               // PR 12 — lifecycle chips count contextually via the
               // hoisted `filterFields` (codex Round-1 #3).
-              const rowsForStatusCount = sessionsQ.data!.filter((s) =>
+              const rowsForStatusCount = nonEmptyData!.filter((s) =>
                 rowMatchesFilters(s, filterFields, "status")
               );
               return (["all", "open", "closed"] as StatusFilter[]).map((s) => {
@@ -684,7 +713,7 @@ export default function SessionsList() {
               teamFilter !== null ||
               tagFilter !== null) && (
               <span className="text-cs-muted ml-auto">
-                {filteredSessions.length} of {sessionsQ.data.length} shown
+                {filteredSessions.length} of {nonEmptyData!.length} shown
               </span>
             )}
           </div>
@@ -704,14 +733,14 @@ export default function SessionsList() {
             teamFilter === null &&
             tagFilter === null && (
               <div className="text-[10px] text-cs-muted opacity-70">
-                {sessionsQ.data!.length} total ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "session").length} sessions
+                {nonEmptyData!.length} total ·{" "}
+                {nonEmptyData!.filter((r) => r.rowKind === "session").length} sessions
                 ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "single_run").length} single-runs
+                {nonEmptyData!.filter((r) => r.rowKind === "single_run").length} single-runs
                 ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "war_room").length} war rooms
+                {nonEmptyData!.filter((r) => r.rowKind === "war_room").length} war rooms
                 ·{" "}
-                {sessionsQ.data!.filter((r) => r.rowKind === "chat").length} chats.{" "}
+                {nonEmptyData!.filter((r) => r.rowKind === "chat").length} chats.{" "}
                 <span className="opacity-80">
                   Open / Closed lifecycle applies to sessions only.
                 </span>
@@ -724,7 +753,7 @@ export default function SessionsList() {
         <div className="flex items-center justify-center h-32">
           <Loader2 className="animate-spin text-cs-accent" size={28} />
         </div>
-      ) : !sessionsQ.data || sessionsQ.data.length === 0 ? (
+      ) : !nonEmptyData || nonEmptyData.length === 0 ? (
         <div className="text-center py-12 text-cs-muted">
           <MessagesSquare size={48} className="mx-auto mb-4 opacity-50" />
           <p className="text-cs-text text-base">Compare any AI · keep the receipts.</p>
@@ -751,7 +780,7 @@ export default function SessionsList() {
           <p>No sessions match your search.</p>
           <p className="text-xs mt-2">
             Try a different word, or clear the filter to see all{" "}
-            {sessionsQ.data.length} sessions.
+            {nonEmptyData!.length} sessions.
           </p>
         </div>
       ) : (

@@ -9,6 +9,7 @@ import WelcomeTour from "@/components/WelcomeTour";
 import { useUiStore } from "@/stores/useUiStore";
 
 const CreateAgentWizard = lazy(() => import("@/components/CreateAgentWizard"));
+const FirstChatWizard = lazy(() => import("@/components/FirstChatWizard"));
 
 // v1.3.0 — IA collapse: 6 top-level sections (T1).
 // Each section owns its sub-tabs in pages/sections/*.
@@ -27,6 +28,12 @@ export default function Dashboard() {
   const createAgentOpen = useUiStore((s) => s.createAgentOpen);
   const createAgentPath = useUiStore((s) => s.createAgentPath);
   const closeCreateAgent = useUiStore((s) => s.closeCreateAgent);
+  // 2026-05-19 — FirstChatWizard must live at Dashboard scope so the
+  // bottom-pane "War room" launcher works from any section. Previously
+  // mounted only in Home.tsx; clicking War room from Sessions or
+  // Settings flipped firstChatOpen=true in Zustand with no listener.
+  const firstChatOpen = useUiStore((s) => s.firstChatOpen);
+  const closeFirstChat = useUiStore((s) => s.closeFirstChat);
 
   const renderSection = () => {
     switch (section) {
@@ -74,6 +81,13 @@ export default function Dashboard() {
           open={createAgentOpen}
           initialPath={createAgentPath}
           onClose={closeCreateAgent}
+        />
+      </Suspense>
+      <Suspense fallback={null}>
+        <FirstChatWizard
+          open={firstChatOpen}
+          onClose={closeFirstChat}
+          onOpenSettings={() => setSection("settings")}
         />
       </Suspense>
     </div>
