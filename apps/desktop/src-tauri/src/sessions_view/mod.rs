@@ -1,0 +1,159 @@
+// v2.3.42 — Sessions view for the GUI.
+//
+// Phase 6 sessions (Slice A + A.2 + B) are CLI-first today: they live
+// in the `sessions` + `session_turns` tables and the CLI exposes
+// `ato sessions ...` and `ato bridge`. The desktop GUI never had a
+// first-class surface for them — they only appeared incidentally
+// under Execution Logs after v2.3.41's grouping.
+//
+// This module adds two Tauri commands:
+//   - list_sessions_full   — overview rows for the Sessions tab list
+//   - get_session_transcript — every turn for one session, ordered
+//
+// Both are read-only. Continuing a session from the GUI uses the
+// existing prompt_agent flow with an extra session_id parameter
+// (wired separately so this module stays narrowly scoped to the
+// view layer).
+
+// Shared structs only — read paths import what they need from `read.rs`,
+// write paths from `write.rs`. The Mutex+HashMap+Serialize trio below
+// support `CloseInflight` + the three session-shape structs.
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// v2.6 Slice C — tracks the PIDs of in-flight `ato sessions close`
+/// subprocesses so the frontend's Cancel button can interrupt them.
+/// Keyed by session_id because a user can only close one session at
+/// a time per session (a second close on the same session is refused
+/// by the CLI's idempotency guard anyway). The Child is dropped after
+/// wait_with_output returns; the PID entry is removed in the same
+/// scope. SIGTERM lets the subprocess unwind cleanly — reqwest
+/// drops the in-flight HTTP request, the UPDATE never runs, and the
+/// session stays 'open'.
+pub struct CloseInflight(pub Mutex<HashMap<String, u32>>);
+
+impl CloseInflight {
+    pub fn new() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListRow {
+    pub id: String,
+    pub runtime: String,
+    pub agent_slug: Option<String>,
+    pub title: Option<String>,
+    pub created_at: String,
+    pub last_used_at: String,
+    pub turn_count: i64,
+    /// Distinct runtimes that appear in this session's turns. For a
+    /// claude-only session this is `["claude"]`. For a Slice B
+    /// cross-runtime conversation it's e.g. `["claude", "minimax"]`.
+    /// Drives the runtime badges in the list UI.
+    pub runtimes_used: Vec<String>,
+    /// 2026-05-16 — distinct agent slugs that appear on the assistant
+    /// turns of this session. Empty when every turn was a generalist
+    /// dispatch (no `--agent` flag). For a war-room session it's e.g.
+    /// `["positioning", "devex", "ceo", "designer", "office-hours"]`.
+    /// Drives the persona-badge cluster on the SessionsList card.
+    pub agents_used: Vec<String>,
+    /// 2026-05-16 — session-total cost in USD, summed across every
+    /// successful execution_logs row tied to this session_id. Renders
+    /// as a small "$0.0644" pill on the card next to the turn count so
+    /// users can scan cost per session without opening it. NULL when
+    /// no execution_logs rows reference the session (older sessions
+    /// pre-session_id-on-execution-logs).
+    pub total_cost_usd: Option<f64>,
+    /// Last (assistant) turn's text, truncated. Gives the user a
+    /// "what was this conversation about" preview without expanding.
+    pub last_assistant_preview: Option<String>,
+    // v2.6 Slice C — lifecycle + coordinator-generated metadata.
+    // `status` is "open" or "closed". `auto_title` is preferred over
+    // the user-supplied `title` in the list when present (it's the
+    // coordinator's distilled label). `summary`, `tags`, and
+    // `project_id` are populated on close and refreshed on each
+    // subsequent close after a reopen.
+    pub status: String,
+    pub closed_at: Option<String>,
+    pub auto_title: Option<String>,
+    pub summary: Option<String>,
+    pub tags: Vec<String>,
+    pub project_id: Option<String>,
+    /// PR 15 (2026-05-18) — human-readable project name resolved at
+    /// query time via LEFT JOIN against the projects table. The
+    /// frontend prefers this for display; project_id stays the
+    /// canonical identifier. NULL when project_id is NULL or when
+    /// the join doesn't find a row (project deleted but session
+    /// retains the snapshot id).
+    pub project_name: Option<String>,
+    /// 2026-05-17 — Sessions UX polish PR 2 + 4. Controlled-vocab tag
+    /// for the work band (Business / Marketing / Dev / Frontend / etc.)
+    /// + free-form team label. NULL on pre-PR-2 rows; populated by the
+    /// coordinator at close in PR 3.
+    pub category: Option<String>,
+    pub team: Option<String>,
+    /// 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
+    /// real sessions (multi-turn, from the `sessions` table) and
+    /// "single_run" single-shot dispatches (one row in `execution_logs`
+    /// with `session_id IS NULL`). The History tab today shows the
+    /// latter as a flat list; PR 5 collapses both into one Sessions
+    /// feed (WhatsApp-style — group chats and single chats in one
+    /// inbox). The frontend uses this discriminator to pick the card
+    /// variant + the click-into-detail route (full transcript for
+    /// `"session"`, single-turn detail for `"single_run"`). Codex
+    /// Round-1 #2: bool would be too weak for routing/caching — a
+    /// typed string keeps future variants open ("scheduled-run",
+    /// "automation-step", etc.) without another migration.
+    pub row_kind: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTurn {
+    pub turn_index: i64,
+    pub role: String,
+    pub text: String,
+    pub runtime: String,
+    pub created_at: String,
+    /// 2026-05-16 — agent slug captured when the dispatching turn was
+    /// fired with `--agent <slug>`. NULL means a generalist dispatch
+    /// (raw model priors, no persona overlay). Drives the persona role
+    /// label in the chat-bubble UI.
+    pub agent_slug: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTranscript {
+    pub id: String,
+    pub runtime: String,
+    pub agent_slug: Option<String>,
+    pub title: Option<String>,
+    pub turns: Vec<SessionTurn>,
+    // v2.6 Slice C — coordinator metadata, same fields as the list row.
+    pub status: String,
+    pub closed_at: Option<String>,
+    pub auto_title: Option<String>,
+    pub summary: Option<String>,
+    pub tags: Vec<String>,
+    pub project_id: Option<String>,
+}
+
+// 2026-05-19 elegance war-room split (was 1635-line sessions_view.rs).
+// Read paths in `read.rs`, write/CLI-spawn paths in `write.rs`.
+// External callers (lib.rs + remote_runtimes_view.rs comments +
+// ratchet_view.rs comments) reach commands via `sessions_view::<name>`
+// — the re-exports below keep that path unchanged.
+
+pub mod read;
+pub mod write;
+
+// Wildcard re-export so Tauri's macro-generated `__cmd__<name>`
+// siblings come along — `generate_handler!` in lib.rs resolves
+// `sessions_view::<name>` and needs both the function AND its
+// generated companion in this namespace.
+pub use read::*;
+pub use write::*;
