@@ -439,7 +439,9 @@ export default function GuidedPath({ onCreated, onCancel }: Props) {
   );
 }
 
-const RUNTIME_LABELS: Record<AgentRuntime, string> = {
+// Partial maps — the 5 API providers fall back at the call site via the
+// `runtimeLabel` / `runtimeDot` helpers below.
+const RUNTIME_LABELS: Partial<Record<AgentRuntime, string>> = {
   claude: "Claude Code",
   codex: "Codex / GPT",
   gemini: "Gemini CLI",
@@ -447,7 +449,7 @@ const RUNTIME_LABELS: Record<AgentRuntime, string> = {
   hermes: "Hermes",
 };
 
-const RUNTIME_DOTS: Record<AgentRuntime, string> = {
+const RUNTIME_DOTS: Partial<Record<AgentRuntime, string>> = {
   claude: "bg-orange-500",
   codex: "bg-green-500",
   gemini: "bg-blue-500",

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { X, Clock, CheckCircle, AlertTriangle, Loader2 } from "lucide-react";
+import { X, Clock, CheckCircle, AlertTriangle, Loader2, SkipForward, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAutomationStore } from "@/stores/useAutomationStore";
 import type { ExecutionNodeStatus } from "./types";
@@ -10,6 +10,8 @@ const STATUS_ICONS: Record<ExecutionNodeStatus, React.ElementType> = {
   running: Loader2,
   completed: CheckCircle,
   failed: AlertTriangle,
+  skipped: SkipForward,
+  retrying: RotateCcw,
 };
 
 const STATUS_COLORS: Record<ExecutionNodeStatus, string> = {
@@ -17,6 +19,8 @@ const STATUS_COLORS: Record<ExecutionNodeStatus, string> = {
   running: "#FFB800",
   completed: "#00FFB2",
   failed: "#FF4466",
+  skipped: "#6b7280",
+  retrying: "#a78bfa",
 };
 
 export default function ExecutionOverlay() {

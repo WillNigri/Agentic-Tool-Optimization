@@ -27,7 +27,10 @@ import { getRuntimeCapability, shellRequestForAgent } from "@/lib/runtimeCapabil
 // SQLite agents table). Separate from SubagentsManager, which displays
 // runtime-discovered built-in agents (Claude Code, OpenClaw, etc).
 
-const RUNTIME_DOT: Record<Agent["runtime"], string> = {
+// Partial maps — the 5 API providers (minimax/grok/deepseek/qwen/openrouter)
+// fall back to a default at the call site rather than carrying explicit
+// per-runtime visual treatments here.
+const RUNTIME_DOT: Partial<Record<Agent["runtime"], string>> = {
   claude: "bg-orange-500",
   codex: "bg-green-500",
   gemini: "bg-blue-500",
@@ -35,7 +38,7 @@ const RUNTIME_DOT: Record<Agent["runtime"], string> = {
   hermes: "bg-purple-500",
 };
 
-const RUNTIME_LABEL: Record<Agent["runtime"], string> = {
+const RUNTIME_LABEL: Partial<Record<Agent["runtime"], string>> = {
   claude: "Claude Code",
   codex: "Codex",
   gemini: "Gemini",
@@ -244,12 +247,12 @@ function AgentRow({
           data-demo-id={`agent-row-${agent.slug}`}
           className="flex-1 flex items-center gap-3 px-4 py-3 text-left hover:bg-cs-bg-raised transition min-w-0"
         >
-          <span className={cn("inline-block w-2 h-2 rounded-full shrink-0", RUNTIME_DOT[agent.runtime])} />
+          <span className={cn("inline-block w-2 h-2 rounded-full shrink-0", RUNTIME_DOT[agent.runtime] ?? "bg-slate-400")} />
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-cs-text truncate">{agent.displayName}</span>
               <span className="text-[10px] uppercase tracking-wide text-cs-muted">
-                {RUNTIME_LABEL[agent.runtime]}
+                {RUNTIME_LABEL[agent.runtime] ?? agent.runtime}
               </span>
             </div>
             {agent.description && (

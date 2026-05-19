@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
-function ThrowingComponent() {
+function ThrowingComponent(): JSX.Element {
   throw new Error("Test error");
 }
 
@@ -34,7 +34,7 @@ describe("ErrorBoundary", () => {
 
   it("detects Tauri-specific errors", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    function TauriError() {
+    function TauriError(): JSX.Element {
       throw new Error("invoke is not defined __TAURI__");
     }
     render(

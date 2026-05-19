@@ -23,8 +23,8 @@ export default function Register() {
       const result = await register({ name, email, password });
       setAuth(
         result.user,
-        result.accessToken,
-        result.refreshToken,
+        result.tokens.accessToken,
+        result.tokens.refreshToken,
         result.user.subscription_tier ?? "pro",
       );
       navigate("/");

@@ -10,7 +10,10 @@ import type { AgentRuntime } from "@/components/cron/types";
 const AVAILABLE_TOOLS = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Agent"];
 const AVAILABLE_MODELS = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"];
 
-const SCOPE_PATHS: Record<AgentRuntime, { value: SkillScope; path: string }[]> = {
+// Partial map — skill scopes are CLI-runtime specific; API providers
+// don't have a local skill directory convention. Call sites fall back
+// to the claude entry when the picker lands on an API runtime.
+const SCOPE_PATHS: Partial<Record<AgentRuntime, { value: SkillScope; path: string }[]>> = {
   claude: [
     { value: "enterprise", path: "/etc/claude/skills/" },
     { value: "personal", path: "~/.claude/skills/" },
@@ -83,11 +86,14 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
 
     const fullContent = frontmatterLines.join("\n") + (content || `# ${name}\n\n`);
 
+    // Skills only apply to CLI runtimes; the picker filters to those four,
+    // but TS sees the wider AgentRuntime union from the registry. Narrow
+    // at the call site where the backend contract is enforced.
     createMutation.mutate({
       name: name.trim(),
       description: description.trim(),
       scope,
-      runtime: aiRuntime,
+      runtime: aiRuntime as "claude" | "codex" | "openclaw" | "hermes",
       content: fullContent,
       allowedTools: selectedTools.length > 0 ? selectedTools : undefined,
       model: model || undefined,
@@ -182,7 +188,7 @@ export default function CreateSkillModal({ onClose }: CreateSkillModalProps) {
                 {t("skills.source")}
               </label>
               <div className="grid grid-cols-2 gap-2">
-                {(SCOPE_PATHS[aiRuntime] || SCOPE_PATHS.claude).map((opt) => (
+                {(SCOPE_PATHS[aiRuntime] ?? SCOPE_PATHS.claude ?? []).map((opt) => (
                   <button
                     key={opt.value}
                     type="button"

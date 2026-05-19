@@ -1355,6 +1355,7 @@ export interface ProjectBundle {
   hasCodex: boolean;
   hasHermes: boolean;
   hasOpenclaw: boolean;
+  hasGemini: boolean;
   memoryFiles: ProjectFileRef[];
   subagents: ProjectFileRef[];
   commands: ProjectFileRef[];
