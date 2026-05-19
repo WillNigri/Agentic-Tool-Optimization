@@ -215,10 +215,27 @@ export function avatarInitials(label: string): string {
   return label.slice(0, 2).toUpperCase();
 }
 
-// Runtimes offered in the New Session / Continue dropdowns. Mirrors
-// the registry the CLI's dispatch path resolves through (CLI runtimes
-// + the api_providers crate). Derived from the canonical runtime
-// registry rather than hand-maintained — adding a runtime to
-// lib/runtimes.ts populates this for free.
+// Runtimes offered in the New Session / Continue dropdowns. The full
+// registry from lib/runtimes.ts includes CLI runtimes whose session
+// story isn't wired yet — `ato sessions` only resumes runtimes that
+// either (a) maintain conversation state themselves and ATO can hand
+// them a resume token (claude today) OR (b) are stateless API
+// providers whose history ATO replays per turn (the api_providers
+// crate — minimax/grok/deepseek/qwen/openrouter/anthropic/google).
+//
+// Codex + Gemini still need their resume-flag wiring + signing-cert
+// dance; Hermes + OpenClaw have no session story yet. The backend
+// `supported_runtimes()` in apps/cli/src/commands/sessions.rs is the
+// source of truth — filter mirrors that list. Will caught this
+// during dogfood when the modal offered codex and `ato sessions new`
+// errored with "Runtime 'codex' is not yet supported".
 import { RUNTIME_IDS } from "@/lib/runtimes";
-export const NEW_SESSION_RUNTIMES: string[] = RUNTIME_IDS as unknown as string[];
+const SESSION_UNSUPPORTED_RUNTIMES = new Set([
+  "codex",
+  "gemini",
+  "openclaw",
+  "hermes",
+]);
+export const NEW_SESSION_RUNTIMES: string[] = (
+  RUNTIME_IDS as unknown as string[]
+).filter((r) => !SESSION_UNSUPPORTED_RUNTIMES.has(r));
