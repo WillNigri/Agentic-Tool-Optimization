@@ -246,10 +246,19 @@ fn parse_minimax_content_as_tool_calls(
     round_idx: usize,
 ) -> Vec<ToolCall> {
     let trimmed = content.trim();
-    let candidate = strip_fenced_json_block(trimmed).unwrap_or(trimmed);
-    let parsed: serde_json::Value = match serde_json::from_str(candidate) {
+    let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            let candidate = match find_fenced_json_block(trimmed) {
+                FenceMatch::None => return Vec::new(),
+                FenceMatch::Single(inner) => inner,
+                FenceMatch::Multiple => return Vec::new(),
+            };
+            match serde_json::from_str(candidate) {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            }
+        }
     };
     let obj = match parsed.as_object() {
         Some(o) => o,
@@ -274,6 +283,7 @@ fn minimax_content_matches_schema(
     obj: &serde_json::Map<String, serde_json::Value>,
     schema: &serde_json::Value,
 ) -> bool {
+    let required_present = schema.get("required").and_then(|v| v.as_array()).is_some();
     if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
         for r in required {
             if let Some(key) = r.as_str() {
@@ -283,30 +293,60 @@ fn minimax_content_matches_schema(
             }
         }
     }
-    if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+    let properties = schema.get("properties").and_then(|v| v.as_object());
+    if let Some(props) = properties {
         for key in obj.keys() {
-            if !properties.contains_key(key) {
+            if !props.contains_key(key) {
                 return false;
             }
+        }
+    }
+    // Without `required`, the only structural rule is "no extra keys",
+    // which never fires when `properties` is absent — so any non-empty
+    // object would match every such schema. Require a property-key
+    // intersection in that case so empty-schema tools don't capture
+    // unrelated payloads. Empty obj with absent `required` still
+    // matches (preserves the schema-says-nothing edge case).
+    if !required_present && !obj.is_empty() {
+        let intersects = match properties {
+            Some(props) => obj.keys().any(|k| props.contains_key(k)),
+            None => false,
+        };
+        if !intersects {
+            return false;
         }
     }
     true
 }
 
-fn strip_fenced_json_block(s: &str) -> Option<&str> {
-    let s = s.trim();
-    if !s.starts_with("```") || !s.ends_with("```") || s.len() < 6 {
-        return None;
+enum FenceMatch<'a> {
+    None,
+    Single(&'a str),
+    Multiple,
+}
+
+fn find_fenced_json_block(s: &str) -> FenceMatch<'_> {
+    let positions: Vec<usize> = s.match_indices("```").map(|(i, _)| i).collect();
+    match positions.len() {
+        0 | 1 => FenceMatch::None,
+        2 => {
+            let open_end = positions[0] + 3;
+            let close_start = positions[1];
+            if close_start < open_end {
+                return FenceMatch::None;
+            }
+            let inner = &s[open_end..close_start];
+            let inner = inner
+                .strip_prefix("json\n")
+                .or_else(|| inner.strip_prefix("json\r\n"))
+                .or_else(|| inner.strip_prefix("json "))
+                .or_else(|| inner.strip_prefix("\n"))
+                .or_else(|| inner.strip_prefix("\r\n"))
+                .unwrap_or(inner);
+            FenceMatch::Single(inner.trim())
+        }
+        _ => FenceMatch::Multiple,
     }
-    let inner = &s[3..s.len() - 3];
-    let inner = inner
-        .strip_prefix("json\n")
-        .or_else(|| inner.strip_prefix("json\r\n"))
-        .or_else(|| inner.strip_prefix("json "))
-        .or_else(|| inner.strip_prefix("\n"))
-        .or_else(|| inner.strip_prefix("\r\n"))
-        .unwrap_or(inner);
-    Some(inner.trim())
 }
 
 /// Conversation state across tool-call rounds — direct port of the
