@@ -315,6 +315,111 @@ War-room id `1DF02DA9-125E-4A98-B78D-083BA605A80B` (claude + codex; gemini skipp
 
 War-room transcripts: `docs/reviews/elegance-roadmap-war-room-2026-05-19.md` (forthcoming write-up of both seats' answers).
 
+### v2.7.7 — Agentic-runtime unlock + multi-runtime sessions + dogfood-bug arc (Released 2026-05-19)
+
+Same-day follow-up to v2.7.6's elegance pass. Driven by Will's dogfood
+pass that surfaced a cluster of real user-facing bugs in dispatch /
+sessions / keychain. Shipped 24 commits across 8 hours of mixed
+elegance + bug-fix work.
+
+**Dispatch agentic capability:**
+- Codex sandbox unlock: every codex `exec` spawn (synchronous +
+  streaming + CLI dispatch + replay paths, all 4 sites) now passes
+  `--sandbox workspace-write` + `-c approval_policy="never"`.
+  Codex defaulted to read-only with on-request approvals that ATO
+  couldn't answer (we capture piped stdout/stderr, not a PTY) —
+  every dispatched codex turn surfaced "I didn't patch because this
+  harness is read-only." Will's positioning is *"dispatching is the
+  authorization"* — uniform unlock matches that. Verified end-to-end:
+  codex dispatched from a war-room successfully read 4 source files
+  at exact line ranges AND wrote a verification artifact.
+- Claude `--allowedTools` pre-allowlist: every `claude --print` spawn
+  pre-grants `Bash(ato:*) Bash(gemini:*) Bash(codex:*) Bash(openclaw:*)
+  Bash(hermes:*) Bash(minimax:*)`. Without this, prompts like "call
+  gemini" hung on Claude Code's permission gate that surfaces an
+  OS-level prompt ATO can't relay.
+
+**Sessions backend opened to every runtime:**
+- `supported_runtimes()` now includes claude / codex / gemini / openclaw /
+  hermes + every api_provider. History-replay (the same mechanism that
+  worked for stateless API providers) is the universal fallback for any
+  CLI runtime — `dispatch.rs:477-501` already prefixed prior turns into
+  the prompt for any non-anchor runtime. The prior gating ("Codex/Gemini
+  land in follow-up slices") punted on the wrong question — native
+  resume is the optimization, not the requirement.
+- `NewSessionModal` accepts every runtime, no more "coming soon" labels.
+
+**Frontend elegance push (continuing the v2.7.6 split):**
+- `PromptBar/index.tsx`: 1722 → 1044 lines (-39% across the day) via
+  5 picker/view child components: RoomTypePicker, RuntimePicker,
+  AgentPicker, ThreadHistoryHeader, ChatHistoryView.
+- `openPicker` discriminated-union refactor closes the latent
+  backdrop-stacking bug between the 3 picker popovers.
+- Shared `useEnabledRuntimes()` hook caches the runtime list across
+  PromptBar + FirstChatWizard via React Query (kills duplicated
+  fetches).
+- `WarRoomDetailView`: new Receipts table matches SessionTranscriptView
+  (Will dogfood: war-rooms shipped without per-seat receipts).
+- Thread-history dropdown: WhatsApp-style (last 5 sorted by activity,
+  one-line rows, `See all N conversations →` footer).
+- Lazy chat-thread creation: clicking `+` no longer writes an empty
+  ghost row to `chat_threads`. Actual create happens on first
+  message dispatch.
+
+**Backend elegance:**
+- `sessions_view.rs` (1635 lines) → `sessions_view/{mod,read,write}`
+  split. Codex's catch — the file was on the lazy-row-creation path
+  and would have gotten worse without splitting first.
+- `lib.rs` (2370 lines) → extracted `init_database` (983 lines) to
+  `schema.rs`. lib.rs now 1396 lines (-41%).
+- `cron.rs` unused-fn warnings: gated behind `#[cfg(any(target_os =
+  "windows", test))]`.
+
+**Dogfood bug arc (8 bugs caught in real use):**
+- `FirstChatWizard` was mounted only in `Home.tsx`. Clicking War room
+  from any other section flipped `firstChatOpen=true` in Zustand with
+  no listener. Moved to `Dashboard.tsx` so it's global.
+- `SessionsList` consumed pending-flag via stale-deps useEffect; switched
+  to value-based deps so the multi-launcher works while on Sessions tab.
+- `NewSessionModal` rendered hidden behind detail view; close detail
+  before opening modal.
+- War-room modal: toggleable pills (excluded state), filled-vs-outlined
+  metaphor (no line-through), soft "+ add another" with both API-key
+  and CLI-subscription forks.
+- `LlmApiKeys` page: subscription banner pointing CLI-sub users to
+  Runtimes. Cache invalidation on save/rotate/delete now hits both
+  `["llm-api-keys"]` and `["enabled-runtimes"]`.
+- Empty-row filter on Sessions feed (turnCount > 0). Plus lazy chat-
+  thread creation kills the source.
+- `simple_encrypt`: now `Result<String, String>` (was String, silently
+  emitted "" on encrypt failure). Plus post-encrypt decrypt round-trip
+  sanity check that refuses to persist a row we can't read back.
+- "CLI not found" errors now point at the existing API-provider
+  fallback option in the picker.
+
+**Keychain workaround for dev:**
+- `scripts/grant-dev-keychain-access.sh` widens the macOS keychain ACL
+  partition list so adhoc-signed dev CLI binaries stop prompting on
+  every dispatch. Same scope as `ATO_MASTER_KEY_B64` env-var path.
+- `scripts/audit-stale-ato-binaries.sh` enumerates every `ato` on
+  disk + flags pre-PR-13 binaries that may silently rotate the
+  master_key.
+- Will found a stale `~/.local/bin/ato` symlink pointing at yesterday's
+  debug build. The desktop's `which_cli("ato")` picks it up; pointing
+  the symlink at the freshly-rebuilt release binary unblocked the
+  multi-runtime session creation.
+
+**Roadmap items queued in this release** (in ROADMAP.md "Path to 85+"):
+- v2.7.8: lazy session-row creation at backend write points; mandatory
+  pre-tag dogfood pass; agents.rs PR 28 (the elephant); gemini
+  agentic-flag unlock; CLI-runtime → API-provider auto-fallback;
+  agent-permission plumb-through audit.
+- v2.8.0: lib.rs further split; recipes_engine.rs split; `master_key_v2`
+  versioned ledger (eliminates the keychain rotation cliff
+  structurally); API-provider tool-call loop (makes the "compare every
+  LLM on your task" pitch honest by giving API-provider seats real
+  tool access).
+
 ### v2.7.6 — Elegance day part II: TS cliff cleared + 5 fronts at 85%+ (Released 2026-05-19)
 
 Continuation of the 2026-05-18 elegance arc. Single goal: clear the 151-error TypeScript debt cliff (hidden behind a `noEmit:true + composite:true` tsconfig misconfig) and push all 5 elegance fronts to 85%+ in one day.
