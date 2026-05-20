@@ -23,6 +23,7 @@ import {
   personaDisplay,
   formatTime,
 } from "./_helpers";
+import PermissionEventsPanel from "./PermissionEventsPanel";
 
 export interface SingleRunDetail {
   id: string;
@@ -44,6 +45,12 @@ export interface SingleRunDetail {
   // and on pre-PR-16 backfilled rows (which all became round 1).
   // WarRoomDetailView groups by this.
   warRoomRound: number | null;
+  // v2.7.10 PR-5 UI — raw JSON from execution_logs.tool_calls_summary
+  // ([{name, args_brief, is_error}, ...]). Optional because the
+  // get_single_run_detail backend column-select hasn't been bumped
+  // to include it yet; PermissionEventsPanel renders nothing when
+  // the field is absent so the field is forward-compatible.
+  toolCallsSummary?: string | null;
 }
 
 export default function SingleRunDetailView({
@@ -174,6 +181,8 @@ export default function SingleRunDetailView({
             {d.response ?? "(no response recorded)"}
           </pre>
         </div>
+
+        <PermissionEventsPanel toolCallsSummary={d.toolCallsSummary} />
 
         {d.errorMessage && (
           <div className="rounded-lg border border-cs-danger/40 bg-cs-danger/10 p-4">
