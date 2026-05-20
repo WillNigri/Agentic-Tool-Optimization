@@ -47,21 +47,44 @@ pub fn mask_api_key(key: &str) -> String {
 // (decrypt() falls back) and get migrated to v1 on next write.
 //
 // See audit H1 in SECURITY.md.
-pub fn simple_encrypt(key: &str) -> String {
-    match crate::encryption::encrypt(key) {
-        Ok(v1) => v1,
-        Err(e) => {
-            // Fail-loud rather than silently fall back to legacy
-            // base64 — silent legacy regression is exactly the bug
-            // we're fixing. Returning an empty string makes the
-            // caller's INSERT visibly broken instead.
-            eprintln!(
-                "[encryption] FATAL: encrypt failed ({}). Stored key will be unusable.",
-                e
-            );
-            String::new()
-        }
+pub fn simple_encrypt(key: &str) -> Result<String, String> {
+    // 2026-05-19 (codex review) — previously returned String on
+    // failure (logged "FATAL" and emitted ""). Callers blindly
+    // INSERTed that "" into encrypted_key, persisting a row that
+    // could never decrypt. Now Result-typed so save/rotate fail
+    // before writing instead of leaving an undecryptable ghost.
+    //
+    // 2026-05-19 (claude review) — added the post-encrypt round-trip
+    // sanity check. The recurring "ciphertext is intact but cannot
+    // be authenticated under the current master key" cliff happens
+    // when the master_key changes between when we encrypt and when
+    // we later decrypt (stale pre-PR-13 binary on PATH rotates the
+    // keychain, or an external rewrite). The fix at the rotation
+    // boundary: encrypt → immediately decrypt → assert plaintext
+    // round-trips. If the master_key shifted between the two calls,
+    // decrypt fails and we refuse to persist a row we already can't
+    // read back. The divergence stops at this function; it never
+    // reaches disk.
+    let encrypted = crate::encryption::encrypt(key).map_err(|e| {
+        eprintln!(
+            "[encryption] FATAL: encrypt failed ({}). Refusing to persist an undecryptable row.",
+            e
+        );
+        e
+    })?;
+    let roundtrip = crate::encryption::decrypt(&encrypted).map_err(|e| {
+        eprintln!(
+            "[encryption] FATAL: encrypt→decrypt round-trip failed ({}). The master key changed between encrypt and verify — refusing to write a key we can't read back. Run `scripts/grant-dev-keychain-access.sh` or remove stale `ato` binaries from PATH.",
+            e
+        );
+        format!("encrypt→decrypt round-trip failed: {}", e)
+    })?;
+    if roundtrip != key {
+        let msg = "encrypt→decrypt round-trip produced different plaintext — refusing to write.";
+        eprintln!("[encryption] FATAL: {}", msg);
+        return Err(msg.to_string());
     }
+    Ok(encrypted)
 }
 
 pub fn simple_decrypt(encrypted: &str) -> Result<String, String> {
@@ -81,7 +104,7 @@ pub fn save_llm_api_key(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let key_preview = mask_api_key(&api_key);
-    let encrypted = simple_encrypt(&api_key);
+    let encrypted = simple_encrypt(&api_key)?;
 
     conn.execute(
         "INSERT INTO llm_api_keys (id, provider, name, key_preview, encrypted_key, project_id, runtime, is_active, usage_count, created_at, updated_at)
@@ -189,7 +212,7 @@ pub fn rotate_llm_api_key(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     let key_preview = mask_api_key(&new_key);
-    let encrypted = simple_encrypt(&new_key);
+    let encrypted = simple_encrypt(&new_key)?;
 
     conn.execute(
         "UPDATE llm_api_keys SET encrypted_key = ?1, key_preview = ?2, updated_at = ?3 WHERE id = ?4",

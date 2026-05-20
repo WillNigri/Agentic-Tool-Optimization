@@ -838,6 +838,18 @@ async fn prompt_agent_inner(
             if let Some(m) = &model_override {
                 c.arg("--model").arg(m);
             }
+            // 2026-05-19 (claude+codex war-room synthesis) — pre-allowlist
+            // the sibling-runtime Bash invocations Claude Code might
+            // call. Without this, prompts like "call gemini to say hi"
+            // hit Claude Code's permission gate; the prompt UI surfaces
+            // out-of-band where ATO can't see it (we capture stdout/stderr
+            // with piped streams, not a PTY), so Will's chat-reply
+            // "Approved" goes nowhere and the loop hangs. Per-invocation
+            // --allowedTools is the belt; the suspenders is the
+            // settings.local.json file write at agent-save time (v2.7.8).
+            c.arg("--allowedTools").arg(
+                "Bash(ato:*) Bash(gemini:*) Bash(codex:*) Bash(openclaw:*) Bash(hermes:*) Bash(minimax:*)",
+            );
             c
         }
         "codex" => {

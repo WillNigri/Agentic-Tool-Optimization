@@ -532,6 +532,14 @@ pub fn run(
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
+            // 2026-05-19 (claude+codex war-room synthesis) — mirror of
+            // the desktop's mod.rs:836 patch. Pre-allowlist sibling-
+            // runtime Bash invocations so multi-runtime prompts like
+            // "call gemini to say hi" don't hit Claude Code's permission
+            // gate (which surfaces an OS prompt ATO can't see).
+            cmd.arg("--allowedTools").arg(
+                "Bash(ato:*) Bash(gemini:*) Bash(codex:*) Bash(openclaw:*) Bash(hermes:*) Bash(minimax:*)",
+            );
             // v2.3.31 Slice A — wire claude --resume when the session
             // has a captured runtime_session_id, and switch output to
             // JSON so we can read back the session id metadata for
