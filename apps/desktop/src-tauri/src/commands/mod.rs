@@ -804,6 +804,13 @@ pub async fn prompt_agent(
 /// instead of begin_run-ing a new one. Used by `prompt_agent_with_context`
 /// which has to keep ownership of the registration so it can return
 /// the run_id to the frontend (for overlap evidence + finish).
+///
+/// TODO(S9): when `prompt` is empty AND the agent has a non-NULL
+/// `default_prompt` (column added v2.7.9 — Felipe P5), substitute the
+/// agent's default before dispatching. Read via:
+///   SELECT default_prompt FROM agents WHERE slug = ?1 AND runtime = ?2
+/// The schema column + create/update Tauri commands are already in
+/// place; only the substitution branch is missing.
 async fn prompt_agent_inner(
     runtime: String,
     prompt: String,
@@ -5591,6 +5598,10 @@ pub fn create_agent(
     goal: Option<String>,
     write_file: Option<bool>,
     kind: Option<String>,
+    // v2.7.9 Felipe P5 — optional dispatch prompt that S9 will use as
+    // the fallback when `ato dispatch --agent <slug>` is called with no
+    // prompt argument. None preserves today's interactive behavior.
+    default_prompt: Option<String>,
 ) -> Result<Agent, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
@@ -5671,16 +5682,25 @@ pub fn create_agent(
         agent.file_path = Some(path.to_string_lossy().to_string());
     }
 
+    // Normalize default_prompt — whitespace-only strings stored as NULL so
+    // the S9 "use default when blank" branch can rely on `IS NOT NULL`.
+    let default_prompt_value: Option<String> = default_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     // Insert into DB. v2.7.8 PR-6 — stamp permissions_migrated_at = now
     // for any agent created on v2.7.8+. New agents have correct
     // expectations from the wizard, so enforcement is on from day 1.
     conn.execute(
-        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, kind, permissions_migrated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, kind, permissions_migrated_at, default_prompt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             agent.id, agent.slug, agent.display_name, agent.description, agent.runtime, agent.model,
             agent.project_id, agent.system_prompt, agent.permissions, agent.skills, agent.mcps,
-            agent.goal, agent.file_path, agent.created_at, agent.last_used_at, kind_val, agent.created_at
+            agent.goal, agent.file_path, agent.created_at, agent.last_used_at, kind_val, agent.created_at,
+            default_prompt_value
         ],
     ).map_err(|e| {
         // SQLite UNIQUE violation → friendly message
@@ -5906,6 +5926,50 @@ pub fn update_agent_role_models(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// v2.7.9 Felipe P5 — persist the optional default dispatch prompt.
+///
+/// Whitespace-only strings collapse to NULL so the S9 "use default when
+/// prompt is blank" branch can rely on a single `IS NOT NULL` check.
+/// Passing `None` clears the override.
+#[tauri::command]
+pub fn update_agent_default_prompt(
+    db: State<'_, DbState>,
+    id: String,
+    value: Option<String>,
+) -> Result<(), String> {
+    let normalized: Option<String> = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agents SET default_prompt = ?1 WHERE id = ?2",
+        params![normalized, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// v2.7.9 Felipe P5 — read the current default dispatch prompt.
+///
+/// Surfaced separately because list_agents/get_agent are owned by S9's
+/// dispatch lock; this additive getter lets the AgentDetail UI prefill
+/// the edit textarea without us having to touch those readers.
+#[tauri::command]
+pub fn get_agent_default_prompt(
+    db: State<'_, DbState>,
+    id: String,
+) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT default_prompt FROM agents WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Update the MCPs attached to an agent. Stored as a JSON-encoded string

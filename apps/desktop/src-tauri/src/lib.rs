@@ -920,6 +920,9 @@ pub fn run() {
             update_agent_role_models,
             // v1.5.0: Update MCPs attached to an agent (one-click browser tools etc.)
             update_agent_mcps,
+            // v2.7.9 Felipe P5: default dispatch prompt
+            update_agent_default_prompt,
+            get_agent_default_prompt,
             // v1.4.0 F4: Multi-agent groups (router + children)
             create_agent_group,
             list_agent_groups,

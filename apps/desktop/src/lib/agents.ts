@@ -41,6 +41,10 @@ export interface Agent {
   memoryPolicy?: string | null;
   // v2.0.0 — defaults to 'internal' for older rows.
   kind?: AgentKind | null;
+  // v2.7.9 Felipe P5 — optional default dispatch prompt. Not returned
+  // by list_agents/get_agent (those are owned by S9's dispatch lock);
+  // load it on demand via getAgentDefaultPrompt(id).
+  defaultPrompt?: string | null;
 }
 
 // v1.4.0 F5 — per-task model selection.
@@ -136,6 +140,9 @@ export interface CreateAgentInput {
   writeFile?: boolean;
   /** v2.0.0 — defaults to 'internal' if omitted. 'external' auto-locks permissions. */
   kind?: AgentKind;
+  /** v2.7.9 Felipe P5 — optional default dispatch prompt; fires automatically when
+   *  the agent is dispatched without one. Whitespace-only collapses to null. */
+  defaultPrompt?: string;
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<Agent> {
@@ -152,6 +159,7 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     goal: input.goal ?? null,
     writeFile: input.writeFile ?? true,
     kind: input.kind ?? "internal",
+    defaultPrompt: input.defaultPrompt ?? null,
   });
   // v2.1.0 — record the genesis event so the dashboard has a "v0"
   // marker per agent. Subsequent edits chain off this. Best-effort.
@@ -176,6 +184,29 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
 export async function updateAgentKind(id: string, kind: AgentKind): Promise<void> {
   await invoke("update_agent_kind", { id, kind });
   void recordChangeFor(id, "kind", kind);
+}
+
+/** v2.7.9 Felipe P5 — persist the optional default dispatch prompt.
+ *  Pass `null` (or whitespace) to clear it. The backend normalizes
+ *  whitespace-only inputs to NULL so S9's "use default when blank"
+ *  branch can rely on a single IS NOT NULL check.
+ *
+ *  Cloud config-change telemetry is intentionally skipped — `default_prompt`
+ *  isn't in the `ConfigChangeField` union yet (cloudConfigChanges.ts is
+ *  out of scope for this session). A follow-up can wire it once the
+ *  cloud schema accepts the new field. */
+export async function updateAgentDefaultPrompt(
+  id: string,
+  value: string | null,
+): Promise<void> {
+  await invoke("update_agent_default_prompt", { id, value });
+}
+
+/** v2.7.9 Felipe P5 — read the current default dispatch prompt.
+ *  Surfaced via a dedicated getter because list_agents/get_agent are
+ *  owned by S9's dispatch lock. Returns null when unset. */
+export async function getAgentDefaultPrompt(id: string): Promise<string | null> {
+  return invoke<string | null>("get_agent_default_prompt", { id });
 }
 
 // v2.1.0 — Configuration impact ledger. Each update fn fires this
