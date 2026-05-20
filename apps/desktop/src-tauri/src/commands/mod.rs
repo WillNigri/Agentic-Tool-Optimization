@@ -8350,7 +8350,16 @@ async fn spawn_streaming_dispatch(
             // `--skip-git-repo-check` mirrors the non-streaming dispatch —
             // ATO can be run from any cwd, including non-repo dirs, and
             // Codex bails with "Not inside a trusted directory" otherwise.
-            c.arg("exec").arg("--skip-git-repo-check");
+            // `--sandbox workspace-write` + `approval_policy=never` mirror
+            // the non-streaming codex branch — see line ~860 for the
+            // longer rationale (codex default is read-only; ATO dispatch
+            // is the authorization).
+            c.arg("exec")
+                .arg("--skip-git-repo-check")
+                .arg("--sandbox")
+                .arg("workspace-write")
+                .arg("-c")
+                .arg("approval_policy=\"never\"");
             if let Some(m) = &model_override {
                 c.arg("--model").arg(m);
             }

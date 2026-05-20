@@ -272,7 +272,17 @@ fn run_replay_dispatch(
             }
         }
         "codex" => {
-            cmd.arg("exec").arg("--skip-git-repo-check");
+            // 2026-05-19 — mirror the dispatch.rs codex branch: unlock
+            // workspace-write sandbox + never-approve so replay can
+            // actually patch files instead of returning read-only stubs.
+            // ATO replay IS the authorization; see
+            // apps/desktop/src-tauri/src/commands/mod.rs codex branch.
+            cmd.arg("exec")
+                .arg("--skip-git-repo-check")
+                .arg("--sandbox")
+                .arg("workspace-write")
+                .arg("-c")
+                .arg("approval_policy=\"never\"");
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
