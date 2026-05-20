@@ -161,7 +161,7 @@ pub fn dispatch_with_tools(
         }
 
         // Did the model emit tool calls?
-        let calls = conv.parse_tool_calls(provider, &payload);
+        let calls = conv.parse_tool_calls(provider, &payload, tools);
         let assistant_text = conv.extract_final_text(provider, &payload);
         if !calls.is_empty() && rounds < MAX_TOOL_ROUNDS {
             // Append the assistant's tool-call turn to history, then
@@ -267,6 +267,107 @@ fn resolve_model(provider: &ApiProvider, override_: Option<&str>) -> Result<Stri
         )),
         (_, default) => Ok(default.to_string()),
     }
+}
+
+/// v2.7.9 PR-A — MiniMax content-as-args detection.
+///
+/// MiniMax-M2.7-highspeed (and its tier-mates) sometimes emits
+/// function-call arguments as plain JSON in `message.content` rather
+/// than using OpenAI's `choices[0].message.tool_calls[]` shape. The
+/// `tools` field IS honored on the request side; the emission side
+/// just doesn't structure it back. Without this fallback, the loop
+/// reads the JSON as text and returns it to the user verbatim
+/// (looks like the model "hallucinated" code that it actually
+/// intended to read via a tool call).
+///
+/// Algorithm (4-seat war-room A803A3C3, unanimous):
+///   1. Strip an optional `​```json` (or bare `​```​`) fence if the
+///      entire content IS a fenced block. Otherwise use trimmed
+///      content as-is.
+///   2. Parse as JSON. Must be an object. Anything else → no call.
+///   3. Strict-match against each offered tool's input_schema:
+///      - All `required` fields present in obj.
+///      - All obj keys present in schema's `properties`.
+///   4. Require EXACTLY ONE matching tool. Zero matches → text.
+///      Two or more → ambiguous, prefer text over a guess.
+///   5. Synthesize a ToolCall with a stable id (`mm-{round_idx}-0`)
+///      so the next round's tool_result can reference it.
+fn parse_minimax_content_as_tool_calls(
+    content: &str,
+    offered_tools: &[ToolDef],
+    round_idx: usize,
+) -> Vec<ToolCall> {
+    let trimmed = content.trim();
+    let candidate = strip_fenced_json_block(trimmed).unwrap_or(trimmed);
+    let parsed: serde_json::Value = match serde_json::from_str(candidate) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let obj = match parsed.as_object() {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let matches: Vec<&ToolDef> = offered_tools
+        .iter()
+        .filter(|t| minimax_content_matches_schema(obj, &t.schema))
+        .collect();
+    if matches.len() != 1 {
+        return Vec::new();
+    }
+    let t = matches[0];
+    vec![ToolCall {
+        id: format!("mm-{}-0", round_idx),
+        name: t.name.to_string(),
+        arguments: parsed,
+    }]
+}
+
+/// Strict JSON-Schema field-presence match for content-as-args detection.
+/// All required fields present + no keys outside `properties`. Type
+/// checking deliberately omitted: missing/wrong types surface as tool
+/// execution errors the model can correct on the next round, which is
+/// the right error UX (vs. silently dropping the call here).
+fn minimax_content_matches_schema(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    schema: &serde_json::Value,
+) -> bool {
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        for r in required {
+            if let Some(key) = r.as_str() {
+                if !obj.contains_key(key) {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+        for key in obj.keys() {
+            if !properties.contains_key(key) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Strip a leading/trailing ```json or ``` fence if the entire trimmed
+/// string is a fenced code block. Returns None when no fence is present,
+/// so the caller can use the raw content.
+fn strip_fenced_json_block(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if !s.starts_with("```") || !s.ends_with("```") || s.len() < 6 {
+        return None;
+    }
+    let inner = &s[3..s.len() - 3];
+    // Strip optional language tag after the opening fence.
+    let inner = inner
+        .strip_prefix("json\n")
+        .or_else(|| inner.strip_prefix("json\r\n"))
+        .or_else(|| inner.strip_prefix("json "))
+        .or_else(|| inner.strip_prefix("\n"))
+        .or_else(|| inner.strip_prefix("\r\n"))
+        .unwrap_or(inner);
+    Some(inner.trim())
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -446,7 +547,12 @@ impl Conversation {
         }
     }
 
-    fn parse_tool_calls(&self, provider: &ApiProvider, payload: &serde_json::Value) -> Vec<ToolCall> {
+    fn parse_tool_calls(
+        &self,
+        provider: &ApiProvider,
+        payload: &serde_json::Value,
+        offered_tools: &[ToolDef],
+    ) -> Vec<ToolCall> {
         match provider.flavor {
             "anthropic" => {
                 // Anthropic puts content as an array of blocks; each
@@ -485,11 +591,10 @@ impl Conversation {
                 out
             }
             _ => {
-                let calls = payload["choices"][0]["message"]["tool_calls"]
+                let calls: Vec<ToolCall> = payload["choices"][0]["message"]["tool_calls"]
                     .as_array()
                     .cloned()
-                    .unwrap_or_default();
-                calls
+                    .unwrap_or_default()
                     .into_iter()
                     .filter_map(|c| {
                         let id = c["id"].as_str()?.to_string();
@@ -502,7 +607,28 @@ impl Conversation {
                             .unwrap_or(serde_json::json!({}));
                         Some(ToolCall { id, name, arguments })
                     })
-                    .collect()
+                    .collect();
+                // v2.7.9 PR-A — MiniMax content-as-args fallback.
+                // MiniMax-M2.7-highspeed (subscription tier) emits
+                // function-call args as plain JSON in message.content
+                // instead of using OpenAI's choices[0].message.tool_calls[]
+                // shape. When the OpenAI parser returns empty AND this
+                // is the minimax flavor, attempt to detect content-as-
+                // args by strict-matching the JSON against the offered
+                // tools' input_schemas. Algorithm chosen by the
+                // 4-seat war-room A803A3C3 (claude + google + minimax
+                // unanimous on schema-strict-match with exactly-one-
+                // match disambiguation; codex was rate-limited).
+                if calls.is_empty() && provider.flavor == "minimax" {
+                    if let Some(content) = payload["choices"][0]["message"]["content"].as_str() {
+                        return parse_minimax_content_as_tool_calls(
+                            content,
+                            offered_tools,
+                            self.openai_messages.len(),
+                        );
+                    }
+                }
+                calls
             }
         }
     }
@@ -571,7 +697,7 @@ impl Conversation {
         &mut self,
         provider: &ApiProvider,
         payload: &serde_json::Value,
-        _calls: &[ToolCall],
+        calls: &[ToolCall],
     ) {
         match provider.flavor {
             "anthropic" => {
@@ -594,10 +720,41 @@ impl Conversation {
                 }
             }
             _ => {
-                // For OpenAI shape we append the assistant message
-                // (with tool_calls) so the upstream parser can match
-                // the upcoming `tool` role replies by tool_call_id.
-                if let Some(msg) = payload["choices"][0]["message"].as_object() {
+                // v2.7.9 PR-A — MiniMax content-as-args case:
+                // payload's choices[0].message has `content: "<json>"`
+                // but NO `tool_calls[]` field. Appending verbatim
+                // leaves the next round's tool_result references
+                // dangling. Synthesize an OpenAI-shape assistant
+                // message with `tool_calls[]` from the parsed calls
+                // so tool_call_ids resolve.
+                let payload_has_tool_calls = payload["choices"][0]["message"]["tool_calls"]
+                    .as_array()
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if !payload_has_tool_calls && !calls.is_empty() {
+                    let synthesized_tool_calls: Vec<serde_json::Value> = calls
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "id": c.id,
+                                "type": "function",
+                                "function": {
+                                    "name": c.name,
+                                    // OpenAI's tool_calls.function.arguments is
+                                    // a JSON STRING, not an object. Match shape.
+                                    "arguments": serde_json::to_string(&c.arguments)
+                                        .unwrap_or_else(|_| "{}".to_string()),
+                                }
+                            })
+                        })
+                        .collect();
+                    self.openai_messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": serde_json::Value::Null,
+                        "tool_calls": synthesized_tool_calls,
+                    }));
+                } else if let Some(msg) = payload["choices"][0]["message"].as_object() {
+                    // Normal OpenAI shape — append verbatim.
                     self.openai_messages.push(serde_json::Value::Object(msg.clone()));
                 }
             }
@@ -740,7 +897,7 @@ mod tests {
             }]
         });
         let conv = Conversation::new(&mock_openai_provider(), &[], "hi");
-        let calls = conv.parse_tool_calls(&mock_openai_provider(), &payload);
+        let calls = conv.parse_tool_calls(&mock_openai_provider(), &payload, &[]);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].arguments["path"], "foo.rs");
@@ -762,7 +919,7 @@ mod tests {
             }]
         });
         let conv = Conversation::new(&mock_gemini_provider(), &[], "hi");
-        let calls = conv.parse_tool_calls(&mock_gemini_provider(), &payload);
+        let calls = conv.parse_tool_calls(&mock_gemini_provider(), &payload, &[]);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "grep");
         assert_eq!(calls[0].arguments["pattern"], "fn dispatch");
@@ -830,7 +987,7 @@ mod tests {
             "stop_reason": "tool_use"
         });
         let conv = Conversation::new(&mock_anthropic_provider(), &[], "hi");
-        let calls = conv.parse_tool_calls(&mock_anthropic_provider(), &payload);
+        let calls = conv.parse_tool_calls(&mock_anthropic_provider(), &payload, &[]);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].id, "toolu_01abc");
@@ -863,8 +1020,8 @@ mod tests {
         let p = mock_anthropic_provider();
         let conv = Conversation::new(&p, &[], "hello");
         let tools = vec![review_tools::ToolDef {
-            name: "read_file",
-            description: "read a file",
+            name: "read_file".to_string(),
+            description: "read a file".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}}}),
         }];
         let body = conv.build_request_body(&p, &tools, "claude-test", false);
@@ -874,6 +1031,199 @@ mod tests {
         assert_eq!(body["tools"][0]["input_schema"]["properties"]["path"]["type"], "string");
         // No top-level `parameters` field (that's the OpenAI shape).
         assert!(body["tools"][0].get("parameters").is_none());
+    }
+
+    // v2.7.9 PR-A — MiniMax content-as-args detection. Pinned by
+    // the 4-seat war-room A803A3C3 algorithm.
+    fn mock_minimax_provider() -> ApiProvider {
+        ApiProvider {
+            slug: "test-minimax",
+            base_url: "https://api.minimax.io",
+            path: "/v1/text/chatcompletion_v2",
+            default_model: "MiniMax-test",
+            env_var: "TEST_KEY",
+            flavor: "minimax",
+        }
+    }
+
+    fn read_file_tool() -> review_tools::ToolDef {
+        review_tools::ToolDef {
+            name: "read_file".to_string(),
+            description: "Read a file from the repo.".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "start_line": { "type": "integer" },
+                    "end_line": { "type": "integer" }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    fn grep_tool() -> review_tools::ToolDef {
+        review_tools::ToolDef {
+            name: "grep".to_string(),
+            description: "Search the repo for a regex pattern.".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "glob": { "type": "string" }
+                },
+                "required": ["pattern"]
+            }),
+        }
+    }
+
+    #[test]
+    fn minimax_content_as_args_strict_match_returns_call() {
+        let tools = vec![read_file_tool(), grep_tool()];
+        let content = r#"{"path":"apps/cli/src/main.rs","start_line":80,"end_line":95}"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "apps/cli/src/main.rs");
+        assert_eq!(calls[0].id, "mm-1-0");
+    }
+
+    #[test]
+    fn minimax_content_as_args_fenced_block_stripped() {
+        let tools = vec![read_file_tool()];
+        let content = "```json\n{\"path\":\"foo.rs\"}\n```";
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 2);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn minimax_content_as_args_missing_required_no_match() {
+        // No `path` field (required for read_file). No tool matches → empty.
+        let tools = vec![read_file_tool(), grep_tool()];
+        let content = r#"{"start_line": 80, "end_line": 95}"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn minimax_content_as_args_extra_keys_no_match() {
+        // Has `path` but also `unexpected_field` not in properties → strict
+        // match fails. Avoids matching prose-like content that happens to
+        // contain a `path` key.
+        let tools = vec![read_file_tool()];
+        let content = r#"{"path":"foo.rs","unexpected_field":"hello"}"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn minimax_content_as_args_ambiguous_match_returns_empty() {
+        // A tool that ONLY has optional fields (no required) — every JSON
+        // object would match. Combined with read_file, a `{path: "..."}`
+        // payload matches both. War-room rule: zero or >1 matches → text.
+        let permissive = review_tools::ToolDef {
+            name: "list_directory".to_string(),
+            description: "List a directory".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                }
+                // No "required" — every object matches
+            }),
+        };
+        let tools = vec![read_file_tool(), permissive];
+        let content = r#"{"path":"foo.rs"}"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        // Both tools' schemas accept this object → ambiguous → empty.
+        assert!(calls.is_empty(), "ambiguous matches must return empty");
+    }
+
+    #[test]
+    fn minimax_content_as_args_non_json_content_returns_empty() {
+        let tools = vec![read_file_tool()];
+        let content = "This is just regular prose, not JSON.";
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn minimax_content_as_args_json_array_returns_empty() {
+        // Arrays at top level aren't a valid tool-call shape (we need
+        // an object). Don't accidentally match against array input.
+        let tools = vec![read_file_tool()];
+        let content = r#"["path", "foo.rs"]"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn minimax_payload_native_tool_calls_take_precedence() {
+        // When MiniMax DOES emit tool_calls properly, content-as-args
+        // detection must not fire — the native shape wins. Pin this so
+        // future MiniMax model versions that fix the emission don't
+        // double-fire calls.
+        let payload = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_native",
+                        "type": "function",
+                        "function": {
+                            "name": "grep",
+                            "arguments": "{\"pattern\":\"fn dispatch\"}"
+                        }
+                    }],
+                    "content": r#"{"path":"foo.rs"}"#
+                }
+            }]
+        });
+        let tools = vec![read_file_tool(), grep_tool()];
+        let conv = Conversation::new(&mock_minimax_provider(), &[], "hi");
+        let calls = conv.parse_tool_calls(&mock_minimax_provider(), &payload, &tools);
+        assert_eq!(calls.len(), 1);
+        // Native id used, not the synthesized mm-N-0 id.
+        assert_eq!(calls[0].id, "call_native");
+        assert_eq!(calls[0].name, "grep");
+    }
+
+    #[test]
+    fn minimax_synthesized_assistant_message_has_tool_calls() {
+        // History-echo test (claude #3 risk). When the model emitted
+        // content-as-args, append_assistant_tool_calls must synthesize
+        // an OpenAI-shape `tool_calls[]` field so the next round's
+        // tool_result references resolve. Without this fix, the next
+        // request body would be malformed.
+        let p = mock_minimax_provider();
+        let mut conv = Conversation::new(&p, &[], "hi");
+        let payload = serde_json::json!({
+            "choices": [{
+                "message": {
+                    // Note: NO tool_calls field, just content (the bug).
+                    "content": r#"{"path":"foo.rs","start_line":1,"end_line":5}"#
+                }
+            }]
+        });
+        let calls = vec![ToolCall {
+            id: "mm-0-0".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path":"foo.rs","start_line":1,"end_line":5}),
+        }];
+        conv.append_assistant_tool_calls(&p, &payload, &calls);
+        let last = conv.openai_messages.last().expect("appended");
+        assert_eq!(last["role"], "assistant");
+        // The synthesized message MUST include tool_calls so tool_results match.
+        let tc = last["tool_calls"]
+            .as_array()
+            .expect("synthesized tool_calls[] required");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], "mm-0-0");
+        assert_eq!(tc[0]["function"]["name"], "read_file");
+        // OpenAI's arguments is a JSON STRING, not an object.
+        let args_str = tc[0]["function"]["arguments"].as_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(args_str).unwrap();
+        assert_eq!(parsed["path"], "foo.rs");
     }
 
     // v2.7.8 PR-3 — Anthropic tool_result reply shape: role=user with

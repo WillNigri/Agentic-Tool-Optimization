@@ -1140,7 +1140,7 @@ fn run_api(
             with_tools
                 || crate::review_tools::registry().iter().any(|t| {
                     matches!(
-                        agent_gate_for_api.check(t.name),
+                        agent_gate_for_api.check(&t.name),
                         ato_agent_permissions::GateDecision::Allow
                     )
                 })
@@ -1175,7 +1175,7 @@ fn run_api(
                 .into_iter()
                 .filter(|t| {
                     matches!(
-                        agent_gate_for_api.check(t.name),
+                        agent_gate_for_api.check(&t.name),
                         ato_agent_permissions::GateDecision::Allow
                     )
                 })

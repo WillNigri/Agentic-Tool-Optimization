@@ -1403,11 +1403,18 @@ pub async fn prompt_api_provider(
     //     review_tool's name) AND provider supports tools.
     //   - text-only: otherwise. Preserves pre-PR-3b behaviour for
     //     agents without permissions and for non-tools providers.
+    //
+    // v2.7.9 — MCP-tool gating (PR-B) deferred to v2.7.10. War-room
+    // V279_REVIEW found two ship blockers: (1) discover_mcp_server_tools
+    // is sync, called from this async fn → blocks the tokio worker;
+    // (2) offering MCP tools whose execution path isn't wired returns
+    // "unknown tool" to the model — deceptive UX. v2.7.10 adds
+    // spawn_blocking wrap + actual MCP execution.
     let use_tool_loop = !agent_gate.allowed_tools.is_empty()
         && crate::api_dispatch_tools::provider_supports_tools(provider)
         && ato_review_tools::registry().iter().any(|t| {
             matches!(
-                agent_gate.check(t.name),
+                agent_gate.check(&t.name),
                 ato_agent_permissions::GateDecision::Allow
             )
         });
@@ -1551,6 +1558,10 @@ fn truncate_api_log(s: &str) -> String {
         format!("{}…[truncated]", &s[..MAX])
     }
 }
+
+// v2.7.9 PR-B deferred to v2.7.10 — see comment in prompt_api_provider.
+// load_agent_mcp_tools removed pending spawn_blocking wrap + MCP
+// execution path. Kept in audit doc for v2.7.10 reference.
 
 
 // ── v2.3.2 Phase 2.x — Local config-change ledger ─────────────────────

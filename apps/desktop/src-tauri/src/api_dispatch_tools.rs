@@ -133,7 +133,7 @@ pub async fn dispatch_with_tools(
             tokens_out_total = Some(tokens_out_total.unwrap_or(0) + to.unwrap_or(0));
         }
 
-        let calls = conv.parse_tool_calls(provider, &payload);
+        let calls = conv.parse_tool_calls(provider, &payload, tools);
         let assistant_text = conv.extract_final_text(provider, &payload);
         if !calls.is_empty() && rounds < MAX_TOOL_ROUNDS {
             conv.append_assistant_tool_calls(provider, &payload, &calls);
@@ -231,6 +231,82 @@ fn truncate(s: &str, n: usize) -> String {
         let head: String = s.chars().take(n).collect();
         format!("{}…", head)
     }
+}
+
+// v2.7.9 PR-A — MiniMax content-as-args detection. Mirror of
+// `apps/cli/src/api_dispatch_tools.rs::parse_minimax_content_as_tool_calls`.
+// MiniMax-M2.7-highspeed emits function-call args as plain JSON in
+// `message.content` rather than using OpenAI's tool_calls[] shape;
+// this fallback strict-matches the JSON against offered tools'
+// input_schemas. Unit tests live in the CLI side; this is a verbatim
+// port (the algorithm is pure-data, sync OR async).
+fn parse_minimax_content_as_tool_calls(
+    content: &str,
+    offered_tools: &[ToolDef],
+    round_idx: usize,
+) -> Vec<ToolCall> {
+    let trimmed = content.trim();
+    let candidate = strip_fenced_json_block(trimmed).unwrap_or(trimmed);
+    let parsed: serde_json::Value = match serde_json::from_str(candidate) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let obj = match parsed.as_object() {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let matches: Vec<&ToolDef> = offered_tools
+        .iter()
+        .filter(|t| minimax_content_matches_schema(obj, &t.schema))
+        .collect();
+    if matches.len() != 1 {
+        return Vec::new();
+    }
+    let t = matches[0];
+    vec![ToolCall {
+        id: format!("mm-{}-0", round_idx),
+        name: t.name.to_string(),
+        arguments: parsed,
+    }]
+}
+
+fn minimax_content_matches_schema(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    schema: &serde_json::Value,
+) -> bool {
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        for r in required {
+            if let Some(key) = r.as_str() {
+                if !obj.contains_key(key) {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+        for key in obj.keys() {
+            if !properties.contains_key(key) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn strip_fenced_json_block(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if !s.starts_with("```") || !s.ends_with("```") || s.len() < 6 {
+        return None;
+    }
+    let inner = &s[3..s.len() - 3];
+    let inner = inner
+        .strip_prefix("json\n")
+        .or_else(|| inner.strip_prefix("json\r\n"))
+        .or_else(|| inner.strip_prefix("json "))
+        .or_else(|| inner.strip_prefix("\n"))
+        .or_else(|| inner.strip_prefix("\r\n"))
+        .unwrap_or(inner);
+    Some(inner.trim())
 }
 
 /// Conversation state across tool-call rounds — direct port of the
@@ -395,7 +471,12 @@ impl Conversation {
         }
     }
 
-    fn parse_tool_calls(&self, provider: &ApiProvider, payload: &serde_json::Value) -> Vec<ToolCall> {
+    fn parse_tool_calls(
+        &self,
+        provider: &ApiProvider,
+        payload: &serde_json::Value,
+        offered_tools: &[ToolDef],
+    ) -> Vec<ToolCall> {
         match provider.flavor {
             "anthropic" => {
                 let blocks = payload["content"].as_array().cloned().unwrap_or_default();
@@ -427,11 +508,10 @@ impl Conversation {
                 out
             }
             _ => {
-                let calls = payload["choices"][0]["message"]["tool_calls"]
+                let calls: Vec<ToolCall> = payload["choices"][0]["message"]["tool_calls"]
                     .as_array()
                     .cloned()
-                    .unwrap_or_default();
-                calls
+                    .unwrap_or_default()
                     .into_iter()
                     .filter_map(|c| {
                         let id = c["id"].as_str()?.to_string();
@@ -441,7 +521,21 @@ impl Conversation {
                             .unwrap_or(serde_json::json!({}));
                         Some(ToolCall { id, name, arguments })
                     })
-                    .collect()
+                    .collect();
+                // v2.7.9 PR-A — MiniMax content-as-args fallback. See
+                // apps/cli/src/api_dispatch_tools.rs for full rationale
+                // and the 4-seat war-room A803A3C3 algorithm. Mirror
+                // implementation; tests in CLI side.
+                if calls.is_empty() && provider.flavor == "minimax" {
+                    if let Some(content) = payload["choices"][0]["message"]["content"].as_str() {
+                        return parse_minimax_content_as_tool_calls(
+                            content,
+                            offered_tools,
+                            self.openai_messages.len(),
+                        );
+                    }
+                }
+                calls
             }
         }
     }
@@ -498,7 +592,7 @@ impl Conversation {
         &mut self,
         provider: &ApiProvider,
         payload: &serde_json::Value,
-        _calls: &[ToolCall],
+        calls: &[ToolCall],
     ) {
         match provider.flavor {
             "anthropic" => {
@@ -515,7 +609,34 @@ impl Conversation {
                 }
             }
             _ => {
-                if let Some(msg) = payload["choices"][0]["message"].as_object() {
+                // v2.7.9 PR-A — MiniMax content-as-args synthesizes
+                // an OpenAI-shape tool_calls[] so the next round's
+                // tool_result references resolve. See CLI mirror.
+                let payload_has_tool_calls = payload["choices"][0]["message"]["tool_calls"]
+                    .as_array()
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if !payload_has_tool_calls && !calls.is_empty() {
+                    let synthesized_tool_calls: Vec<serde_json::Value> = calls
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "id": c.id,
+                                "type": "function",
+                                "function": {
+                                    "name": c.name,
+                                    "arguments": serde_json::to_string(&c.arguments)
+                                        .unwrap_or_else(|_| "{}".to_string()),
+                                }
+                            })
+                        })
+                        .collect();
+                    self.openai_messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": serde_json::Value::Null,
+                        "tool_calls": synthesized_tool_calls,
+                    }));
+                } else if let Some(msg) = payload["choices"][0]["message"].as_object() {
                     self.openai_messages.push(serde_json::Value::Object(msg.clone()));
                 }
             }
@@ -623,7 +744,7 @@ pub fn build_filtered_review_tools(
         .into_iter()
         .filter(|t| {
             matches!(
-                gate.check(t.name),
+                gate.check(&t.name),
                 ato_agent_permissions::GateDecision::Allow
             )
         })

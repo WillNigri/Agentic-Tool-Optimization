@@ -27,10 +27,15 @@ use std::process::Command;
 
 /// Provider-agnostic tool definition. Per-flavor marshalling lives
 /// in api_dispatch_tools.rs.
+///
+/// v2.7.9 PR-B — `name` and `description` are `String` (was
+/// `&'static str`) so MCP-discovered tools can be added at runtime.
+/// The built-in registry uses `.to_string()` on its literals; this
+/// adds a one-time allocation per process load, no hot-path cost.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDef {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub schema: serde_json::Value,
 }
 
@@ -67,11 +72,11 @@ pub const MAX_TOOL_ROUNDS: usize = 10;
 pub fn registry() -> Vec<ToolDef> {
     vec![
         ToolDef {
-            name: "read_file",
+            name: "read_file".to_string(),
             description: "Read the current contents of a file from the repo. \
                           Use this when the rich-context bundle didn't include the file you need, \
                           or when you want to see a section the bundle truncated. Limited to files \
-                          inside the repo; cannot read /etc/passwd, ~/.ssh/, or other host paths.",
+                          inside the repo; cannot read /etc/passwd, ~/.ssh/, or other host paths.".to_string(),
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -92,11 +97,11 @@ pub fn registry() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "grep",
+            name: "grep".to_string(),
             description: "Search tracked files in the repo for a regex pattern. \
                           Returns matching file:line:content tuples, up to 50 hits. \
                           Use this to find callers of a function, references to a symbol, \
-                          or instances of a pattern you want to audit consistency for.",
+                          or instances of a pattern you want to audit consistency for.".to_string(),
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -113,10 +118,10 @@ pub fn registry() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "git_log",
+            name: "git_log".to_string(),
             description: "Recent commits touching a specific file. Useful for spotting churn \
                           (recently edited code may have unresolved issues) or seeing the \
-                          intent behind the surrounding code.",
+                          intent behind the surrounding code.".to_string(),
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -443,7 +448,7 @@ mod tests {
     fn registry_includes_three_tools() {
         let r = registry();
         assert_eq!(r.len(), 3);
-        let names: Vec<&str> = r.iter().map(|t| t.name).collect();
+        let names: Vec<&str> = r.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"grep"));
         assert!(names.contains(&"git_log"));
