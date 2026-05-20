@@ -831,8 +831,12 @@ async fn prompt_agent_inner(
 
     let mut cmd = match runtime.as_str() {
         "claude" => {
-            let claude_path =
-                which_claude().ok_or_else(|| "Claude Code CLI not found".to_string())?;
+            let claude_path = which_claude().ok_or_else(|| {
+                "Claude Code CLI not found on PATH. You can either:\n\
+                 1. Install Claude Code: https://docs.claude.com/claude-code, OR\n\
+                 2. Pick 'anthropic' from the runtime dropdown if you have an Anthropic API key configured in Settings → API Keys\n\
+                 (Backend auto-fallback queued for v2.7.8.)".to_string()
+            })?;
             let mut c = Command::new(claude_path);
             c.arg("--print").arg(&prompt);
             if let Some(m) = &model_override {
@@ -854,7 +858,12 @@ async fn prompt_agent_inner(
         }
         "codex" => {
             let codex_path = which_cli("codex").ok_or_else(|| {
-                "Codex CLI not found. Install it with: npm install -g @openai/codex"
+                // No OpenAI api_provider in the registry yet (v2.7.8
+                // adds the api-provider-tool-call-loop scope), so codex
+                // has no API fallback today. Install the CLI is the
+                // only path.
+                "Codex CLI not found on PATH. Install with: npm install -g @openai/codex\n\
+                 (OpenAI API fallback not yet available — queued for v2.8.0's API-provider tool-call loop scope.)"
                     .to_string()
             })?;
             // exec subcommand; --skip-git-repo-check needed because ATO
@@ -925,8 +934,22 @@ async fn prompt_agent_inner(
             c
         }
         "gemini" => {
+            // 2026-05-19 (Will dogfood) — if the CLI is missing AND the user
+            // has a Google API key configured, surface that path. Backend
+            // auto-fallback is v2.7.8 work; tonight we just point the user
+            // at the existing 'google' runtime that uses their stored key.
             let gemini_path = which_cli("gemini").ok_or_else(|| {
-                "Gemini CLI not found. Install: npm install -g @google/gemini-cli".to_string()
+                let has_google_key = crate::api_dispatch::find_provider("google").is_some();
+                if has_google_key {
+                    "Gemini CLI not found on PATH. You can either:\n\
+                     1. Pick 'google' from the runtime dropdown — it uses your stored Google API key (no CLI install needed), OR\n\
+                     2. Install the Gemini CLI: npm install -g @google/gemini-cli@latest\n\
+                     (Backend auto-fallback queued for v2.7.8.)".to_string()
+                } else {
+                    "Gemini CLI not found on PATH. You can either:\n\
+                     1. Install the Gemini CLI: npm install -g @google/gemini-cli@latest, OR\n\
+                     2. Add a Google API key in Settings → API Keys and use 'google' from the runtime dropdown".to_string()
+                }
             })?;
             let mut c = Command::new(gemini_path);
             c.arg("-p").arg(&prompt);
