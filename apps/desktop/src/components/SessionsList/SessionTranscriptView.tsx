@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { useProjectStore } from "@/stores/useProjectStore";
+import { listAgents, type Agent } from "@/lib/agents";
 import {
   runtimeBadge,
   formatTime,
@@ -84,6 +86,13 @@ export default function SessionTranscriptView({
 
   const [continueRuntime, setContinueRuntime] = useState(defaultContinueRuntime);
   const [continuePrompt, setContinuePrompt] = useState("");
+  // v2.7.8 PR-3c — per-message agent override in the in-session
+  // dispatcher. Empty string means "use the session's stored agent
+  // (or none)". Will's dogfood: "only can select the llms in the
+  // sessions not agents still" — the runtime select had no agent
+  // partner. This list mirrors what FirstChatWizard's seat picker
+  // shows, filtered by the currently-selected continueRuntime.
+  const [continueAgent, setContinueAgent] = useState<string>("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [bridging, setBridging] = useState(false);
@@ -155,6 +164,29 @@ export default function SessionTranscriptView({
     "openrouter",
   ]);
 
+  // v2.7.8 PR-3c — agents for the per-message agent picker.
+  const agentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => listAgents(),
+  });
+  const agentsForCurrentRuntime: Agent[] = (agentsQuery.data ?? []).filter(
+    (a) => a.runtime === continueRuntime,
+  );
+
+  // v2.7.8 PR-3c dogfood — backend refuses tool-using API dispatches
+  // without an explicit `workspace_root`. If no project is active in
+  // the sidebar, the dispatch would error server-side ("Tool-using
+  // API dispatch requires an explicit workspace_root"). Detect that
+  // state here and disable Send + show a clear hint so the user
+  // doesn't end up confused by a server error. Conservatively
+  // checks: agent is picked AND runtime is an API provider — those
+  // are the only paths that engage the tool loop.
+  const activeProject = useProjectStore((s) => s.activeProject);
+  const isApiProviderRuntime = (rt: string): boolean =>
+    ["anthropic", "google", "minimax", "grok", "deepseek", "qwen", "openrouter"].includes(rt);
+  const wouldEngageToolLoop = !!continueAgent && isApiProviderRuntime(continueRuntime);
+  const blockedByMissingProject = wouldEngageToolLoop && !activeProject;
+
   const handleSend = async () => {
     if (!continuePrompt.trim() || sending) return;
     setSending(true);
@@ -164,17 +196,24 @@ export default function SessionTranscriptView({
     setStreamingText("");
     setStreamingRuntime(useStreaming ? continueRuntime : null);
     try {
+      // PR-3c — agentSlugOverride lets the per-message picker
+      // override the session's stored agent_slug for THIS dispatch.
+      // Backend defaults to the session's stored agent when this is
+      // omitted, so today's "no picker" callers still work.
+      const agentSlugOverride = continueAgent || null;
       if (useStreaming) {
         await invoke("dispatch_into_session_streaming", {
           runtime: continueRuntime,
           prompt: continuePrompt,
           sessionId,
+          agentSlugOverride,
         });
       } else {
         await invoke("dispatch_into_session", {
           runtime: continueRuntime,
           prompt: continuePrompt,
           sessionId,
+          agentSlugOverride,
         });
       }
       setContinuePrompt("");
@@ -830,13 +869,39 @@ export default function SessionTranscriptView({
         <div className="flex items-end gap-2">
           <select
             value={continueRuntime}
-            onChange={(e) => setContinueRuntime(e.target.value)}
+            onChange={(e) => {
+              setContinueRuntime(e.target.value);
+              // Reset agent when runtime changes — old agent
+              // doesn't apply to the new runtime.
+              setContinueAgent("");
+            }}
             disabled={sending || isClosed}
             className="bg-cs-card border border-cs-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-cs-accent"
           >
             {NEW_SESSION_RUNTIMES.map((r) => (
               <option key={r} value={r}>
                 {r}
+              </option>
+            ))}
+          </select>
+          {/* v2.7.8 PR-3c — agent picker. "no agent" preserves
+              today's behaviour (use session's stored agent, or
+              text-only). Picking an agent overrides per message. */}
+          <select
+            value={continueAgent}
+            onChange={(e) => setContinueAgent(e.target.value)}
+            disabled={sending || isClosed || agentsForCurrentRuntime.length === 0}
+            title={
+              agentsForCurrentRuntime.length === 0
+                ? `No agents created on '${continueRuntime}' yet.`
+                : "Override the session's agent for this message."
+            }
+            className="bg-cs-card border border-cs-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-cs-accent disabled:opacity-50"
+          >
+            <option value="">— no agent —</option>
+            {agentsForCurrentRuntime.map((a) => (
+              <option key={a.id} value={a.slug}>
+                {a.displayName} ({a.slug})
               </option>
             ))}
           </select>
@@ -862,7 +927,17 @@ export default function SessionTranscriptView({
           />
           <button
             onClick={handleSend}
-            disabled={!continuePrompt.trim() || sending || isClosed}
+            disabled={
+              !continuePrompt.trim() ||
+              sending ||
+              isClosed ||
+              blockedByMissingProject
+            }
+            title={
+              blockedByMissingProject
+                ? "Pick a project in the left sidebar — tool-using API dispatches need a workspace root."
+                : undefined
+            }
             className="flex items-center gap-2 px-3 py-2 rounded-md bg-cs-accent text-cs-bg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {sending ? (
@@ -877,6 +952,14 @@ export default function SessionTranscriptView({
           ⌘/Ctrl + Enter to send. The dispatch routes via `ato dispatch &lt;runtime&gt; --session &lt;id&gt;`,
           so cross-runtime continuation just works (history is replayed for non-anchor runtimes).
         </div>
+        {blockedByMissingProject && (
+          <div className="mt-2 text-xs text-cs-warning bg-cs-warning/10 border border-cs-warning/40 rounded px-2 py-1">
+            ⚠ Pick a project in the left sidebar — tool-using API
+            dispatches (agent +{" "}
+            <code className="text-cs-text">{continueRuntime}</code>) need a
+            workspace root to sandbox the file reads.
+          </div>
+        )}
         {sendError && (
           <div className="mt-2 text-xs text-cs-danger">{sendError}</div>
         )}

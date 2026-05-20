@@ -35,6 +35,34 @@ pub struct ApiDispatchOutcome {
     pub duration_ms: i64,
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
+    /// v2.7.8 PR-3b — tool-call audit populated by
+    /// `api_dispatch_tools::dispatch_with_tools` when the dispatch
+    /// engaged the tool-call loop. None for legacy text-only
+    /// dispatches. Empty vec means "tools were offered, model declined."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallAudit>>,
+}
+
+/// One row of the tool-call audit log written into
+/// `execution_logs.tool_calls_summary` (a JSON array of these).
+/// Mirrors `apps/cli/src/api_dispatch.rs::ToolCallAudit` exactly so the
+/// GUI's Receipts table can render both transports uniformly.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallAudit {
+    pub name: String,
+    pub args_brief: String,
+    pub is_error: bool,
+}
+
+/// A single turn in the conversation history passed into
+/// `dispatch_with_tools`. v2.7.8 PR-3b — desktop needs this to mirror
+/// the CLI shape; today's `dispatch()` builds a single-message body
+/// inline, but the tool-call loop carries multi-turn state across
+/// rounds.
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
 }
 
 pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<String, String> {
@@ -152,6 +180,7 @@ pub async fn dispatch(
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            tool_calls: None,
         });
     }
     let payload: serde_json::Value =
@@ -181,6 +210,7 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                tool_calls: None,
             });
         }
         // Concatenate text blocks without filtering empty strings —
@@ -218,6 +248,7 @@ fn parse_response(
             duration_ms,
             tokens_in: payload["usage"]["input_tokens"].as_i64(),
             tokens_out: payload["usage"]["output_tokens"].as_i64(),
+            tool_calls: None,
         });
     }
     if provider.flavor == "minimax" {
@@ -238,6 +269,7 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                tool_calls: None,
             });
         }
     }
@@ -259,6 +291,7 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                tool_calls: None,
             });
         }
     };
@@ -272,6 +305,7 @@ fn parse_response(
         duration_ms,
         tokens_in,
         tokens_out,
+        tool_calls: None,
     })
 }
 

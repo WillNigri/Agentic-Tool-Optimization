@@ -1,122 +1,91 @@
-// v2.4.5 Tier 2 — function-calling dispatch loop for reviewers.
+// v2.7.8 PR-3b — desktop async port of the CLI's tool-call loop.
 //
-// `dispatch_with_tools` extends `dispatch_with_history` to support
-// providers' tool-calling protocols. The reviewer LLM can emit
-// `tool_calls` for `read_file` / `grep` / `git_log` (per
-// review_tools::registry()); we execute, append results to the
-// message history, call again, loop until the model produces a
-// final text response with no further tool calls OR we hit
-// MAX_TOOL_ROUNDS.
+// The CLI's `apps/cli/src/api_dispatch_tools.rs` implements a tool-call
+// loop in BLOCKING reqwest because the CLI binary's dispatch path is
+// synchronous. The desktop runs on tokio and the Tauri command
+// `prompt_api_provider` is `async fn`, so it needs an async port.
 //
-// Per-flavor differences are isolated to:
-//   - tools_field()      — request-body marshalling of the registry
-//   - parse_tool_calls() — extracting tool_calls from the response
-//   - append_tool_results() — appending tool results to messages
-//   - extract_final_text() — pulling the model's final reply
+// This is currently a parallel implementation — codex's PR-3b review
+// flagged option (c) "extract the loop body into a flavor-agnostic
+// async helper, CLI wraps in a blocking shim, desktop calls natively"
+// as the cleanest long-term design. v2.7.8 ships duplication for
+// speed; v2.7.9 can do the extraction. The Conversation type, request
+// shapes, and parser logic are intentionally identical to the CLI
+// version so a future merge is a straight rename.
 //
-// Supported flavors today:
+// Supported flavors today (matches the CLI):
 //   - openai     (grok, deepseek, qwen, openrouter, minimax)
 //   - gemini     (google)
-//   - anthropic  (added v2.7.8 PR-3 — the audit's primary target)
-//
-// MiniMax tool-calling has known reliability issues on the
-// subscription tier; the caller (`ato review`) decides whether to
-// route a given provider through the tool-using path or fall back
-// to plain dispatch_with_history.
-//
-// v2.7.8 PR-3 — `dispatch_with_tools` now takes the tools list as a
-// parameter rather than hardcoding `review_tools::registry()`. This
-// lets `ato dispatch` (war-room flows) pass a permission-gated subset
-// while `ato review` keeps passing the full registry.
+//   - anthropic  (PR-3 target)
 
-use anyhow::{anyhow, Context, Result};
-use base64::Engine as _;
+use crate::api_dispatch::{resolve_api_key, ApiDispatchOutcome, ApiProvider, ToolCallAudit};
+use ato_review_tools::{execute_call_with_root, ToolCall, ToolDef, ToolResult, MAX_TOOL_ROUNDS};
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::api_dispatch::{resolve_api_key, ApiDispatchOutcome, ApiProvider, Message, ToolCallAudit};
-use crate::review_tools::{self, ToolCall, ToolDef, ToolResult, MAX_TOOL_ROUNDS};
-
 /// Run a dispatch with a permission-aware tool registry available to
-/// the model. Iterates: dispatch → execute tool calls → dispatch
-/// again → … until the model produces a final text response or we
-/// hit the round cap.
-///
-/// `tools` is caller-provided so each call site can pass either the
-/// full review registry (Tier 2 reviews) or an agent-permission-
-/// filtered subset (war-room dispatches).
-pub fn dispatch_with_tools(
+/// the model. Async mirror of `apps/cli/src/api_dispatch_tools.rs::
+/// dispatch_with_tools`. The `tools` parameter is caller-provided
+/// (filtered by the agent's permission gate before the call) and the
+/// `workspace_root` parameter scopes the executor sandbox — required
+/// because the desktop process cwd is `apps/desktop/`, not the user's
+/// repo.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_with_tools(
     provider: &ApiProvider,
-    history: &[Message],
+    history: &[crate::api_dispatch::Message],
     prompt: &str,
     model_override: Option<&str>,
     tools: &[ToolDef],
-    conn: &Connection,
-) -> Result<ApiDispatchOutcome> {
+    workspace_root: &Path,
+    db_path: &Path,
+) -> Result<ApiDispatchOutcome, String> {
     if !provider_supports_tools(provider) {
-        anyhow::bail!(
+        return Err(format!(
             "provider '{}' does not have a tools-flavor mapping; fall back to dispatch_with_history",
             provider.slug
-        );
+        ));
     }
-    let key = resolve_api_key(provider, conn)?;
+
+    // Resolve key in a scoped sync block so Connection drops before
+    // we hit any .await — same pattern as `dispatch()`.
+    let key = {
+        let conn = Connection::open(db_path).map_err(|e| format!("open db: {}", e))?;
+        resolve_api_key(provider, &conn)?
+    };
     let model = resolve_model(provider, model_override)?;
 
-    let client = reqwest::blocking::Client::builder()
-        // Tool loops can run several seconds per turn for 4–8 turns;
-        // a 10 min wall budget keeps a hung provider from blocking
-        // ato review indefinitely without giving up on legitimate
-        // multi-tool reviews.
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
         .build()
-        .context("build reqwest client")?;
+        .map_err(|e| format!("build reqwest client: {}", e))?;
 
-    // The conversation state we mutate across rounds. Shape is
-    // flavor-specific (openai uses `messages[]`, gemini uses
-    // `contents[]`). We keep both representations live in one struct
-    // to avoid double-conversion.
     let mut conv = Conversation::new(provider, history, prompt);
-
     let start = std::time::Instant::now();
     let mut rounds = 0usize;
     let mut accumulated_text = String::new();
     let mut tokens_in_total: Option<i64> = None;
     let mut tokens_out_total: Option<i64> = None;
-    // Per-dispatch audit so the GUI can show "verified via N tool
-    // calls" instead of guessing from response text. Always populated
-    // (empty vec is itself signal: "tools were offered, model declined").
     let mut audit: Vec<ToolCallAudit> = Vec::new();
-    // v2.4.6 — Gemini specifically can return finishReason=STOP with
-    // no tool calls AND no text parts when its private thinking
-    // tokens consume all the generation budget on a tool-use round.
-    // We retry ONCE with an explicit "please write your final reply
-    // now" nudge before giving up; more attempts would just burn the
-    // budget on more thinking with no return.
     let mut empty_response_retries = 0usize;
     const MAX_EMPTY_RETRIES: usize = 1;
 
     eprintln!(
-        "  [tools] dispatch_with_tools provider={} flavor={} model={}",
+        "  [tools] desktop dispatch_with_tools provider={} flavor={} model={}",
         provider.slug, provider.flavor, model
     );
     loop {
         if rounds >= MAX_TOOL_ROUNDS {
-            // Tell the model "one more turn, no tools, just finalize."
-            // Surface the cap in the audit so the caller knows.
             conv.append_user_text(
                 provider,
-                "Maximum tool rounds reached. Write your final review now using what you've learned. No more tool calls.",
+                "Maximum tool rounds reached. Write your final reply now using what you've learned. No more tool calls.",
             );
         }
-        eprintln!("  [tools] round {} begins", rounds);
 
         let body = conv.build_request_body(provider, tools, &model, rounds >= MAX_TOOL_ROUNDS);
         let url = conv.build_url(provider, &model, &key);
         let mut req = client.post(&url).header("Content-Type", "application/json");
-        // Auth header per flavor:
-        //   - openai / minimax: Bearer <key>
-        //   - gemini:           API key in URL ?key= (no header)
-        //   - anthropic:        x-api-key + anthropic-version
         match provider.flavor {
             "anthropic" => {
                 req = req
@@ -128,9 +97,16 @@ pub fn dispatch_with_tools(
                 req = req.bearer_auth(&key);
             }
         }
-        let resp = req.json(&body).send().with_context(|| format!("POST {}", url))?;
+        let resp = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("POST {}: {}", url, e))?;
         let http_status = resp.status();
-        let body_text = resp.text().context("read response body")?;
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("read response body: {}", e))?;
         if !http_status.is_success() {
             return Ok(ApiDispatchOutcome {
                 response: None,
@@ -147,11 +123,8 @@ pub fn dispatch_with_tools(
             });
         }
         let payload: serde_json::Value =
-            serde_json::from_str(&body_text).context("response was not valid JSON")?;
+            serde_json::from_str(&body_text).map_err(|e| format!("response not valid JSON: {}", e))?;
 
-        // Pull usage tokens if the provider exposes them — we
-        // accumulate across rounds so the final outcome's
-        // tokens_in/out reflect the whole loop.
         let (ti, to) = conv.extract_usage(provider, &payload);
         if ti.is_some() {
             tokens_in_total = Some(tokens_in_total.unwrap_or(0) + ti.unwrap_or(0));
@@ -160,17 +133,18 @@ pub fn dispatch_with_tools(
             tokens_out_total = Some(tokens_out_total.unwrap_or(0) + to.unwrap_or(0));
         }
 
-        // Did the model emit tool calls?
         let calls = conv.parse_tool_calls(provider, &payload);
         let assistant_text = conv.extract_final_text(provider, &payload);
         if !calls.is_empty() && rounds < MAX_TOOL_ROUNDS {
-            // Append the assistant's tool-call turn to history, then
-            // execute each call and append the results.
             conv.append_assistant_tool_calls(provider, &payload, &calls);
             let results: Vec<ToolResult> = calls
                 .iter()
                 .map(|c| {
-                    let r = review_tools::execute_call(c);
+                    // PR-3b — sandbox root is the explicit workspace
+                    // root, not the desktop process cwd. Otherwise
+                    // every read_file would resolve under
+                    // `apps/desktop/`, not the user's repo.
+                    let r = execute_call_with_root(workspace_root, c);
                     eprintln!(
                         "  [tool] {} {} -> {}{}",
                         c.name,
@@ -191,19 +165,11 @@ pub fn dispatch_with_tools(
             continue;
         }
 
-        // No tool calls — this is the final reply. Accumulate any
-        // assistant text emitted alongside earlier tool calls (rare)
-        // and return.
         if let Some(t) = assistant_text {
             accumulated_text.push_str(&t);
         }
         let duration_ms = start.elapsed().as_millis() as i64;
         if accumulated_text.trim().is_empty() {
-            // Gemini-on-thinking-budget escape hatch: one retry with
-            // an explicit "write your reply now" nudge. If we've
-            // already used the retry OR we've used no tools (so the
-            // model never had a chance to reason productively), give
-            // up and surface the diagnostic.
             if empty_response_retries < MAX_EMPTY_RETRIES && !audit.is_empty() {
                 empty_response_retries += 1;
                 eprintln!(
@@ -212,7 +178,7 @@ pub fn dispatch_with_tools(
                 );
                 conv.append_user_text(
                     provider,
-                    "You returned no text. Please write your final review now in plain markdown, using the tool-call results from earlier rounds. Do not call any more tools.",
+                    "You returned no text. Please write your final reply now in plain markdown, using the tool-call results from earlier rounds. Do not call any more tools.",
                 );
                 rounds += 1;
                 continue;
@@ -244,24 +210,13 @@ pub fn dispatch_with_tools(
 }
 
 pub fn provider_supports_tools(p: &ApiProvider) -> bool {
-    // MiniMax-M2+ exposes the same OpenAI-style `tools` field, `tool_choice`,
-    // and `choices[0].message.tool_calls[]` response shape as the openai
-    // flavor — the only structural difference between the two is MiniMax's
-    // URL path (`/v1/text/chatcompletion_v2`) and its `base_resp.status_code`
-    // success wrapper, neither of which the tool-call protocol cares about.
-    // So we let minimax fall through the same openai branch in build_url /
-    // build_request_body / parse_tool_calls / extract_final_text.
-    //
-    // v2.7.8 PR-3 — anthropic added. Different content-block model
-    // (tool_use / tool_result types) but the loop shape is identical
-    // and the audit doc's primary verification target lives here.
     matches!(p.flavor, "openai" | "gemini" | "minimax" | "anthropic")
 }
 
-fn resolve_model(provider: &ApiProvider, override_: Option<&str>) -> Result<String> {
+fn resolve_model(provider: &ApiProvider, override_: Option<&str>) -> Result<String, String> {
     match (override_, provider.default_model) {
         (Some(m), _) if !m.is_empty() => Ok(m.to_string()),
-        (None, "") => Err(anyhow!(
+        (None, "") => Err(format!(
             "Provider '{}' has no default model — pass --model explicitly.",
             provider.slug
         )),
@@ -278,22 +233,21 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// Conversation state across tool-call rounds. Holds whichever
-/// shape (`messages` or `contents`) the active provider's flavor
-/// expects, plus the small helpers needed to extend it.
+/// Conversation state across tool-call rounds — direct port of the
+/// CLI's Conversation struct. Holds whichever shape (`messages` or
+/// `contents`) the active provider's flavor expects.
 struct Conversation {
     openai_messages: Vec<serde_json::Value>,
     gemini_contents: Vec<serde_json::Value>,
-    /// v2.7.8 PR-3 — anthropic's Messages API uses a similar
-    /// `messages` array to OpenAI but content blocks are structured
-    /// (`text` / `tool_use` / `tool_result` types) rather than flat
-    /// strings. Kept separate so we can preserve assistant turns'
-    /// `tool_use` blocks across rounds.
     anthropic_messages: Vec<serde_json::Value>,
 }
 
 impl Conversation {
-    fn new(provider: &ApiProvider, history: &[Message], prompt: &str) -> Self {
+    fn new(
+        provider: &ApiProvider,
+        history: &[crate::api_dispatch::Message],
+        prompt: &str,
+    ) -> Self {
         let mut openai_messages = Vec::new();
         let mut gemini_contents = Vec::new();
         let mut anthropic_messages = Vec::new();
@@ -312,10 +266,6 @@ impl Conversation {
                 }));
             }
             "anthropic" => {
-                // Anthropic uses {role, content} like OpenAI but
-                // content can be either a string OR an array of
-                // typed blocks. For history we use plain string
-                // content; tool-use rounds build typed-block arrays.
                 for m in history {
                     anthropic_messages.push(serde_json::json!({
                         "role": m.role,
@@ -388,7 +338,6 @@ impl Conversation {
                     "messages": self.anthropic_messages,
                 });
                 if !suppress_tools {
-                    // Anthropic tool definitions use {name, description, input_schema}.
                     let anth_tools: Vec<serde_json::Value> = tools
                         .iter()
                         .map(|t| serde_json::json!({
@@ -449,8 +398,6 @@ impl Conversation {
     fn parse_tool_calls(&self, provider: &ApiProvider, payload: &serde_json::Value) -> Vec<ToolCall> {
         match provider.flavor {
             "anthropic" => {
-                // Anthropic puts content as an array of blocks; each
-                // block with type=tool_use is a tool invocation.
                 let blocks = payload["content"].as_array().cloned().unwrap_or_default();
                 let mut out = Vec::new();
                 for b in blocks {
@@ -464,7 +411,6 @@ impl Conversation {
                 out
             }
             "gemini" => {
-                // Gemini puts function calls inside candidates[0].content.parts[].functionCall.
                 let parts = payload["candidates"][0]["content"]["parts"]
                     .as_array()
                     .cloned()
@@ -474,10 +420,6 @@ impl Conversation {
                     if let Some(fc) = p.get("functionCall") {
                         let name = fc["name"].as_str().unwrap_or("").to_string();
                         let arguments = fc.get("args").cloned().unwrap_or(serde_json::json!({}));
-                        // Gemini doesn't give us a tool_call_id; synthesize a
-                        // stable one tied to round + index so we can match
-                        // tool results back up if the model emits multiple
-                        // parallel calls in one turn.
                         let id = format!("gem-{}-{}", self.gemini_contents.len(), idx);
                         out.push(ToolCall { id, name, arguments });
                     }
@@ -494,9 +436,6 @@ impl Conversation {
                     .filter_map(|c| {
                         let id = c["id"].as_str()?.to_string();
                         let name = c["function"]["name"].as_str()?.to_string();
-                        // OpenAI sends arguments as a JSON STRING, not an
-                        // object. Parse it; on parse failure treat as
-                        // empty object so the tool surfaces a useful error.
                         let raw_args = c["function"]["arguments"].as_str().unwrap_or("{}");
                         let arguments = serde_json::from_str(raw_args)
                             .unwrap_or(serde_json::json!({}));
@@ -535,13 +474,6 @@ impl Conversation {
                     Some(texts.join(""))
                 }
             }
-            // OpenAI-shape responses (openai-flavored providers + minimax).
-            // Standard path: choices[0].message.content. MiniMax has a
-            // quirk where if its response is truncated at max_tokens, the
-            // main `content` arrives empty and the actual text lands in
-            // `reasoning_content`. Mirror the same fallback we use in the
-            // non-tool dispatch path (api_dispatch.rs) so a length-capped
-            // MiniMax tool-loop reply isn't dropped silently.
             _ => {
                 let msg = &payload["choices"][0]["message"];
                 if let Some(c) = msg["content"].as_str() {
@@ -553,11 +485,6 @@ impl Conversation {
                 if finish_reason == "length" {
                     if let Some(r) = msg["reasoning_content"].as_str() {
                         if !r.is_empty() {
-                            eprintln!(
-                                "  [tools] {} finish_reason=length, falling back to reasoning_content ({} chars)",
-                                provider.slug,
-                                r.len()
-                            );
                             return Some(r.to_string());
                         }
                     }
@@ -575,9 +502,6 @@ impl Conversation {
     ) {
         match provider.flavor {
             "anthropic" => {
-                // Echo back the assistant's full content array
-                // (text + tool_use blocks) so the next round preserves
-                // the tool_use id needed to match tool_result.
                 if let Some(content) = payload["content"].as_array() {
                     self.anthropic_messages.push(serde_json::json!({
                         "role": "assistant",
@@ -586,17 +510,11 @@ impl Conversation {
                 }
             }
             "gemini" => {
-                // For gemini we echo back the model's content message
-                // (including its functionCall parts) verbatim so the
-                // next round's request preserves the structure.
                 if let Some(content) = payload["candidates"][0]["content"].as_object() {
                     self.gemini_contents.push(serde_json::Value::Object(content.clone()));
                 }
             }
             _ => {
-                // For OpenAI shape we append the assistant message
-                // (with tool_calls) so the upstream parser can match
-                // the upcoming `tool` role replies by tool_call_id.
                 if let Some(msg) = payload["choices"][0]["message"].as_object() {
                     self.openai_messages.push(serde_json::Value::Object(msg.clone()));
                 }
@@ -607,8 +525,6 @@ impl Conversation {
     fn append_tool_results(&mut self, provider: &ApiProvider, results: &[ToolResult]) {
         match provider.flavor {
             "anthropic" => {
-                // Anthropic expects ALL tool_results for a turn in
-                // one `user` message with multiple tool_result blocks.
                 let blocks: Vec<serde_json::Value> = results
                     .iter()
                     .map(|r| serde_json::json!({
@@ -624,8 +540,6 @@ impl Conversation {
                 }));
             }
             "gemini" => {
-                // Gemini expects ALL results for a turn in one
-                // `user` message with multiple functionResponse parts.
                 let parts: Vec<serde_json::Value> = results
                     .iter()
                     .map(|r| serde_json::json!({
@@ -641,8 +555,6 @@ impl Conversation {
                 }));
             }
             _ => {
-                // OpenAI: one `tool` role message per result, keyed
-                // by tool_call_id.
                 for r in results {
                     self.openai_messages.push(serde_json::json!({
                         "role": "tool",
@@ -691,210 +603,55 @@ fn urlencode(s: &str) -> String {
             }
         }
     }
-    // Suppress unused-import warning: base64 is used elsewhere.
-    let _ = base64::engine::general_purpose::STANDARD;
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api_dispatch::ApiProvider;
+/// Public helper for the call site: given an agent's permission gate
+/// and the optional MCP tools, return the filtered review_tools list
+/// to pass to dispatch_with_tools. Mirrors the CLI's filter logic at
+/// `apps/cli/src/commands/dispatch.rs::run_api` so the two paths agree
+/// on what the agent sees. RequireApproval tools are NOT included
+/// (war-room finding: PR-5 approval UI not yet built, so denying
+/// implicitly is safer than executing without approval).
+pub fn build_filtered_review_tools(
+    gate: &ato_agent_permissions::ToolGate,
+) -> Vec<ToolDef> {
+    if gate.allowed_tools.is_empty() {
+        return ato_review_tools::registry();
+    }
+    ato_review_tools::registry()
+        .into_iter()
+        .filter(|t| {
+            matches!(
+                gate.check(t.name),
+                ato_agent_permissions::GateDecision::Allow
+            )
+        })
+        .collect()
+}
 
-    fn mock_openai_provider() -> ApiProvider {
-        ApiProvider {
-            slug: "test-openai",
-            base_url: "https://example.com",
-            path: "/v1/chat/completions",
-            default_model: "gpt-test",
-            env_var: "TEST_KEY",
-            flavor: "openai",
+/// Resolve the workspace root for tool-call sandboxing by walking up
+/// from `start` looking for `.git` or `.claude/`. RETAINED as a
+/// helper for future call sites that have a known starting point
+/// (e.g. an agent's stored project path), but NOT used by
+/// `prompt_api_provider` today.
+///
+/// War-room finding (codex 2026-05-20): walking up from
+/// `std::env::current_dir()` is unsafe — the desktop's cwd is
+/// `apps/desktop/` (in dev) or wherever Tauri was launched (in prod),
+/// neither of which is the user's intended project. The Tauri command
+/// now requires the frontend to pass `workspace_root` explicitly and
+/// refuses tool-using dispatches without it. This function stays
+/// available for callers who already have a trusted starting point.
+#[allow(dead_code)]
+pub fn resolve_workspace_root(start: &Path) -> PathBuf {
+    let mut cur: PathBuf = start.to_path_buf();
+    loop {
+        if cur.join(".git").exists() || cur.join(".claude").exists() {
+            return cur;
         }
-    }
-
-    fn mock_gemini_provider() -> ApiProvider {
-        ApiProvider {
-            slug: "test-gemini",
-            base_url: "https://example.com",
-            path: "/v1beta/models/{model}:generateContent",
-            default_model: "gemini-test",
-            env_var: "TEST_KEY",
-            flavor: "gemini",
+        if !cur.pop() {
+            return start.to_path_buf();
         }
-    }
-
-    #[test]
-    fn parses_openai_tool_call() {
-        let payload = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "tool_calls": [{
-                        "id": "call_abc",
-                        "type": "function",
-                        "function": {
-                            "name": "read_file",
-                            "arguments": "{\"path\":\"foo.rs\"}"
-                        }
-                    }]
-                }
-            }]
-        });
-        let conv = Conversation::new(&mock_openai_provider(), &[], "hi");
-        let calls = conv.parse_tool_calls(&mock_openai_provider(), &payload);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read_file");
-        assert_eq!(calls[0].arguments["path"], "foo.rs");
-        assert_eq!(calls[0].id, "call_abc");
-    }
-
-    #[test]
-    fn parses_gemini_function_call() {
-        let payload = serde_json::json!({
-            "candidates": [{
-                "content": {
-                    "parts": [{
-                        "functionCall": {
-                            "name": "grep",
-                            "args": { "pattern": "fn dispatch" }
-                        }
-                    }]
-                }
-            }]
-        });
-        let conv = Conversation::new(&mock_gemini_provider(), &[], "hi");
-        let calls = conv.parse_tool_calls(&mock_gemini_provider(), &payload);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "grep");
-        assert_eq!(calls[0].arguments["pattern"], "fn dispatch");
-    }
-
-    #[test]
-    fn final_text_extracted_openai() {
-        let payload = serde_json::json!({
-            "choices": [{
-                "message": { "content": "All good." }
-            }]
-        });
-        let conv = Conversation::new(&mock_openai_provider(), &[], "hi");
-        assert_eq!(
-            conv.extract_final_text(&mock_openai_provider(), &payload).as_deref(),
-            Some("All good.")
-        );
-    }
-
-    #[test]
-    fn final_text_extracted_gemini_multi_part() {
-        let payload = serde_json::json!({
-            "candidates": [{
-                "content": {
-                    "parts": [
-                        {"text": "Findings:\n"},
-                        {"text": "1. HIGH — …"}
-                    ]
-                }
-            }]
-        });
-        let conv = Conversation::new(&mock_gemini_provider(), &[], "hi");
-        assert_eq!(
-            conv.extract_final_text(&mock_gemini_provider(), &payload).as_deref(),
-            Some("Findings:\n1. HIGH — …")
-        );
-    }
-
-    fn mock_anthropic_provider() -> ApiProvider {
-        ApiProvider {
-            slug: "test-anthropic",
-            base_url: "https://api.anthropic.com",
-            path: "/v1/messages",
-            default_model: "claude-test",
-            env_var: "TEST_KEY",
-            flavor: "anthropic",
-        }
-    }
-
-    // v2.7.8 PR-3 — Anthropic emits tool invocations as content
-    // blocks of type "tool_use" with name/id/input fields. Pin the
-    // parser shape so a future SDK shape change is loud.
-    #[test]
-    fn parses_anthropic_tool_use() {
-        let payload = serde_json::json!({
-            "content": [
-                { "type": "text", "text": "I'll read that file." },
-                {
-                    "type": "tool_use",
-                    "id": "toolu_01abc",
-                    "name": "read_file",
-                    "input": { "path": "apps/cli/src/main.rs" }
-                }
-            ],
-            "stop_reason": "tool_use"
-        });
-        let conv = Conversation::new(&mock_anthropic_provider(), &[], "hi");
-        let calls = conv.parse_tool_calls(&mock_anthropic_provider(), &payload);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read_file");
-        assert_eq!(calls[0].id, "toolu_01abc");
-        assert_eq!(calls[0].arguments["path"], "apps/cli/src/main.rs");
-    }
-
-    // v2.7.8 PR-3 — Anthropic final text comes out of content[] blocks
-    // of type "text". Multiple blocks concatenate.
-    #[test]
-    fn final_text_extracted_anthropic_multi_block() {
-        let payload = serde_json::json!({
-            "content": [
-                { "type": "text", "text": "Reviewing the file. " },
-                { "type": "text", "text": "Findings:\n1. HIGH — bug at line 42." }
-            ],
-            "stop_reason": "end_turn"
-        });
-        let conv = Conversation::new(&mock_anthropic_provider(), &[], "hi");
-        assert_eq!(
-            conv.extract_final_text(&mock_anthropic_provider(), &payload).as_deref(),
-            Some("Reviewing the file. Findings:\n1. HIGH — bug at line 42.")
-        );
-    }
-
-    // v2.7.8 PR-3 — Anthropic request body includes `tools` with
-    // `input_schema` (not `parameters` as OpenAI uses) and
-    // `tool_choice: { type: "auto" }`.
-    #[test]
-    fn builds_anthropic_request_body() {
-        let p = mock_anthropic_provider();
-        let conv = Conversation::new(&p, &[], "hello");
-        let tools = vec![review_tools::ToolDef {
-            name: "read_file",
-            description: "read a file",
-            schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}}}),
-        }];
-        let body = conv.build_request_body(&p, &tools, "claude-test", false);
-        assert_eq!(body["model"], "claude-test");
-        assert_eq!(body["tool_choice"]["type"], "auto");
-        assert_eq!(body["tools"][0]["name"], "read_file");
-        assert_eq!(body["tools"][0]["input_schema"]["properties"]["path"]["type"], "string");
-        // No top-level `parameters` field (that's the OpenAI shape).
-        assert!(body["tools"][0].get("parameters").is_none());
-    }
-
-    // v2.7.8 PR-3 — Anthropic tool_result reply shape: role=user with
-    // content array of tool_result blocks keyed by tool_use_id.
-    #[test]
-    fn appends_anthropic_tool_results() {
-        let p = mock_anthropic_provider();
-        let mut conv = Conversation::new(&p, &[], "hello");
-        let results = vec![ToolResult {
-            tool_call_id: "toolu_01abc".to_string(),
-            name: "read_file".to_string(),
-            content: "fn main() {}".to_string(),
-            is_error: false,
-        }];
-        conv.append_tool_results(&p, &results);
-        let last = conv.anthropic_messages.last().expect("appended");
-        assert_eq!(last["role"], "user");
-        let block = &last["content"][0];
-        assert_eq!(block["type"], "tool_result");
-        assert_eq!(block["tool_use_id"], "toolu_01abc");
-        assert_eq!(block["content"], "fn main() {}");
-        assert_eq!(block["is_error"], false);
     }
 }

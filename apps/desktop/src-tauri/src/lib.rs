@@ -17,6 +17,7 @@ pub mod events;
 pub mod recipes;
 pub mod posts;
 pub mod api_dispatch;
+pub mod api_dispatch_tools;
 pub mod recipes_engine;
 mod schema;
 

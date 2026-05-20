@@ -46,9 +46,16 @@ pub struct WarRoomDispatchResult {
 /// replies. Failures land in execution_logs with status="error"
 /// and surface in the war-room detail view + the next round's
 /// synthesis (per Will: humans need to understand what happened).
+// v2.7.8 PR-3c — `agent_slugs` is a parallel array to `runtimes`:
+// per-seat agent slug. `None` for a seat means "no agent" (text-only
+// dispatch, today's behaviour). When the array is shorter than
+// `runtimes` or omitted entirely, missing entries default to None.
+// Agents must already exist on the matching runtime; the CLI's
+// `lookup_by_slug` returns a clean error otherwise.
 #[tauri::command]
 pub fn dispatch_war_room(
     runtimes: Vec<String>,
+    agent_slugs: Option<Vec<Option<String>>>,
     prompt: String,
     war_room_id: Option<String>,
     round: Option<i64>,
@@ -65,13 +72,18 @@ pub fn dispatch_war_room(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let round = round.unwrap_or(1);
     let round_str = round.to_string();
+    let agent_slugs = agent_slugs.unwrap_or_default();
     // Spawn all N dispatches in parallel. wait() on each child
     // collects exit status without serializing them. Stdout is
     // captured (not piped to terminal) since the CLI's --quiet
     // flag emits compact JSON we don't need to parse here — the
     // execution_logs row is the source of truth.
     let mut children: Vec<(String, std::process::Child)> = Vec::with_capacity(runtimes.len());
-    for runtime in &runtimes {
+    for (idx, runtime) in runtimes.iter().enumerate() {
+        let agent_slug: Option<&str> = agent_slugs
+            .get(idx)
+            .and_then(|s| s.as_deref())
+            .filter(|s| !s.is_empty());
         let mut cmd = Command::new(&bin);
         cmd.args([
             "dispatch",
@@ -83,6 +95,13 @@ pub fn dispatch_war_room(
             &round_str,
             "--quiet",
         ]);
+        // v2.7.8 PR-3c — per-seat agent. The CLI's --agent flag
+        // loads the agent's persona + permissions; combined with
+        // PR-3 / PR-3b, this is what gives war-room API seats real
+        // tool access for the configured tools.
+        if let Some(slug) = agent_slug {
+            cmd.args(["--agent", slug]);
+        }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         match cmd.spawn() {
@@ -148,6 +167,74 @@ pub struct DispatchIntoSessionResult {
     pub duration_ms: Option<i64>,
 }
 
+/// v2.7.8 PR-3c — shared agent-slug resolver used by both
+/// `dispatch_into_session` and `dispatch_into_session_streaming`.
+///
+/// Order of precedence:
+///   1. Per-message `override_slug` (from the frontend's agent picker).
+///   2. The session's stored `agent_slug` from the sessions table.
+///
+/// In both cases we validate the slug points at a real agent before
+/// returning it. Invalid values (e.g. a user typing a title into the
+/// freeform NewSessionModal "Agent slug" field) are silently dropped
+/// rather than passed to the CLI as `--agent <junk>` which would
+/// error the entire dispatch.
+fn resolve_agent_slug_for_session(
+    session_id: &str,
+    override_slug: Option<String>,
+) -> Option<String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+
+    // Helper: confirm the slug exists in agents table (any runtime).
+    let agent_exists = |slug: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM agents WHERE slug = ?1 LIMIT 1",
+            rusqlite::params![slug],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+
+    // 1. Per-message override takes precedence.
+    if let Some(s) = override_slug.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if agent_exists(s) {
+            return Some(s.to_string());
+        }
+        eprintln!(
+            "session dispatch: agent_slug_override='{}' but no matching agent exists; dropping --agent",
+            s
+        );
+        return None;
+    }
+
+    // 2. Session's stored agent_slug.
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT agent_slug FROM sessions WHERE id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let s = raw?;
+    if agent_exists(&s) {
+        Some(s)
+    } else {
+        eprintln!(
+            "session dispatch: session '{}' has agent_slug='{}' but no matching agent exists; dropping --agent",
+            session_id, s
+        );
+        None
+    }
+}
+
 fn resolve_ato_binary() -> Result<String, String> {
     // Prefer the bundled installation paths, then fall through to the
     // same PATH resolution other Tauri commands use. Falls back to bare
@@ -196,16 +283,36 @@ pub fn create_session(
     Ok(parsed.id)
 }
 
+// v2.7.8 PR-3c — `agent_slug_override` lets the frontend pass a
+// per-message agent picker selection. When set, takes precedence
+// over the session's stored agent_slug; when omitted/null, falls
+// back to the stored value. Both are validated against the agents
+// table before being passed to the CLI as `--agent`.
 #[tauri::command]
 pub fn dispatch_into_session(
     runtime: String,
     prompt: String,
     session_id: String,
     model: Option<String>,
+    agent_slug_override: Option<String>,
 ) -> Result<DispatchIntoSessionResult, String> {
     let bin = resolve_ato_binary()?;
+    // v2.7.8 PR-3c — resolve which agent_slug to pass to the CLI:
+    //   1. If the caller passed an override (per-message picker),
+    //      use that. Validate it points at a real agent first.
+    //   2. Otherwise fall back to the session's stored agent_slug.
+    //      Also validated to defend against NewSessionModal's
+    //      freeform "Agent slug" field — users typed a title
+    //      ("Test") there in 2026-05-20 dogfood, causing dispatch
+    //      to error with `Agent 'Test' not found`. Now we silently
+    //      drop the flag if validation fails.
+    let effective_agent_slug: Option<String> =
+        resolve_agent_slug_for_session(&session_id, agent_slug_override);
     let mut cmd = Command::new(&bin);
     cmd.args(["dispatch", &runtime, &prompt, "--session", &session_id]);
+    if let Some(slug) = &effective_agent_slug {
+        cmd.args(["--agent", slug]);
+    }
     if let Some(m) = &model {
         cmd.args(["--model", m]);
     }
@@ -298,8 +405,14 @@ pub fn dispatch_into_session_streaming(
     prompt: String,
     session_id: String,
     model: Option<String>,
+    agent_slug_override: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let bin = resolve_ato_binary()?;
+    // v2.7.8 PR-3c — same resolution as dispatch_into_session: per-
+    // message override takes precedence over the session's stored
+    // agent_slug. Both are validated before passing to the CLI.
+    let session_agent_slug: Option<String> =
+        resolve_agent_slug_for_session(&session_id, agent_slug_override);
     let mut cmd = Command::new(&bin);
     cmd.args([
         "dispatch",
@@ -309,6 +422,9 @@ pub fn dispatch_into_session_streaming(
         &session_id,
         "--stream-jsonl",
     ]);
+    if let Some(slug) = &session_agent_slug {
+        cmd.args(["--agent", slug]);
+    }
     if let Some(m) = &model {
         cmd.args(["--model", m]);
     }

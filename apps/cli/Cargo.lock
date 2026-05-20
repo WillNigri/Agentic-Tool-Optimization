@@ -298,11 +298,13 @@ version = "2.7.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "ato-agent-permissions",
  "ato-api-providers",
  "ato-db-views",
  "ato-posts",
  "ato-pricing",
  "ato-recipes",
+ "ato-review-tools",
  "base64",
  "chrono",
  "clap",
@@ -320,6 +322,14 @@ dependencies = [
  "tokio",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "ato-agent-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -350,6 +360,15 @@ name = "ato-recipes"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "ato-review-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

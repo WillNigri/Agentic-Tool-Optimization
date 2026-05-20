@@ -51,13 +51,21 @@ fn prepend_agent_persona_with_conn(
     runtime: &str,
     body: &str,
 ) -> Result<String> {
-    let agent = crate::commands::agents::lookup_by_slug(conn, slug, Some(runtime))?
-        .ok_or_else(|| {
+    // v2.7.8 PR-3c dogfood 2026-05-20 — when the dispatch entered
+    // via PR-5a auto-fallback, the lookup runtime may not match the
+    // agent's row. Try runtime-specific first; if missing, fall back
+    // to any-runtime lookup (same logic as
+    // `load_enforceable_permissions`). The persona is the agent's
+    // system_prompt which is logically runtime-agnostic.
+    let agent = match crate::commands::agents::lookup_by_slug(conn, slug, Some(runtime))? {
+        Some(a) => a,
+        None => crate::commands::agents::lookup_by_slug(conn, slug, None)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "Agent '{}' not found on runtime '{}'. Create it in the GUI or with `ato agents create`.",
                 slug, runtime
             )
-        })?;
+        })?,
+    };
     if let Some(sp) = agent.system_prompt.as_deref() {
         let trimmed = sp.trim();
         if !trimmed.is_empty() {
@@ -79,6 +87,48 @@ fn prepend_agent_persona(
     let conn = db::open_readonly(db_path)
         .context("opening DB for --agent persona lookup")?;
     prepend_agent_persona_with_conn(&conn, slug, runtime, body)
+}
+
+/// v2.7.8 PR-5a — CLI→API auto-fallback lookup.
+///
+/// Returns Some(api_provider_slug) when the given CLI runtime has a
+/// matching API provider AND a key for that provider is configured
+/// (either env var or llm_api_keys). Returns None when no fallback
+/// is available — caller surfaces the original "CLI not found" error.
+///
+/// Mapping (mirrors `byok::runtime_byok_env` but in the opposite
+/// direction — runtime → provider slug):
+///   claude  → "anthropic"
+///   gemini  → "google"
+///   codex   → no fallback yet; OpenAI not in the api-provider
+///             registry today, queued for v2.8.x.
+fn api_fallback_for_missing_cli(runtime_name: &str, db_path: &PathBuf) -> Option<&'static str> {
+    let fallback_slug = match runtime_name {
+        "claude" => "anthropic",
+        "gemini" => "google",
+        _ => return None,
+    };
+    let provider = crate::api_dispatch::find_provider(fallback_slug)?;
+    // Honor env var first (matches resolve_api_key precedence).
+    if let Ok(v) = std::env::var(provider.env_var) {
+        if !v.trim().is_empty() {
+            return Some(fallback_slug);
+        }
+    }
+    // Then check llm_api_keys for an active row.
+    let conn = db::open_readonly(db_path).ok()?;
+    let has_key: bool = conn
+        .query_row(
+            "SELECT 1 FROM llm_api_keys WHERE LOWER(provider) = LOWER(?1) AND is_active = 1 LIMIT 1",
+            [provider.slug],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_key {
+        Some(fallback_slug)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -438,6 +488,7 @@ pub fn run(
             prompt,
             model,
             agent_slug_for_event,
+            None, // direct API dispatch — agent lookup uses provider.slug
             session,
             war_room_id,
             war_room_round,
@@ -448,7 +499,47 @@ pub fn run(
             opts,
         );
     }
-    let cli_path = runtime::resolve_runtime_cli(runtime_name)?;
+    // v2.7.8 PR-5a — CLI→API auto-fallback. When the user dispatches a
+    // CLI runtime (claude / gemini) whose binary isn't on PATH AND a
+    // matching API key IS configured, silently route through the
+    // matching API provider instead of erroring with "CLI not found."
+    // codex has no OpenAI API provider in the registry yet so it falls
+    // through to the existing error message (queued for v2.8.x).
+    let cli_path = match runtime::resolve_runtime_cli(runtime_name) {
+        Ok(p) => p,
+        Err(cli_err) => {
+            if let Some(fallback_slug) = api_fallback_for_missing_cli(runtime_name, db_path) {
+                if let Some(provider) = crate::api_dispatch::find_provider(fallback_slug) {
+                    if opts.human {
+                        emit_human(&format!(
+                            "[fallback] {} CLI not found — routing through {} API provider.",
+                            runtime_name, fallback_slug
+                        ));
+                    }
+                    // PR-5a — agent record lives under the original
+                    // CLI runtime name ("gemini"), not provider.slug
+                    // ("google"). Pass it through so persona +
+                    // permissions lookups hit the right row.
+                    return run_api(
+                        provider,
+                        prompt,
+                        model,
+                        agent_slug_for_event,
+                        Some(runtime_name),
+                        session,
+                        war_room_id,
+                        war_room_round,
+                        stream,
+                        stream_jsonl,
+                        with_tools,
+                        db_path,
+                        opts,
+                    );
+                }
+            }
+            return Err(cli_err);
+        }
+    };
 
     // v2.3.25 Phase 6.x — register in live_runs so the desktop's
     // Live tab shows this dispatch while it's in flight. Best-effort:
@@ -510,6 +601,22 @@ pub fn run(
         effective_prompt
     };
 
+    // v2.7.8 PR-2 + PR-6 — load the agent's enforceable permissions.
+    // `load_enforceable_permissions` honors the opt-in migration flag:
+    // pre-v2.7.8 agents (NULL `permissions_migrated_at`) get defaults
+    // even when `permissions` is populated, so dispatch behaviour is
+    // identical to pre-PR-2 on day 1. Migrated agents and v2.7.8+
+    // creates get the parsed permissions enforced.
+    let agent_perms: ato_agent_permissions::AgentPermissions = if let Some(slug) =
+        agent_slug_for_event.as_deref()
+    {
+        db::open_readonly(db_path)
+            .map(|c| crate::commands::agents::load_enforceable_permissions(&c, slug, runtime_name))
+            .unwrap_or_default()
+    } else {
+        ato_agent_permissions::AgentPermissions::default()
+    };
+
     let mut cmd = Command::new(&cli_path);
     // BYOK: if the user stored an Anthropic/OpenAI/Gemini key in
     // Settings → API Keys, forward it as the runtime's standard env var
@@ -532,14 +639,18 @@ pub fn run(
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
-            // 2026-05-19 (claude+codex war-room synthesis) — mirror of
-            // the desktop's mod.rs:836 patch. Pre-allowlist sibling-
-            // runtime Bash invocations so multi-runtime prompts like
-            // "call gemini to say hi" don't hit Claude Code's permission
-            // gate (which surfaces an OS prompt ATO can't see).
-            cmd.arg("--allowedTools").arg(
-                "Bash(ato:*) Bash(gemini:*) Bash(codex:*) Bash(openclaw:*) Bash(hermes:*) Bash(minimax:*)",
-            );
+            // v2.7.8 PR-2 — agent-permission-aware --allowedTools. When
+            // the agent has no permissions configured (empty / NULL),
+            // the crate returns CLAUDE_DEFAULT_ALLOWED_TOOLS which
+            // exactly matches the pre-PR-2 hardcoded bundle (pinned by
+            // PR-1 golden test #1: Bash(ato:*) Bash(gemini:*) ...).
+            // When the agent has permissions, the allowlist is derived
+            // from `allowed`, omitting `denied` / `requireApproval`.
+            // The settings_local JSON is NOT written by the CLI today —
+            // that surface is `~/.claude/settings.local.json` which the
+            // desktop owns; CLI uses --allowedTools per-invocation.
+            let claude_flags = ato_agent_permissions::to_claude(&agent_perms);
+            cmd.arg("--allowedTools").arg(&claude_flags.allowed_tools);
             // v2.3.31 Slice A — wire claude --resume when the session
             // has a captured runtime_session_id, and switch output to
             // JSON so we can read back the session id metadata for
@@ -565,27 +676,44 @@ pub fn run(
             // Codex requires `exec` + skip-git-repo-check (mirrors the
             // desktop's behaviour). Model goes before the prompt arg.
             //
-            // 2026-05-19 (Will dogfood) — also pass
-            // `--sandbox workspace-write` + `-c approval_policy="never"`
-            // so dispatched codex can actually patch files instead of
-            // returning "I didn't patch because this harness is
-            // read-only." ATO dispatching codex IS the authorization;
-            // headless on-request approvals can't be answered (no TTY).
-            // See apps/desktop/src-tauri/src/commands/mod.rs (codex
-            // branch) for the longer rationale.
+            // v2.7.8 PR-2 — agent-permission-aware sandbox mode. The
+            // pre-PR-2 baseline (`--sandbox workspace-write -c
+            // approval_policy="never"`) is the crate's default-arm
+            // output when permissions are empty (pinned by PR-1 test
+            // #1). Any non-empty `denied` or `requireApproval` demotes
+            // to `read-only` because codex's --sandbox is a 3-mode
+            // enum — there is no per-tool deny rule, so the only safe
+            // structural enforcement is dropping the broader
+            // capability. Labels we can't enforce land in
+            // `advisory_only` and are surfaced in the UI / telemetry.
+            let codex_flags = ato_agent_permissions::to_codex(&agent_perms);
             cmd.arg("exec")
                 .arg("--skip-git-repo-check")
                 .arg("--sandbox")
-                .arg("workspace-write")
+                .arg(codex_flags.sandbox)
                 .arg("-c")
-                .arg("approval_policy=\"never\"");
+                .arg(format!("approval_policy=\"{}\"", codex_flags.approval_policy));
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
             cmd.arg(&effective_prompt);
         }
         "gemini" => {
+            // v2.7.8 PR-2 — gemini CLI's enforcement is binary
+            // (--yolo or default). When the agent's permissions can't
+            // be honored (any non-empty deny/approval list), the crate
+            // returns an error string and we refuse the dispatch
+            // rather than silently dropping policy. Empty permissions
+            // pass through unchanged (yolo=false, no error) — matches
+            // pre-PR-2 behaviour.
+            let gemini_flags = ato_agent_permissions::to_gemini(&agent_perms);
+            if let Some(err) = gemini_flags.error {
+                anyhow::bail!("{}", err);
+            }
             cmd.arg("-p").arg(&effective_prompt);
+            if gemini_flags.yolo {
+                cmd.arg("--yolo");
+            }
             if let Some(m) = &model {
                 cmd.arg("-m").arg(m);
             }
@@ -869,11 +997,20 @@ fn truncate(s: &str) -> String {
 /// and dispatch with full history (stateless providers can't resume
 /// otherwise), then append the new user prompt + assistant response
 /// as the next two turns.
+// v2.7.8 PR-5a follow-up — `agent_runtime_override` (4th-from-end arg):
+// when entered via the auto-fallback path (`claude→anthropic`,
+// `gemini→google`), the agent record lives under the ORIGINAL CLI
+// runtime name (e.g. "gemini"), not the API provider slug ("google").
+// Lookups for persona + permissions must use the override; the API
+// call itself (URL/key/shape) still uses provider.slug. None for
+// direct API-provider dispatches → falls back to provider.slug.
+#[allow(clippy::too_many_arguments)]
 fn run_api(
     provider: &crate::api_dispatch::ApiProvider,
     prompt: &str,
     model_override: Option<String>,
     agent_slug_for_event: Option<String>,
+    agent_runtime_override: Option<&str>,
     session: Option<crate::commands::sessions::Session>,
     war_room_id: Option<String>,
     war_room_round: Option<i64>,
@@ -883,6 +1020,7 @@ fn run_api(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    let agent_lookup_runtime = agent_runtime_override.unwrap_or(provider.slug);
     // Quota pre-flight (same shape as the CLI-runtime path).
     if let Ok(Some(resets_at)) = crate::quota::lookup_future(db_path, provider.slug) {
         anyhow::bail!(
@@ -929,10 +1067,27 @@ fn run_api(
     // unwrapped for execution_logs / session_turns logging below so
     // persona doesn't nest across multi-turn sessions.
     let effective_prompt: String = if let Some(slug) = agent_slug_for_event.as_deref() {
-        prepend_agent_persona_with_conn(&conn, slug, provider.slug, prompt)?
+        prepend_agent_persona_with_conn(&conn, slug, agent_lookup_runtime, prompt)?
     } else {
         prompt.to_string()
     };
+
+    // v2.7.8 PR-3 — for API providers, load the agent's permission
+    // gate so the tool-call loop can offer / refuse tools per the
+    // user's stored policy. Honors the PR-6 migration flag via
+    // `load_enforceable_permissions`. Empty permissions → empty gate
+    // → loop stays disabled unless the caller forced with_tools.
+    //
+    // When entered via PR-5a auto-fallback, agent_lookup_runtime is
+    // the ORIGINAL CLI runtime ("gemini") not the provider slug
+    // ("google") — matches where the agent was actually created.
+    let agent_perms_for_api = if let Some(slug) = agent_slug_for_event.as_deref() {
+        crate::commands::agents::load_enforceable_permissions(&conn, slug, agent_lookup_runtime)
+    } else {
+        ato_agent_permissions::AgentPermissions::default()
+    };
+    let agent_gate_for_api =
+        ato_agent_permissions::to_api_tool_gate(&agent_perms_for_api, &[]);
     // v2.3.47 Phase 6.x-F — streaming. Three output modes:
     //   - --human + --stream: write raw chunks to stdout as they
     //     arrive, then print the normal footer at the end.
@@ -972,19 +1127,66 @@ fn run_api(
                 }
             },
         )
-    } else if with_tools && crate::api_dispatch_tools::provider_supports_tools(provider) {
-        // v2.4.5 Tier 2 — function-calling dispatch loop. Only
-        // engaged when the caller (e.g. `ato review --with-tools`)
-        // opts in AND the provider has a tools-flavor mapping
-        // (openai shape or gemini). Otherwise falls through to the
-        // plain dispatch_with_history below — minimax stays on
-        // Tier 1 because its tool-calling reliability on the
-        // subscription tier isn't there yet.
+    } else if (with_tools || !agent_gate_for_api.allowed_tools.is_empty())
+        && crate::api_dispatch_tools::provider_supports_tools(provider)
+        && {
+            // War-room finding (codex BUG #2): if the agent's gate
+            // post-filters review_tools::registry() down to an empty
+            // set (e.g. agent allows only `send_emails` which isn't
+            // a review tool), don't enter the tool loop — sending an
+            // empty `tools` field with `tool_choice: auto` confuses
+            // providers and produces unhelpful errors. Fall through
+            // to the no-tools dispatch_with_history path instead.
+            with_tools
+                || crate::review_tools::registry().iter().any(|t| {
+                    matches!(
+                        agent_gate_for_api.check(t.name),
+                        ato_agent_permissions::GateDecision::Allow
+                    )
+                })
+        }
+    {
+        // v2.7.8 PR-3 — engage the tool-call loop when EITHER the
+        // caller explicitly opted in via `with_tools`
+        // (e.g. `ato review --with-tools`), OR the dispatched agent
+        // has permissions enabling at least one tool. War-room
+        // dispatches with agent permissions flow through this branch
+        // so API runtimes get the same code-reading capability CLI
+        // runtimes have.
+        // The tool registry the model sees is the review-tools
+        // registry filtered by the agent's gate (when present);
+        // legacy callers without agent permissions get the full
+        // registry, matching pre-PR-3 behaviour.
+        //
+        // War-room finding (codex BUG #1): until the PR-5 approval UI
+        // lands, `RequireApproval` tools are DENIED implicitly — they
+        // do NOT appear in the registry offered to the model. This
+        // is safer than offering them and silently executing without
+        // approval. The audit doc's open question Q3 documents the
+        // structural limit; the UI surfaces "tool needs approval but
+        // approval flow isn't built yet" when this code path is hit.
+        let tools: Vec<crate::review_tools::ToolDef> = if agent_gate_for_api
+            .allowed_tools
+            .is_empty()
+        {
+            crate::review_tools::registry()
+        } else {
+            crate::review_tools::registry()
+                .into_iter()
+                .filter(|t| {
+                    matches!(
+                        agent_gate_for_api.check(t.name),
+                        ato_agent_permissions::GateDecision::Allow
+                    )
+                })
+                .collect()
+        };
         crate::api_dispatch_tools::dispatch_with_tools(
             provider,
             &history,
             &effective_prompt,
             model_override.as_deref(),
+            &tools,
             &conn,
         )
     } else {
@@ -1399,22 +1601,26 @@ mod tests {
     use rusqlite::Connection;
 
     fn agents_schema() -> &'static str {
+        // Test fixture mirrors the production schema (apps/desktop/
+        // src-tauri/src/schema.rs:162-179) including the PR-6 column
+        // `permissions_migrated_at` so lookup_by_slug's SELECT matches.
         "CREATE TABLE agents (
-            id            TEXT PRIMARY KEY,
-            slug          TEXT NOT NULL,
-            display_name  TEXT NOT NULL,
-            description   TEXT,
-            runtime       TEXT NOT NULL,
-            model         TEXT,
-            project_id    TEXT,
-            system_prompt TEXT,
-            permissions   TEXT,
-            skills        TEXT,
-            mcps          TEXT,
-            goal          TEXT,
-            file_path     TEXT,
-            created_at    TEXT NOT NULL,
-            last_used_at  TEXT,
+            id                          TEXT PRIMARY KEY,
+            slug                        TEXT NOT NULL,
+            display_name                TEXT NOT NULL,
+            description                 TEXT,
+            runtime                     TEXT NOT NULL,
+            model                       TEXT,
+            project_id                  TEXT,
+            system_prompt               TEXT,
+            permissions                 TEXT,
+            skills                      TEXT,
+            mcps                         TEXT,
+            goal                        TEXT,
+            file_path                   TEXT,
+            created_at                  TEXT NOT NULL,
+            last_used_at                TEXT,
+            permissions_migrated_at     TEXT,
             UNIQUE (runtime, slug)
         );"
     }
@@ -1545,5 +1751,247 @@ mod tests {
             prepend_agent_persona_with_conn(&conn, "shared", "codex", "body").unwrap();
         assert!(codex_result.contains("CODEX-PERSONA"));
         assert!(!codex_result.contains("CLAUDE-PERSONA"));
+    }
+
+    // v2.7.8 PR-2 + PR-6 — migrated agent with denied permissions
+    // → codex sandbox demotes to read-only.
+    //
+    // The fixture stamps `permissions_migrated_at` so the opt-in
+    // enforcement path is exercised. Without the stamp, the migration
+    // gate (PR-6) would return defaults regardless of the deny list;
+    // see `pr6_pre_migration_keeps_defaults` for that case.
+    #[test]
+    fn pr2_migrated_codex_denied_rm() {
+        let conn = Connection::open_in_memory().expect("in-memory");
+        conn.execute_batch(agents_schema()).unwrap();
+        let permissions_json = r#"["allow:Read","deny:Bash(rm:*)"]"#;
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, permissions, created_at, permissions_migrated_at)
+             VALUES ('a', 'rm-blocked', 'rm-blocked', 'codex', 'persona', ?1, '2026-05-14T00:00:00Z', '2026-05-20T10:00:00Z')",
+            rusqlite::params![permissions_json],
+        )
+        .unwrap();
+
+        let perms = crate::commands::agents::load_enforceable_permissions(
+            &conn,
+            "rm-blocked",
+            "codex",
+        );
+        assert_eq!(perms.allowed, vec!["Read".to_string()]);
+        assert_eq!(perms.denied, vec!["Bash(rm:*)".to_string()]);
+
+        let codex_flags = ato_agent_permissions::to_codex(&perms);
+        assert_eq!(
+            codex_flags.sandbox, "read-only",
+            "denied:Bash(rm:*) must demote codex sandbox to read-only"
+        );
+        assert!(
+            codex_flags
+                .advisory_only
+                .contains(&"Bash(rm:*)".to_string()),
+            "Bash(rm:*) lands in advisory_only for UI surfacing"
+        );
+    }
+
+    // v2.7.8 PR-2 — NULL permissions column → backward-compat defaults.
+    // Pre-v2.7.8 agents have NULL here; their dispatch must produce
+    // exactly the pre-PR-2 flag bundle.
+    #[test]
+    fn pr2_null_permissions_match_pre_pr2_defaults() {
+        let conn = db_with_agent("legacy", "codex", Some("persona"));
+        let perms = crate::commands::agents::load_enforceable_permissions(&conn, "legacy", "codex");
+        assert!(perms.is_empty());
+
+        let claude_flags = ato_agent_permissions::to_claude(&perms);
+        assert_eq!(
+            claude_flags.allowed_tools,
+            ato_agent_permissions::CLAUDE_DEFAULT_ALLOWED_TOOLS
+        );
+        let codex_flags = ato_agent_permissions::to_codex(&perms);
+        assert_eq!(codex_flags.sandbox, "workspace-write");
+        assert_eq!(codex_flags.approval_policy, "never");
+    }
+
+    // v2.7.8 PR-5a — auto-fallback lookup tests. The fallback only
+    // fires when a matching API provider is registered AND a key is
+    // configured. Codex has no OpenAI api-provider registration
+    // today (v2.8.x queued), so it never falls back regardless of
+    // env state.
+    //
+    // The tests touch process-global env vars (ANTHROPIC_API_KEY /
+    // OPENAI_API_KEY) which cargo's parallel test runner would race
+    // on without serialization. PR5A_ENV_MUTEX serializes any test
+    // that reads or writes those vars. Tests point at a non-existent
+    // DB path because the env-var path bypasses the DB lookup
+    // entirely.
+    fn nonexistent_db_path() -> PathBuf {
+        PathBuf::from("/tmp/ato-test-nonexistent-db-pr5a.sqlite")
+    }
+    static PR5A_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn pr5a_fallback_claude_to_anthropic_when_env_set() {
+        let _lock = PR5A_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-test-fake");
+        let got = super::api_fallback_for_missing_cli("claude", &nonexistent_db_path());
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert_eq!(got, Some("anthropic"));
+    }
+
+    #[test]
+    fn pr5a_fallback_codex_never_falls_back() {
+        // Codex has no OpenAI api-provider registration. Even with
+        // OPENAI_API_KEY set, no fallback fires.
+        let _lock = PR5A_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("OPENAI_API_KEY", "sk-openai-fake");
+        let got = super::api_fallback_for_missing_cli("codex", &nonexistent_db_path());
+        std::env::remove_var("OPENAI_API_KEY");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn pr5a_fallback_claude_no_key_returns_none() {
+        // Both paths fail to find a key → None. Critical: this is
+        // the case that controls whether `ato dispatch claude` with
+        // no CLI installed and no key returns the original "CLI not
+        // found" error instead of routing to a key-less anthropic
+        // attempt that would itself fail.
+        let _lock = PR5A_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let got = super::api_fallback_for_missing_cli("claude", &nonexistent_db_path());
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn pr5a_fallback_unknown_runtime_returns_none() {
+        let got = super::api_fallback_for_missing_cli("hermes", &nonexistent_db_path());
+        assert_eq!(got, None);
+    }
+
+    // v2.7.8 PR-5a regression — dogfood 2026-05-20 found that run_api
+    // was looking up the agent under provider.slug ("google") when the
+    // agent was actually created under the original CLI runtime
+    // ("gemini"). The fallback path now threads the original runtime
+    // through as `agent_runtime_override`, AND
+    // `load_enforceable_permissions` falls back to a cross-runtime
+    // lookup if the runtime-specific row is missing or non-migrated
+    // — because users commonly have the same agent slug "mirrored"
+    // across runtimes and only one row carries the migrated
+    // permissions. This test pins both behaviors:
+    //   1. Runtime-specific lookup works.
+    //   2. Cross-runtime fallback finds the migrated row when looked
+    //      up under a different runtime.
+    #[test]
+    fn pr5a_fallback_agent_lookup_uses_original_runtime() {
+        let conn = Connection::open_in_memory().expect("in-memory");
+        conn.execute_batch(agents_schema()).unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, permissions, permissions_migrated_at, created_at)
+             VALUES ('a', 'fallback-target', 'fallback-target', 'gemini', 'persona', '[\"allow:read_file\"]', '2026-05-20T00:00:00Z', '2026-05-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Lookup under the ORIGINAL CLI runtime — finds the row.
+        let perms_gemini = crate::commands::agents::load_enforceable_permissions(
+            &conn,
+            "fallback-target",
+            "gemini",
+        );
+        assert_eq!(perms_gemini.allowed, vec!["read_file".to_string()]);
+
+        // Lookup under a DIFFERENT runtime (e.g. API-provider slug)
+        // — cross-runtime fallback finds the migrated row on
+        // 'gemini' and returns its permissions. This is the
+        // PR-5a-dogfood-2026-05-20 behavior: an agent's permission
+        // DSL is transport-agnostic.
+        let perms_google = crate::commands::agents::load_enforceable_permissions(
+            &conn,
+            "fallback-target",
+            "google",
+        );
+        assert_eq!(perms_google.allowed, vec!["read_file".to_string()]);
+    }
+
+    // v2.7.8 PR-3c dogfood 2026-05-20 — the case that caught the bug:
+    // same slug exists on TWO runtimes. The runtime-specific row
+    // (gemini) is NON-migrated. The other-runtime row (google) IS
+    // migrated. Lookup at "gemini" must return the migrated google
+    // row's permissions via cross-runtime fallback.
+    #[test]
+    fn pr3c_cross_runtime_prefers_migrated_row() {
+        let conn = Connection::open_in_memory().expect("in-memory");
+        conn.execute_batch(agents_schema()).unwrap();
+        // Non-migrated mirror on gemini (the pre-v2.7.8 row).
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, permissions, permissions_migrated_at, created_at)
+             VALUES ('a', 'devex', 'devex', 'gemini', 'persona', NULL, NULL, '2026-05-17T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Migrated row on google (the user opted into enforcement).
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, permissions, permissions_migrated_at, created_at)
+             VALUES ('b', 'devex', 'devex', 'google', 'persona', '[\"allow:read_file\"]', '2026-05-20T17:47:19Z', '2026-05-20T17:47:19Z')",
+            [],
+        )
+        .unwrap();
+
+        // Dispatch was for runtime=gemini (via auto-fallback). The
+        // runtime-specific row is non-migrated → falls back to
+        // cross-runtime → finds the migrated google row → returns
+        // its permissions.
+        let perms = crate::commands::agents::load_enforceable_permissions(
+            &conn, "devex", "gemini",
+        );
+        assert_eq!(
+            perms.allowed,
+            vec!["read_file".to_string()],
+            "cross-runtime fallback must prefer the migrated row even when the runtime-specific row is non-migrated"
+        );
+    }
+
+    // v2.7.8 PR-6 — pre-migration agents (NULL migrated_at) MUST get
+    // defaults even when `permissions` is populated. This is the
+    // backward-compat invariant: every existing agent's dispatch
+    // behaviour is identical on the v2.7.8 upgrade.
+    #[test]
+    fn pr6_pre_migration_keeps_defaults() {
+        let conn = Connection::open_in_memory().expect("in-memory");
+        conn.execute_batch(agents_schema()).unwrap();
+        // Populated permissions but NULL migrated_at — pre-v2.7.8 row
+        // whose policy was advisory under the old dispatch path.
+        let permissions_json = r#"["allow:Read","deny:Bash(rm:*)"]"#;
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, system_prompt, permissions, created_at)
+             VALUES ('a', 'legacy-deny', 'legacy-deny', 'codex', 'persona', ?1, '2026-05-14T00:00:00Z')",
+            rusqlite::params![permissions_json],
+        )
+        .unwrap();
+
+        // Without migration, the gate returns defaults regardless of
+        // what's in `permissions`.
+        let perms = crate::commands::agents::load_enforceable_permissions(
+            &conn,
+            "legacy-deny",
+            "codex",
+        );
+        assert!(
+            perms.is_empty(),
+            "Pre-migration agents must yield empty permissions"
+        );
+
+        // Stamp migration → enforcement kicks in.
+        conn.execute(
+            "UPDATE agents SET permissions_migrated_at = '2026-05-20T10:00:00Z' WHERE slug = 'legacy-deny'",
+            [],
+        )
+        .unwrap();
+        let perms = crate::commands::agents::load_enforceable_permissions(
+            &conn,
+            "legacy-deny",
+            "codex",
+        );
+        assert_eq!(perms.denied, vec!["Bash(rm:*)".to_string()]);
     }
 }

@@ -298,6 +298,32 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE agents ADD COLUMN kind TEXT NOT NULL DEFAULT 'internal'",
         [],
     );
+    // v2.7.8 PR-6 — opt-in enforcement of agent.permissions.
+    //
+    // PR-2 wired the dispatch path to read agent.permissions and
+    // translate them into runtime-native flags. Pre-v2.7.8 agents may
+    // already have permissions populated (the wizard has been writing
+    // them since v1.3.0) — turning enforcement on for them retroactively
+    // would silently change dispatch behaviour for every existing agent
+    // on upgrade. That's the migration trap claude flagged in the
+    // 2026-05-20 war-room.
+    //
+    // Resolution: `permissions_migrated_at` is the explicit opt-in flag.
+    // - NULL → dispatch path ignores stored permissions and uses
+    //   pre-PR-2 hardcoded defaults. Backward compatibility preserved
+    //   for every existing agent on day 1.
+    // - Non-NULL → dispatch path reads + enforces stored permissions.
+    //   Stamped at create_agent for any agent newly created on v2.7.8+
+    //   (new agents have correct expectations from the wizard). Stamped
+    //   when the user explicitly confirms migration via the next-edit
+    //   toast for pre-existing agents.
+    //
+    // The migration timestamp also serves as audit evidence: when did
+    // this agent's policy become enforceable?
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN permissions_migrated_at TEXT",
+        [],
+    );
     // v2.1.0 — execution_logs links to its corresponding cloud
     // agent_traces row when the dispatch was uploaded. Powers replay
     // ("look up the local prompt for this cloud trace ID"). Existing

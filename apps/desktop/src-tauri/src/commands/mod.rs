@@ -829,6 +829,55 @@ async fn prompt_agent_inner(
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
+    // v2.7.8 PR-2 + PR-6 — load the agent's permissions when dispatching
+    // by slug, BUT only enforce them when `permissions_migrated_at` is
+    // non-NULL (the opt-in flag from PR-6). NULL = pre-v2.7.8 agent that
+    // hasn't been confirmed for the new enforcement semantics → fall
+    // back to defaults so the dispatch matches pre-PR-2 behaviour.
+    //
+    // The crate's default-arm output (when AgentPermissions is empty)
+    // is pinned by PR-1 golden test #1 to match the pre-PR-2 hardcoded
+    // flag bundles. A missing slug or DB failure degrades silently the
+    // same way.
+    let agent_perms: ato_agent_permissions::AgentPermissions = if let Some(slug) =
+        agent_slug.as_deref()
+    {
+        let db_path = crate::get_db_path();
+        rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()
+        .and_then(|c| {
+            c.query_row(
+                "SELECT permissions, permissions_migrated_at FROM agents
+                  WHERE slug = ?1 AND runtime = ?2
+                  ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1",
+                rusqlite::params![slug, runtime],
+                |r| Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                )),
+            )
+            .ok()
+        })
+        .and_then(|(perms_json, migrated_at)| {
+            // Opt-in flag: only enforce stored permissions when the
+            // agent has been migrated. Pre-v2.7.8 rows have
+            // migrated_at = NULL and keep using defaults.
+            if migrated_at.is_some() {
+                perms_json
+            } else {
+                None
+            }
+        })
+        .as_deref()
+        .map(ato_agent_permissions::parse_permissions_column)
+        .unwrap_or_default()
+    } else {
+        ato_agent_permissions::AgentPermissions::default()
+    };
+
     let mut cmd = match runtime.as_str() {
         "claude" => {
             let claude_path = which_claude().ok_or_else(|| {
@@ -842,18 +891,15 @@ async fn prompt_agent_inner(
             if let Some(m) = &model_override {
                 c.arg("--model").arg(m);
             }
-            // 2026-05-19 (claude+codex war-room synthesis) — pre-allowlist
-            // the sibling-runtime Bash invocations Claude Code might
-            // call. Without this, prompts like "call gemini to say hi"
-            // hit Claude Code's permission gate; the prompt UI surfaces
-            // out-of-band where ATO can't see it (we capture stdout/stderr
-            // with piped streams, not a PTY), so Will's chat-reply
-            // "Approved" goes nowhere and the loop hangs. Per-invocation
-            // --allowedTools is the belt; the suspenders is the
-            // settings.local.json file write at agent-save time (v2.7.8).
-            c.arg("--allowedTools").arg(
-                "Bash(ato:*) Bash(gemini:*) Bash(codex:*) Bash(openclaw:*) Bash(hermes:*) Bash(minimax:*)",
-            );
+            // v2.7.8 PR-2 — agent-permission-aware --allowedTools.
+            // When the agent has no permissions, the crate returns
+            // CLAUDE_DEFAULT_ALLOWED_TOOLS which exactly matches the
+            // pre-PR-2 hardcoded bundle (pinned by PR-1 golden test
+            // #1). Per-invocation --allowedTools is the belt; the
+            // suspenders is the settings.local.json file write at
+            // agent-save time (queued for v2.7.9+).
+            let claude_flags = ato_agent_permissions::to_claude(&agent_perms);
+            c.arg("--allowedTools").arg(&claude_flags.allowed_tools);
             c
         }
         "codex" => {
@@ -886,12 +932,22 @@ async fn prompt_agent_inner(
             // `danger-full-access` would let codex touch ~/ paths
             // outside the workspace — explicitly NOT what we want.
             let mut c = Command::new(codex_path);
+            // v2.7.8 PR-2 — agent-permission-aware sandbox mode. The
+            // pre-PR-2 baseline (`workspace-write` + `never`) is the
+            // crate's empty-permissions default (PR-1 test #1). Any
+            // non-empty deny/approval list demotes to `read-only`
+            // because codex --sandbox is a 3-mode enum with no
+            // per-tool deny. Advisory labels surface in UI / telemetry.
+            let codex_flags = ato_agent_permissions::to_codex(&agent_perms);
             c.arg("exec")
                 .arg("--skip-git-repo-check")
                 .arg("--sandbox")
-                .arg("workspace-write")
+                .arg(codex_flags.sandbox)
                 .arg("-c")
-                .arg("approval_policy=\"never\"");
+                .arg(format!(
+                    "approval_policy=\"{}\"",
+                    codex_flags.approval_policy
+                ));
             if let Some(m) = &model_override {
                 c.arg("--model").arg(m);
             }
@@ -951,8 +1007,19 @@ async fn prompt_agent_inner(
                      2. Add a Google API key in Settings → API Keys and use 'google' from the runtime dropdown".to_string()
                 }
             })?;
+            // v2.7.8 PR-2 — gemini's enforcement is binary
+            // (--yolo or default). If the agent's permissions can't be
+            // honored (any non-empty deny/approval list), refuse the
+            // dispatch rather than silently dropping the policy.
+            let gemini_flags = ato_agent_permissions::to_gemini(&agent_perms);
+            if let Some(err) = gemini_flags.error {
+                return Err(err);
+            }
             let mut c = Command::new(gemini_path);
             c.arg("-p").arg(&prompt);
+            if gemini_flags.yolo {
+                c.arg("--yolo");
+            }
             if let Some(m) = &model_override {
                 c.arg("-m").arg(m);
             }
@@ -1230,12 +1297,21 @@ pub struct ApiDispatchResult {
     pub created_at: String,
 }
 
+// v2.7.8 PR-3b — `workspace_root` (5th arg): when the dispatched
+// agent has permissions enabling a tool-call loop, this must be the
+// absolute path to the user's project root. The desktop process cwd
+// (`apps/desktop/` in dev) is NOT a safe sandbox root — codex review
+// flagged that resolving cwd would silently inspect the wrong repo.
+// None is allowed for text-only dispatches; tool-using dispatches
+// without an explicit workspace_root return a hard error so the
+// caller can't accidentally read files from the wrong project.
 #[tauri::command]
 pub async fn prompt_api_provider(
     runtime: String,
     prompt: String,
     model: Option<String>,
     agent_slug: Option<String>,
+    workspace_root: Option<String>,
 ) -> Result<ApiDispatchResult, String> {
     let provider = crate::api_dispatch::find_provider(&runtime).ok_or_else(|| {
         format!(
@@ -1264,10 +1340,120 @@ pub async fn prompt_api_provider(
     }
     let _active_run_guard = ActiveRunGuard(active_run_id);
 
-    // dispatch() opens its own short-lived connection for the key
-    // lookup and drops it before any .await — Connection isn't Send.
-    let outcome =
-        crate::api_dispatch::dispatch(provider, &prompt, model.as_deref(), &db_path).await;
+    // v2.7.8 PR-3b — load the agent's permission gate so we can decide
+    // whether to engage the tool-call loop. Honors the PR-6 migration
+    // flag: pre-v2.7.8 agents (NULL `permissions_migrated_at`) get an
+    // empty gate → text-only dispatch, matching pre-PR-3b behaviour.
+    //
+    // We also load the matched agent's persisted `runtime` so the
+    // permissions row resolves correctly when the user attached a
+    // CLI-runtime agent to an API-provider dispatch (e.g. an agent
+    // created under "gemini" runtime is reused via the "google"
+    // provider — same pattern PR-5a's CLI auto-fallback solved).
+    let (agent_perms, agent_runtime_label): (
+        ato_agent_permissions::AgentPermissions,
+        Option<String>,
+    ) = if let Some(slug) = agent_slug.as_deref() {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok();
+        if let Some(c) = conn {
+            // Most-recently-used row for this slug (any runtime). The
+            // agent.permissions DSL is runtime-agnostic at the spec
+            // level; the dispatch runtime is provider.slug for the
+            // HTTP call regardless.
+            let row: Option<(Option<String>, Option<String>, String)> = c
+                .query_row(
+                    "SELECT permissions, permissions_migrated_at, runtime
+                       FROM agents WHERE slug = ?1
+                       ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1",
+                    rusqlite::params![slug],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .ok();
+            match row {
+                Some((perms_json, migrated_at, runtime_label)) => {
+                    let p = if migrated_at.is_some() {
+                        perms_json
+                            .as_deref()
+                            .map(ato_agent_permissions::parse_permissions_column)
+                            .unwrap_or_default()
+                    } else {
+                        ato_agent_permissions::AgentPermissions::default()
+                    };
+                    (p, Some(runtime_label))
+                }
+                None => (ato_agent_permissions::AgentPermissions::default(), None),
+            }
+        } else {
+            (ato_agent_permissions::AgentPermissions::default(), None)
+        }
+    } else {
+        (ato_agent_permissions::AgentPermissions::default(), None)
+    };
+    let _ = agent_runtime_label; // captured for telemetry only today; PR-5 UI surfaces it
+    let agent_gate = ato_agent_permissions::to_api_tool_gate(&agent_perms, &[]);
+
+    // Decide between the tool-call loop and the legacy text-only
+    // dispatch:
+    //   - tool loop: agent has at least one tool the model would
+    //     actually be able to use (gate.check returns Allow on some
+    //     review_tool's name) AND provider supports tools.
+    //   - text-only: otherwise. Preserves pre-PR-3b behaviour for
+    //     agents without permissions and for non-tools providers.
+    let use_tool_loop = !agent_gate.allowed_tools.is_empty()
+        && crate::api_dispatch_tools::provider_supports_tools(provider)
+        && ato_review_tools::registry().iter().any(|t| {
+            matches!(
+                agent_gate.check(t.name),
+                ato_agent_permissions::GateDecision::Allow
+            )
+        });
+
+    let outcome = if use_tool_loop {
+        // PR-3b — explicit workspace root is REQUIRED for tool
+        // dispatches. The desktop process cwd is the wrong sandbox
+        // (codex review: it would silently resolve to the ATO repo,
+        // not the user's project). If the frontend didn't pass a
+        // root, fail loud — better than reading the wrong files.
+        let ws_str = workspace_root.as_deref().unwrap_or("").trim();
+        if ws_str.is_empty() {
+            return Err(
+                "Tool-using API dispatch requires an explicit workspace_root. \
+                 The frontend's prompt_api_provider call must pass the active \
+                 project's root path. (PR-3b safety: cwd is not a safe sandbox.)"
+                    .to_string(),
+            );
+        }
+        let workspace_path = std::path::PathBuf::from(ws_str);
+        if !workspace_path.is_absolute() {
+            return Err(format!(
+                "workspace_root must be an absolute path; got '{}'",
+                ws_str
+            ));
+        }
+        if !workspace_path.exists() {
+            return Err(format!(
+                "workspace_root '{}' does not exist on disk",
+                ws_str
+            ));
+        }
+        let tools = crate::api_dispatch_tools::build_filtered_review_tools(&agent_gate);
+        crate::api_dispatch_tools::dispatch_with_tools(
+            provider,
+            &[],
+            &prompt,
+            model.as_deref(),
+            &tools,
+            &workspace_path,
+            &db_path,
+        )
+        .await
+    } else {
+        crate::api_dispatch::dispatch(provider, &prompt, model.as_deref(), &db_path).await
+    };
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -1279,12 +1465,26 @@ pub async fn prompt_api_provider(
     let result = match outcome {
         Ok(o) => {
             let status = if o.response.is_some() { "success" } else { "error" };
+            // v2.7.8 PR-3b — persist tool-call audit alongside the
+            // standard execution_logs columns. tool_calls_count and
+            // tool_calls_summary were added in v2.4.5 (schema.rs:
+            // 372-378) but desktop API dispatches never populated
+            // them. None when the loop didn't engage; non-zero count
+            // + summary JSON when it did.
+            let (tool_calls_count, tool_calls_summary): (Option<i64>, Option<String>) =
+                match &o.tool_calls {
+                    Some(audit) => (
+                        Some(audit.len() as i64),
+                        Some(serde_json::to_string(audit).unwrap_or_else(|_| "[]".to_string())),
+                    ),
+                    None => (None, None),
+                };
             // MiniMax round-1 6.x-C: surface write failures instead
             // of swallowing them. The dispatch still succeeds; the
             // log row just doesn't exist, and the user sees why.
             if let Err(e) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL, ?11, ?12)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -1296,6 +1496,8 @@ pub async fn prompt_api_provider(
                     status,
                     o.error_message.as_ref().map(|s| truncate_api_log(s)),
                     now,
+                    tool_calls_count,
+                    tool_calls_summary,
                 ],
             ) {
                 eprintln!("prompt_api_provider: execution_logs write failed: {}", e);
@@ -5458,14 +5660,16 @@ pub fn create_agent(
         agent.file_path = Some(path.to_string_lossy().to_string());
     }
 
-    // Insert into DB.
+    // Insert into DB. v2.7.8 PR-6 — stamp permissions_migrated_at = now
+    // for any agent created on v2.7.8+. New agents have correct
+    // expectations from the wizard, so enforcement is on from day 1.
     conn.execute(
-        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, kind)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO agents (id, slug, display_name, description, runtime, model, project_id, system_prompt, permissions, skills, mcps, goal, file_path, created_at, last_used_at, kind, permissions_migrated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             agent.id, agent.slug, agent.display_name, agent.description, agent.runtime, agent.model,
             agent.project_id, agent.system_prompt, agent.permissions, agent.skills, agent.mcps,
-            agent.goal, agent.file_path, agent.created_at, agent.last_used_at, kind_val
+            agent.goal, agent.file_path, agent.created_at, agent.last_used_at, kind_val, agent.created_at
         ],
     ).map_err(|e| {
         // SQLite UNIQUE violation → friendly message

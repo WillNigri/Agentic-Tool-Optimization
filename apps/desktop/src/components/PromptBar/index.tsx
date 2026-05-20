@@ -509,6 +509,12 @@ export default function PromptBar() {
               prompt,
               model: null,
               agentSlug: selectedAgent?.slug ?? null,
+              // v2.7.8 PR-3b — required by the backend when the
+              // agent's permissions enable a tool-call loop. Without
+              // it, the backend refuses tool-using dispatch rather
+              // than silently sandboxing the wrong repo. Text-only
+              // dispatches ignore this field.
+              workspaceRoot: activeProject?.path ?? null,
             });
             if (result.status === "success" && result.response) {
               response = result.response;

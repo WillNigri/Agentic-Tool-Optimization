@@ -231,9 +231,10 @@ fn create_inner(
 }
 
 /// v2.4.6 — resolved agent record for downstream consumers like
-/// `ato review --reviewer @<slug>`. We don't return the full row
-/// (skills/mcps/permissions/etc. aren't needed for the persona-prepend
-/// flow); only the fields the dispatch path actually consumes.
+/// `ato review --reviewer @<slug>`. v2.7.8 (PR-2) added `permissions`
+/// so the dispatch path can translate them into per-runtime flags via
+/// `ato_agent_permissions::to_<runtime>`. PR-6 added the opt-in
+/// migration flag.
 #[derive(Debug, Clone)]
 pub struct AgentRef {
     pub slug: String,
@@ -241,6 +242,93 @@ pub struct AgentRef {
     pub runtime: String,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
+    /// JSON-encoded tagged-string array from GuidedPath.tsx:174-179
+    /// (`["allow:Read", "approve:send_emails", "deny:Bash(rm:*)"]`).
+    /// NULL for agents created before v2.7.8 or via paths that
+    /// skipped the permissions step.
+    pub permissions: Option<String>,
+    /// v2.7.8 PR-6 — opt-in enforcement flag. NULL = pre-v2.7.8 agent
+    /// whose permissions are advisory; dispatch falls back to defaults.
+    /// Non-NULL = user-confirmed (or v2.7.8+ create-time) enforcement
+    /// is live.
+    pub permissions_migrated_at: Option<String>,
+}
+
+/// v2.7.8 PR-6 — load an agent's permissions for the dispatch path,
+/// honoring the opt-in migration flag. Returns the parsed
+/// `AgentPermissions` only when the agent has been migrated;
+/// otherwise returns `AgentPermissions::default()` so backward-compat
+/// defaults kick in via the crate's default-arm logic.
+///
+/// Pure function over a borrowed connection — testable without I/O
+/// beyond the in-memory fixture each test sets up.
+pub fn load_enforceable_permissions(
+    conn: &Connection,
+    slug: &str,
+    runtime: &str,
+) -> ato_agent_permissions::AgentPermissions {
+    // v2.7.8 PR-3c dogfood 2026-05-20 — root cause analysis:
+    //
+    // The dispatch enters the PR-5a auto-fallback path when (e.g.)
+    // gemini CLI is missing → routes to google API provider. PR-5a
+    // threads the user's original runtime ("gemini") through as
+    // `agent_runtime_override` so agent lookups hit the row the user
+    // logically created — but in practice, the SAME slug can exist
+    // on MULTIPLE runtimes (e.g. devex on both "gemini" and "google",
+    // common with the "mirror agent on every CLI" pattern from the
+    // older /agent-suggest flow). Only ONE of those rows has the
+    // permissions stamped; the other is a pre-v2.7.8 mirror with
+    // NULL permissions.
+    //
+    // Strategy: try the runtime-specific row first; if it's migrated,
+    // use it. Otherwise look for ANY migrated row with this slug
+    // across runtimes (a migrated row is a strong signal that the
+    // user explicitly opted that agent into enforcement; transports
+    // are interchangeable for the permission DSL). Falls back to
+    // defaults if no migrated row exists at all.
+    let runtime_specific = lookup_by_slug(conn, slug, Some(runtime)).ok().flatten();
+    if let Some(ar) = &runtime_specific {
+        if ar.permissions_migrated_at.is_some() {
+            return ar
+                .permissions
+                .as_deref()
+                .map(ato_agent_permissions::parse_permissions_column)
+                .unwrap_or_default();
+        }
+    }
+
+    // Cross-runtime fallback — prefer a migrated row over a non-
+    // migrated one. Picks the most-recently-used migrated row for
+    // this slug.
+    type Row = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let migrated_any: Option<Row> = conn
+        .query_row(
+            "SELECT slug, display_name, runtime, model, system_prompt, permissions, permissions_migrated_at
+               FROM agents
+              WHERE slug = ?1 AND permissions_migrated_at IS NOT NULL
+              ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1",
+            [slug],
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?,
+                r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+            )),
+        )
+        .ok();
+    if let Some((_, _, _, _, _, permissions, _)) = migrated_any {
+        return permissions
+            .as_deref()
+            .map(ato_agent_permissions::parse_permissions_column)
+            .unwrap_or_default();
+    }
+    ato_agent_permissions::AgentPermissions::default()
 }
 
 /// Look up an agent by slug. The agents table has a UNIQUE(runtime,
@@ -257,38 +345,49 @@ pub fn lookup_by_slug(
     slug: &str,
     runtime: Option<&str>,
 ) -> Result<Option<AgentRef>> {
-    let row: Option<(String, String, String, Option<String>, Option<String>)> = match runtime {
-        Some(rt) => conn
-            .query_row(
-                "SELECT slug, display_name, runtime, model, system_prompt
-                   FROM agents
-                  WHERE runtime = ?1 AND slug = ?2
-                  LIMIT 1",
-                [rt, slug],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?,
-        None => conn
-            .query_row(
-                "SELECT slug, display_name, runtime, model, system_prompt
-                   FROM agents
-                  WHERE slug = ?1
-                  ORDER BY COALESCE(last_used_at, created_at) DESC
-                  LIMIT 1",
-                [slug],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?,
+    // `permissions_migrated_at` was added in PR-6 as an additive
+    // ALTER TABLE; defensively SELECT IFNULL so older fixtures and
+    // tests that don't declare the column still return NULL.
+    type Row = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let read_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+        ))
     };
-    Ok(row.map(|(slug, display_name, runtime, model, system_prompt)| {
-        AgentRef {
+    let sql_runtime = "SELECT slug, display_name, runtime, model, system_prompt, permissions, permissions_migrated_at
+           FROM agents WHERE runtime = ?1 AND slug = ?2 LIMIT 1";
+    let sql_any = "SELECT slug, display_name, runtime, model, system_prompt, permissions, permissions_migrated_at
+           FROM agents WHERE slug = ?1
+           ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1";
+    let row: Option<Row> = match runtime {
+        Some(rt) => conn.query_row(sql_runtime, [rt, slug], read_row).optional()?,
+        None => conn.query_row(sql_any, [slug], read_row).optional()?,
+    };
+    Ok(row.map(
+        |(slug, display_name, runtime, model, system_prompt, permissions, permissions_migrated_at)| AgentRef {
             slug,
             display_name,
             runtime,
             model,
             system_prompt,
-        }
-    }))
+            permissions,
+            permissions_migrated_at,
+        },
+    ))
 }
 
 /// v2.3.0 — write the per-runtime agent config file so the runtime's

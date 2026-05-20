@@ -20,7 +20,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Key, Loader2, Send, Settings, Swords, Terminal, X } from "lucide-react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useUiStore } from "@/stores/useUiStore";
@@ -29,6 +29,7 @@ import {
   useEnabledRuntimes,
   type EnabledRuntimeRow,
 } from "@/lib/enabledRuntimes";
+import { listAgents, type Agent } from "@/lib/agents";
 
 interface WarRoomDispatchResult {
   warRoomId: string;
@@ -85,6 +86,27 @@ export default function FirstChatWizard({
     return out;
   }, [enabled, excluded]);
 
+  // v2.7.8 PR-3c — agents-per-seat. Will's dogfood (2026-05-20) caught
+  // that war-rooms had ZERO agent surface: dispatch_war_room received
+  // only runtime slugs, so agent.permissions never reached the
+  // per-seat dispatch and API providers stayed text-only. Each
+  // selected runtime can now opt in to one of its agents; default is
+  // "no agent" (text-only, preserves prior behaviour).
+  const agentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => listAgents(),
+  });
+  const agentsByRuntime = useMemo(() => {
+    const out = new Map<string, Agent[]>();
+    for (const a of agentsQuery.data ?? []) {
+      const arr = out.get(a.runtime) ?? [];
+      arr.push(a);
+      out.set(a.runtime, arr);
+    }
+    return out;
+  }, [agentsQuery.data]);
+  const [seatAgents, setSeatAgents] = useState<Map<string, string>>(new Map());
+
   const toggleRuntime = (slug: string) => {
     setExcluded((prev) => {
       const next = new Set(prev);
@@ -96,8 +118,15 @@ export default function FirstChatWizard({
 
   const fire = useMutation({
     mutationFn: async () => {
+      // PR-3c — parallel arrays. Index N of agent_slugs maps to the
+      // agent picked for runtimes[N]; null means "no agent" (text-
+      // only). Backend defaults to null when array length doesn't
+      // match runtimes length, so this is safe even for older agents.
+      const runtimeList = Array.from(selected);
+      const agentSlugs = runtimeList.map((r) => seatAgents.get(r) ?? null);
       return await invoke<WarRoomDispatchResult>("dispatch_war_room", {
-        runtimes: Array.from(selected),
+        runtimes: runtimeList,
+        agentSlugs,
         prompt: prompt.trim(),
       });
     },
@@ -214,6 +243,22 @@ export default function FirstChatWizard({
             onAddSubscription={() => goToSettings("runtimes")}
           />
 
+          {selected.size > 0 && (agentsQuery.data?.length ?? 0) > 0 && (
+            <SeatAgentsPicker
+              selectedRuntimes={Array.from(selected)}
+              agentsByRuntime={agentsByRuntime}
+              seatAgents={seatAgents}
+              onChange={(runtime, slug) =>
+                setSeatAgents((prev) => {
+                  const next = new Map(prev);
+                  if (slug) next.set(runtime, slug);
+                  else next.delete(runtime);
+                  return next;
+                })
+              }
+            />
+          )}
+
           {fire.isError && (
             <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 px-3 py-2 text-xs text-cs-text">
               {fire.error instanceof Error
@@ -265,6 +310,92 @@ export default function FirstChatWizard({
           </div>
         </footer>
       </div>
+    </div>
+  );
+}
+
+// v2.7.8 PR-3c — collapsible seat-level agent picker. Defaults to
+// hidden (no agent rows shown) since most users will fire the war-
+// room without agents. One click on "Use my agents" expands the
+// panel and shows one row per selected runtime with that runtime's
+// agents in a dropdown.
+function SeatAgentsPicker({
+  selectedRuntimes,
+  agentsByRuntime,
+  seatAgents,
+  onChange,
+}: {
+  selectedRuntimes: string[];
+  agentsByRuntime: Map<string, Agent[]>;
+  seatAgents: Map<string, string>;
+  onChange: (runtime: string, slug: string | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const totalConfigured = seatAgents.size;
+  return (
+    <div className="rounded-md border border-cs-border/60 bg-cs-bg-raised/40">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2 text-[11px] text-cs-muted hover:text-cs-text"
+      >
+        <span>
+          {t("firstChat.useAgentsLabel", "Use my agents")}{" "}
+          {totalConfigured > 0 && (
+            <span className="ml-1 text-cs-accent">({totalConfigured})</span>
+          )}
+        </span>
+        <span className="text-[10px]">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-cs-border/60 p-3 space-y-2">
+          <p className="text-[10px] text-cs-muted leading-relaxed">
+            {t(
+              "firstChat.seatAgentsHint",
+              "Pick an agent per seat to apply its permissions + persona. Skip to send raw prompts (today's behaviour)."
+            )}
+          </p>
+          {selectedRuntimes.map((runtime) => {
+            const agents = agentsByRuntime.get(runtime) ?? [];
+            const current = seatAgents.get(runtime) ?? "";
+            return (
+              <div
+                key={runtime}
+                className="flex items-center gap-2 text-[11px]"
+              >
+                <span
+                  className={`${runtimeBadge(runtime)} min-w-[80px] justify-center`}
+                >
+                  {runtime}
+                </span>
+                {agents.length === 0 ? (
+                  <span className="text-cs-muted">
+                    {t("firstChat.noAgentsForRuntime", "(no agents)")}
+                  </span>
+                ) : (
+                  <select
+                    value={current}
+                    onChange={(e) =>
+                      onChange(runtime, e.target.value || null)
+                    }
+                    className="flex-1 rounded border border-cs-border bg-cs-bg-raised px-2 py-1 text-cs-text focus:border-cs-accent focus:outline-none"
+                  >
+                    <option value="">
+                      {t("firstChat.noAgent", "— no agent —")}
+                    </option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.slug}>
+                        {a.displayName} ({a.slug})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

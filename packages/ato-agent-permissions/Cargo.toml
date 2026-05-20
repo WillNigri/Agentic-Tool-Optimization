@@ -1,0 +1,10 @@
+[package]
+name = "ato-agent-permissions"
+version = "0.1.0"
+edition = "2021"
+description = "Translate ATO's agent.permissions DSL into per-runtime enforcement (claude --allowedTools, codex --sandbox, gemini --yolo, API-provider tool-call gate)."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
