@@ -119,6 +119,56 @@ export default function WarRoomDetailView({
     ),
   );
 
+  // 2026-05-19 — receipts table mirrors SessionTranscriptView's. War-rooms
+  // were missing it; Will caught it dogfooding. Aggregation is client-side
+  // because q.data already has every per-seat dispatch with cost / tokens /
+  // duration / authMode — no backend Tauri call needed.
+  type ReceiptRow = {
+    runtime: string;
+    agentSlug: string | null;
+    billingMode: string;
+    successfulTurns: number;
+    totalTurns: number;
+    tokensIn: number;
+    tokensOut: number;
+    totalDurationMs: number;
+    totalCostUsd: number;
+    costNullTurns: number;
+  };
+  const receiptMap = new Map<string, ReceiptRow>();
+  for (const r of rows) {
+    const billing = r.authMode ?? "unknown";
+    const key = `${r.runtime}|${r.agentSlug ?? ""}|${billing}`;
+    const acc = receiptMap.get(key) ?? {
+      runtime: r.runtime,
+      agentSlug: r.agentSlug,
+      billingMode: billing,
+      successfulTurns: 0,
+      totalTurns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      totalDurationMs: 0,
+      totalCostUsd: 0,
+      costNullTurns: 0,
+    };
+    acc.totalTurns += 1;
+    if (r.status === "success") acc.successfulTurns += 1;
+    acc.tokensIn += r.tokensIn ?? 0;
+    acc.tokensOut += r.tokensOut ?? 0;
+    acc.totalDurationMs += r.durationMs ?? 0;
+    if (r.costUsdEstimated === null) acc.costNullTurns += 1;
+    else acc.totalCostUsd += r.costUsdEstimated;
+    receiptMap.set(key, acc);
+  }
+  const receiptRows = Array.from(receiptMap.values()).sort(
+    (a, b) => b.totalCostUsd - a.totalCostUsd,
+  );
+  const totalDurationMs = rows.reduce((s, r) => s + (r.durationMs ?? 0), 0);
+  const totalTokens = rows.reduce(
+    (s, r) => s + (r.tokensIn ?? 0) + (r.tokensOut ?? 0),
+    0,
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -372,6 +422,142 @@ export default function WarRoomDetailView({
           </>
         );
       })()}
+
+      {/* 2026-05-19 — Receipts table. Mirrors SessionTranscriptView's;
+          war-rooms shipped without this affordance. Aggregated client-
+          side from the per-seat rows q.data already loads. */}
+      {receiptRows.length > 0 && (
+        <div className="border border-cs-border rounded-lg overflow-hidden">
+          <div className="px-3 py-2 bg-cs-card border-b border-cs-border flex items-center justify-between">
+            <span className="text-xs font-medium text-cs-text uppercase tracking-wide">
+              Receipts
+            </span>
+            <span className="text-xs text-cs-muted font-mono">
+              total{" "}
+              <span className="text-cs-accent">
+                {totalCost === 0
+                  ? "free (subscription)"
+                  : `$${totalCost.toFixed(4)}`}
+              </span>
+              {" · "}
+              {rows.length} dispatch{rows.length !== 1 ? "es" : ""}
+              {" · "}
+              {(totalDurationMs / 1000).toFixed(1)}s
+              {" · "}
+              {totalTokens.toLocaleString()} tok
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-cs-muted border-b border-cs-border bg-cs-card/40">
+                <tr>
+                  <th className="text-left px-3 py-1.5 font-medium">Runtime</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Seat</th>
+                  <th className="text-right px-3 py-1.5 font-medium">Turns</th>
+                  <th className="text-right px-3 py-1.5 font-medium">Tokens in</th>
+                  <th className="text-right px-3 py-1.5 font-medium">Tokens out</th>
+                  <th className="text-right px-3 py-1.5 font-medium">Duration</th>
+                  <th className="text-right px-3 py-1.5 font-medium">Cost</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {receiptRows.map((row, i) => (
+                  <tr
+                    key={`${row.runtime}-${row.agentSlug ?? "_"}-${i}`}
+                    className="border-b border-cs-border/40 last:border-0"
+                  >
+                    <td className="px-3 py-1.5">
+                      <span className={runtimeBadge(row.runtime)}>
+                        {row.runtime}
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      {row.agentSlug ? (
+                        <span className={personaBadge()}>
+                          {personaDisplay(row.agentSlug)}
+                        </span>
+                      ) : (
+                        <span className="text-cs-muted italic">generalist</span>
+                      )}
+                    </td>
+                    <td className="text-right px-3 py-1.5">
+                      {row.successfulTurns}
+                      {row.totalTurns !== row.successfulTurns && (
+                        <span
+                          className="text-cs-muted ml-1"
+                          title={`${row.totalTurns - row.successfulTurns} error turn(s)`}
+                        >
+                          (+{row.totalTurns - row.successfulTurns}e)
+                        </span>
+                      )}
+                    </td>
+                    <td className="text-right px-3 py-1.5 text-cs-muted">
+                      {row.tokensIn.toLocaleString()}
+                    </td>
+                    <td className="text-right px-3 py-1.5 text-cs-muted">
+                      {row.tokensOut.toLocaleString()}
+                    </td>
+                    <td className="text-right px-3 py-1.5 text-cs-muted">
+                      {(row.totalDurationMs / 1000).toFixed(1)}s
+                    </td>
+                    <td
+                      className={cn(
+                        "text-right px-3 py-1.5",
+                        row.totalCostUsd === 0 ? "text-cs-muted" : "text-cs-text",
+                      )}
+                      title={
+                        row.billingMode === "subscription"
+                          ? "Subscription auth (Claude Code / Codex CLI / Gemini CLI). No per-token billing — cost is the equivalent if you were paying per-token directly."
+                          : row.billingMode === "local"
+                            ? "Local runtime (Ollama / OpenClaw / Hermes). No network, no cost."
+                            : row.costNullTurns > 0
+                              ? `${row.costNullTurns} turn(s) had no cost computed — model missing from pricing table.`
+                              : "Estimated from published per-token rates."
+                      }
+                    >
+                      {row.costNullTurns > 0 ? (
+                        <span className="text-amber-400">
+                          $?{" "}
+                          <span className="text-[10px]">(pricing missing)</span>
+                        </span>
+                      ) : row.billingMode === "local" ? (
+                        <span className="text-cs-muted">local</span>
+                      ) : row.totalCostUsd === 0 ? (
+                        row.billingMode === "subscription" ? (
+                          <span className="text-cs-muted">subscription</span>
+                        ) : (
+                          <span className="text-cs-muted">$0.0000</span>
+                        )
+                      ) : row.billingMode === "subscription" ? (
+                        <span>
+                          <span className="text-cs-muted">≈ </span>
+                          ${row.totalCostUsd.toFixed(4)}
+                          <span className="text-[10px] text-cs-muted ml-1">
+                            (sub est.)
+                          </span>
+                        </span>
+                      ) : (
+                        <>${row.totalCostUsd.toFixed(4)}</>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-3 py-1.5 text-[10px] text-cs-muted border-t border-cs-border/40">
+            Costs estimated from published per-runtime rates × tokens used.
+            For metered providers (api_key) this should match your bill. For
+            subscription runtimes this is the equivalent if you were paying
+            per-token. "$?" means the model is missing from the pricing
+            table — see{" "}
+            <code className="text-cs-text">
+              apps/cli/src/runtime.rs:pricing_for_model
+            </code>
+            .
+          </div>
+        </div>
+      )}
     </div>
   );
 }
