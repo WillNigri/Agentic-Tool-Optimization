@@ -564,7 +564,21 @@ pub fn run(
         "codex" => {
             // Codex requires `exec` + skip-git-repo-check (mirrors the
             // desktop's behaviour). Model goes before the prompt arg.
-            cmd.arg("exec").arg("--skip-git-repo-check");
+            //
+            // 2026-05-19 (Will dogfood) — also pass
+            // `--sandbox workspace-write` + `-c approval_policy="never"`
+            // so dispatched codex can actually patch files instead of
+            // returning "I didn't patch because this harness is
+            // read-only." ATO dispatching codex IS the authorization;
+            // headless on-request approvals can't be answered (no TTY).
+            // See apps/desktop/src-tauri/src/commands/mod.rs (codex
+            // branch) for the longer rationale.
+            cmd.arg("exec")
+                .arg("--skip-git-repo-check")
+                .arg("--sandbox")
+                .arg("workspace-write")
+                .arg("-c")
+                .arg("approval_policy=\"never\"");
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }

@@ -860,8 +860,29 @@ async fn prompt_agent_inner(
             // exec subcommand; --skip-git-repo-check needed because ATO
             // can dispatch from any cwd (Felipe's "Not inside a trusted
             // directory" regression).
+            //
+            // 2026-05-19 (Will dogfood) — codex's `exec` defaults to
+            // `--sandbox read-only` + `approval_policy=untrusted`. In a
+            // war-room seat that means codex literally cannot patch
+            // anything and surfaces "I didn't patch because this harness
+            // is read-only" in its reply. Without a TTY (we pipe
+            // stdout/stderr), the on-request approvals can't be answered
+            // either. ATO's positioning is agentic: dispatching codex
+            // IS the authorization, so unlock both:
+            //   --sandbox workspace-write   → codex can edit files in
+            //                                 the working directory but
+            //                                 not escape it.
+            //   -c approval_policy="never"  → no headless-blocking
+            //                                 approval prompts.
+            // `danger-full-access` would let codex touch ~/ paths
+            // outside the workspace — explicitly NOT what we want.
             let mut c = Command::new(codex_path);
-            c.arg("exec").arg("--skip-git-repo-check");
+            c.arg("exec")
+                .arg("--skip-git-repo-check")
+                .arg("--sandbox")
+                .arg("workspace-write")
+                .arg("-c")
+                .arg("approval_policy=\"never\"");
             if let Some(m) = &model_override {
                 c.arg("--model").arg(m);
             }
