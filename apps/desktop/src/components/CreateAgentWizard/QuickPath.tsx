@@ -17,6 +17,7 @@ import { useDemoStore } from "@/stores/useDemoStore";
 import { cn } from "@/lib/utils";
 import { FileText, Plus, Trash2 } from "lucide-react";
 import AuthRequirements from "./AuthRequirements";
+import EmptyMcpsWarning from "./EmptyMcpsWarning";
 import { useUiStore } from "@/stores/useUiStore";
 
 // Quick (form) path — wired to Rust create_agent. T3.b adds:
@@ -97,7 +98,7 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
     staleTime: 30_000,
   });
 
-  const { data: allMcps = [] } = useQuery({
+  const { data: allMcps = [], isLoading: mcpsLoading } = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: getMcpServers,
     staleTime: 30_000,
@@ -489,6 +490,8 @@ export default function QuickPath({ onCreated, onCancel, initialDraft, initialSc
             }
             emptyHint={t("createAgent.quick.noSkillsAvailable", "No skills installed for this runtime.")}
           />
+
+          {!mcpsLoading && allMcps.length === 0 && <EmptyMcpsWarning onClose={onCancel} />}
 
           <MultiSelect
             label={t("createAgent.quick.mcps", "MCPs")}
