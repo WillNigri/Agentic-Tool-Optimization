@@ -80,12 +80,21 @@ KEYCHAIN_PATH="$(security default-keychain | tr -d '" ')"
 echo "Using default keychain: $KEYCHAIN_PATH"
 echo
 
-# macOS will prompt for the login keychain password once here.
+# `security ... -k <password>` expects the macOS LOGIN password as
+# the value. Omitting `-k` makes macOS prompt interactively (GUI
+# prompt OR terminal `password:` line) — that's what we want. The
+# previous version of this script accidentally passed the keychain
+# PATH to `-k`, which macOS treated as a wrong password and rejected
+# silently. The keychain target is the trailing positional arg.
+echo "macOS will now prompt for your login keychain password (the same"
+echo "password you use to unlock the Mac). Type it carefully — silent"
+echo "failure if wrong."
+echo
 security set-generic-password-partition-list \
   -S "apple-tool:,apple:,unsigned:" \
   -s "$KEYCHAIN_SERVICE" \
   -a "$MASTER_KEY_ACCOUNT" \
-  -k "$KEYCHAIN_PATH"
+  "$KEYCHAIN_PATH"
 
 echo
 echo "✓ Partition list updated."

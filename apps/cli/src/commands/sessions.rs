@@ -51,13 +51,22 @@ fn has_table(conn: &Connection) -> bool {
     c > 0
 }
 
-// v2.3.32 Slice A.2 — sessions work with claude (native --resume),
-// and the API providers from the registry (history replay since
-// they're stateless). Codex / Gemini still need their resume flag
-// wiring (and codex needs its signing cert back); they'll land
-// in Slice A.3 / A.4. Hermes / OpenClaw have no session story yet.
+// 2026-05-19 (Will dogfood) — opened sessions to every runtime.
+// History-replay is the universal fallback: dispatch.rs:477-501
+// already prefixes prior turns into the prompt for any non-anchor
+// runtime, which is exactly what "stateless API replay" did for the
+// api_providers. Codex / Gemini / OpenClaw / Hermes get the same
+// treatment — they're CLI subprocesses that ATO hands a stitched
+// prompt to. Native resume (claude --resume) is still the
+// fast-path for claude-anchored sessions; everything else gets
+// history_replay.
+//
+// Previous gating ("Codex / Gemini still need their resume flag
+// wiring") punted on the wrong question — native resume is the
+// optimization, not the requirement. Replay works for any prompt-
+// in / text-out runtime, which is all of them.
 fn supported_runtimes() -> Vec<&'static str> {
-    let mut v = vec!["claude"];
+    let mut v = vec!["claude", "codex", "gemini", "openclaw", "hermes"];
     for p in ato_api_providers::registry() {
         v.push(p.slug);
     }
@@ -68,7 +77,7 @@ fn validate_runtime(runtime: &str) -> Result<()> {
     let supported = supported_runtimes();
     if !supported.contains(&runtime) {
         return Err(anyhow!(
-            "Runtime '{}' is not yet supported by `ato sessions`. Currently: {}. Codex/Gemini land in follow-up slices.",
+            "Runtime '{}' is not in the registry. Currently: {}.",
             runtime,
             supported.join(", ")
         ));
@@ -76,17 +85,19 @@ fn validate_runtime(runtime: &str) -> Result<()> {
     Ok(())
 }
 
-/// "native" runtimes maintain conversation state themselves; ATO
-/// just hands them a resume token. "history_replay" runtimes are
-/// stateless APIs; ATO rebuilds the prior conversation into the
-/// messages array on every turn.
+/// "native_resume" runtimes maintain conversation state themselves
+/// and accept a resume token (claude today). "history_replay"
+/// runtimes are prompt-in / text-out — ATO rebuilds the prior
+/// conversation into the prompt on every turn. After 2026-05-19
+/// every non-claude runtime falls into history_replay; future
+/// optimization can promote codex/gemini to native_resume once
+/// their --resume wiring lands, but until then replay is correct
+/// and works.
 pub fn session_strategy(runtime: &str) -> &'static str {
     if runtime == "claude" {
         "native_resume"
-    } else if ato_api_providers::is_api_provider(runtime) {
-        "history_replay"
     } else {
-        "unsupported"
+        "history_replay"
     }
 }
 
@@ -1195,7 +1206,8 @@ mod tests {
 
     /// Codex Round-1 #2 — the category vocab is duplicated between
     /// `ALLOWED_CATEGORIES` (CLI parse-time) and the SQL CHECK string
-    /// in `apps/desktop/src-tauri/src/lib.rs` (UPDATE-time). A
+    /// in `apps/desktop/src-tauri/src/schema.rs` (UPDATE-time, was
+    /// `lib.rs` before the 2026-05-19 init_database extraction). A
     /// "keep them in sync" comment is not a mechanism. This test
     /// parses the migration source at compile time, extracts the
     /// vocab from the CHECK constraint, and asserts set-equality
@@ -1204,15 +1216,16 @@ mod tests {
     fn category_vocab_matches_sql_check_constraint() {
         // Path is relative to the test binary's cargo crate root
         // (apps/cli/), so walk up to the workspace root and into the
-        // desktop crate's lib.rs.
-        let lib_rs = include_str!("../../../desktop/src-tauri/src/lib.rs");
+        // desktop crate's schema.rs (post-d523d29 split — was
+        // lib.rs before).
+        let schema_rs = include_str!("../../../desktop/src-tauri/src/schema.rs");
         // Find the line that introduces the category CHECK constraint.
-        let check_line = lib_rs
+        let check_line = schema_rs
             .lines()
             .find(|line| line.contains("category TEXT CHECK") && line.contains("category IN"))
             .expect(
                 "could not find the `category TEXT CHECK (... category IN ...)` line in \
-                 apps/desktop/src-tauri/src/lib.rs — if you renamed or moved the migration, \
+                 apps/desktop/src-tauri/src/schema.rs — if you renamed or moved the migration, \
                  update this test or move ALLOWED_CATEGORIES into a shared crate."
             );
         // Extract everything between the first `(` after `IN` and the
@@ -1224,7 +1237,7 @@ mod tests {
         let combined = format!(
             "{} {}",
             check_line,
-            lib_rs
+            schema_rs
                 .lines()
                 .skip_while(|l| !std::ptr::eq(*l as *const str, check_line as *const str))
                 .nth(1)
