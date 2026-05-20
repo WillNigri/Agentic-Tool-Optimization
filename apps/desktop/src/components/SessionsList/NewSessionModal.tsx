@@ -17,7 +17,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { Loader2, Plus, X } from "lucide-react";
 
 import { useProjectStore } from "@/stores/useProjectStore";
-import { NEW_SESSION_RUNTIMES } from "./_helpers";
+import {
+  NEW_SESSION_RUNTIMES,
+  SESSION_UNSUPPORTED_REASON,
+  SESSION_UNSUPPORTED_RUNTIMES,
+} from "./_helpers";
 
 export default function NewSessionModal({
   onClose,
@@ -112,15 +116,30 @@ export default function NewSessionModal({
               onChange={(e) => setRuntime(e.target.value)}
               className="mt-1 w-full bg-cs-bg border border-cs-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-cs-accent"
             >
-              {NEW_SESSION_RUNTIMES.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
+              {NEW_SESSION_RUNTIMES.map((r) => {
+                const unsupported = SESSION_UNSUPPORTED_RUNTIMES.has(r);
+                return (
+                  <option
+                    key={r}
+                    value={r}
+                    disabled={unsupported}
+                    title={
+                      unsupported ? SESSION_UNSUPPORTED_REASON[r] : undefined
+                    }
+                  >
+                    {unsupported ? `${r} — coming soon` : r}
+                  </option>
+                );
+              })}
             </select>
             <div className="mt-1 text-[10px] text-cs-muted">
               Anchor runtime. Cross-runtime turns via @-mentions in --tag-bridge or by
-              dispatching into the session from a different runtime later.
+              dispatching into the session from a different runtime later.{" "}
+              {SESSION_UNSUPPORTED_RUNTIMES.has(runtime) && (
+                <span className="text-cs-warning">
+                  · {SESSION_UNSUPPORTED_REASON[runtime]}
+                </span>
+              )}
             </div>
           </div>
           <div>
@@ -155,8 +174,13 @@ export default function NewSessionModal({
           </button>
           <button
             onClick={handleCreate}
-            disabled={creating}
-            className="flex items-center gap-2 px-3 py-2 rounded-md bg-cs-accent text-cs-bg text-sm font-medium hover:opacity-90 disabled:opacity-40"
+            disabled={creating || SESSION_UNSUPPORTED_RUNTIMES.has(runtime)}
+            title={
+              SESSION_UNSUPPORTED_RUNTIMES.has(runtime)
+                ? SESSION_UNSUPPORTED_REASON[runtime]
+                : undefined
+            }
+            className="flex items-center gap-2 px-3 py-2 rounded-md bg-cs-accent text-cs-bg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
             Create

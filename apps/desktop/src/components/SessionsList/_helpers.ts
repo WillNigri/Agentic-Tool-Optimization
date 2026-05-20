@@ -230,12 +230,31 @@ export function avatarInitials(label: string): string {
 // during dogfood when the modal offered codex and `ato sessions new`
 // errored with "Runtime 'codex' is not yet supported".
 import { RUNTIME_IDS } from "@/lib/runtimes";
-const SESSION_UNSUPPORTED_RUNTIMES = new Set([
+
+/** Runtimes the `ato sessions` backend currently resumes (claude via
+ *  native --resume, all api_providers via history-replay). Mirrors
+ *  `supported_runtimes()` in apps/cli/src/commands/sessions.rs. */
+export const SESSION_UNSUPPORTED_RUNTIMES = new Set([
   "codex",
   "gemini",
   "openclaw",
   "hermes",
 ]);
-export const NEW_SESSION_RUNTIMES: string[] = (
-  RUNTIME_IDS as unknown as string[]
-).filter((r) => !SESSION_UNSUPPORTED_RUNTIMES.has(r));
+
+/** Human-readable note per unsupported runtime — surfaced as the
+ *  disabled-option tooltip in NewSessionModal. Will's dogfood
+ *  feedback ("where is codex?") said hiding them entirely undersells
+ *  the roadmap; show them as disabled with the reason. */
+export const SESSION_UNSUPPORTED_REASON: Record<string, string> = {
+  codex: "Codex sessions land in Slice A.3 — needs resume-flag wiring + signing cert. Use standalone `ato dispatch codex` for now.",
+  gemini: "Gemini sessions land in Slice A.4 — needs resume-flag wiring. Use standalone `ato dispatch gemini` for now.",
+  openclaw: "OpenClaw has no native session/resume story — dispatch via SSH per call.",
+  hermes: "Hermes has no native session/resume story — single-shot only.",
+};
+
+/** All runtimes from the registry, in display order. NewSessionModal
+ *  uses this and styles the unsupported ones as disabled with
+ *  SESSION_UNSUPPORTED_REASON as the tooltip. The backend will reject
+ *  if you somehow submit one anyway. */
+export const NEW_SESSION_RUNTIMES: string[] =
+  RUNTIME_IDS as unknown as string[];
