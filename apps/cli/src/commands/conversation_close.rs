@@ -82,6 +82,14 @@ pub struct CloseFields {
     pub human_comment: Option<String>,
     pub coordinator_runtime: String,
     pub coordinator_model: Option<String>,
+    /// v2.7.14 (sessions::close refactor) — the agent slug the
+    /// summarizer dispatch resolved to (None when --as wasn't
+    /// passed and the conversation had no stored agent_slug to use
+    /// as a fallback). Sessions surfaces this in human-mode output
+    /// ("agent: @<slug>") so the operator sees which persona
+    /// summarized; war-rooms + chats can opt-in to render it the
+    /// same way for consistency.
+    pub coordinator_slug: Option<String>,
     pub duration_ms: i64,
 }
 
@@ -422,7 +430,7 @@ pub fn close_conversation<T: Closeable>(
         ));
     }
 
-    let (provider, model, _coordinator_slug) = resolve_summarizer(
+    let (provider, model, coordinator_slug) = resolve_summarizer(
         conn,
         target,
         agent_slug_override,
@@ -590,6 +598,7 @@ band most responsible for follow-up.\n\
         human_comment: human_comment_normalized,
         coordinator_runtime: provider.slug.to_string(),
         coordinator_model: Some(outcome.model_used.clone()),
+        coordinator_slug,
         duration_ms: outcome.duration_ms,
     };
 
@@ -712,5 +721,58 @@ mod tests {
     #[test]
     fn extract_json_object_fails_loud_on_unparseable() {
         assert!(extract_json_object("absolutely nothing here").is_err());
+    }
+
+    /// v2.7.14 — moved from sessions.rs (the constant lives here now).
+    /// The category vocab is duplicated between this Rust constant
+    /// (CLI parse-time) and the SQL CHECK string in
+    /// `apps/desktop/src-tauri/src/schema.rs` (UPDATE-time). A
+    /// "keep them in sync" comment is not a mechanism. This test
+    /// parses the migration source at compile time, extracts the
+    /// vocab from the CHECK constraint, and asserts set-equality
+    /// with the in-memory constant. Drift on either side fails CI.
+    #[test]
+    fn category_vocab_matches_sql_check_constraint() {
+        // Path is relative to the test binary's cargo crate root
+        // (apps/cli/), so walk up to the workspace root and into the
+        // desktop crate's schema.rs.
+        let schema_rs = include_str!("../../../desktop/src-tauri/src/schema.rs");
+        let check_line = schema_rs
+            .lines()
+            .find(|line| line.contains("category TEXT CHECK") && line.contains("category IN"))
+            .expect(
+                "could not find the `category TEXT CHECK (... category IN ...)` line in \
+                 apps/desktop/src-tauri/src/schema.rs — if you renamed or moved the migration, \
+                 update this test or move ALLOWED_CATEGORIES into a shared crate."
+            );
+        let combined = format!(
+            "{} {}",
+            check_line,
+            schema_rs
+                .lines()
+                .skip_while(|l| !std::ptr::eq(*l as *const str, check_line as *const str))
+                .nth(1)
+                .unwrap_or("")
+        );
+        let vocab_start = combined.find("IN").expect("vocab marker missing");
+        let after_in = &combined[vocab_start..];
+        let open_paren = after_in.find('(').expect("vocab paren missing");
+        let close_paren = after_in[open_paren..]
+            .find(')')
+            .expect("vocab close-paren missing");
+        let vocab_blob = &after_in[open_paren + 1..open_paren + close_paren];
+        let parsed_vocab: std::collections::BTreeSet<String> = vocab_blob
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let constant_vocab: std::collections::BTreeSet<String> =
+            ALLOWED_CATEGORIES.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            parsed_vocab, constant_vocab,
+            "category vocab in apps/desktop/src-tauri/src/schema.rs CHECK constraint \
+             does not match ALLOWED_CATEGORIES in apps/cli/src/commands/conversation_close.rs. \
+             Update both, or extract the vocab into a shared crate."
+        );
     }
 }
