@@ -76,7 +76,26 @@ impl crate::commands::conversation_close::Closeable for Session {
         // Reuses the existing sessions::fetch_turns; maps Turn →
         // ConversationTurn (drop session_id / turn_index / created_at
         // — the orchestrator doesn't need them).
-        let turns = fetch_turns(conn, &self.id)?;
+        //
+        // v2.7.14 — close path caps at the most-recent 1000 turns.
+        // Matches the LIMIT 1000 added to war_rooms + chats in
+        // commit 737a3c6 (DoS / bill-shock guard from MiniMax dogfood
+        // review — claude X6 from the sessions refactor war-room
+        // 8E5D733D-…). Slicing happens in Rust (not via SQL LIMIT)
+        // because the underlying `fetch_turns` is shared with
+        // history-replay dispatchers that NEED the full transcript
+        // for accurate replay — a SQL LIMIT there would silently
+        // truncate replays. Scoping the cap to the Closeable impl
+        // keeps replay correct + bounds the prompt-to-LLM at close
+        // time. Typical session (5-50 turns) is unaffected.
+        let mut turns = fetch_turns(conn, &self.id)?;
+        const CLOSE_TURN_CAP: usize = 1000;
+        if turns.len() > CLOSE_TURN_CAP {
+            // Drop the oldest (turns.len() - CAP) turns; keep the
+            // LATEST 1000 in chronological order.
+            let drop_count = turns.len() - CLOSE_TURN_CAP;
+            turns.drain(0..drop_count);
+        }
         Ok(turns
             .into_iter()
             .map(|t| crate::commands::conversation_close::ConversationTurn {
