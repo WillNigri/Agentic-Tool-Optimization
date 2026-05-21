@@ -583,7 +583,18 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 r.get::<_, Option<String>>(14)?,        // human_comment
             ))
         })?
-        .filter_map(|r| r.ok())
+        // v2.7.14 — log on row-drop so the next regression of the
+        // "silent empty list" shape (0c5ef70 / b1a397c) leaves a trail.
+        // The fallback below kicks in on prepare() failure; this
+        // covers per-row decode failure (e.g. one bad column on one
+        // row). MiniMax dogfood review 2026-05-21 #2.
+        .filter_map(|r| match r {
+            Ok(row) => Some(row),
+            Err(e) => {
+                eprintln!("list_sessions_inner: dropping chat row: {}", e);
+                None
+            }
+        })
         .map(|(
             id,
             title,

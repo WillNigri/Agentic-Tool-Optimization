@@ -33,6 +33,21 @@ use std::sync::Mutex;
 /// session stays 'open'.
 pub struct CloseInflight(pub Mutex<HashMap<String, u32>>);
 
+/// v2.7.14 — Map keys are namespaced by conversation kind so two
+/// types that happen to share an ID (impossible today since each
+/// table mints its own UUID, but defense-in-depth) can't collide on
+/// the same map entry. Format: `"<kind>/<id>"` where kind is
+/// `"session"`, `"war_room"`, or `"chat"`.
+pub fn inflight_key(kind: &str, id: &str) -> String {
+    format!("{}/{}", kind, id)
+}
+
+/// Kinds that participate in the close-inflight map. Iterated by
+/// `cancel_close_session` to find a running close for a given id
+/// regardless of conversation type (the frontend's Cancel button
+/// passes only the id, not the kind).
+pub const INFLIGHT_KINDS: &[&str] = &["session", "war_room", "chat"];
+
 impl CloseInflight {
     pub fn new() -> Self {
         Self(Mutex::new(HashMap::new()))

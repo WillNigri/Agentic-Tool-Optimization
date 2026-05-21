@@ -660,17 +660,19 @@ pub fn close_session(
     // error paths so a subsequent close isn't blocked by a stale entry.
     let child = cmd.spawn().map_err(|e| format!("spawn ato: {}", e))?;
     let pid = child.id();
+    // v2.7.14 — kind-namespaced key. See inflight_key + INFLIGHT_KINDS
+    // in mod.rs for the rationale.
+    let key = super::inflight_key("session", &session_id);
     {
         let mut map = inflight.0.lock().map_err(|e| e.to_string())?;
-        map.insert(session_id.clone(), pid);
+        map.insert(key.clone(), pid);
     }
     let result = child
         .wait_with_output()
         .map_err(|e| format!("wait ato: {}", e));
-    // Always deregister, even on wait_with_output error.
     {
         let mut map = inflight.0.lock().map_err(|e| e.to_string())?;
-        map.remove(&session_id);
+        map.remove(&key);
     }
     let out = result?;
 
@@ -698,10 +700,19 @@ pub fn close_session(
         .map_err(|_| "ato sessions close returned unparseable JSON".to_string())
 }
 
-/// Send SIGTERM to an in-flight `ato sessions close` subprocess so
-/// the user's Cancel click in the blocking modal aborts the LLM call.
-/// No-op when no close is in flight for this session (e.g., the user
-/// double-clicked Cancel and the first click already worked).
+/// Send SIGTERM to an in-flight `ato sessions close` (or war-room /
+/// chat close) subprocess so the user's Cancel click in the blocking
+/// modal aborts the LLM call. No-op when no close is in flight for
+/// this id under any conversation kind.
+///
+/// v2.7.14 — frontend still passes only the id (Cancel button has no
+/// access to the conversation kind). We scan all known kinds in the
+/// inflight map and SIGTERM whichever one matches. At most one will
+/// be present because UUIDs are unique across the sessions /
+/// war_rooms / chat_threads tables — each table mints its own
+/// `Uuid::new_v4()`, so collision across kinds is effectively
+/// impossible (war-room review 95C52D64-… claude #3 — earlier draft
+/// referred to a "spawn lock" that doesn't actually exist).
 #[tauri::command]
 pub fn cancel_close_session(
     inflight: State<'_, CloseInflight>,
@@ -710,7 +721,9 @@ pub fn cancel_close_session(
     validate_session_id(&session_id)?;
     let pid = {
         let map = inflight.0.lock().map_err(|e| e.to_string())?;
-        map.get(&session_id).copied()
+        super::INFLIGHT_KINDS
+            .iter()
+            .find_map(|kind| map.get(&super::inflight_key(kind, &session_id)).copied())
     };
     let Some(pid) = pid else {
         return Ok(false);
@@ -749,8 +762,12 @@ pub fn reopen_session(session_id: String) -> Result<serde_json::Value, String> {
 /// surface as `Err("__cancelled__")` so the frontend can tell user-
 /// initiated cancels from real failures.
 #[allow(clippy::too_many_arguments)]
+// `kind` (v2.7.14) namespaces the inflight map key. One of
+// `super::INFLIGHT_KINDS` ("war_room" / "chat"; "session" has its
+// own `close_session` path).
 fn run_close_subprocess(
     inflight: &CloseInflight,
+    kind: &str,
     subcommand: &[&str],
     id: &str,
     agent_slug: Option<&str>,
@@ -797,16 +814,17 @@ fn run_close_subprocess(
 
     let child = cmd.spawn().map_err(|e| format!("spawn ato: {}", e))?;
     let pid = child.id();
+    let key = super::inflight_key(kind, id);
     {
         let mut map = inflight.0.lock().map_err(|e| e.to_string())?;
-        map.insert(id.to_string(), pid);
+        map.insert(key.clone(), pid);
     }
     let result = child
         .wait_with_output()
         .map_err(|e| format!("wait ato: {}", e));
     {
         let mut map = inflight.0.lock().map_err(|e| e.to_string())?;
-        map.remove(id);
+        map.remove(&key);
     }
     let out = result?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -872,6 +890,7 @@ pub fn close_war_room(
     validate_session_id(&war_room_id)?; // war_room_ids are UUIDs too.
     run_close_subprocess(
         &inflight,
+        "war_room",
         &["war-rooms", "close"],
         &war_room_id,
         agent_slug.as_deref(),
@@ -905,6 +924,7 @@ pub fn close_chat(
     validate_session_id(&chat_id)?; // chat_thread.id are UUIDs too.
     run_close_subprocess(
         &inflight,
+        "chat",
         &["chats", "close"],
         &chat_id,
         agent_slug.as_deref(),

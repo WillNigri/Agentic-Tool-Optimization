@@ -41,20 +41,21 @@ interface ChatMessage {
   createdAt: string;
 }
 
-// v2.7.13 — chat_threads row snapshot returned by `get_chat`. Maps
-// to commands::chats::ChatThread on the Rust side; fields stay
-// snake_case (serde rename_all not set there).
+// chat_threads row snapshot returned by `get_chat`. Maps directly
+// to commands::chats::ChatThread on the Rust side. v2.7.14: serde
+// rename_all = "camelCase" is set there now so the wire shape
+// matches every other Tauri command's response.
 interface ChatThreadSnapshot {
   id: string;
   title: string;
   status: "open" | "closed";
-  closed_at: string | null;
-  auto_title: string | null;
+  closedAt: string | null;
+  autoTitle: string | null;
   summary: string | null;
-  coordinator_runtime: string | null;
-  human_comment: string | null;
+  coordinatorRuntime: string | null;
+  humanComment: string | null;
   tags: string[];
-  message_count: number;
+  messageCount: number;
 }
 
 export default function ChatThreadDetailView({
@@ -203,32 +204,32 @@ export default function ChatThreadDetailView({
         <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
           <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
             <Sparkles size={12} /> Coordinator summary
-            {snapshotQ.data.closed_at && (
+            {snapshotQ.data.closedAt && (
               <span className="text-[10px] text-cs-muted normal-case font-normal">
-                · closed {formatTime(snapshotQ.data.closed_at)}
+                · closed {formatTime(snapshotQ.data.closedAt)}
               </span>
             )}
-            {snapshotQ.data.coordinator_runtime && (
-              <span className={cn(runtimeBadge(snapshotQ.data.coordinator_runtime), "normal-case")}>
-                {snapshotQ.data.coordinator_runtime}
+            {snapshotQ.data.coordinatorRuntime && (
+              <span className={cn(runtimeBadge(snapshotQ.data.coordinatorRuntime), "normal-case")}>
+                {snapshotQ.data.coordinatorRuntime}
               </span>
             )}
           </div>
-          {snapshotQ.data.auto_title && (
+          {snapshotQ.data.autoTitle && (
             <div className="text-sm font-medium text-cs-text">
-              {snapshotQ.data.auto_title}
+              {snapshotQ.data.autoTitle}
             </div>
           )}
           <div className="text-sm text-cs-text whitespace-pre-wrap">
             {snapshotQ.data.summary}
           </div>
-          {snapshotQ.data.human_comment && snapshotQ.data.human_comment.trim() && (
+          {snapshotQ.data.humanComment && snapshotQ.data.humanComment.trim() && (
             <div className="border-t border-cs-accent/20 pt-2 mt-2">
               <div className="text-[10px] uppercase tracking-wider font-medium text-cs-muted mb-1">
                 Note from human
               </div>
               <div className="text-sm text-cs-text whitespace-pre-wrap">
-                {snapshotQ.data.human_comment}
+                {snapshotQ.data.humanComment}
               </div>
             </div>
           )}

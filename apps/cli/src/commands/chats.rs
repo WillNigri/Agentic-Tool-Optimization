@@ -25,7 +25,12 @@ use crate::commands::conversation_close::{
 use crate::output::Opts;
 
 /// In-memory snapshot of a chat thread's metadata + lifecycle state.
+///
+/// v2.7.14 — `rename_all = "camelCase"` so JSON keys on the wire
+/// match the rest of the desktop frontend's TS interfaces. See the
+/// matching annotation on `commands::war_rooms::WarRoom`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatThread {
     pub id: String,
     pub title: String,
@@ -77,11 +82,20 @@ impl Closeable for ChatThread {
         }
     }
     fn fetch_turns(&self, conn: &Connection) -> Result<Vec<ConversationTurn>> {
+        // v2.7.14 — same DoS guard as war_rooms::fetch_turns. A chat
+        // thread with N=100k messages would otherwise feed all of
+        // them into the coordinator prompt. Inner subquery takes the
+        // most recent 1000 messages; outer re-sorts ASC so the
+        // transcript reads chronologically.
         let mut stmt = conn.prepare(
-            "SELECT role, content, runtime
-               FROM chat_messages
-              WHERE thread_id = ?1
-              ORDER BY created_at ASC",
+            "SELECT role, content, runtime FROM (
+                SELECT role, content, runtime, created_at
+                  FROM chat_messages
+                 WHERE thread_id = ?1
+                 ORDER BY created_at DESC
+                 LIMIT 1000
+             )
+             ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([&self.id], |r| {
             Ok((

@@ -29,7 +29,16 @@ use crate::output::Opts;
 /// In-memory snapshot of a war room's lifecycle metadata. Built
 /// lazily by `lookup` from the existing execution_logs grouping +
 /// the (possibly absent) war_rooms row.
+///
+/// v2.7.14 — `rename_all = "camelCase"` so JSON keys on the wire
+/// match SessionListRow / SessionTranscript / every other shape
+/// the desktop frontend reads. Pre-fix `get_war_room` returned
+/// snake_case (`coordinator_runtime`, `seat_count`, `closed_at`)
+/// while every other Tauri command returned camelCase — the TS
+/// `WarRoomSnapshot` interface compensated by using snake_case,
+/// which works but is inconsistent and confuses future readers.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarRoom {
     pub id: String,
     pub status: String,
@@ -77,11 +86,28 @@ impl Closeable for WarRoom {
     fn fetch_turns(&self, conn: &Connection) -> Result<Vec<ConversationTurn>> {
         // Order by round first, then created_at within round so the
         // coordinator sees the rounds in the order they fired.
+        //
+        // v2.7.14 — explicit LIMIT 1000 (MiniMax dogfood review
+        // 2026-05-21 caught this): a war room with N=10k execution
+        // logs would feed all of them into the coordinator prompt,
+        // blowing token budgets and bill. 1000 is conservative — far
+        // larger than any real war-room (typical: 3-15 seats × 1-5
+        // rounds = ~75 rows) but bounds the worst case for a runaway
+        // automation.
+        //
+        // Inner subquery takes the LATEST 1000 (DESC + LIMIT), outer
+        // re-sorts ASC so the transcript reads chronologically. We
+        // prefer recent context over ancient bootstrap when the cap
+        // bites.
         let mut stmt = conn.prepare(
-            "SELECT runtime, prompt, response
-               FROM execution_logs
-              WHERE war_room_id = ?1
-              ORDER BY COALESCE(war_room_round, 1) ASC, created_at ASC",
+            "SELECT runtime, prompt, response FROM (
+                SELECT runtime, prompt, response, war_room_round, created_at
+                  FROM execution_logs
+                 WHERE war_room_id = ?1
+                 ORDER BY COALESCE(war_room_round, 1) DESC, created_at DESC
+                 LIMIT 1000
+             )
+             ORDER BY COALESCE(war_room_round, 1) ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([&self.id], |r| {
             Ok((

@@ -33,25 +33,38 @@ interface WarRoomDispatchResult {
   round: number;
 }
 
-/// v2.7.13 — war_rooms row snapshot returned by `get_war_room`. Maps
-/// directly to commands::war_rooms::WarRoom on the Rust side; serde
-/// rename_all isn't enabled there so the fields stay snake_case on
-/// the wire. We keep the TS surface snake_case to match.
+/// War-rooms row snapshot returned by `get_war_room`. Maps directly
+/// to commands::war_rooms::WarRoom on the Rust side. v2.7.14: serde
+/// rename_all = "camelCase" is set there now so the wire shape
+/// matches every other Tauri command's response.
 interface WarRoomSnapshot {
   id: string;
   status: "open" | "closed";
-  closed_at: string | null;
-  auto_title: string | null;
+  closedAt: string | null;
+  autoTitle: string | null;
   summary: string | null;
-  coordinator_runtime: string | null;
-  human_comment: string | null;
+  coordinatorRuntime: string | null;
+  humanComment: string | null;
   tags: string[];
-  seat_count: number;
+  seatCount: number;
 }
 
 /// Mirrors the `ato war-rooms close` JSON payload. Used by the close
 /// flow to surface the coordinator's response in the summary card
 /// immediately, without re-querying.
+///
+/// v2.7.14 NOTE: snake_case here is *intentional asymmetry* with
+/// `WarRoomSnapshot` above (which is camelCase to match the rest of
+/// the Tauri command surface). The close-payload comes from CLI
+/// `emit_json_close` which uses hand-rolled `serde_json::json!()`
+/// with snake_case literal keys. The close handler doesn't actually
+/// read these fields — it just awaits the result and refetches the
+/// snapshot, which IS camelCase. If a future contributor wires these
+/// to render directly, either align the close-payload keys to
+/// camelCase in `commands::war_rooms::emit_json_close` OR rewrite
+/// these field names to camelCase + add an adapter on the close
+/// boundary. War-room 95C52D64 reviewers (claude + minimax) flagged
+/// the asymmetry; consensus was "ok for now, comment + revisit".
 interface WarRoomCloseResult {
   id: string;
   status: string;
@@ -315,20 +328,20 @@ export default function WarRoomDetailView({
         <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
           <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
             <Sparkles size={12} /> Coordinator summary
-            {snapshotQ.data.closed_at && (
+            {snapshotQ.data.closedAt && (
               <span className="text-[10px] text-cs-muted normal-case font-normal">
-                · closed {formatTime(snapshotQ.data.closed_at)}
+                · closed {formatTime(snapshotQ.data.closedAt)}
               </span>
             )}
-            {snapshotQ.data.coordinator_runtime && (
-              <span className={cn(runtimeBadge(snapshotQ.data.coordinator_runtime), "normal-case")}>
-                {snapshotQ.data.coordinator_runtime}
+            {snapshotQ.data.coordinatorRuntime && (
+              <span className={cn(runtimeBadge(snapshotQ.data.coordinatorRuntime), "normal-case")}>
+                {snapshotQ.data.coordinatorRuntime}
               </span>
             )}
           </div>
-          {snapshotQ.data.auto_title && (
+          {snapshotQ.data.autoTitle && (
             <div className="text-sm font-medium text-cs-text">
-              {snapshotQ.data.auto_title}
+              {snapshotQ.data.autoTitle}
             </div>
           )}
           <div className="text-sm text-cs-text whitespace-pre-wrap">
@@ -337,13 +350,13 @@ export default function WarRoomDetailView({
           {/* v2.7.13 fix — human's free-form note. Rendered as a
               distinct sub-block so a glance separates LLM output from
               human framing. Skipped when null/empty. */}
-          {snapshotQ.data.human_comment && snapshotQ.data.human_comment.trim() && (
+          {snapshotQ.data.humanComment && snapshotQ.data.humanComment.trim() && (
             <div className="border-t border-cs-accent/20 pt-2 mt-2">
               <div className="text-[10px] uppercase tracking-wider font-medium text-cs-muted mb-1">
                 Note from human
               </div>
               <div className="text-sm text-cs-text whitespace-pre-wrap">
-                {snapshotQ.data.human_comment}
+                {snapshotQ.data.humanComment}
               </div>
             </div>
           )}

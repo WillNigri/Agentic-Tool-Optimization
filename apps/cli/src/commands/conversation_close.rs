@@ -121,10 +121,27 @@ pub trait Closeable {
     fn fetch_turns(&self, conn: &Connection) -> Result<Vec<ConversationTurn>>;
     /// Persist the close payload to the per-type row. Returns the
     /// number of rows changed so the shared close() can detect a
-    /// racing writer (UPDATE ... WHERE status = 'open' returning 0).
+    /// racing writer.
+    ///
+    /// CONTRACT (v2.7.14, MiniMax dogfood review 2026-05-21): the
+    /// UPDATE / UPSERT MUST include a `WHERE status = 'open'`
+    /// guard (or an `ON CONFLICT … WHERE … = 'open'` equivalent for
+    /// the UPSERT case). Without it, `changed > 0` no longer means
+    /// "we won the race" — two concurrent closes would each report
+    /// success with different `closed_at` / `auto_title` / etc.
+    /// Verify against the in-tree implementations before adding a
+    /// fourth conversation type:
+    ///   - commands::sessions::close      (UPDATE … WHERE status='open')
+    ///   - commands::war_rooms::WarRoom    (UPSERT WHERE war_rooms.status='open')
+    ///   - commands::chats::ChatThread     (UPDATE … WHERE status='open')
     fn persist_close(&self, conn: &Connection, fields: &CloseFields) -> Result<usize>;
     /// Flip the lifecycle back to 'open'. The next close will
     /// overwrite the summary with the refreshed transcript.
+    ///
+    /// CONTRACT: symmetric guard — UPDATE MUST include
+    /// `WHERE status = 'closed'` so a reopen on an already-open
+    /// row returns `changed == 0` and the caller can surface the
+    /// "already open" diagnostic instead of silently no-oping.
     fn persist_reopen(&self, conn: &Connection) -> Result<usize>;
 }
 
