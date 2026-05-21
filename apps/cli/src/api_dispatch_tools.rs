@@ -280,17 +280,28 @@ fn resolve_model(provider: &ApiProvider, override_: Option<&str>) -> Result<Stri
 /// (looks like the model "hallucinated" code that it actually
 /// intended to read via a tool call).
 ///
-/// Algorithm (4-seat war-room A803A3C3, unanimous):
-///   1. Strip an optional `​```json` (or bare `​```​`) fence if the
-///      entire content IS a fenced block. Otherwise use trimmed
-///      content as-is.
-///   2. Parse as JSON. Must be an object. Anything else → no call.
-///   3. Strict-match against each offered tool's input_schema:
+/// Algorithm (4-seat war-room A803A3C3, unanimous; tightened in S1):
+///   1. Try parsing the trimmed content as JSON directly. If that
+///      succeeds, use the parsed value (handles "JSON only" AND the
+///      "JSON with literal ``` inside a string value" case — e.g., a
+///      tool argument carrying a code snippet).
+///   2. Otherwise, look for a fenced ```json (or bare ```) block:
+///      - exactly one fenced block (with or without a prose prefix
+///        like "I'll call read_file: ```json {...}```") → parse the
+///        inner contents
+///      - zero fence markers or more than one fenced block →
+///        ambiguous, return no call
+///   3. Parsed value must be an object. Anything else → no call.
+///   4. Strict-match against each offered tool's input_schema:
 ///      - All `required` fields present in obj.
 ///      - All obj keys present in schema's `properties`.
-///   4. Require EXACTLY ONE matching tool. Zero matches → text.
+///      - When `required` is absent AND obj is non-empty, require at
+///        least one obj key to intersect with `properties` (closes a
+///        loose-match hole where a schema with no `required` would
+///        otherwise accept anything).
+///   5. Require EXACTLY ONE matching tool. Zero matches → text.
 ///      Two or more → ambiguous, prefer text over a guess.
-///   5. Synthesize a ToolCall with a stable id (`mm-{round_idx}-0`)
+///   6. Synthesize a ToolCall with a stable id (`mm-{round_idx}-0`)
 ///      so the next round's tool_result can reference it.
 fn parse_minimax_content_as_tool_calls(
     content: &str,
@@ -298,10 +309,23 @@ fn parse_minimax_content_as_tool_calls(
     round_idx: usize,
 ) -> Vec<ToolCall> {
     let trimmed = content.trim();
-    let candidate = strip_fenced_json_block(trimmed).unwrap_or(trimmed);
-    let parsed: serde_json::Value = match serde_json::from_str(candidate) {
+    // Raw-first: a successful JSON parse of the whole trimmed content
+    // wins, so that legitimate args carrying literal ``` in string
+    // values (e.g., a code snippet) aren't mis-extracted by the fence
+    // scanner. Fence detection is the prose-prefix fallback.
+    let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            let candidate = match find_fenced_json_block(trimmed) {
+                FenceMatch::None => return Vec::new(),
+                FenceMatch::Single(inner) => inner,
+                FenceMatch::Multiple => return Vec::new(),
+            };
+            match serde_json::from_str(candidate) {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            }
+        }
     };
     let obj = match parsed.as_object() {
         Some(o) => o,
@@ -331,6 +355,7 @@ fn minimax_content_matches_schema(
     obj: &serde_json::Map<String, serde_json::Value>,
     schema: &serde_json::Value,
 ) -> bool {
+    let required_present = schema.get("required").and_then(|v| v.as_array()).is_some();
     if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
         for r in required {
             if let Some(key) = r.as_str() {
@@ -340,34 +365,72 @@ fn minimax_content_matches_schema(
             }
         }
     }
-    if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+    let properties = schema.get("properties").and_then(|v| v.as_object());
+    if let Some(props) = properties {
         for key in obj.keys() {
-            if !properties.contains_key(key) {
+            if !props.contains_key(key) {
                 return false;
             }
+        }
+    }
+    // Without `required`, the only structural rule is "no extra keys",
+    // which never fires when `properties` is absent — so any non-empty
+    // object would match every such schema. Require a property-key
+    // intersection in that case so empty-schema tools don't capture
+    // unrelated payloads. Empty obj with absent `required` still
+    // matches (preserves the schema-says-nothing edge case).
+    if !required_present && !obj.is_empty() {
+        let intersects = match properties {
+            Some(props) => obj.keys().any(|k| props.contains_key(k)),
+            None => false,
+        };
+        if !intersects {
+            return false;
         }
     }
     true
 }
 
-/// Strip a leading/trailing ```json or ``` fence if the entire trimmed
-/// string is a fenced code block. Returns None when no fence is present,
-/// so the caller can use the raw content.
-fn strip_fenced_json_block(s: &str) -> Option<&str> {
-    let s = s.trim();
-    if !s.starts_with("```") || !s.ends_with("```") || s.len() < 6 {
-        return None;
+/// Outcome of scanning for a fenced JSON block inside content.
+enum FenceMatch<'a> {
+    /// No fence markers — caller parses the raw content.
+    None,
+    /// Exactly one fenced block (whether the entire trimmed content
+    /// is the fence or a prose prefix precedes it) — caller parses
+    /// the inner content.
+    Single(&'a str),
+    /// More than one fenced block — ambiguous, caller should reject.
+    Multiple,
+}
+
+/// Locate a fenced ```json (or bare ```) block inside `s`. Tolerates
+/// a prose prefix (real-world MiniMax sometimes emits
+/// `I'll call read_file: ```json {...}````). Counts ``` markers:
+/// exactly two → one block (extract inner); zero or one → no block;
+/// three or more → multiple blocks (ambiguous).
+fn find_fenced_json_block(s: &str) -> FenceMatch<'_> {
+    let positions: Vec<usize> = s.match_indices("```").map(|(i, _)| i).collect();
+    match positions.len() {
+        0 | 1 => FenceMatch::None,
+        2 => {
+            let open_end = positions[0] + 3;
+            let close_start = positions[1];
+            if close_start < open_end {
+                return FenceMatch::None;
+            }
+            let inner = &s[open_end..close_start];
+            // Strip optional language tag after the opening fence.
+            let inner = inner
+                .strip_prefix("json\n")
+                .or_else(|| inner.strip_prefix("json\r\n"))
+                .or_else(|| inner.strip_prefix("json "))
+                .or_else(|| inner.strip_prefix("\n"))
+                .or_else(|| inner.strip_prefix("\r\n"))
+                .unwrap_or(inner);
+            FenceMatch::Single(inner.trim())
+        }
+        _ => FenceMatch::Multiple,
     }
-    let inner = &s[3..s.len() - 3];
-    // Strip optional language tag after the opening fence.
-    let inner = inner
-        .strip_prefix("json\n")
-        .or_else(|| inner.strip_prefix("json\r\n"))
-        .or_else(|| inner.strip_prefix("json "))
-        .or_else(|| inner.strip_prefix("\n"))
-        .or_else(|| inner.strip_prefix("\r\n"))
-        .unwrap_or(inner);
-    Some(inner.trim())
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1146,6 +1209,108 @@ mod tests {
         let content = "This is just regular prose, not JSON.";
         let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
         assert!(calls.is_empty());
+    }
+
+    // S1 — prose-prefix tolerance. Real MiniMax sometimes narrates
+    // before the fenced JSON ("I'll call read_file: ```json …```").
+    // The fence scanner counts ``` markers; exactly two = one block,
+    // even when prose precedes the opening fence.
+    #[test]
+    fn prose_prefix_then_fenced_json_matches() {
+        let tools = vec![read_file_tool()];
+        let content = "I'll call read_file: ```json\n{\"path\":\"foo.rs\"}\n```";
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "foo.rs");
+    }
+
+    // S1 — more than one fenced block is ambiguous: we won't guess
+    // which block to use. Four ``` markers = two blocks → reject.
+    #[test]
+    fn multiple_fenced_blocks_returns_empty() {
+        let tools = vec![read_file_tool()];
+        let content = "first: ```json\n{\"path\":\"a.rs\"}\n``` and second: ```json\n{\"path\":\"b.rs\"}\n```";
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert!(calls.is_empty(), "multiple fenced blocks must return empty");
+    }
+
+    // S1 — the empty-obj edge case is preserved. A schema that lists
+    // properties but no required field is "every input is valid"; an
+    // empty payload `{}` is still a valid call for that schema.
+    #[test]
+    fn empty_object_no_required_still_matches() {
+        let list_dir = review_tools::ToolDef {
+            name: "list_directory".to_string(),
+            description: "List a directory".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                }
+                // no "required"
+            }),
+        };
+        let tools = vec![list_dir];
+        let content = "{}";
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_directory");
+        assert!(calls[0].arguments.as_object().unwrap().is_empty());
+    }
+
+    // S1 — regression pin (war-room MiniMax catch). Valid top-level
+    // JSON whose string values contain literal ``` (e.g., a code
+    // snippet argument) must NOT be mis-extracted by the fence
+    // scanner — the raw-first parse wins before fence detection runs.
+    #[test]
+    fn literal_backticks_inside_json_string_still_matches() {
+        let snippet_tool = review_tools::ToolDef {
+            name: "write_file".to_string(),
+            description: "Write a file with a snippet".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "snippet": { "type": "string" }
+                },
+                "required": ["path", "snippet"]
+            }),
+        };
+        let tools = vec![snippet_tool];
+        let content = r#"{"path":"src/lib.rs","snippet":"```rust\nfn x() {}\n```"}"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["path"], "src/lib.rs");
+        assert!(calls[0]
+            .arguments["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("fn x()"));
+    }
+
+    // S1 — strict-match tightening. A schema with no `required` AND
+    // no `properties` used to accept any object (only the never-fires
+    // extra-keys check ran). The new intersection rule rejects a
+    // non-empty payload that has nothing to do with the schema.
+    #[test]
+    fn nonempty_object_no_required_no_property_intersection_returns_empty() {
+        let opaque = review_tools::ToolDef {
+            name: "opaque".to_string(),
+            description: "A tool with an unconstrained schema".to_string(),
+            schema: serde_json::json!({
+                "type": "object"
+                // neither "required" nor "properties"
+            }),
+        };
+        let tools = vec![opaque];
+        let content = r#"{"foo":"bar"}"#;
+        let calls = parse_minimax_content_as_tool_calls(content, &tools, 1);
+        assert!(
+            calls.is_empty(),
+            "non-empty payload must not match a schema with no properties to intersect"
+        );
     }
 
     #[test]
