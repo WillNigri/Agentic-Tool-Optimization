@@ -57,14 +57,18 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // (project_name). Falls back to NULL on the name when the row
     // was tagged with an id whose project was later deleted; the
     // frontend then renders the short-form id.
-    // v2.7.13 — also SELECT coordinator_runtime + human_comment so the
-    // list card can render the COORD badge and the human's note
-    // without drilling in. Same projects LEFT JOIN as before.
+    // v2.7.13 — also SELECT human_comment so the list card can render
+    // the human's note without drilling in. Sessions don't have a
+    // coordinator_runtime column persisted yet (close() emits the
+    // value into the CLI response but never UPDATEs sessions with
+    // it — historical oversight, queued as a v2.7.14 fix). The
+    // session card uses s.runtime for the coordinator label today
+    // anyway, so the omission is invisible. War-rooms + chats DO
+    // have their own coordinator_runtime column (added v2.7.13).
     let mut stmt = conn.prepare(
         "SELECT s.id, s.runtime, s.agent_slug, s.title, s.created_at, s.last_used_at, s.turn_count,
                 COALESCE(s.status, 'open'), s.closed_at, s.auto_title, s.summary, s.tags_json, s.project_id,
-                s.category, s.team, p.name,
-                s.coordinator_runtime, s.human_comment
+                s.category, s.team, p.name, s.human_comment
            FROM sessions s
            LEFT JOIN projects p ON p.id = s.project_id
           ORDER BY s.last_used_at DESC
@@ -98,8 +102,11 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 project_name: r.get(15)?,
                 category: r.get(13)?,
                 team: r.get(14)?,
-                coordinator_runtime: r.get(16)?,
-                human_comment: r.get(17)?,
+                // See module comment above — sessions don't have a
+                // persisted coordinator_runtime column. The card
+                // falls back to s.runtime for the coordinator label.
+                coordinator_runtime: None,
+                human_comment: r.get(16)?,
                 row_kind: "session".to_string(),
             })
         })?
