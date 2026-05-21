@@ -53,26 +53,19 @@ interface WarRoomSnapshot {
 /// flow to surface the coordinator's response in the summary card
 /// immediately, without re-querying.
 ///
-/// v2.7.14 NOTE: snake_case here is *intentional asymmetry* with
-/// `WarRoomSnapshot` above (which is camelCase to match the rest of
-/// the Tauri command surface). The close-payload comes from CLI
-/// `emit_json_close` which uses hand-rolled `serde_json::json!()`
-/// with snake_case literal keys. The close handler doesn't actually
-/// read these fields — it just awaits the result and refetches the
-/// snapshot, which IS camelCase. If a future contributor wires these
-/// to render directly, either align the close-payload keys to
-/// camelCase in `commands::war_rooms::emit_json_close` OR rewrite
-/// these field names to camelCase + add an adapter on the close
-/// boundary. War-room 95C52D64 reviewers (claude + minimax) flagged
-/// the asymmetry; consensus was "ok for now, comment + revisit".
+/// v2.7.14 — camelCase to match the getter (`get_war_room`) + every
+/// other Tauri command surface. The earlier intentional snake_case
+/// asymmetry (flagged by war-room 95C52D64) was resolved by flipping
+/// the CLI `emit_json_close` payload to camelCase too. No future
+/// contributor lands on a "why is this one snake_case?" foot-gun.
 interface WarRoomCloseResult {
   id: string;
   status: string;
-  auto_title: string | null;
+  autoTitle: string | null;
   summary: string | null;
   tags: string[];
-  human_comment: string | null;
-  coordinator_runtime: string;
+  humanComment: string | null;
+  coordinatorRuntime: string;
 }
 
 export default function WarRoomDetailView({

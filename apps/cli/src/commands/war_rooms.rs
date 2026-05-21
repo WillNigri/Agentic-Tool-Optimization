@@ -377,22 +377,27 @@ fn emit_human_close(target: &WarRoom, fields: &CloseFields) {
 }
 
 fn emit_json_close(target: &WarRoom, fields: &CloseFields) -> Result<()> {
+    // v2.7.14 — camelCase keys to match the getter (`get_war_room`)
+    // which got `rename_all = "camelCase"` in commit 737a3c6. Pre-fix
+    // the getter and close-response had ASYMMETRIC shapes (getter
+    // camelCase, close response snake_case) — claude + minimax X2
+    // flagged the foot-gun for future contributors. Now consistent.
     let payload = serde_json::json!({
         "id": target.id,
         "kind": "war_room",
         "status": "closed",
-        "seat_count": target.seat_count,
-        "auto_title": fields.auto_title,
+        "seatCount": target.seat_count,
+        "autoTitle": fields.auto_title,
         "summary": fields.summary,
         "tags": fields.tags,
         "category": fields.category,
         "team": fields.team,
-        "project_id": fields.project_id,
-        "coordinator_runtime": fields.coordinator_runtime,
-        "coordinator_model": fields.coordinator_model,
-        "human_comment": fields.human_comment,
-        "duration_ms": fields.duration_ms,
-        "closed_at": fields.closed_at,
+        "projectId": fields.project_id,
+        "coordinatorRuntime": fields.coordinator_runtime,
+        "coordinatorModel": fields.coordinator_model,
+        "humanComment": fields.human_comment,
+        "durationMs": fields.duration_ms,
+        "closedAt": fields.closed_at,
     });
     println!("{}", serde_json::to_string(&payload)?);
     Ok(())

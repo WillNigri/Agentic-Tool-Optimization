@@ -338,22 +338,25 @@ fn emit_human_close(target: &ChatThread, fields: &CloseFields) {
 }
 
 fn emit_json_close(target: &ChatThread, fields: &CloseFields) -> Result<()> {
+    // v2.7.14 — camelCase keys to match the getter (`get_chat`) which
+    // got `rename_all = "camelCase"` in commit 737a3c6. See the matching
+    // emit_json_close in commands::war_rooms for the rationale.
     let payload = serde_json::json!({
         "id": target.id,
         "kind": "chat",
         "status": "closed",
-        "message_count": target.message_count,
-        "auto_title": fields.auto_title,
+        "messageCount": target.message_count,
+        "autoTitle": fields.auto_title,
         "summary": fields.summary,
         "tags": fields.tags,
         "category": fields.category,
         "team": fields.team,
-        "project_id": fields.project_id,
-        "coordinator_runtime": fields.coordinator_runtime,
-        "coordinator_model": fields.coordinator_model,
-        "human_comment": fields.human_comment,
-        "duration_ms": fields.duration_ms,
-        "closed_at": fields.closed_at,
+        "projectId": fields.project_id,
+        "coordinatorRuntime": fields.coordinator_runtime,
+        "coordinatorModel": fields.coordinator_model,
+        "humanComment": fields.human_comment,
+        "durationMs": fields.duration_ms,
+        "closedAt": fields.closed_at,
     });
     println!("{}", serde_json::to_string(&payload)?);
     Ok(())
