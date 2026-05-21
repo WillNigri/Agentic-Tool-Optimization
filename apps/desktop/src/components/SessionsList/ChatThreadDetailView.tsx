@@ -11,9 +11,14 @@
 // detail views feel like one component family. Same header treatment
 // (back button + id chip), same body styling (alternating role
 // bubbles).
+//
+// v2.7.13 — close lifecycle parity. The Close button + summary card
+// mirror SessionTranscriptView's surface; the modal is the shared
+// CloseConversationModal with conversationType="chat".
 
-import { Loader2 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { Loader2, Lock, Sparkles, Unlock } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { cn } from "@/lib/utils";
@@ -23,6 +28,7 @@ import {
   personaDisplay,
   formatTime,
 } from "./_helpers";
+import CloseConversationModal from "./CloseConversationModal";
 
 interface ChatMessage {
   id: string;
@@ -35,6 +41,20 @@ interface ChatMessage {
   createdAt: string;
 }
 
+// v2.7.13 — chat_threads row snapshot returned by `get_chat`. Maps
+// to commands::chats::ChatThread on the Rust side; fields stay
+// snake_case (serde rename_all not set there).
+interface ChatThreadSnapshot {
+  id: string;
+  title: string;
+  status: "open" | "closed";
+  closed_at: string | null;
+  auto_title: string | null;
+  summary: string | null;
+  coordinator_runtime: string | null;
+  message_count: number;
+}
+
 export default function ChatThreadDetailView({
   threadId,
   onBack,
@@ -42,11 +62,73 @@ export default function ChatThreadDetailView({
   threadId: string;
   onBack: () => void;
 }) {
+  const qc = useQueryClient();
   const q = useQuery<ChatMessage[]>({
     queryKey: ["chat-messages", threadId],
     queryFn: () => invoke<ChatMessage[]>("get_chat_messages", { threadId }),
     staleTime: 30_000,
   });
+  // v2.7.13 — chat_threads row snapshot for the close lifecycle.
+  // Independent of get_chat_messages so a slow messages query doesn't
+  // block the snapshot (and vice versa).
+  const snapshotQ = useQuery<ChatThreadSnapshot>({
+    queryKey: ["chat-snapshot", threadId],
+    queryFn: () => invoke<ChatThreadSnapshot>("get_chat", { chatId: threadId }),
+    staleTime: 30_000,
+    retry: false,
+  });
+  const isClosed = snapshotQ.data?.status === "closed";
+
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  const [closeModalOpen, setCloseModalOpen] = useState(false);
+
+  const handleClose = async (opts: {
+    coordinator: string | null;
+    humanComment: string | null;
+  }) => {
+    if (closing) return;
+    setCloseModalOpen(false);
+    setClosing(true);
+    setCloseError(null);
+    setReopenError(null);
+    try {
+      await invoke("close_chat", {
+        chatId: threadId,
+        agentSlug: null,
+        model: null,
+        coordinator: opts.coordinator,
+        humanComment: opts.humanComment,
+      });
+      await qc.invalidateQueries({ queryKey: ["chat-snapshot", threadId] });
+      await qc.invalidateQueries({ queryKey: ["sessions-full"] });
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes("__cancelled__")) {
+        setCloseError(msg);
+      }
+    } finally {
+      setClosing(false);
+    }
+  };
+
+  const handleReopen = async () => {
+    if (reopening) return;
+    setReopening(true);
+    setReopenError(null);
+    setCloseError(null);
+    try {
+      await invoke("reopen_chat", { chatId: threadId });
+      await qc.invalidateQueries({ queryKey: ["chat-snapshot", threadId] });
+      await qc.invalidateQueries({ queryKey: ["sessions-full"] });
+    } catch (e) {
+      setReopenError(String(e));
+    } finally {
+      setReopening(false);
+    }
+  };
 
   if (q.isLoading) {
     return (
@@ -83,7 +165,33 @@ export default function ChatThreadDetailView({
         >
           ← Back to Sessions
         </button>
-        <div className="text-xs text-cs-muted font-mono">{threadId}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-xs text-cs-muted font-mono">{threadId}</div>
+          {isClosed ? (
+            <button
+              onClick={handleReopen}
+              disabled={reopening}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Reopen this chat thread. The next close will refresh the summary with any newly-added messages."
+            >
+              {reopening ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Unlock size={14} />
+              )}
+              {reopening ? "Reopening…" : "Reopen"}
+            </button>
+          ) : (
+            <button
+              onClick={() => setCloseModalOpen(true)}
+              disabled={closing || messages.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Close this chat thread. You'll pick the coordinator LLM and can attach a note before the messages are summarized."
+            >
+              <Lock size={14} /> Close chat
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="rounded-lg border border-cs-border bg-cs-card p-4 space-y-1 text-xs text-cs-muted">
@@ -96,6 +204,47 @@ export default function ChatThreadDetailView({
           thread from the dropdown.
         </p>
       </div>
+
+      {/* v2.7.13 — coordinator summary card. Renders once closed AND
+          there's a summary. Same shape as session + war-room cards
+          so the UI feels like one component family across types. */}
+      {isClosed && snapshotQ.data?.summary && (
+        <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
+          <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
+            <Sparkles size={12} /> Coordinator summary
+            {snapshotQ.data.closed_at && (
+              <span className="text-[10px] text-cs-muted normal-case font-normal">
+                · closed {formatTime(snapshotQ.data.closed_at)}
+              </span>
+            )}
+            {snapshotQ.data.coordinator_runtime && (
+              <span className={cn(runtimeBadge(snapshotQ.data.coordinator_runtime), "normal-case")}>
+                {snapshotQ.data.coordinator_runtime}
+              </span>
+            )}
+          </div>
+          {snapshotQ.data.auto_title && (
+            <div className="text-sm font-medium text-cs-text">
+              {snapshotQ.data.auto_title}
+            </div>
+          )}
+          <div className="text-sm text-cs-text whitespace-pre-wrap">
+            {snapshotQ.data.summary}
+          </div>
+        </div>
+      )}
+
+      {closeError && (
+        <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+          <strong className="text-cs-danger">Close failed:</strong> {closeError}
+        </div>
+      )}
+      {reopenError && (
+        <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+          <strong className="text-cs-danger">Reopen failed:</strong>{" "}
+          {reopenError}
+        </div>
+      )}
 
       {messages.length === 0 ? (
         <div className="rounded-md border border-cs-border/60 bg-cs-card/40 p-4 text-sm text-cs-muted">
@@ -142,6 +291,46 @@ export default function ChatThreadDetailView({
           })}
         </div>
       )}
+
+      {closing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-cs-bg/80 backdrop-blur-sm">
+          <div className="border border-cs-border bg-cs-card rounded-lg p-6 max-w-md w-full mx-4 space-y-4">
+            <div className="flex items-center gap-3">
+              <Loader2
+                size={20}
+                className="animate-spin text-cs-accent shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-cs-text">
+                  Coordinator is summarizing the chat…
+                </div>
+                <div className="text-xs text-cs-muted mt-1">
+                  Reading every message. Typically finishes in 5–20 seconds.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                void invoke("cancel_close_session", {
+                  sessionId: threadId,
+                }).catch(() => undefined)
+              }
+              className="w-full px-3 py-1.5 rounded-md border border-cs-border bg-cs-card text-sm text-cs-muted hover:text-cs-text"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <CloseConversationModal
+        open={closeModalOpen}
+        busy={closing}
+        conversationType="chat"
+        onCancel={() => setCloseModalOpen(false)}
+        onSubmit={handleClose}
+      />
     </div>
   );
 }

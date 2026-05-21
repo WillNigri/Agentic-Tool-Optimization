@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import CloseSessionModal from "@/components/SessionsList/CloseSessionModal";
+import CloseConversationModal from "@/components/SessionsList/CloseConversationModal";
 import * as tauriApi from "@/lib/tauri-api";
 
 // v2.7.12 — pre-close modal. Pins the user-visible contract:
@@ -19,19 +19,19 @@ vi.mock("@/lib/tauri-api", async (orig) => {
   };
 });
 
-function renderModal(props: Partial<React.ComponentProps<typeof CloseSessionModal>> = {}) {
+function renderModal(props: Partial<React.ComponentProps<typeof CloseConversationModal>> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const onCancel = props.onCancel ?? vi.fn();
   const onSubmit = props.onSubmit ?? vi.fn();
   const utils = render(
     <QueryClientProvider client={qc}>
-      <CloseSessionModal open={true} onCancel={onCancel} onSubmit={onSubmit} {...props} />
+      <CloseConversationModal open={true} onCancel={onCancel} onSubmit={onSubmit} {...props} />
     </QueryClientProvider>,
   );
   return { ...utils, onCancel, onSubmit };
 }
 
-describe("CloseSessionModal (S12 v2.7.12)", () => {
+describe("CloseConversationModal (S12 v2.7.12)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(tauriApi.listLlmApiKeys).mockResolvedValue([]);
@@ -41,7 +41,7 @@ describe("CloseSessionModal (S12 v2.7.12)", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(
       <QueryClientProvider client={qc}>
-        <CloseSessionModal open={false} onCancel={vi.fn()} onSubmit={vi.fn()} />
+        <CloseConversationModal open={false} onCancel={vi.fn()} onSubmit={vi.fn()} />
       </QueryClientProvider>,
     );
     expect(container.firstChild).toBeNull();

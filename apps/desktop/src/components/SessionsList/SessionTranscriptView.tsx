@@ -29,7 +29,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { listAgents, type Agent } from "@/lib/agents";
-import CloseSessionModal from "./CloseSessionModal";
+import CloseConversationModal from "./CloseConversationModal";
 import {
   runtimeBadge,
   formatTime,
@@ -446,9 +446,10 @@ export default function SessionTranscriptView({
           comment. Submit calls handleClose with the user's choices;
           the existing "Coordinator is summarizing…" blocker takes over
           from there. */}
-      <CloseSessionModal
+      <CloseConversationModal
         open={closeModalOpen}
         busy={closing}
+        conversationType="session"
         onCancel={() => setCloseModalOpen(false)}
         onSubmit={handleClose}
       />

@@ -14,7 +14,7 @@
 // commit message.
 
 import { useState } from "react";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, Lock, Send, Sparkles, Tag, Unlock } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -26,10 +26,38 @@ import {
   formatTime,
 } from "./_helpers";
 import type { SingleRunDetail } from "./SingleRunDetailView";
+import CloseConversationModal from "./CloseConversationModal";
 
 interface WarRoomDispatchResult {
   warRoomId: string;
   round: number;
+}
+
+/// v2.7.13 — war_rooms row snapshot returned by `get_war_room`. Maps
+/// directly to commands::war_rooms::WarRoom on the Rust side; serde
+/// rename_all isn't enabled there so the fields stay snake_case on
+/// the wire. We keep the TS surface snake_case to match.
+interface WarRoomSnapshot {
+  id: string;
+  status: "open" | "closed";
+  closed_at: string | null;
+  auto_title: string | null;
+  summary: string | null;
+  coordinator_runtime: string | null;
+  seat_count: number;
+}
+
+/// Mirrors the `ato war-rooms close` JSON payload. Used by the close
+/// flow to surface the coordinator's response in the summary card
+/// immediately, without re-querying.
+interface WarRoomCloseResult {
+  id: string;
+  status: string;
+  auto_title: string | null;
+  summary: string | null;
+  tags: string[];
+  human_comment: string | null;
+  coordinator_runtime: string;
 }
 
 export default function WarRoomDetailView({
@@ -46,6 +74,73 @@ export default function WarRoomDetailView({
       invoke<SingleRunDetail[]>("get_war_room_constituents", { warRoomId }),
     staleTime: 60_000,
   });
+  // v2.7.13 — war_rooms row snapshot for the close lifecycle. Falls
+  // through gracefully when the war_rooms row doesn't exist yet
+  // (legacy war room that pre-dates the table) — get_war_room returns
+  // a synthetic 'open' row in that case.
+  const snapshotQ = useQuery<WarRoomSnapshot>({
+    queryKey: ["war-room-snapshot", warRoomId],
+    queryFn: () => invoke<WarRoomSnapshot>("get_war_room", { warRoomId }),
+    staleTime: 30_000,
+    // Don't surface errors here — the snapshot is a render hint, not
+    // load-bearing. The constituents query above is the actual gate.
+    retry: false,
+  });
+  const isClosed = snapshotQ.data?.status === "closed";
+
+  // Close lifecycle state — mirrors SessionTranscriptView's shape so
+  // the cancel/error/blocker UX is consistent across conversation
+  // types.
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  const [closeModalOpen, setCloseModalOpen] = useState(false);
+
+  const handleClose = async (opts: {
+    coordinator: string | null;
+    humanComment: string | null;
+  }) => {
+    if (closing) return;
+    setCloseModalOpen(false);
+    setClosing(true);
+    setCloseError(null);
+    setReopenError(null);
+    try {
+      await invoke<WarRoomCloseResult>("close_war_room", {
+        warRoomId,
+        agentSlug: null,
+        model: null,
+        coordinator: opts.coordinator,
+        humanComment: opts.humanComment,
+      });
+      await qc.invalidateQueries({ queryKey: ["war-room-snapshot", warRoomId] });
+      await qc.invalidateQueries({ queryKey: ["sessions-full"] });
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes("__cancelled__")) {
+        setCloseError(msg);
+      }
+    } finally {
+      setClosing(false);
+    }
+  };
+
+  const handleReopen = async () => {
+    if (reopening) return;
+    setReopening(true);
+    setReopenError(null);
+    setCloseError(null);
+    try {
+      await invoke("reopen_war_room", { warRoomId });
+      await qc.invalidateQueries({ queryKey: ["war-room-snapshot", warRoomId] });
+      await qc.invalidateQueries({ queryKey: ["sessions-full"] });
+    } catch (e) {
+      setReopenError(String(e));
+    } finally {
+      setReopening(false);
+    }
+  };
   // PR 16-PR-B — "Send next round" input state. Disabled while a
   // round is in flight (the parallel dispatches block this Tauri
   // call until all seats return, so the loading flag tracks the
@@ -178,7 +273,36 @@ export default function WarRoomDetailView({
         >
           ← Back to Sessions
         </button>
-        <div className="text-xs text-cs-muted font-mono">{warRoomId}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-xs text-cs-muted font-mono">{warRoomId}</div>
+          {/* v2.7.13 — close + reopen buttons (mirrors the session
+              detail view's lifecycle controls). Disabled while a
+              dispatch is in flight or no seats have replied yet. */}
+          {isClosed ? (
+            <button
+              onClick={handleReopen}
+              disabled={reopening}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Reopen this war room. The next close will refresh the summary with any newly-added seats or rounds."
+            >
+              {reopening ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Unlock size={14} />
+              )}
+              {reopening ? "Reopening…" : "Reopen"}
+            </button>
+          ) : (
+            <button
+              onClick={() => setCloseModalOpen(true)}
+              disabled={closing || q.data.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Close this war room. You'll pick the coordinator LLM and can attach a note before the seats are summarized."
+            >
+              <Lock size={14} /> Close war room
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Header summary card — counts, badges, total cost. */}
@@ -558,6 +682,94 @@ export default function WarRoomDetailView({
           </div>
         </div>
       )}
+
+      {/* v2.7.13 — coordinator summary card. Renders once the war
+          room is closed AND we have a summary. Same shape as the
+          session-side card so the UI feels consistent across types. */}
+      {isClosed && snapshotQ.data?.summary && (
+        <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
+          <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
+            <Sparkles size={12} /> Coordinator summary
+            {snapshotQ.data.closed_at && (
+              <span className="text-[10px] text-cs-muted normal-case font-normal">
+                · closed {formatTime(snapshotQ.data.closed_at)}
+              </span>
+            )}
+            {snapshotQ.data.coordinator_runtime && (
+              <span className={cn(runtimeBadge(snapshotQ.data.coordinator_runtime), "normal-case")}>
+                {snapshotQ.data.coordinator_runtime}
+              </span>
+            )}
+          </div>
+          {snapshotQ.data.auto_title && (
+            <div className="text-sm font-medium text-cs-text">
+              {snapshotQ.data.auto_title}
+            </div>
+          )}
+          <div className="text-sm text-cs-text whitespace-pre-wrap">
+            {snapshotQ.data.summary}
+          </div>
+        </div>
+      )}
+
+      {/* Close + reopen error banners. Mirrors the session view's
+          inline error surface; the modal/blocker absorbs the success
+          path so these only render when something went wrong. */}
+      {closeError && (
+        <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+          <strong className="text-cs-danger">Close failed:</strong> {closeError}
+        </div>
+      )}
+      {reopenError && (
+        <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">
+          <strong className="text-cs-danger">Reopen failed:</strong>{" "}
+          {reopenError}
+        </div>
+      )}
+
+      {/* Blocking close modal — coordinator is summarizing. Identical
+          shape to SessionTranscriptView's blocker. Cancel here aborts
+          the underlying `ato war-rooms close` subprocess. */}
+      {closing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-cs-bg/80 backdrop-blur-sm">
+          <div className="border border-cs-border bg-cs-card rounded-lg p-6 max-w-md w-full mx-4 space-y-4">
+            <div className="flex items-center gap-3">
+              <Loader2
+                size={20}
+                className="animate-spin text-cs-accent shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-cs-text">
+                  Coordinator is summarizing the war room…
+                </div>
+                <div className="text-xs text-cs-muted mt-1">
+                  Reading every seat's reply across all rounds. Typically
+                  finishes in 5–20 seconds.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                void invoke("cancel_close_session", {
+                  sessionId: warRoomId,
+                }).catch(() => undefined)
+              }
+              className="w-full px-3 py-1.5 rounded-md border border-cs-border bg-cs-card text-sm text-cs-muted hover:text-cs-text"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <CloseConversationModal
+        open={closeModalOpen}
+        busy={closing}
+        conversationType="war_room"
+        onCancel={() => setCloseModalOpen(false)}
+        onSubmit={handleClose}
+      />
     </div>
   );
 }

@@ -4,22 +4,30 @@ import { useQuery } from "@tanstack/react-query";
 import { listLlmApiKeys, type LlmApiKey } from "@/lib/tauri-api";
 import { cn } from "@/lib/utils";
 
-// v2.7.12 — Pre-close modal. Lets the user pick which LLM runtime
-// summarizes the session AND attach a free-form human note that lives
-// in the summary card alongside the coordinator's output.
+// v2.7.12 (sessions) → v2.7.13 (generalized) — Pre-close modal for
+// any closeable conversation: sessions, war rooms, chat threads. Lets
+// the user pick which LLM runtime summarizes AND attach a free-form
+// human note that lives in the summary card alongside the
+// coordinator's output. One component for all three types; the
+// `conversationType` prop drives just the copy (title + placeholder +
+// button label). The actual close invocation is the parent's job —
+// this modal only collects the user's intent and hands it off via
+// `onSubmit`.
 //
-// Why a separate modal (vs inline pickers in the header): the old close
-// button fired close_session synchronously with whatever defaults the
-// backend picked. Users had no surface for "summarize this with claude
-// instead of minimax" or "add my own framing of what we just decided"
-// — both promised by the CLI flags (--coordinator, --human-comment) but
-// invisible from the UI. The modal makes both first-class.
+// Why a separate modal (vs inline pickers in the header): the close
+// CLI surface accepts --coordinator and --human-comment for every
+// conversation type, but until this modal those flags were invisible
+// from the UI — clicking Close fired whatever defaults the backend
+// picked, no surface for "summarize with claude not minimax" or "add
+// my own framing." The modal makes both first-class for all three
+// types in one place.
 //
 // Coordinator picker: populated from listLlmApiKeys() so users only see
 // providers they can actually dispatch to. Empty list → modal renders
 // the field as a disabled "(no API keys configured)" hint and still
 // lets the user submit; the backend falls through to its default
-// resolution chain (session agent_slug → anchor runtime → first key).
+// resolution chain (session agent_slug / chat agent → anchor runtime
+// → first key).
 
 // API-provider slugs that the close-summarizer can dispatch to. Mirrors
 // crate::api_dispatch::registry() on the Rust side. Any provider in this
@@ -34,17 +42,67 @@ const SUPPORTED_COORDINATORS: { slug: string; label: string }[] = [
   { slug: "openrouter", label: "OpenRouter" },
 ];
 
+export type ConversationType = "session" | "war_room" | "chat";
+
+/** Per-type copy. Centralized so a future fourth conversation type
+ *  only needs an entry here (plus the matching backend Closeable
+ *  impl). The placeholder string is intentionally type-specific so
+ *  the example in the empty textarea matches what a user typically
+ *  writes for that conversation type. */
+const COPY: Record<ConversationType, {
+  title: string;
+  description: string;
+  buttonLabel: string;
+  placeholder: string;
+}> = {
+  session: {
+    title: "Close session",
+    description:
+      "The coordinator will read the conversation and produce a title, summary, topic tags, and category. Pick who summarizes — and add any framing of your own that should travel with the summary.",
+    buttonLabel: "Close session",
+    placeholder:
+      "e.g. 'We agreed to ship the migration toast first; revisit war-room close after v2.7.12.'",
+  },
+  war_room: {
+    title: "Close war room",
+    description:
+      "The coordinator will read every seat's reply across all rounds and produce a single summary capturing where they agreed, where they diverged, and what got decided. Pick who summarizes and add any framing of your own.",
+    buttonLabel: "Close war room",
+    placeholder:
+      "e.g. 'Claude + Codex converged on the migration toast; Minimax was an outlier — discounted.'",
+  },
+  chat: {
+    title: "Close chat thread",
+    description:
+      "The coordinator will read every message and produce a title, summary, topic tags, and category. Pick who summarizes — and add any framing of your own that should travel with the summary.",
+    buttonLabel: "Close chat",
+    placeholder:
+      "e.g. 'Quick triage convo — actual fix tracked in war room ABC123.'",
+  },
+};
+
 interface Props {
   open: boolean;
   onCancel: () => void;
-  /** Called with the user's choices. Caller invokes close_session and
-   *  shows the existing "Coordinator is summarizing…" blocker. */
+  /** Called with the user's choices. Caller invokes the matching
+   *  Tauri command (close_session / close_war_room / close_chat) and
+   *  shows the "Coordinator is summarizing…" blocker. */
   onSubmit: (opts: { coordinator: string | null; humanComment: string | null }) => void;
   /** Disables the Submit button while the parent is mid-dispatch. */
   busy?: boolean;
+  /** Drives the per-type copy. Defaults to "session" so existing
+   *  callers keep working without an explicit prop. */
+  conversationType?: ConversationType;
 }
 
-export default function CloseSessionModal({ open, onCancel, onSubmit, busy = false }: Props) {
+export default function CloseConversationModal({
+  open,
+  onCancel,
+  onSubmit,
+  busy = false,
+  conversationType = "session",
+}: Props) {
+  const copy = COPY[conversationType];
   const [coordinator, setCoordinator] = useState<string>("");
   const [humanComment, setHumanComment] = useState<string>("");
 
@@ -77,7 +135,7 @@ export default function CloseSessionModal({ open, onCancel, onSubmit, busy = fal
       className="fixed inset-0 z-50 flex items-center justify-center bg-cs-bg/80 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="close-session-title"
+      aria-labelledby="close-conversation-title"
       onClick={(e) => {
         if (e.target === e.currentTarget) onCancel();
       }}
@@ -89,14 +147,11 @@ export default function CloseSessionModal({ open, onCancel, onSubmit, busy = fal
         <div className="flex items-start gap-3">
           <Sparkles size={18} className="text-cs-accent mt-0.5 shrink-0" />
           <div className="flex-1 min-w-0">
-            <h2 id="close-session-title" className="text-sm font-semibold text-cs-text">
-              Close session
+            <h2 id="close-conversation-title" className="text-sm font-semibold text-cs-text">
+              {copy.title}
             </h2>
             <p className="text-xs text-cs-muted mt-1 leading-relaxed">
-              The coordinator will read the conversation and produce a
-              title, summary, topic tags, and category. Pick who summarizes
-              — and add any framing of your own that should travel with
-              the summary.
+              {copy.description}
             </p>
           </div>
           <button
@@ -155,7 +210,7 @@ export default function CloseSessionModal({ open, onCancel, onSubmit, busy = fal
             disabled={busy}
             rows={4}
             maxLength={4096}
-            placeholder="e.g. 'We agreed to ship the migration toast first; revisit war-room close after v2.7.12.'"
+            placeholder={copy.placeholder}
             className="w-full rounded-md border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text font-mono focus:border-cs-accent focus:outline-none disabled:opacity-50"
           />
           <p className="text-[10px] text-cs-muted text-right">
@@ -181,7 +236,7 @@ export default function CloseSessionModal({ open, onCancel, onSubmit, busy = fal
             )}
           >
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}
-            {busy ? "Closing…" : "Close session"}
+            {busy ? "Closing…" : copy.buttonLabel}
           </button>
         </div>
       </form>
