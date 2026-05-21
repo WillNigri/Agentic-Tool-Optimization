@@ -1409,4 +1409,81 @@ mod tests {
         assert_eq!(block["content"], "fn main() {}");
         assert_eq!(block["is_error"], false);
     }
+
+    // v2.8.0 closing — API-provider tool-call loop acceptance.
+    //
+    // ROADMAP item 5 promised "OpenAI/Anthropic function-call loop
+    // for all 7 API providers." Most of the surface (parse_tool_calls,
+    // append_tool_results, dispatch_with_tools) was already shipped
+    // by v2.7.8 PR-3 for openai/gemini/minimax/anthropic. What was
+    // missing was explicit acceptance proof for the OpenAI-FLAVOR
+    // providers in the live registry — grok, deepseek, qwen,
+    // openrouter, and openai (the slug added in v2.7.14 commit
+    // 08796d6). These two tests pin the contract: any future provider
+    // added to packages/ato-api-providers with flavor="openai"
+    // automatically gains tool support + is verified by the existing
+    // handler. A new flavor that needs its own parser branch can't
+    // ship "marked supported" without breaking these tests.
+    #[test]
+    fn provider_supports_tools_covers_every_registry_provider_with_known_flavor() {
+        for p in ato_api_providers::registry() {
+            let supported = provider_supports_tools(p);
+            let expected = matches!(p.flavor, "openai" | "gemini" | "minimax" | "anthropic");
+            assert_eq!(
+                supported, expected,
+                "provider {} (flavor={}) expected supports_tools={}, got {}",
+                p.slug, p.flavor, expected, supported
+            );
+        }
+    }
+
+    #[test]
+    fn parses_openai_tool_call_works_for_every_openai_flavor_provider() {
+        // Same payload shape (OpenAI chat-completions tool_calls) MUST
+        // parse identically for every OpenAI-flavor provider — that's
+        // the entire premise of the flavor abstraction. If a provider
+        // ever diverges (e.g. DeepSeek changes their tool_call envelope),
+        // this test fails BEFORE a user hits it in dogfood.
+        let payload = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_xyz",
+                        "type": "function",
+                        "function": {
+                            "name": "grep",
+                            "arguments": "{\"pattern\":\"fn dispatch\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let openai_flavor_providers: Vec<&'static ato_api_providers::ApiProvider> =
+            ato_api_providers::registry()
+                .iter()
+                .filter(|p| p.flavor == "openai")
+                .collect();
+        assert!(
+            openai_flavor_providers.len() >= 5,
+            "expected at least 5 OpenAI-flavor providers (grok, deepseek, qwen, openrouter, openai); got {}",
+            openai_flavor_providers.len()
+        );
+        for p in openai_flavor_providers {
+            let conv = Conversation::new(p, &[], "test prompt");
+            let calls = conv.parse_tool_calls(p, &payload, &[]);
+            assert_eq!(
+                calls.len(),
+                1,
+                "provider {} (flavor=openai) failed to parse tool_calls",
+                p.slug
+            );
+            assert_eq!(calls[0].name, "grep", "provider {} name mismatch", p.slug);
+            assert_eq!(
+                calls[0].arguments["pattern"], "fn dispatch",
+                "provider {} arguments mismatch",
+                p.slug
+            );
+            assert_eq!(calls[0].id, "call_xyz", "provider {} id mismatch", p.slug);
+        }
+    }
 }

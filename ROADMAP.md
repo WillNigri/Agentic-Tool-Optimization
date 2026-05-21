@@ -301,11 +301,47 @@ War-room id `1DF02DA9-125E-4A98-B78D-083BA605A80B` (claude + codex; gemini skipp
   Without this, ATO is selling permissions it can't enforce — "the dispatch IS the authorization" only works for users who never look at the agent-creation UI's promises.
 
 **v2.8.0 — backend file surgery + keychain durability + tool-call loop**
-- Split `lib.rs` (2,370 lines) — schema init / Tauri command registration / structs. Backend 81 → 85.
-- Split `recipes_engine.rs` (2,245 lines) — engine / triggers / actions. Backend 85 → 88.
-- Versioned master-key + identity-change detection. Today's keychain rotation cliff (memory `feedback_dev_build_keychain.md`) silently orphans every stored API key when the macOS keychain ACL identity changes. Real users hit this on signing-cert rollover, macOS version upgrades, keychain resets. Ship `master_key_v2` with re-encryption transaction on rotation instead of orphaning ciphertext; prompt-to-re-enter on identity change instead of silent rotate. Surface 85 → 87.
-- `anchor_runtime` column on `chat_threads` → ships the WhatsApp-row LLM-icon column the v2.7.6 truncation war-room shipped without. Surface 87 → 88.
-- **API-provider tool-call loop** (need-to-have for the multi-LLM arbitration pitch to be honest). Today the 7 API providers in `packages/ato-api-providers/` (minimax, grok, deepseek, qwen, openrouter, anthropic, google) dispatch as `POST /v1/chat/completions` — pure text-in, text-out. They have **zero tool access**, can't read files, can't grep the codebase, can't make a decision about your code. When you war-room with codex + claude + minimax, the API-provider seats reason about whatever's in the prompt context; only the CLI agents (codex / claude / openclaw / hermes) actually investigate. That's a credibility hole: ATO sells "compare every LLM on your task" but half the seats are reasoning blind. Fix: implement OpenAI/Anthropic function-call loop in `apps/cli/src/api_dispatch.rs` — parse `tool_calls` in the response, execute the requested tool locally (file read, grep, write, shell — same workspace-write boundary as codex), append `tool` role messages with the results, re-dispatch until the model emits a final answer with no more tool calls. Per-provider testing matrix because each provider's function-call shape is slightly different (OpenAI vs Anthropic vs Gemini all diverge). Effort estimate: ~200-400 LOC + 7 provider acceptance tests. Surface ?? (lifts the "honest agentic multi-LLM" claim from aspirational to real).
+
+*Status check 2026-05-21: 4 of 5 items SHIPPED in the v2.7.14 release;
+master_key_v2 ships PR-1 (additive ledger foundation) with PRs 2-6
+queued for the next focused session. See the "v2.7.14 — Released
+2026-05-21" history block below for commit-level detail.*
+
+- ✅ SHIPPED `421e39b` (v2.7.14) — Split `lib.rs` (1431 lines after the
+  v2.7.7 split, was 2370 originally) — extracted 400 lines of
+  frontend-facing type definitions into `types.rs`. lib.rs now 1037
+  lines, types.rs 410. Backend 81 → 85.
+- ✅ SHIPPED `b9db3a5` (v2.7.14) — Split `recipes_engine.rs` (2245
+  lines) into `recipes_engine/{mod,triggers,placeholders,actions,
+  audit}.rs`. War-roomed plan (`726F8702`) before code. `pub(super)`
+  visibility; behavior unchanged. Backend 85 → 88.
+- ⚠️ PARTIAL `2ad9441` (v2.7.14) — Versioned master-key (`master_key_v2`).
+  PR-1 SHIPPED: additive `master_key_ledger` table + `llm_api_keys.
+  key_version` column + idempotent v1 backfill on startup. Zero
+  behavior change today. PRs 2-6 (per-OS identity probe, mismatch
+  detection, atomic re-encryption transaction, rekey UI, CLI mirror)
+  designed in memory `project_master_key_v2_design.md` and war-roomed
+  (`C14E2735`) — held for live dogfood because they touch destructive
+  paths. Surface 85 → 87 partial; full credit lands when PRs 2-6 ship.
+- ✅ SHIPPED `94cb10f` + `3235b97` (v2.7.14) — `anchor_runtime` column
+  on `chat_threads` + distinct "With <runtime>" badge in ChatCard.
+  WhatsApp-row LLM-icon column the v2.7.6 truncation war-room shipped
+  without is now stable across runtime hops. Surface 87 → 88.
+- ✅ SHIPPED (existed pre-v2.7.14 in `api_dispatch_tools.rs`, completed
+  with v2.7.14 acceptance tests) — **API-provider tool-call loop.**
+  The OpenAI/Anthropic/Gemini/MiniMax function-call loop (parse
+  `tool_calls`, execute locally, append `tool` role results,
+  re-dispatch until no more tool calls) is implemented for every
+  provider flavor in `apps/cli/src/api_dispatch_tools.rs`. v2.7.14
+  closing tests (`provider_supports_tools_covers_every_registry_
+  provider_with_known_flavor` + `parses_openai_tool_call_works_for_
+  every_openai_flavor_provider`) pin the contract: every OpenAI-
+  flavor provider in the live registry — grok, deepseek, qwen,
+  openrouter, openai (added v2.7.14 commit `08796d6`) — flows
+  through the OpenAI tool-call handler. Live-verified end-to-end
+  via the minimax + distribution-fixer agent dispatching `read_file`
+  + `grep` (v2.7.14 dogfood test 17). The earlier "API providers
+  reason blind" credibility hole is closed.
 
 **Projected scores after v2.8.0 lands:** TS 96, DB schema 87, Backend org 88, Frontend org 83, Surface 87. Weighted average ~89%. Frontend may need a second pass (`PromptBar/_helpers.ts` audit + SessionsList second cut) to clear 85.
 
@@ -314,6 +350,120 @@ War-room id `1DF02DA9-125E-4A98-B78D-083BA605A80B` (claude + codex; gemini skipp
 **Process change:** release notes claim per-front percentages only when there's a linked measurement (file LOC delta, bug count, test pass count). Stops the "85%+ across all 5" language from leaking into release notes without numbers backing it.
 
 War-room transcripts: `docs/reviews/elegance-roadmap-war-room-2026-05-19.md` (forthcoming write-up of both seats' answers).
+
+### v2.7.14 — Close lifecycle + sessions refactor + Linux fix + v2.8.0 closing (Released 2026-05-21)
+
+15-commit release shipped across two autonomous-CTO windows on
+2026-05-21. Net -54 LOC across 21 files despite adding 149 lines of
+new security-schema, 1 new API provider, and 4 features. War-roomed
+every non-trivial change before commit (lesson reinforced 3 times
+after a v2.7.13 regression-shaped miss).
+
+**Close lifecycle (war-rooms + chats + sessions refactor):**
+- `737a3c6` v2.7.13 polish bundle: `LIMIT 1000` on `fetch_turns` for
+  war_rooms + chats (DoS / bill-shock guard from the MiniMax dogfood
+  review); `#[serde(rename_all="camelCase")]` on `WarRoom` +
+  `ChatThread` getter structs; PID registry by `(kind, id)`;
+  `.filter_map(|r| r.ok())` row-drop logging on the chat-wide SELECT;
+  `Closeable` trait status-guard invariant docs.
+- `5d75ba6` `sessions::close` + `reopen` collapse into the shared
+  `commands::conversation_close::close_conversation<T: Closeable>`
+  orchestrator. **Net -524 LOC** in `sessions.rs` (1568 → 913);
+  7 dead helpers (`ALLOWED_CATEGORIES`, `list_projects_for_prompt`,
+  `resolve_summarizer`, `extract_json_object`, `truncate`,
+  `sanitize_tag`, `validate_category`) consolidated in
+  `conversation_close.rs`. War-roomed the plan (`8E5D733D`) before
+  code; caught the `coordinator_slug` drop + 2 test breakages before
+  they shipped.
+- `a51123f` `Closeable::fetch_turns` cap at 1000 for sessions
+  (slices in-Rust so history-replay dispatchers keep full fidelity).
+  All three conversation kinds now bounded.
+- `d580c24` `emit_json_close` camelCase consistency (was the
+  "intentional asymmetry" foot-gun flagged by war-rooms `95C52D64`
+  and `C14E2735`). Verified live by re-closing a war-room and
+  asserting zero snake_case keys in the output.
+
+**API/dispatch:**
+- `5f9a713` buffered reqwest timeout 120s → 300s + classify send
+  errors. MiniMax's content-moderation pass on 20K-token code-review
+  prompts routinely takes 60-180s; the 120s cap silently truncated
+  those as misleading "POST <url>" connect-failures in the audit log.
+  Streaming was already 300s; brings the two paths into agreement.
+- `08796d6` `openai` API provider added to
+  `packages/ato-api-providers` (slug=openai, flavor=openai,
+  env_var=OPENAI_API_KEY, default_model=gpt-4o-mini). Closes the
+  v2.8.x docket entry "Codex has no OpenAI api-provider in the
+  registry."
+- `6742a30` codex → openai CLI auto-fallback wired in
+  `dispatch.rs::api_fallback_for_missing_cli`. Mirrors the
+  claude→anthropic + gemini→google pattern from v2.7.8 PR-5a.
+  6/6 pr5a fallback tests pass.
+- `2ad9441` API-provider tool-call loop acceptance tests
+  (`provider_supports_tools_covers_every_registry_provider_with_
+  known_flavor` + `parses_openai_tool_call_works_for_every_openai_
+  flavor_provider`). The loop itself shipped in v2.7.8 PR-3; these
+  tests pin the contract for every OpenAI-flavor provider in the
+  registry (grok, deepseek, qwen, openrouter, openai).
+
+**Frontend / data:**
+- `94cb10f` `anchor_runtime TEXT` column on `chat_threads` +
+  idempotent backfill from first assistant turn. SessionListRow's
+  `runtime` field now prefers the stable anchor over the per-turn
+  fallback.
+- `3235b97` distinct "With <runtime>" badge on ChatCard. Tooltip:
+  *"Anchor runtime: <runtime> — the LLM this chat thread is
+  primarily with. Individual messages can be routed to other
+  runtimes; this stays stable."*
+
+**Backend file surgery:**
+- `421e39b` `lib.rs` split — extracted 400 lines of frontend-facing
+  type definitions into `types.rs`. `lib.rs` 1431 → 1037 LOC.
+- `b9db3a5` `recipes_engine.rs` (2245 LOC) split into
+  `recipes_engine/{mod,triggers,placeholders,actions,audit}.rs`.
+  War-roomed plan (`726F8702`) PROCEED-WITH-FIXES; claude's
+  line-range corrections + `pub(super)` visibility per minimax's
+  call applied. 79 CLI tests + 62 vitest + 153 desktop tests still
+  pass.
+
+**Linux / dev experience:**
+- `a88a0a1` (relocated to `lib::run()` by `08796d6`) Fedora
+  white-screen fix — `WEBKIT_DISABLE_DMABUF_RENDERER=1` on Linux
+  before Tauri builds the webview. WebKitGTK 2.40+ DMA-BUF
+  renderer bug under GNOME/Wayland triggered blank windows; Ubuntu
+  on 2.38.x didn't repro. Coordinated with a parallel session
+  (`E2D6ABF5`) that prepared the patch.
+
+**Security foundation:**
+- `2ad9441` `master_key_v2` PR-1 — `master_key_ledger` table +
+  `llm_api_keys.key_version` column + idempotent v1 backfill on
+  startup. Additive only; zero behavior change. 3 unit tests + live
+  prod-DB verification (existing Google AI + MiniMax keys now
+  declare `key_version='v1'`; ledger has exactly one v1 row;
+  re-running init doesn't duplicate). Designed in memory
+  `project_master_key_v2_design.md` and war-roomed (`C14E2735`)
+  with claude's identity-probe critique applied (macOS DR
+  redesigned as advisory hint not primary signal; Linux 4KB-SHA
+  replaced with publisher-info coarseness; `BEGIN IMMEDIATE`
+  transaction discipline; ledger writes for env-bypass loads too).
+  PRs 2-6 (probe, mismatch detection, atomic re-encryption, rekey
+  UI, CLI mirror) held for live-dogfood session with the driver.
+
+**War-rooms run** (all preserved in `~/.ato/local.db` for replay):
+| war_room_id | Topic |
+|---|---|
+| `76F7CEEB` | v2.7.13 Rust diff review |
+| `95C52D64` | v2.7.14 polish bundle review |
+| `8E5D733D` | sessions::close refactor PLAN review |
+| `E2D6ABF5` | Fedora dmabuf diagnosis (parallel session) |
+| `C14E2735` | master_key_v2 design critique |
+| `726F8702` | recipes_engine.rs split PLAN review |
+
+**Process change:** war-room non-trivial Rust diffs BEFORE commit,
+not after. Caught real bugs three times this session — the
+sessions-coordinator-runtime regression at `0c5ef70` would have been
+caught earlier; chat-fallback gap + coordinator-slug leading-dash
+caught at `b1a397c`; sessions refactor coordinator_slug-drop
+regression caught at `5d75ba6` via plan-review BEFORE code.
 
 ### v2.7.7 — Agentic-runtime unlock + multi-runtime sessions + dogfood-bug arc (Released 2026-05-19)
 
