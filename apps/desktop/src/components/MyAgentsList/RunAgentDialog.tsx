@@ -28,27 +28,52 @@ interface Props {
   agent: Agent;
   open: boolean;
   onClose: () => void;
+  /**
+   * Felipe P4 — when the caller knows the prompt up front (e.g. the
+   * agent has a stored `default_prompt`), pre-fill it here so the
+   * dialog doesn't make the user retype it. Pair with `autoFire` to
+   * dispatch on mount.
+   */
+  initialPrompt?: string;
+  /**
+   * Felipe P4 — when true (and `initialPrompt` is non-empty), the
+   * dialog fires the dispatch as soon as it mounts and then behaves
+   * like a normal Run dialog for any follow-up turns the user types.
+   */
+  autoFire?: boolean;
 }
 
-export default function RunAgentDialog({ agent, open, onClose }: Props) {
+export default function RunAgentDialog({
+  agent,
+  open,
+  onClose,
+  initialPrompt,
+  autoFire,
+}: Props) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const requestShell = useTerminalStore((s) => s.requestShell);
   const activeProject = useProjectStore((s) => s.activeProject);
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(initialPrompt ?? "");
   const [running, setRunning] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Felipe P4 — guards the auto-fire effect so it can't loop if React
+  // re-runs the effect (e.g. StrictMode double-invoke in dev). The
+  // dialog is short-lived (mount → run → user closes), so a single
+  // boolean is enough.
+  const autoFiredRef = useRef(false);
 
   useEffect(() => {
     if (!open) {
-      setPrompt("");
+      setPrompt(initialPrompt ?? "");
       setTurns([]);
       setError(null);
       setRunning(false);
+      autoFiredRef.current = false;
     }
-  }, [open]);
+  }, [open, initialPrompt]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -57,10 +82,9 @@ export default function RunAgentDialog({ agent, open, onClose }: Props) {
     });
   }, [turns]);
 
-  const run = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!prompt.trim() || running) return;
-    const userText = prompt.trim();
+  const dispatch = async (rawText: string) => {
+    const userText = rawText.trim();
+    if (!userText || running) return;
     setPrompt("");
     setError(null);
     setTurns((ts) => [...ts, { role: "user", text: userText, ts: Date.now() }]);
@@ -97,6 +121,29 @@ export default function RunAgentDialog({ agent, open, onClose }: Props) {
       setRunning(false);
     }
   };
+
+  const onFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void dispatch(prompt);
+  };
+
+  // Felipe P4 — auto-fire when MyAgentsList opens us with a pre-loaded
+  // default_prompt. Runs once per open cycle (autoFiredRef gates the
+  // StrictMode double-invoke + any stray re-render). The dispatch
+  // helper still does its own running/empty guard.
+  useEffect(() => {
+    if (!open) return;
+    if (!autoFire) return;
+    if (autoFiredRef.current) return;
+    const seed = (initialPrompt ?? "").trim();
+    if (!seed) return;
+    autoFiredRef.current = true;
+    void dispatch(seed);
+    // dispatch / initialPrompt are stable enough for this effect's
+    // intent ("once when the dialog opens with a seed"); listing
+    // open/autoFire/initialPrompt is the right set.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, autoFire, initialPrompt]);
 
   const openInShell = async () => {
     const req = await shellRequestForAgent(agent.runtime, agent.slug);
@@ -185,7 +232,7 @@ export default function RunAgentDialog({ agent, open, onClose }: Props) {
         </div>
 
         <footer className="border-t border-cs-border p-4 space-y-2">
-          <form onSubmit={run} className="flex gap-2">
+          <form onSubmit={onFormSubmit} className="flex gap-2">
             <input
               type="text"
               value={prompt}

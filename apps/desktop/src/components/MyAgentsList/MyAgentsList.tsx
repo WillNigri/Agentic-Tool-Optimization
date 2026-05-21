@@ -12,10 +12,17 @@ import {
   ChevronRight,
   FileCode,
   Play,
-  Zap,
+  Terminal as TerminalIcon,
   Settings2,
 } from "lucide-react";
-import { listAgents, deleteAgent, parseSkills, parseMcps, type Agent } from "@/lib/agents";
+import {
+  listAgents,
+  deleteAgent,
+  parseSkills,
+  parseMcps,
+  getAgentDefaultPrompt,
+  type Agent,
+} from "@/lib/agents";
 import { cn } from "@/lib/utils";
 import RunAgentDialog from "./RunAgentDialog";
 import AgentDetail from "@/components/AgentDetail/AgentDetail";
@@ -53,17 +60,41 @@ export default function MyAgentsList() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [runningAgent, setRunningAgent] = useState<Agent | null>(null);
+  // Felipe P4 — when an agent has a stored default_prompt, the Run
+  // button auto-fires that prompt as soon as RunAgentDialog mounts.
+  // Holds the resolved prompt string between the async lookup and
+  // the dialog mount.
+  const [autoFirePrompt, setAutoFirePrompt] = useState<string | null>(null);
   const [configuringAgent, setConfiguringAgent] = useState<Agent | null>(null);
   const [initialTab, setInitialTab] = useState<string | null>(null);
   const requestShell = useTerminalStore((s) => s.requestShell);
   const pendingOpenSlug = useUiStore((s) => s.pendingOpenAgentSlug);
   const consumePendingOpen = useUiStore((s) => s.consumePendingOpenAgent);
 
-  // Primary "Run" — open the embedded interactive shell scoped to this agent
-  // so the user keeps memory across turns. Uses the per-runtime capability
+  // Felipe P4 — "Run" now dispatches (was: opened the interactive
+  // shell, which surprised users who expected "execute and show me
+  // the result"). Pre-loads default_prompt so the dispatch can
+  // auto-fire when one is configured; otherwise the dialog opens
+  // for manual prompt entry (the old Quick Test behaviour). The
+  // shell behaviour moved to the "Interactive session" link below.
+  const runDispatch = async (agent: Agent) => {
+    let dp: string | null = null;
+    try {
+      dp = await getAgentDefaultPrompt(agent.id);
+    } catch {
+      // Lookup failure is non-fatal — fall through to manual prompt
+      // entry rather than silently hanging the Run click.
+      dp = null;
+    }
+    setAutoFirePrompt(dp && dp.trim() ? dp : null);
+    setRunningAgent(agent);
+  };
+
+  // Interactive session — embedded shell scoped to the agent so the
+  // user keeps memory across turns. Uses the per-runtime capability
   // matrix (Claude has @-mentions; Codex / Gemini get a prompt-prefix
-  // fallback; OpenClaw / Hermes return null — the Run button is disabled).
-  const runInShell = async (agent: Agent) => {
+  // fallback; OpenClaw / Hermes return null — link is hidden).
+  const openInteractiveSession = async (agent: Agent) => {
     const req = await shellRequestForAgent(agent.runtime, agent.slug);
     if (!req) return;
     requestShell(req.initialCommand, {
@@ -180,8 +211,8 @@ export default function MyAgentsList() {
             onCancelDelete={() => setPendingDelete(null)}
             onConfirmDelete={() => deleteMutation.mutate(agent.id)}
             deleting={deleteMutation.isPending && deleteMutation.variables === agent.id}
-            onRun={() => runInShell(agent)}
-            onQuickTest={() => setRunningAgent(agent)}
+            onRun={() => runDispatch(agent)}
+            onInteractiveSession={() => openInteractiveSession(agent)}
             onConfigure={() => setConfiguringAgent(agent)}
           />
         ))}
@@ -191,7 +222,12 @@ export default function MyAgentsList() {
         <RunAgentDialog
           agent={runningAgent}
           open={!!runningAgent}
-          onClose={() => setRunningAgent(null)}
+          initialPrompt={autoFirePrompt ?? undefined}
+          autoFire={!!autoFirePrompt}
+          onClose={() => {
+            setRunningAgent(null);
+            setAutoFirePrompt(null);
+          }}
         />
       )}
 
@@ -219,7 +255,7 @@ function AgentRow({
   onConfirmDelete,
   deleting,
   onRun,
-  onQuickTest,
+  onInteractiveSession,
   onConfigure,
 }: {
   agent: Agent;
@@ -230,8 +266,10 @@ function AgentRow({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   deleting: boolean;
+  /** Felipe P4: dispatch (formerly Quick test). Auto-fires when default_prompt set. */
   onRun: () => void;
-  onQuickTest: () => void;
+  /** Felipe P4: open the embedded shell (formerly "Run"). */
+  onInteractiveSession: () => void;
   onConfigure: () => void;
 }) {
   const { t } = useTranslation();
@@ -270,10 +308,17 @@ function AgentRow({
         </button>
         {(() => {
           const cap = getRuntimeCapability(agent.runtime);
+          // Felipe P4: Run now dispatches via RunAgentDialog rather
+          // than opening a shell. The capability check still gates
+          // it because the dispatch path uses the same per-runtime
+          // CLI semantics (claude --print, codex --execute, gemini
+          // -p, ato dispatch for API providers). manual = no CLI
+          // wired up, so dispatch can't run either.
           const canRun = cap.invocation.kind !== "manual";
           return (
             <button
               type="button"
+              data-testid={`agent-run-${agent.slug}`}
               onClick={(e) => {
                 e.stopPropagation();
                 if (canRun) onRun();
@@ -287,7 +332,7 @@ function AgentRow({
               )}
               title={
                 canRun
-                  ? "Open an interactive shell session for this agent"
+                  ? "Dispatch this agent (auto-fires the default prompt if one is set)"
                   : cap.invocation.kind === "manual"
                   ? cap.invocation.instructions
                   : "Not yet supported for this runtime"
@@ -348,18 +393,30 @@ function AgentRow({
                   date: new Date(agent.createdAt).toLocaleString(),
                 })}
               </span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onQuickTest();
-                }}
-                className="inline-flex items-center gap-1 text-[11px] text-cs-muted hover:text-cs-accent"
-                title="Single-shot test, no memory between runs"
-              >
-                <Zap size={10} />
-                {t("myAgents.quickTest", "Quick test")}
-              </button>
+              {(() => {
+                // Felipe P4: the secondary link used to be "Quick
+                // test" (single-shot dispatch). The single-shot
+                // behaviour is now what Run does. The link here is
+                // the inverse: drop into the embedded shell for a
+                // continuous, memory-preserving session.
+                const cap = getRuntimeCapability(agent.runtime);
+                if (cap.invocation.kind === "manual") return null;
+                return (
+                  <button
+                    type="button"
+                    data-testid={`agent-interactive-${agent.slug}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onInteractiveSession();
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] text-cs-muted hover:text-cs-accent"
+                    title="Open an embedded terminal scoped to this agent (continuous session, keeps memory)"
+                  >
+                    <TerminalIcon size={10} />
+                    {t("myAgents.interactiveSession", "Interactive session")}
+                  </button>
+                );
+              })()}
               <button
                 type="button"
                 onClick={(e) => {

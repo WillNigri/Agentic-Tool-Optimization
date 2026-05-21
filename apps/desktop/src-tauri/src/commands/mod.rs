@@ -784,6 +784,42 @@ async fn dispatch_command_killable(
     }
 }
 
+/// Felipe P4 — look up the `default_prompt` column for an agent
+/// identified by `(slug, runtime)`. Slug is not unique across
+/// runtimes (a user can have `@reviewer` registered for both Claude
+/// and Codex), so we disambiguate by runtime and tie-break with the
+/// same `COALESCE(last_used_at, created_at) DESC` ordering the
+/// permissions lookup uses a few lines down — keeping a single
+/// "most recently active row wins" rule across both reads.
+///
+/// Returns `Some(default_prompt)` only when the column is non-NULL
+/// AND non-empty after trim. Any DB error (file missing, table
+/// missing on a brand-new install) returns `None` so the dispatch
+/// path is never blocked by a substitution failure — empty stays
+/// empty and the existing downstream behaviour stands.
+fn load_agent_default_prompt(
+    db_path: &std::path::Path,
+    slug: &str,
+    runtime: &str,
+) -> Option<String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let default_prompt: Option<String> = conn
+        .query_row(
+            "SELECT default_prompt FROM agents
+              WHERE slug = ?1 AND runtime = ?2
+              ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1",
+            rusqlite::params![slug, runtime],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+    default_prompt.filter(|s| !s.trim().is_empty())
+}
+
 #[tauri::command]
 pub async fn prompt_agent(
     runtime: String,
@@ -805,15 +841,27 @@ pub async fn prompt_agent(
 /// which has to keep ownership of the registration so it can return
 /// the run_id to the frontend (for overlap evidence + finish).
 ///
-/// TODO(S9): when `prompt` is empty AND the agent has a non-NULL
-/// `default_prompt` (column added v2.7.9 — Felipe P5), substitute the
-/// agent's default before dispatching. Read via:
-///   SELECT default_prompt FROM agents WHERE slug = ?1 AND runtime = ?2
-/// The schema column + create/update Tauri commands are already in
-/// place; only the substitution branch is missing.
+/// v2.7.10 Felipe P4 — when `prompt_arg` is whitespace-only AND a
+/// slug is present, substitute the agent's `default_prompt` (column
+/// from Felipe P5 / v2.7.9). This is the back half of the Run =
+/// dispatch rework: the frontend "Run" button now fires here with
+/// an empty prompt when default_prompt is set, expecting the
+/// substitution to happen below.
+///
+/// `prompt_agent_with_context` does the same substitution one level
+/// up so variable resolution can apply to `default_prompt`. The
+/// duplicate here is defense-in-depth for direct callers (group
+/// dispatch, headless replay, recipes) that don't route through
+/// that wrapper — those callers don't get `{variables}` expansion on
+/// the substituted text, which is fine for their use cases today
+/// but worth knowing if you wire a new caller. The local variable
+/// is intentionally named `prompt` (not shadowing the arg) so every
+/// downstream `&prompt` reference is unambiguously "the effective
+/// prompt" — the function is long and the rename heads off the
+/// shadow trap a reviewer flagged in war-room 4D7247F6-… round 1.
 async fn prompt_agent_inner(
     runtime: String,
-    prompt: String,
+    prompt_arg: String,
     config: Option<String>,
     agent_slug: Option<String>,
     workspace: Option<String>,
@@ -823,6 +871,22 @@ async fn prompt_agent_inner(
 
     // Use the user's full shell PATH so CLIs can find node, npm, etc.
     let user_path = get_user_path();
+
+    // Felipe P4 — empty prompt + known agent → fall back to the
+    // agent's stored default_prompt. Quietly proceeds with the empty
+    // string if no default is configured, matching pre-v2.7.10
+    // behaviour (the upstream caller / CLI surface decides how to
+    // handle that case).
+    let prompt: String = if prompt_arg.trim().is_empty() {
+        if let Some(slug) = agent_slug.as_deref() {
+            load_agent_default_prompt(&crate::get_db_path(), slug, &runtime)
+                .unwrap_or(prompt_arg)
+        } else {
+            prompt_arg
+        }
+    } else {
+        prompt_arg
+    };
 
     // F5 — extract model override from config, applied as `--model X` per
     // runtime. None → runtime default.
@@ -6901,19 +6965,40 @@ pub async fn prompt_agent_with_context(
     // (single short-lived lock). Also pull the agent slug for the
     // active-runs registry (Phase 4) — Beatriz: showing slugs in the
     // Live panel matters more than UUIDs.
-    let (resolved, hooks, response_model, fallback_model, agent_slug) = {
+    //
+    // Felipe P4 (S9) — also pull `default_prompt` here so we can swap
+    // it in BEFORE Step 2's variable substitution. The same swap also
+    // lives in prompt_agent_inner as defense-in-depth for direct
+    // callers (group dispatch, headless replay) that don't come
+    // through this path; on this path the upstream substitution
+    // means `{variables}` embedded in a default_prompt resolve
+    // correctly (the inner fallback would interpolate them too late
+    // — variable resolution has already run).
+    let (resolved, hooks, response_model, fallback_model, agent_slug, default_prompt) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let resolved = resolve_agent_variables(&conn, &agent_id, active_project_path.as_deref());
         let hooks = load_agent_hooks(&conn, &agent_id);
         let (rm, fb) = load_agent_response_model(&conn, &agent_id);
-        let slug: Option<String> = conn
+        let row: Option<(String, Option<String>)> = conn
             .query_row(
-                "SELECT slug FROM agents WHERE id = ?1",
+                "SELECT slug, default_prompt FROM agents WHERE id = ?1",
                 rusqlite::params![&agent_id],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
             )
             .ok();
-        (resolved, hooks, rm, fb, slug)
+        let (slug, dp) = match row {
+            Some((s, d)) => (Some(s), d.filter(|s| !s.trim().is_empty())),
+            None => (None, None),
+        };
+        (resolved, hooks, rm, fb, slug, dp)
+    };
+
+    // Felipe P4 — swap empty prompt for the agent's default_prompt
+    // here so the subsequent variable substitution applies to it.
+    let prompt = if prompt.trim().is_empty() {
+        default_prompt.unwrap_or(prompt)
+    } else {
+        prompt
     };
 
     // Step 2: substitute into the prompt.
@@ -9473,5 +9558,256 @@ mod observability_tests {
         let t = make_trace("anything");
         let r = run_evaluator(&e, &t);
         assert_eq!(r.verdict, "unknown");
+    }
+}
+
+// Felipe P4 — `load_agent_default_prompt` is the back half of the
+// Run = dispatch rework. Tests cover the substitution branches the
+// prompt_agent_inner call site relies on, without spinning up the
+// full dispatch pipeline (which would need real CLIs installed).
+#[cfg(test)]
+mod default_prompt_lookup_tests {
+    use super::*;
+
+    fn seed_agents_table(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id            TEXT PRIMARY KEY,
+                slug          TEXT NOT NULL,
+                display_name  TEXT NOT NULL,
+                description   TEXT,
+                runtime       TEXT NOT NULL,
+                model         TEXT,
+                project_id    TEXT,
+                system_prompt TEXT,
+                permissions   TEXT,
+                skills        TEXT,
+                mcps          TEXT,
+                goal          TEXT,
+                file_path     TEXT,
+                created_at    TEXT NOT NULL,
+                last_used_at  TEXT,
+                default_prompt TEXT,
+                UNIQUE (runtime, slug)
+            );",
+        )
+        .expect("create agents table");
+    }
+
+    fn insert_agent(
+        conn: &rusqlite::Connection,
+        id: &str,
+        slug: &str,
+        runtime: &str,
+        default_prompt: Option<&str>,
+        last_used_at: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO agents
+               (id, slug, display_name, runtime, created_at, last_used_at, default_prompt)
+             VALUES (?1, ?2, ?2, ?3, '2026-05-01T00:00:00Z', ?4, ?5)",
+            rusqlite::params![id, slug, runtime, last_used_at, default_prompt],
+        )
+        .expect("insert agent row");
+    }
+
+    #[test]
+    fn returns_default_prompt_when_set() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        seed_agents_table(&conn);
+        insert_agent(&conn, "a1", "reviewer", "claude", Some("Review my PR"), None);
+        drop(conn);
+
+        let got = load_agent_default_prompt(tmp.path(), "reviewer", "claude");
+        assert_eq!(got.as_deref(), Some("Review my PR"));
+    }
+
+    #[test]
+    fn returns_none_when_default_prompt_is_null() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        seed_agents_table(&conn);
+        insert_agent(&conn, "a1", "reviewer", "claude", None, None);
+        drop(conn);
+
+        assert!(load_agent_default_prompt(tmp.path(), "reviewer", "claude").is_none());
+    }
+
+    #[test]
+    fn returns_none_when_default_prompt_is_whitespace_only() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        seed_agents_table(&conn);
+        insert_agent(&conn, "a1", "reviewer", "claude", Some("   \n\t  "), None);
+        drop(conn);
+
+        assert!(load_agent_default_prompt(tmp.path(), "reviewer", "claude").is_none());
+    }
+
+    #[test]
+    fn returns_none_for_unknown_slug() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        seed_agents_table(&conn);
+        insert_agent(&conn, "a1", "reviewer", "claude", Some("hi"), None);
+        drop(conn);
+
+        assert!(load_agent_default_prompt(tmp.path(), "missing", "claude").is_none());
+    }
+
+    #[test]
+    fn disambiguates_by_runtime() {
+        // Same slug, two runtimes, different defaults — runtime
+        // disambiguates so a Claude `@reviewer` and a Codex
+        // `@reviewer` each get their own default_prompt back.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        seed_agents_table(&conn);
+        insert_agent(
+            &conn,
+            "a1",
+            "reviewer",
+            "claude",
+            Some("claude-review"),
+            None,
+        );
+        insert_agent(&conn, "a2", "reviewer", "codex", Some("codex-review"), None);
+        drop(conn);
+
+        assert_eq!(
+            load_agent_default_prompt(tmp.path(), "reviewer", "claude").as_deref(),
+            Some("claude-review")
+        );
+        assert_eq!(
+            load_agent_default_prompt(tmp.path(), "reviewer", "codex").as_deref(),
+            Some("codex-review")
+        );
+    }
+
+    #[test]
+    fn picks_most_recently_used_when_slug_runtime_collide() {
+        // Schema declares UNIQUE(runtime, slug), but the column was
+        // added late and historical rows could collide. The
+        // COALESCE(last_used_at, created_at) DESC tiebreak in
+        // load_agent_default_prompt mirrors the existing perms
+        // lookup so the "freshest" row wins on either path.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        // Drop the UNIQUE constraint for this synthetic test so we
+        // can seed the collision the lookup is defending against.
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id            TEXT PRIMARY KEY,
+                slug          TEXT NOT NULL,
+                display_name  TEXT NOT NULL,
+                runtime       TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                last_used_at  TEXT,
+                default_prompt TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, created_at, last_used_at, default_prompt)
+             VALUES ('old', 'reviewer', 'reviewer', 'claude', '2026-04-01T00:00:00Z', '2026-04-15T00:00:00Z', 'OLD default')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, slug, display_name, runtime, created_at, last_used_at, default_prompt)
+             VALUES ('new', 'reviewer', 'reviewer', 'claude', '2026-05-01T00:00:00Z', '2026-05-15T00:00:00Z', 'NEW default')",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        assert_eq!(
+            load_agent_default_prompt(tmp.path(), "reviewer", "claude").as_deref(),
+            Some("NEW default")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_db_file_missing() {
+        // Brand-new install / corrupted path / wrong worktree:
+        // never panic, never block dispatch — just return None and
+        // let the empty prompt flow through.
+        let path = std::path::Path::new("/tmp/does-not-exist-S9-test.db");
+        let _ = std::fs::remove_file(path);
+        assert!(load_agent_default_prompt(path, "reviewer", "claude").is_none());
+    }
+
+    #[test]
+    fn default_prompt_with_variables_is_returned_verbatim() {
+        // Pins the war-room Q2 fix shape: load_agent_default_prompt
+        // returns the raw template (no `{variable}` interpolation).
+        // The upstream caller (prompt_agent_with_context) is the one
+        // that runs substitute_variables on the swapped-in default.
+        // If a future refactor moves substitute_variables in here,
+        // this test will trip and the reviewer will know to update
+        // both call sites.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        seed_agents_table(&conn);
+        insert_agent(
+            &conn,
+            "a1",
+            "reviewer",
+            "claude",
+            Some("Review the PR at {project_path}"),
+            None,
+        );
+        drop(conn);
+
+        let got = load_agent_default_prompt(tmp.path(), "reviewer", "claude");
+        assert_eq!(got.as_deref(), Some("Review the PR at {project_path}"));
+    }
+}
+
+// Felipe P4 (S9) — pins the variable-substitution shape used by
+// prompt_agent_with_context after war-room Q2 forced the
+// default_prompt swap to move upstream of the variable resolver.
+#[cfg(test)]
+mod prompt_substitution_order_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn variables_in_default_prompt_resolve_when_swap_happens_first() {
+        // Simulates prompt_agent_with_context's order: swap empty
+        // prompt for default_prompt FIRST, then substitute_variables
+        // runs over the swapped form. Concrete behaviour: a
+        // default_prompt containing `{project_path}` resolves to
+        // the active project path rather than leaking the literal
+        // `{project_path}` to the model.
+        let prompt_arg = String::new();
+        let default_prompt = "Review the PR at {project_path}";
+        let swapped = if prompt_arg.trim().is_empty() {
+            default_prompt.to_string()
+        } else {
+            prompt_arg
+        };
+        let mut resolved: HashMap<String, String> = HashMap::new();
+        resolved.insert("project_path".into(), "/Users/me/project".into());
+        let rendered = substitute_variables(&swapped, &resolved);
+        assert_eq!(rendered, "Review the PR at /Users/me/project");
+    }
+
+    #[test]
+    fn variables_in_default_prompt_do_not_resolve_when_swap_happens_after() {
+        // Inverse: if the swap ran AFTER substitute_variables (the
+        // pre-Q2-fix order, still the shape inside prompt_agent_inner's
+        // direct-caller defense-in-depth path), the variable does
+        // NOT expand. Pinned so a future reviewer can see at a
+        // glance what behaviour each ordering produces.
+        let prompt_arg = String::new();
+        let mut resolved: HashMap<String, String> = HashMap::new();
+        resolved.insert("project_path".into(), "/Users/me/project".into());
+        let rendered_before_swap = substitute_variables(&prompt_arg, &resolved);
+        let final_prompt = if rendered_before_swap.trim().is_empty() {
+            "Review the PR at {project_path}".to_string()
+        } else {
+            rendered_before_swap
+        };
+        assert_eq!(final_prompt, "Review the PR at {project_path}");
     }
 }
