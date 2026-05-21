@@ -831,6 +831,42 @@ pub fn init_database(conn: &Connection) {
             ON chat_threads(status, last_message_at DESC)",
         [],
     );
+
+    // v2.7.14 (v2.8.0 ROADMAP item) — anchor_runtime: the runtime this
+    // thread is "with." Chat threads today derive a runtime from the
+    // most recent assistant message; that drifts when a thread hops
+    // runtimes (e.g. a chat that started with claude but had two
+    // gemini turns thrown in). The anchor is a STABLE identifier the
+    // WhatsApp-style row UI can render an LLM icon for without flicker.
+    //
+    // Population strategy:
+    //   - New chats: caller passes anchor_runtime at create time (e.g.
+    //     "the agent attached to this thread runs on claude").
+    //   - Existing chats: backfill below picks the first assistant
+    //     turn's runtime (chronological "what was this chat originally
+    //     with"). NULL when no assistant turn exists yet (a thread
+    //     created but never replied-to).
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN anchor_runtime TEXT", []);
+    // One-shot backfill: assign anchor_runtime to the runtime of the
+    // FIRST assistant message in each thread that doesn't already have
+    // one. Cheap O(N) — a UPDATE with a correlated subquery; SQLite
+    // is happy doing this once per migration. The `WHERE … IS NULL`
+    // guard makes the backfill idempotent across re-runs (won't
+    // overwrite a value the caller already set).
+    let _ = conn.execute(
+        "UPDATE chat_threads
+            SET anchor_runtime = (
+                SELECT runtime
+                  FROM chat_messages
+                 WHERE thread_id = chat_threads.id
+                   AND role = 'assistant'
+                   AND runtime IS NOT NULL
+                 ORDER BY created_at ASC
+                 LIMIT 1
+            )
+          WHERE anchor_runtime IS NULL",
+        [],
+    );
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_category_lastused
             ON sessions(category, last_used_at DESC)",

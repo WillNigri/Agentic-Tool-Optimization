@@ -547,7 +547,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         "SELECT id, title, created_at, COALESCE(last_message_at, created_at) AS last_at,
                 message_count, project_id,
                 COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json,
-                category, team, coordinator_runtime, human_comment
+                category, team, coordinator_runtime, human_comment, anchor_runtime
            FROM chat_threads
           WHERE archived = 0
           ORDER BY last_at DESC
@@ -581,6 +581,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 r.get::<_, Option<String>>(12)?,        // team
                 r.get::<_, Option<String>>(13)?,        // coordinator_runtime
                 r.get::<_, Option<String>>(14)?,        // human_comment
+                r.get::<_, Option<String>>(15)?,        // anchor_runtime
             ))
         })?
         // v2.7.14 — log on row-drop so the next regression of the
@@ -611,24 +612,31 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             team,
             coordinator_runtime,
             human_comment,
+            anchor_runtime,
         )| {
             let tags: Vec<String> = tags_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
-            // Last assistant message — runtime + content preview. Two
-            // small queries per thread, fine for the default limit. Each
-            // is O(log N) on the (thread_id, created_at) index.
+            // v2.7.14 — prefer the stable anchor_runtime when set
+            // (WhatsApp-style "this chat is with claude" semantics).
+            // Falls back to the most-recent-assistant runtime so legacy
+            // chats with no anchor populated still render a badge. The
+            // anchor is stable across runtime hops within a thread; the
+            // fallback flips per turn. SessionListRow.runtime carries
+            // whichever shape the card renders.
             let mut last_rt_stmt = conn.prepare_cached(
                 "SELECT runtime FROM chat_messages
                   WHERE thread_id = ?1 AND role = 'assistant' AND runtime IS NOT NULL
                   ORDER BY created_at DESC
                   LIMIT 1",
             ).ok();
-            let runtime: String = last_rt_stmt
-                .as_mut()
-                .and_then(|s| s.query_row([&id], |r| r.get::<_, String>(0)).ok())
-                .unwrap_or_else(|| "chat".to_string());
+            let runtime: String = anchor_runtime.clone().unwrap_or_else(|| {
+                last_rt_stmt
+                    .as_mut()
+                    .and_then(|s| s.query_row([&id], |r| r.get::<_, String>(0)).ok())
+                    .unwrap_or_else(|| "chat".to_string())
+            });
 
             let mut last_msg_stmt = conn.prepare_cached(
                 "SELECT content FROM chat_messages
