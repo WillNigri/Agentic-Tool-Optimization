@@ -160,6 +160,33 @@ pub fn registry() -> &'static [ApiProvider] {
             env_var: "GEMINI_API_KEY",
             flavor: "gemini",
         },
+        // v2.7.14 — OpenAI API provider. Closes the v2.8.x docket
+        // item from `project_v2_7_8_agent_perms_shipped.md`:
+        // "Codex has no OpenAI API provider in the registry.
+        //  claude→anthropic and gemini→google auto-fallback work;
+        //  codex→openai queued for v2.8.x."
+        //
+        // Slug intentionally `openai` (vendor) rather than `codex` to
+        // avoid colliding with the existing `codex` CLI runtime —
+        // users with the Codex CLI installed keep that subprocess
+        // path, users with only an API key dispatch via `ato
+        // dispatch openai "..."` (or are auto-routed from `codex`
+        // by the byok.rs mapping at apps/cli/src/byok.rs:34-46 when
+        // the CLI binary isn't on PATH).
+        //
+        // Standard chat-completions shape — same flavor as
+        // grok / deepseek / qwen / openrouter (they're all OpenAI-
+        // compatible). default_model is gpt-4o-mini (low-latency,
+        // metered) — users on a Plus/Pro tier with subscription
+        // access to gpt-4o or o1 override with --model.
+        ApiProvider {
+            slug: "openai",
+            base_url: "https://api.openai.com",
+            path: "/v1/chat/completions",
+            default_model: "gpt-4o-mini",
+            env_var: "OPENAI_API_KEY",
+            flavor: "openai",
+        },
     ]
 }
 
@@ -214,12 +241,29 @@ mod tests {
     fn registry_has_expected_providers() {
         let slugs: Vec<&str> = registry().iter().map(|p| p.slug).collect();
         // 2026-05-19 — added "anthropic" between openrouter + google when
-        // BYOK Anthropic API key dispatch landed. Test was checking an
-        // exact-list invariant; update to keep ratcheting on additions.
+        // BYOK Anthropic API key dispatch landed.
+        // v2.7.14 — added "openai" after "google" to close the v2.8.x
+        // docket item: codex CLI now has an API-key fallback path via
+        // OPENAI_API_KEY (matches the claude→anthropic / gemini→google
+        // pattern). Test was checking an exact-list invariant; update
+        // to keep ratcheting on additions.
         assert_eq!(
             slugs,
-            vec!["minimax", "grok", "deepseek", "qwen", "openrouter", "anthropic", "google"]
+            vec![
+                "minimax", "grok", "deepseek", "qwen", "openrouter",
+                "anthropic", "google", "openai",
+            ]
         );
+    }
+
+    #[test]
+    fn openai_uses_chat_completions_path_and_openai_flavor() {
+        let p = find_provider("openai").expect("openai provider registered");
+        assert_eq!(p.path, "/v1/chat/completions");
+        assert_eq!(p.flavor, "openai");
+        assert_eq!(p.env_var, "OPENAI_API_KEY");
+        assert!(!p.default_model.is_empty());
+        assert!(p.default_model.starts_with("gpt-"));
     }
 
     #[test]

@@ -535,6 +535,18 @@ pub use commands::*;
 // ── App Entry ────────────────────────────────────────────────────────────
 
 pub fn run() {
+    // v2.7.14 — disable WebKitGTK's DMA-BUF renderer on Linux. The
+    // default path (enabled since WebKitGTK 2.40) silently fails to
+    // present frames on Fedora 39+ / Wayland / Mesa or NVIDIA, giving
+    // users a blank white window with no crash and no log. Ubuntu is
+    // still on WebKitGTK 2.38.x so it doesn't repro there. Must be
+    // set BEFORE tauri::Builder constructs the webview; the env var
+    // is a no-op outside WebKitGTK.
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     // Headless cron entry — when launchd / cron / Task Scheduler invokes
     // `ato-desktop --run-cron <id>`, we dispatch the job and exit without
     // opening any window. Detected before tauri::Builder runs so the GUI
