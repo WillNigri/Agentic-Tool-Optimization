@@ -179,16 +179,13 @@ pub async fn dispatch_with_tools(
                         is_error: true,
                     }
                 };
-                eprintln!(
-                    "  [tool] {} {} -> {}{}",
-                    c.name,
-                    truncate(&c.arguments.to_string(), 80),
-                    if r.is_error { "ERR " } else { "" },
-                    truncate(&r.content, 80)
-                );
+                // S10 (v2.7.11) — shared log + audit-args helper. Was a
+                // 10-line block duplicated verbatim with the CLI's sync
+                // dispatch_with_tools.
+                let args_brief = ato_review_tools::log_tool_call_and_brief_args(c, &r);
                 audit.push(ToolCallAudit {
                     name: c.name.clone(),
-                    args_brief: truncate(&c.arguments.to_string(), 120),
+                    args_brief,
                     is_error: r.is_error,
                 });
                 results.push(r);

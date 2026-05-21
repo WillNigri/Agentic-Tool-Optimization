@@ -69,6 +69,36 @@ const TOOL_OUTPUT_CAP: usize = 32 * 1024;
 /// even if it wanted more info. Prevents runaway loops.
 pub const MAX_TOOL_ROUNDS: usize = 10;
 
+/// S10 (v2.7.11) — shared eprintln + args-brief helpers for the
+/// tool-call loop body in CLI's sync `dispatch_with_tools` and
+/// desktop's async one. The two loops historically had a 10-line
+/// identical block (`eprintln!("  [tool] …")` + `truncate(args, 120)`
+/// for the audit row). Both call sites used different truncation
+/// caps for log vs audit (80 / 120) so we expose them as one entry
+/// point that returns the audit-cap args string.
+///
+/// Returns the truncated args string suitable for storing in the
+/// audit row. The 80-char log line is printed as a side effect.
+pub fn log_tool_call_and_brief_args(call: &ToolCall, result: &ToolResult) -> String {
+    let args_full = call.arguments.to_string();
+    eprintln!(
+        "  [tool] {} {} -> {}{}",
+        call.name,
+        truncate(&args_full, 80),
+        if result.is_error { "ERR " } else { "" },
+        truncate(&result.content, 80)
+    );
+    truncate(&args_full, 120)
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n])
+    }
+}
+
 pub fn registry() -> Vec<ToolDef> {
     vec![
         ToolDef {
@@ -452,5 +482,48 @@ mod tests {
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"grep"));
         assert!(names.contains(&"git_log"));
+    }
+
+    // S10 (v2.7.11) — shared log + audit-args helper.
+    #[test]
+    fn log_tool_call_and_brief_args_returns_120_char_cap() {
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "x".repeat(200)}),
+        };
+        let result = ToolResult {
+            tool_call_id: "c1".into(),
+            name: "read_file".into(),
+            content: "ok".into(),
+            is_error: false,
+        };
+        let args_brief = log_tool_call_and_brief_args(&call, &result);
+        // 120 chars + the truncation ellipsis (1 char) → length 121.
+        assert!(args_brief.ends_with('…'));
+        assert!(
+            args_brief.chars().count() == 121,
+            "got {} chars: {:?}",
+            args_brief.chars().count(),
+            args_brief
+        );
+    }
+
+    #[test]
+    fn log_tool_call_and_brief_args_no_truncation_for_short_args() {
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "grep".into(),
+            arguments: serde_json::json!({"pattern": "TODO"}),
+        };
+        let result = ToolResult {
+            tool_call_id: "c1".into(),
+            name: "grep".into(),
+            content: "no matches".into(),
+            is_error: false,
+        };
+        let args_brief = log_tool_call_and_brief_args(&call, &result);
+        assert!(!args_brief.contains('…'));
+        assert!(args_brief.contains("TODO"));
     }
 }

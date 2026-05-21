@@ -171,16 +171,13 @@ pub fn dispatch_with_tools(
                 .iter()
                 .map(|c| {
                     let r = review_tools::execute_call(c);
-                    eprintln!(
-                        "  [tool] {} {} -> {}{}",
-                        c.name,
-                        truncate(&c.arguments.to_string(), 80),
-                        if r.is_error { "ERR " } else { "" },
-                        truncate(&r.content, 80)
-                    );
+                    // S10 (v2.7.11) — shared log + audit-args helper. Was a
+                    // 10-line block duplicated verbatim with desktop's async
+                    // dispatch_with_tools.
+                    let args_brief = review_tools::log_tool_call_and_brief_args(c, &r);
                     audit.push(ToolCallAudit {
                         name: c.name.clone(),
-                        args_brief: truncate(&c.arguments.to_string(), 120),
+                        args_brief,
                         is_error: r.is_error,
                     });
                     r
