@@ -57,10 +57,14 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // (project_name). Falls back to NULL on the name when the row
     // was tagged with an id whose project was later deleted; the
     // frontend then renders the short-form id.
+    // v2.7.13 — also SELECT coordinator_runtime + human_comment so the
+    // list card can render the COORD badge and the human's note
+    // without drilling in. Same projects LEFT JOIN as before.
     let mut stmt = conn.prepare(
         "SELECT s.id, s.runtime, s.agent_slug, s.title, s.created_at, s.last_used_at, s.turn_count,
                 COALESCE(s.status, 'open'), s.closed_at, s.auto_title, s.summary, s.tags_json, s.project_id,
-                s.category, s.team, p.name
+                s.category, s.team, p.name,
+                s.coordinator_runtime, s.human_comment
            FROM sessions s
            LEFT JOIN projects p ON p.id = s.project_id
           ORDER BY s.last_used_at DESC
@@ -94,6 +98,8 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 project_name: r.get(15)?,
                 category: r.get(13)?,
                 team: r.get(14)?,
+                coordinator_runtime: r.get(16)?,
+                human_comment: r.get(17)?,
                 row_kind: "session".to_string(),
             })
         })?
@@ -284,6 +290,10 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 project_name: None,
                 category: None,
                 team: None,
+                // Single-runs have no close concept — they're one-shot
+                // dispatches, not multi-turn conversations.
+                coordinator_runtime: None,
+                human_comment: None,
                 row_kind: "single_run".to_string(),
             })
         })?
@@ -383,6 +393,88 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
+        // v2.7.13 — LEFT JOIN-style read of the war_rooms row so the
+        // list card can render coordinator + CLOSED + summary + tags
+        // for closed war rooms without drilling in (Will's dogfood
+        // 2026-05-21: war-room cards used to show only the prompt +
+        // "kind: parallel" intro text even after close). Legacy war
+        // rooms (no war_rooms row yet) fall through to all-NULL +
+        // status='open' so the card renders the live state.
+        type WrLifecycle = (
+            String,         // status
+            Option<String>, // closed_at
+            Option<String>, // auto_title
+            Option<String>, // summary
+            Option<String>, // tags_json
+            Option<String>, // category
+            Option<String>, // team
+            Option<String>, // project_id
+            Option<String>, // coordinator_runtime
+            Option<String>, // human_comment
+        );
+        let lifecycle: WrLifecycle = conn
+            .query_row(
+                "SELECT status, closed_at, auto_title, summary, tags_json,
+                        category, team, project_id, coordinator_runtime, human_comment
+                   FROM war_rooms WHERE id = ?1",
+                [&wr_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<String>>(9)?,
+                    ))
+                },
+            )
+            .unwrap_or_else(|_| {
+                (
+                    "open".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            });
+        let (
+            wr_status,
+            wr_closed_at,
+            wr_auto_title,
+            wr_summary,
+            wr_tags_json,
+            wr_category,
+            wr_team,
+            wr_project_id,
+            wr_coordinator,
+            wr_human_comment,
+        ) = lifecycle;
+        let wr_tags: Vec<String> = wr_tags_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        // Resolve project name when project_id is set (parity with
+        // session-side LEFT JOIN). One small query per war room, fine
+        // for the typical war-room count per user.
+        let wr_project_name: Option<String> = wr_project_id.as_deref().and_then(|pid| {
+            conn.query_row(
+                "SELECT name FROM projects WHERE id = ?1",
+                [pid],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        });
+
         war_rooms.push(SessionListRow {
             id: wr_id.clone(),
             runtime: anchor_runtime,
@@ -399,15 +491,17 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 None
             },
             last_assistant_preview: None,
-            status: "war_room".to_string(),
-            closed_at: None,
-            auto_title: None,
-            summary: None,
-            tags: Vec::new(),
-            project_id: None,
-            project_name: None,
-            category: None,
-            team: None,
+            status: wr_status,
+            closed_at: wr_closed_at,
+            auto_title: wr_auto_title,
+            summary: wr_summary,
+            tags: wr_tags,
+            project_id: wr_project_id,
+            project_name: wr_project_name,
+            category: wr_category,
+            team: wr_team,
+            coordinator_runtime: wr_coordinator,
+            human_comment: wr_human_comment,
             row_kind: "war_room".to_string(),
         });
     }
@@ -427,9 +521,15 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // each message records which runtime answered). Preview = the
     // most recent assistant message's content, truncated to 160 chars
     // to match the session/war-room preview convention.
+    // v2.7.13 — SELECT the lifecycle columns added by the v2.7.13
+    // schema migration so the chat card can render the same closed-
+    // state surface as sessions + war rooms (coordinator badge, auto
+    // title, summary, tags, human comment).
     let mut ct_stmt = conn.prepare(
         "SELECT id, title, created_at, COALESCE(last_message_at, created_at) AS last_at,
-                message_count, project_id
+                message_count, project_id,
+                COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json,
+                category, team, coordinator_runtime, human_comment
            FROM chat_threads
           WHERE archived = 0
           ORDER BY last_at DESC
@@ -444,10 +544,39 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 r.get::<_, String>(3)?,                 // last_at
                 r.get::<_, i64>(4)?,                    // message_count
                 r.get::<_, Option<String>>(5)?,         // project_id
+                r.get::<_, String>(6)?,                 // status
+                r.get::<_, Option<String>>(7)?,         // closed_at
+                r.get::<_, Option<String>>(8)?,         // auto_title
+                r.get::<_, Option<String>>(9)?,         // summary
+                r.get::<_, Option<String>>(10)?,        // tags_json
+                r.get::<_, Option<String>>(11)?,        // category
+                r.get::<_, Option<String>>(12)?,        // team
+                r.get::<_, Option<String>>(13)?,        // coordinator_runtime
+                r.get::<_, Option<String>>(14)?,        // human_comment
             ))
         })?
         .filter_map(|r| r.ok())
-        .map(|(id, title, created_at, last_at, message_count, project_id)| {
+        .map(|(
+            id,
+            title,
+            created_at,
+            last_at,
+            message_count,
+            project_id,
+            status,
+            closed_at,
+            auto_title,
+            summary,
+            tags_json,
+            category,
+            team,
+            coordinator_runtime,
+            human_comment,
+        )| {
+            let tags: Vec<String> = tags_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
             // Last assistant message — runtime + content preview. Two
             // small queries per thread, fine for the default limit. Each
             // is O(log N) on the (thread_id, created_at) index.
@@ -492,20 +621,21 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 agents_used: Vec::new(),
                 total_cost_usd: None,
                 last_assistant_preview: preview,
-                // Lifecycle isn't really applicable to chat threads —
-                // they're always "open" in practice (archived rows are
-                // filtered out in the WHERE clause above). Match the
-                // session convention so the lifecycle filter doesn't
-                // need a fourth special case.
-                status: "open".to_string(),
-                closed_at: None,
-                auto_title: None,
-                summary: None,
-                tags: Vec::new(),
+                // v2.7.13 — lifecycle now real: pulled from the
+                // chat_threads row via the SELECT above. Defaults
+                // were 'open' / NULL pre-close so legacy chats render
+                // unchanged.
+                status,
+                closed_at,
+                auto_title,
+                summary,
+                tags,
                 project_id,
                 project_name: None,
-                category: None,
-                team: None,
+                category,
+                team,
+                coordinator_runtime,
+                human_comment,
                 row_kind: "chat".to_string(),
             }
         })

@@ -95,6 +95,17 @@ pub struct SessionListRow {
     /// coordinator at close in PR 3.
     pub category: Option<String>,
     pub team: Option<String>,
+    /// v2.7.13 — the LLM runtime that summarized this conversation
+    /// on its most recent close. NULL when never closed. Drives the
+    /// COORD badge on the list card so a glance shows which model
+    /// produced the auto-title / summary. Sessions populate from
+    /// sessions.coordinator_runtime (added in v2.7.12); war rooms +
+    /// chats populate from their own lifecycle rows (v2.7.13).
+    pub coordinator_runtime: Option<String>,
+    /// v2.7.13 — the human's free-form note attached at close time.
+    /// Exposed here so list cards (which today don't drill into the
+    /// detail view) can still surface it. NULL when no comment.
+    pub human_comment: Option<String>,
     /// 2026-05-17 — Sessions UX polish PR 5a. Discriminator between
     /// real sessions (multi-turn, from the `sessions` table) and
     /// "single_run" single-shot dispatches (one row in `execution_logs`

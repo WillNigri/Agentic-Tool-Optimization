@@ -88,6 +88,14 @@ export interface SessionListRow {
   projectName: string | null;
   category: string | null;
   team: string | null;
+  /** v2.7.13 — coordinator runtime that summarized this conversation
+   *  on its most recent close. Drives the COORD badge on the list
+   *  card so a glance shows who summarized. NULL when never closed. */
+  coordinatorRuntime: string | null;
+  /** v2.7.13 — free-form human note attached at close time. Surfaced
+   *  on the list card so users see their own framing without having
+   *  to drill in. NULL when no comment was attached. */
+  humanComment: string | null;
   rowKind: "session" | "single_run" | "war_room" | "chat";
 }
 
