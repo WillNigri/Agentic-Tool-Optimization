@@ -532,7 +532,18 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // schema migration so the chat card can render the same closed-
     // state surface as sessions + war rooms (coordinator badge, auto
     // title, summary, tags, human comment).
-    let mut ct_stmt = conn.prepare(
+    //
+    // War-room review 76F7CEEB (claude FIX #1): defensive fallback.
+    // The schema ALTERs are wrapped in `let _ = conn.execute(...)`
+    // (schema.rs) — they silently swallow errors. On older SQLite
+    // (pre-3.25) or a write-locked DB during init, ALTER can fail
+    // and leave the column missing; then this prepare() errors,
+    // list_sessions_inner returns Err, and the WHOLE Sessions feed
+    // empties out — the exact regression shape we just patched on
+    // the sessions side (0c5ef70). Try the wide SELECT first; on
+    // prepare failure, fall back to the pre-v2.7.13 narrow SELECT
+    // so chats still appear with lifecycle defaulted to 'open'.
+    let chats_wide = conn.prepare(
         "SELECT id, title, created_at, COALESCE(last_message_at, created_at) AS last_at,
                 message_count, project_id,
                 COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json,
@@ -541,7 +552,17 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
           WHERE archived = 0
           ORDER BY last_at DESC
           LIMIT ?1",
-    )?;
+    );
+    let mut ct_stmt = match chats_wide {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "list_sessions_inner: chat_threads wide SELECT failed ({}); falling back to narrow pre-v2.7.13 shape so the feed still renders.",
+                e
+            );
+            return list_sessions_narrow_chat_fallback(conn, enriched, single_runs, war_rooms, limit);
+        }
+    };
     let chats: Vec<SessionListRow> = ct_stmt
         .query_map([limit], |r| {
             Ok((
@@ -653,6 +674,76 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // created_at for single-runs). Stable sort so two rows with the
     // same timestamp keep their intra-list order, which is good for
     // determinism in tests.
+    enriched.extend(single_runs);
+    enriched.extend(war_rooms);
+    enriched.extend(chats);
+    enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+    enriched.truncate(limit as usize);
+    Ok(enriched)
+}
+
+/// War-room review 76F7CEEB FIX #1 — fallback path for when the
+/// v2.7.13 chat_threads lifecycle columns aren't available (older
+/// SQLite, partial migration, write-locked init). Reads only the
+/// pre-v2.7.13 columns; defaults status to 'open' + lifecycle
+/// metadata to None so chats still appear in the feed while the
+/// real columns are absent. The narrow SELECT mirrors the original
+/// shape before the v2.7.13 wide SELECT was introduced — single
+/// source of truth for "what columns can we definitely trust on
+/// chat_threads."
+fn list_sessions_narrow_chat_fallback(
+    conn: &Connection,
+    mut enriched: Vec<SessionListRow>,
+    single_runs: Vec<SessionListRow>,
+    war_rooms: Vec<SessionListRow>,
+    limit: i64,
+) -> rusqlite::Result<Vec<SessionListRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, created_at, COALESCE(last_message_at, created_at) AS last_at,
+                message_count, project_id
+           FROM chat_threads
+          WHERE archived = 0
+          ORDER BY last_at DESC
+          LIMIT ?1",
+    )?;
+    let chats: Vec<SessionListRow> = stmt
+        .query_map([limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|(id, title, created_at, last_at, message_count, project_id)| SessionListRow {
+            id,
+            runtime: "chat".to_string(),
+            agent_slug: None,
+            title: Some(title),
+            created_at,
+            last_used_at: last_at,
+            turn_count: message_count,
+            runtimes_used: vec!["chat".to_string()],
+            agents_used: Vec::new(),
+            total_cost_usd: None,
+            last_assistant_preview: None,
+            status: "open".to_string(),
+            closed_at: None,
+            auto_title: None,
+            summary: None,
+            tags: Vec::new(),
+            project_id,
+            project_name: None,
+            category: None,
+            team: None,
+            coordinator_runtime: None,
+            human_comment: None,
+            row_kind: "chat".to_string(),
+        })
+        .collect();
     enriched.extend(single_runs);
     enriched.extend(war_rooms);
     enriched.extend(chats);

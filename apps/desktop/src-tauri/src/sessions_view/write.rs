@@ -571,7 +571,25 @@ fn validate_coordinator_slug(v: &str) -> Result<(), String> {
     if v.is_empty() || v.len() > 32 {
         return Err(format!("coordinator slug length out of range: {}", v.len()));
     }
-    for c in v.chars() {
+    // War-room review 76F7CEEB (claude FIX #2): first char must be
+    // alphanumeric. The old `c.is_ascii_alphanumeric() || c == '-' ||
+    // c == '_'` rule passed values like `-evil` which clap then
+    // rejects as an unknown flag (or, if a future caller toggles
+    // allow_hyphen_values, silently consumes as a flag value).
+    // Registered API-provider slugs (anthropic / google / minimax /
+    // grok / deepseek / qwen / openrouter) all start with a letter,
+    // so the constraint is invisible to legitimate input.
+    let mut chars = v.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => {
+            return Err(format!(
+                "coordinator slug must start with an alphanumeric character: {}",
+                v
+            ))
+        }
+    }
+    for c in chars {
         if !(c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err(format!("coordinator slug contains invalid characters: {}", v));
         }
