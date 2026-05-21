@@ -425,6 +425,10 @@ pub fn get_user_path() -> String {
 }
 
 fn resolve_user_path() -> String {
+    augment_with_version_managers(resolve_base_user_path())
+}
+
+fn resolve_base_user_path() -> String {
     // Windows takes a different code path: GUI-launched apps inherit the
     // PATH from when they were launched, which usually misses User-scope
     // PATH entries the user added later (npm-global, scoop shims, etc.).
@@ -491,6 +495,108 @@ fn resolve_user_path() -> String {
         }
         std::env::var("PATH").unwrap_or_default()
     }
+}
+
+/// Append common version-manager bin/shim directories to PATH if they
+/// exist on disk and aren't already present. Idempotent.
+///
+/// Felipe P1 (2026-05 — WSL/nvm): 100% of catalog MCPs that use `npx`
+/// failed on his WSL setup because the login-shell PATH didn't include
+/// `~/.nvm/versions/node/<version>/bin`. nvm sources lazily from
+/// `.bashrc`, and even `-l -i` doesn't always pick it up under WSL's
+/// non-tty path. Probing the well-known directories directly fills the
+/// gap regardless of how the user's shell config is wired.
+///
+/// For nvm we filter to `vMAJOR.MINOR.PATCH` directory names and pick
+/// the numerically-greatest tuple — naive lex sort would put `v9.x.y`
+/// after `v22.x.y` and select the older one (war-room R1: google +
+/// minimax catch). This also drops `iojs-*`, `system`, and alias
+/// names that may share the parent dir.
+#[allow(clippy::let_and_return)]
+fn augment_with_version_managers(base: String) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        // nvm-windows, pyenv-win, and rbenv have different layouts; the
+        // Felipe P1 case is the Unix-style shim/bin set. Leave Windows
+        // unchanged here — the PowerShell resolver above already picks
+        // up User-scope PATH that covers nvm-windows.
+        return base;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        augment_with_version_managers_for_home(base, &home)
+    }
+}
+
+/// Parse an nvm directory name like `v22.4.0` into a `(major, minor,
+/// patch)` tuple suitable for `max_by_key`. Returns `None` for names
+/// that aren't strictly `v<u32>.<u32>.<u32>` (e.g., `iojs-3.0.0`,
+/// `system`, alias symlinks like `lts`). The leading `v` is required —
+/// every node release nvm has shipped uses it, and rejecting names
+/// without it filters out anything ambiguous.
+#[cfg(not(target_os = "windows"))]
+fn parse_node_version(name: &str) -> Option<(u32, u32, u32)> {
+    let rest = name.strip_prefix('v')?;
+    let mut parts = rest.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        // Reject suffixes like `v22.4.0-rc.1` to keep the picker
+        // predictable; prereleases on a dev box would usually be
+        // selected via `nvm alias default` and live elsewhere anyway.
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Inner parametric form: takes `home` as an argument so tests can
+/// point at a temp directory without racing on `std::env::set_var`.
+#[cfg(not(target_os = "windows"))]
+fn augment_with_version_managers_for_home(base: String, home: &str) -> String {
+    if home.is_empty() {
+        return base;
+    }
+
+    let mut candidates: Vec<String> = Vec::new();
+
+    // nvm: pick numerically-greatest vMAJOR.MINOR.PATCH dir under
+    // ~/.nvm/versions/node. Lex-sort would put v9 after v22; parse the
+    // tuple instead.
+    let nvm_root = format!("{}/.nvm/versions/node", home);
+    if let Ok(entries) = std::fs::read_dir(&nvm_root) {
+        let newest = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|name| parse_node_version(&name).map(|v| (v, name)))
+            .max_by_key(|(v, _)| *v)
+            .map(|(_, name)| name);
+        if let Some(name) = newest {
+            candidates.push(format!("{}/{}/bin", nvm_root, name));
+        }
+    }
+
+    candidates.push(format!("{}/.pyenv/shims", home));
+    candidates.push(format!("{}/.rbenv/shims", home));
+    candidates.push(format!("{}/.local/bin", home));
+
+    let existing: std::collections::HashSet<&str> = base.split(':').collect();
+    let additions: Vec<String> = candidates
+        .into_iter()
+        .filter(|c| std::path::Path::new(c).exists())
+        .filter(|c| !existing.contains(c.as_str()))
+        .collect();
+
+    if additions.is_empty() {
+        return base;
+    }
+    if base.is_empty() {
+        return additions.join(":");
+    }
+    format!("{}:{}", base, additions.join(":"))
 }
 
 /// Build a `std::process::Command` from a CLI string that may be either
@@ -9473,5 +9579,165 @@ mod observability_tests {
         let t = make_trace("anything");
         let r = run_evaluator(&e, &t);
         assert_eq!(r.verdict, "unknown");
+    }
+}
+
+// Felipe P1 — PATH augmentation for version managers (nvm/pyenv/rbenv/.local/bin).
+// Tests use a temp directory as fake $HOME via the `_for_home` variant so they
+// don't race on std::env::set_var or depend on the test host's filesystem state.
+// Path-specific assertions live behind `cfg(not(target_os = "windows"))` because
+// the helper short-circuits on Windows (nvm-windows / pyenv-win have different
+// layouts handled upstream by the PowerShell PATH probe).
+#[cfg(test)]
+#[cfg(not(target_os = "windows"))]
+mod get_user_path_tests {
+    use super::augment_with_version_managers_for_home;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn mk_home() -> TempDir {
+        TempDir::new().expect("tempdir")
+    }
+
+    #[test]
+    fn appends_nvm_pyenv_rbenv_local_bin_when_present() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v22.4.0/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.pyenv/shims", h)).unwrap();
+        fs::create_dir_all(format!("{}/.rbenv/shims", h)).unwrap();
+        fs::create_dir_all(format!("{}/.local/bin", h)).unwrap();
+
+        let out = augment_with_version_managers_for_home("/usr/bin:/bin".to_string(), h);
+        assert!(out.contains(&format!("{}/.nvm/versions/node/v22.4.0/bin", h)));
+        assert!(out.contains(&format!("{}/.pyenv/shims", h)));
+        assert!(out.contains(&format!("{}/.rbenv/shims", h)));
+        assert!(out.contains(&format!("{}/.local/bin", h)));
+        // Base PATH is preserved at the front so login-shell entries still win
+        // when two directories happen to ship the same binary name.
+        assert!(out.starts_with("/usr/bin:/bin:"));
+    }
+
+    #[test]
+    fn picks_newest_nvm_node_version() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v18.19.0/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v20.11.1/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v22.4.0/bin", h)).unwrap();
+
+        let out = augment_with_version_managers_for_home(String::new(), h);
+        assert!(out.contains(&format!("{}/.nvm/versions/node/v22.4.0/bin", h)));
+        assert!(!out.contains("v20.11.1"));
+        assert!(!out.contains("v18.19.0"));
+    }
+
+    // Regression for war-room R1 (google + minimax catch): lex sort
+    // puts v9 after v22 since '9' > '2'. Numeric tuple sort fixes this.
+    #[test]
+    fn picks_numerically_newest_when_majors_differ_in_digit_count() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v9.0.0/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v22.4.0/bin", h)).unwrap();
+
+        let out = augment_with_version_managers_for_home(String::new(), h);
+        assert!(
+            out.contains(&format!("{}/.nvm/versions/node/v22.4.0/bin", h)),
+            "v22.4.0 must beat v9.0.0; got {:?}",
+            out
+        );
+        assert!(!out.contains("v9.0.0"));
+    }
+
+    // nvm's versions/node parent sometimes also holds alias symlinks
+    // (`default`, `lts/*`), iojs entries, or a `system` marker. We
+    // only auto-select strict vMAJOR.MINOR.PATCH dirs.
+    #[test]
+    fn ignores_non_semver_directory_names() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v20.11.1/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/system/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/iojs-3.0.0/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v22.4.0-rc.1/bin", h)).unwrap();
+
+        let out = augment_with_version_managers_for_home(String::new(), h);
+        assert!(out.contains(&format!("{}/.nvm/versions/node/v20.11.1/bin", h)));
+        assert!(!out.contains("/system/bin"));
+        assert!(!out.contains("iojs"));
+        assert!(!out.contains("rc.1"));
+    }
+
+    // Pin the order of augmentations: nvm → pyenv → rbenv → .local/bin.
+    // (war-room R1 minimax suggestion — keeps a refactor from silently
+    // reordering insertions.)
+    #[test]
+    fn additions_preserve_version_manager_order() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.nvm/versions/node/v22.4.0/bin", h)).unwrap();
+        fs::create_dir_all(format!("{}/.pyenv/shims", h)).unwrap();
+        fs::create_dir_all(format!("{}/.rbenv/shims", h)).unwrap();
+        fs::create_dir_all(format!("{}/.local/bin", h)).unwrap();
+
+        let out = augment_with_version_managers_for_home(String::new(), h);
+        let parts: Vec<&str> = out.split(':').collect();
+        let idx = |needle: &str| parts.iter().position(|p| p.contains(needle)).unwrap();
+        let nvm = idx(".nvm/versions/node");
+        let pyenv = idx(".pyenv/shims");
+        let rbenv = idx(".rbenv/shims");
+        let local = idx(".local/bin");
+        assert!(nvm < pyenv && pyenv < rbenv && rbenv < local, "got: {:?}", parts);
+    }
+
+    #[test]
+    fn idempotent_when_paths_already_in_base() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.pyenv/shims", h)).unwrap();
+        fs::create_dir_all(format!("{}/.local/bin", h)).unwrap();
+
+        let base = format!("/usr/bin:{}/.pyenv/shims:{}/.local/bin", h, h);
+        let out = augment_with_version_managers_for_home(base.clone(), h);
+        assert_eq!(out, base, "no duplicates should be appended");
+    }
+
+    #[test]
+    fn skips_directories_that_dont_exist() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        // Only .local/bin exists; the rest aren't created.
+        fs::create_dir_all(format!("{}/.local/bin", h)).unwrap();
+
+        let out = augment_with_version_managers_for_home("/usr/bin".to_string(), h);
+        assert_eq!(out, format!("/usr/bin:{}/.local/bin", h));
+        assert!(!out.contains(".nvm"));
+        assert!(!out.contains(".pyenv"));
+        assert!(!out.contains(".rbenv"));
+    }
+
+    #[test]
+    fn no_op_when_no_version_managers_present() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        let base = "/usr/bin:/bin".to_string();
+        let out = augment_with_version_managers_for_home(base.clone(), h);
+        assert_eq!(out, base);
+    }
+
+    #[test]
+    fn handles_empty_home_without_panicking() {
+        let out = augment_with_version_managers_for_home("/usr/bin".to_string(), "");
+        assert_eq!(out, "/usr/bin");
+    }
+
+    #[test]
+    fn handles_empty_base_with_only_additions() {
+        let home = mk_home();
+        let h = home.path().to_str().unwrap();
+        fs::create_dir_all(format!("{}/.local/bin", h)).unwrap();
+        let out = augment_with_version_managers_for_home(String::new(), h);
+        assert_eq!(out, format!("{}/.local/bin", h));
     }
 }
