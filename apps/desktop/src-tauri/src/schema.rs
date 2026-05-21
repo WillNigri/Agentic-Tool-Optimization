@@ -159,6 +159,22 @@ pub fn init_database(conn: &Connection) {
         );
         CREATE INDEX IF NOT EXISTS idx_llm_keys_provider ON llm_api_keys(provider);
         CREATE INDEX IF NOT EXISTS idx_llm_keys_project ON llm_api_keys(project_id);
+        -- v2.7.14 master_key_v2 PR-1 (ledger-only foundation). Tracks
+        -- every master-key version this install has ever seen so
+        -- later PRs can detect identity mismatches without orphaning
+        -- ciphertexts. PR-1 ONLY creates the table + writes a v1 row
+        -- on startup. By design the worst case is an extra row in a
+        -- new table.
+        CREATE TABLE IF NOT EXISTS master_key_ledger (
+            version           TEXT PRIMARY KEY,
+            keychain_account  TEXT NOT NULL,
+            ciphertext_format TEXT NOT NULL,
+            identity_probe    TEXT,
+            source            TEXT NOT NULL DEFAULT 'keychain',
+            created_at        TEXT NOT NULL,
+            retired_at        TEXT,
+            notes             TEXT
+        );
         CREATE TABLE IF NOT EXISTS agents (
             id            TEXT PRIMARY KEY,
             slug          TEXT NOT NULL,
@@ -867,6 +883,46 @@ pub fn init_database(conn: &Connection) {
           WHERE anchor_runtime IS NULL",
         [],
     );
+
+    // v2.7.14 master_key_v2 PR-1 — additive foundation.
+    //
+    // 1. ALTER llm_api_keys: every ciphertext row declares which
+    //    key_version encrypted it. Default 'v1' because pre-this-PR
+    //    every row implicitly used v1 (the only key that existed).
+    //    The `v1:` PREFIX on encrypted_key is the on-the-wire format
+    //    tag; this column is the LEDGER tag — they should agree but
+    //    are tracked separately so PR-4's atomic rekey can flip one
+    //    row at a time without splitting the wire format.
+    let _ = conn.execute(
+        "ALTER TABLE llm_api_keys ADD COLUMN key_version TEXT NOT NULL DEFAULT 'v1'",
+        [],
+    );
+    // 2. Seed the ledger with a v1 row if no row exists yet. IDEMPOTENT:
+    //    INSERT OR IGNORE skips when the row's already there. The
+    //    identity_probe stays NULL — PR-2 populates it once the
+    //    per-OS probe computation lands. notes carries provenance so
+    //    a future operator can tell "backfilled by the PR-1
+    //    migration" from "written explicitly by a later code path."
+    //
+    //    DELIBERATELY does not check the keychain or derive any
+    //    identity here — PR-1 is supposed to be additive only.
+    //    Writing a backfill row that says "v1 exists; nothing more
+    //    known about it" is the WHOLE behavior change of this PR.
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO master_key_ledger (
+            version, keychain_account, ciphertext_format, identity_probe,
+            source, created_at, retired_at, notes
+         ) VALUES (?1, ?2, ?3, NULL, 'keychain', ?4, NULL, ?5)",
+        rusqlite::params![
+            "v1",
+            "master_key_v1",
+            "aes-gcm-v1",
+            now,
+            "backfilled by schema.rs at app startup (master_key_v2 PR-1)"
+        ],
+    );
+
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_category_lastused
             ON sessions(category, last_used_at DESC)",
@@ -1133,6 +1189,99 @@ pub fn init_database(conn: &Connection) {
              Run `sqlite3 ~/.ato/local.db` and inspect duplicate \
              json_extract(payload,'$.request_post_id') values, then retry.",
             e
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    // v2.7.14 master_key_v2 PR-1 — ledger schema + idempotent backfill.
+    // Pins the contract so PR-2 can layer the probe column on without
+    // accidentally breaking the backfill semantics.
+
+    fn init_in_memory() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_database(&conn);
+        conn
+    }
+
+    #[test]
+    fn master_key_ledger_backfill_creates_v1_row_on_first_init() {
+        let conn = init_in_memory();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM master_key_ledger WHERE version = 'v1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("ledger SELECT");
+        assert_eq!(count, 1, "expected exactly one v1 ledger row after first init");
+
+        let (keychain_account, ciphertext_format, identity_probe, source, retired_at): (
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT keychain_account, ciphertext_format, identity_probe, source, retired_at
+                   FROM master_key_ledger WHERE version = 'v1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("v1 row fields");
+
+        assert_eq!(keychain_account, "master_key_v1", "keychain account locked to v1");
+        assert_eq!(ciphertext_format, "aes-gcm-v1", "wire format locked to v1");
+        assert_eq!(identity_probe, None, "probe stays NULL until PR-2");
+        assert_eq!(source, "keychain", "default source is keychain");
+        assert_eq!(retired_at, None, "v1 is active, not retired");
+    }
+
+    #[test]
+    fn master_key_ledger_backfill_is_idempotent_across_multiple_inits() {
+        // Simulates the app restarting N times — init_database runs every
+        // launch, the backfill must NOT duplicate the v1 row.
+        let conn = init_in_memory();
+        init_database(&conn);
+        init_database(&conn);
+        init_database(&conn);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM master_key_ledger", [], |r| r.get(0))
+            .expect("ledger count");
+        assert_eq!(count, 1, "INSERT OR IGNORE must not duplicate on re-init");
+    }
+
+    #[test]
+    fn llm_api_keys_has_key_version_column_defaulting_to_v1() {
+        let conn = init_in_memory();
+        // Insert a fresh row WITHOUT specifying key_version — should
+        // default to 'v1' per the ALTER TABLE clause.
+        conn.execute(
+            "INSERT INTO llm_api_keys (
+                id, provider, name, key_preview, encrypted_key, project_id, runtime,
+                is_active, last_used, usage_count, created_at, updated_at
+            ) VALUES (
+                'test-id', 'openai', 'test-key', 'sk-...test',
+                'v1:fakecipher', NULL, NULL, 1, NULL, 0, '2026-05-21', '2026-05-21'
+            )",
+            [],
+        )
+        .expect("insert key");
+        let kv: String = conn
+            .query_row(
+                "SELECT key_version FROM llm_api_keys WHERE id = 'test-id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read key_version");
+        assert_eq!(
+            kv, "v1",
+            "rows inserted without key_version should default to v1"
         );
     }
 }
