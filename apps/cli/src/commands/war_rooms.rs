@@ -37,6 +37,13 @@ pub struct WarRoom {
     pub auto_title: Option<String>,
     pub summary: Option<String>,
     pub coordinator_runtime: Option<String>,
+    /// v2.7.13 fix — the persisted human note. Surfaced in the
+    /// closed-war-room summary card alongside the coordinator's
+    /// output. NULL when no comment was attached.
+    pub human_comment: Option<String>,
+    /// v2.7.13 fix — persisted tags from the coordinator. Render as
+    /// chips under the summary so the card matches sessions parity.
+    pub tags: Vec<String>,
     /// Count of execution_logs rows that participate in this war room.
     /// Surfaced as "turns" in the close-time metadata block.
     pub seat_count: i64,
@@ -193,20 +200,52 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<WarRoom> {
             id
         ));
     }
-    let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+    let row: Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = conn
         .query_row(
-            "SELECT status, closed_at, auto_title, summary, coordinator_runtime
+            "SELECT status, closed_at, auto_title, summary, coordinator_runtime,
+                    human_comment, tags_json
                FROM war_rooms WHERE id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
         )
         .optional()?;
-    let (status, closed_at, auto_title, summary, coordinator_runtime) = row.unwrap_or_else(|| {
-        // Legacy war room — no war_rooms row exists yet. Default to
-        // 'open' so the lifecycle UI surfaces it correctly and a
-        // first-time close UPSERTs the row.
-        ("open".to_string(), None, None, None, None)
-    });
+    let (status, closed_at, auto_title, summary, coordinator_runtime, human_comment, tags_json) =
+        row.unwrap_or_else(|| {
+            // Legacy war room — no war_rooms row exists yet. Default
+            // to 'open' so the lifecycle UI surfaces it correctly and
+            // a first-time close UPSERTs the row.
+            (
+                "open".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
+    let tags: Vec<String> = tags_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
     Ok(WarRoom {
         id: id.to_string(),
         status,
@@ -214,6 +253,8 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<WarRoom> {
         auto_title,
         summary,
         coordinator_runtime,
+        human_comment,
+        tags,
         seat_count,
     })
 }

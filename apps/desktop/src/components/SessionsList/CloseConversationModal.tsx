@@ -30,8 +30,12 @@ import { cn } from "@/lib/utils";
 // → first key).
 
 // API-provider slugs that the close-summarizer can dispatch to. Mirrors
-// crate::api_dispatch::registry() on the Rust side. Any provider in this
-// set that ALSO has a configured key shows up in the picker.
+// crate::api_dispatch::registry() on the Rust side. EVERY entry shows
+// up in the picker; ones without a configured key render as disabled
+// options with an explanatory tag so the user knows what's missing.
+// (Pre-fix the picker silently hid them, which made it look like
+// `claude` / codex weren't summarization-capable when really the user
+// just needed to add an API key — Will's dogfood 2026-05-21.)
 const SUPPORTED_COORDINATORS: { slug: string; label: string }[] = [
   { slug: "anthropic", label: "Anthropic (Claude API)" },
   { slug: "google", label: "Google (Gemini API)" },
@@ -113,10 +117,20 @@ export default function CloseConversationModal({
     staleTime: 60_000,
   });
 
-  const availableCoordinators = useMemo(() => {
+  // v2.7.13 fix — instead of filtering hidden, return EVERY supported
+  // coordinator with a `configured` flag so the picker can render
+  // unconfigured ones as disabled. The disabled-option pattern keeps
+  // claude / codex / etc. discoverable so users know they exist + how
+  // to enable them; the prior filter-out shape silently hid them and
+  // made the picker look like only Google + MiniMax were ever options.
+  const coordinatorOptions = useMemo(() => {
     const configured = new Set(apiKeys.map((k) => k.provider));
-    return SUPPORTED_COORDINATORS.filter((c) => configured.has(c.slug));
+    return SUPPORTED_COORDINATORS.map((c) => ({
+      ...c,
+      configured: configured.has(c.slug),
+    }));
   }, [apiKeys]);
+  const anyConfigured = coordinatorOptions.some((c) => c.configured);
 
   if (!open) return null;
 
@@ -175,23 +189,26 @@ export default function CloseConversationModal({
             id="close-coordinator-select"
             value={coordinator}
             onChange={(e) => setCoordinator(e.target.value)}
-            disabled={busy || availableCoordinators.length === 0}
+            disabled={busy}
             className="w-full rounded-md border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none disabled:opacity-50"
           >
             <option value="">
-              {availableCoordinators.length === 0
-                ? "(no API keys configured — backend default will be used)"
-                : "Default (auto-pick from session agent → anchor → first key)"}
+              {anyConfigured
+                ? "Default (auto-pick from session agent → anchor → first key)"
+                : "(no API keys configured — backend default will be used)"}
             </option>
-            {availableCoordinators.map((c) => (
-              <option key={c.slug} value={c.slug}>
+            {coordinatorOptions.map((c) => (
+              <option key={c.slug} value={c.slug} disabled={!c.configured}>
                 {c.label}
+                {!c.configured ? " — no API key configured" : ""}
               </option>
             ))}
           </select>
-          {availableCoordinators.length === 0 && (
+          {!anyConfigured && (
             <p className="text-[10px] text-cs-muted">
               Add a provider key in Settings → API Keys to enable the picker.
+              Note: Claude Code / Codex / Gemini CLI subscriptions don't
+              count — the summarizer dispatches via the provider's API.
             </p>
           )}
         </div>

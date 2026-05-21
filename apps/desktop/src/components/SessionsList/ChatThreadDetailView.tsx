@@ -17,7 +17,7 @@
 // CloseConversationModal with conversationType="chat".
 
 import { useState } from "react";
-import { Loader2, Lock, Sparkles, Unlock } from "lucide-react";
+import { Loader2, Lock, Sparkles, Tag as TagIcon, Unlock } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -52,6 +52,8 @@ interface ChatThreadSnapshot {
   auto_title: string | null;
   summary: string | null;
   coordinator_runtime: string | null;
+  human_comment: string | null;
+  tags: string[];
   message_count: number;
 }
 
@@ -194,20 +196,9 @@ export default function ChatThreadDetailView({
         </div>
       </div>
 
-      <div className="rounded-lg border border-cs-border bg-cs-card p-4 space-y-1 text-xs text-cs-muted">
-        <p>
-          🗨 Bottom-pane chat thread · {messages.length} message
-          {messages.length !== 1 ? "s" : ""}
-        </p>
-        <p className="text-[11px]">
-          Read-only. To continue this chat, open the bottom pane and pick this
-          thread from the dropdown.
-        </p>
-      </div>
-
-      {/* v2.7.13 — coordinator summary card. Renders once closed AND
-          there's a summary. Same shape as session + war-room cards
-          so the UI feels like one component family across types. */}
+      {/* v2.7.13 — coordinator summary card at the TOP (matches the
+          session + war-room layout — Will dogfood 2026-05-21: summary
+          should always render above the conversation body). */}
       {isClosed && snapshotQ.data?.summary && (
         <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
           <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
@@ -231,8 +222,42 @@ export default function ChatThreadDetailView({
           <div className="text-sm text-cs-text whitespace-pre-wrap">
             {snapshotQ.data.summary}
           </div>
+          {snapshotQ.data.human_comment && snapshotQ.data.human_comment.trim() && (
+            <div className="border-t border-cs-accent/20 pt-2 mt-2">
+              <div className="text-[10px] uppercase tracking-wider font-medium text-cs-muted mb-1">
+                Note from human
+              </div>
+              <div className="text-sm text-cs-text whitespace-pre-wrap">
+                {snapshotQ.data.human_comment}
+              </div>
+            </div>
+          )}
+          {snapshotQ.data.tags.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap pt-1">
+              <TagIcon size={10} className="text-cs-muted" />
+              {snapshotQ.data.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/10 text-cs-accent"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
+
+      <div className="rounded-lg border border-cs-border bg-cs-card p-4 space-y-1 text-xs text-cs-muted">
+        <p>
+          🗨 Bottom-pane chat thread · {messages.length} message
+          {messages.length !== 1 ? "s" : ""}
+        </p>
+        <p className="text-[11px]">
+          Read-only. To continue this chat, open the bottom pane and pick this
+          thread from the dropdown.
+        </p>
+      </div>
 
       {closeError && (
         <div className="rounded-md border border-cs-danger/40 bg-cs-danger/10 p-3 text-xs text-cs-text">

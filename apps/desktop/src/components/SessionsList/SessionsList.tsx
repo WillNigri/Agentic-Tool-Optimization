@@ -665,74 +665,27 @@ export default function SessionsList() {
               </div>
             );
           })()}
-          {/* Status chips — lifecycle filter that applies to SESSIONS
-              ONLY. Single-runs carry `execution_logs.status` values
-              ("success"/"error"/"unknown") which aren't open/closed,
-              so they're hidden when this filter is anything other
-              than "all" (codex Round-1 #5: rename/scope copy so the
-              labels don't silently mean "sessions only"). The
-              "(sessions)" tooltip + the row label below the chips
-              make the scope explicit. */}
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
-              Lifecycle
-              <span className="ml-1 opacity-60 normal-case lowercase">
-                (sessions only)
-              </span>
-            </span>
-            {(() => {
-              // PR 12 — lifecycle chips count contextually via the
-              // hoisted `filterFields` (codex Round-1 #3).
-              const rowsForStatusCount = nonEmptyData!.filter((s) =>
-                rowMatchesFilters(s, filterFields, "status")
-              );
-              // Lifecycle applies to sessions only — Open/Closed match
-              // session rows by definition. "All" must count from the
-              // same denominator so the math adds up (All = Open + Closed).
-              // Pre-fix this was rowsForStatusCount.length which mixed in
-              // single-runs / war-rooms / chats and showed e.g. All (49)
-              // alongside Open (6) Closed (1). Will's dogfood 2026-05-21.
-              const sessionRows = rowsForStatusCount.filter(
-                (row) => row.rowKind === "session"
-              );
-              return (["all", "open", "closed"] as StatusFilter[]).map((s) => {
-                const count =
-                  s === "all"
-                    ? sessionRows.length
-                    : sessionRows.filter((row) => row.status === s).length;
-              return (
-                <button
-                  key={s}
-                  onClick={() => setStatusFilter(s)}
-                  title={
-                    s === "all"
-                      ? "Show every session regardless of lifecycle. Non-session rows (single-runs, war-rooms, chats) are unaffected by this filter."
-                      : `Show sessions whose lifecycle is "${s}". Non-session rows are hidden when a lifecycle is selected — they have no open/closed state.`
-                  }
-                  className={cn(
-                    "px-2 py-1 rounded-md border capitalize transition-colors",
-                    statusFilter === s
-                      ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
-                      : "border-cs-border bg-cs-card text-cs-muted hover:text-cs-text"
-                  )}
-                >
-                  {s}
-                  <span className="ml-1 opacity-60">({count})</span>
-                </button>
-              );
-              });
-            })()}
-            {(searchQuery ||
-              statusFilter !== "all" ||
-              kindFilter !== "all" ||
-              categoryFilter !== null ||
-              teamFilter !== null ||
-              tagFilter !== null) && (
+          {/* v2.7.13 — lifecycle filter row REMOVED. Will dogfood
+              2026-05-21: it was redundant with the kind chips above
+              (All / Sessions / Single runs / War rooms / Chats) once
+              war-rooms + chats became closeable in their own surface.
+              Filtering by lifecycle is best done from the conversation
+              detail (click in → see Closed badge) or via the kind chip
+              (Sessions → most are open, only a few are closed). The
+              "X of Y shown" indicator survives via the breakdown row
+              below when a filter narrows the list. */}
+          {(searchQuery ||
+            statusFilter !== "all" ||
+            kindFilter !== "all" ||
+            categoryFilter !== null ||
+            teamFilter !== null ||
+            tagFilter !== null) && (
+            <div className="flex items-center text-xs">
               <span className="text-cs-muted ml-auto">
                 {filteredSessions.length} of {nonEmptyData!.length} shown
               </span>
-            )}
-          </div>
+            </div>
+          )}
           {/* PR 7 (2026-05-17) — lifecycle chip count reconciliation
               footer. The lifecycle chips' "All (N)" counts single-runs
               too, but "Open + Closed" only sums sessions, so the
@@ -756,10 +709,7 @@ export default function SessionsList() {
                 ·{" "}
                 {nonEmptyData!.filter((r) => r.rowKind === "war_room").length} war rooms
                 ·{" "}
-                {nonEmptyData!.filter((r) => r.rowKind === "chat").length} chats.{" "}
-                <span className="opacity-80">
-                  Open / Closed lifecycle applies to sessions only.
-                </span>
+                {nonEmptyData!.filter((r) => r.rowKind === "chat").length} chats.
               </div>
             )}
         </div>

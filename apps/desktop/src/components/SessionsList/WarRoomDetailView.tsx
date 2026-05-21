@@ -14,7 +14,7 @@
 // commit message.
 
 import { useState } from "react";
-import { Loader2, Lock, Send, Sparkles, Tag, Unlock } from "lucide-react";
+import { Loader2, Lock, Send, Sparkles, Tag as TagIcon, Unlock } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -44,6 +44,8 @@ interface WarRoomSnapshot {
   auto_title: string | null;
   summary: string | null;
   coordinator_runtime: string | null;
+  human_comment: string | null;
+  tags: string[];
   seat_count: number;
 }
 
@@ -304,6 +306,62 @@ export default function WarRoomDetailView({
           )}
         </div>
       </div>
+
+      {/* v2.7.13 — coordinator summary card at the TOP (Will dogfood
+          2026-05-21: war-room used to render this below the seat list
+          which buried it; session view always rendered above). Same
+          shape as SessionTranscriptView's summary card. */}
+      {isClosed && snapshotQ.data?.summary && (
+        <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
+          <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
+            <Sparkles size={12} /> Coordinator summary
+            {snapshotQ.data.closed_at && (
+              <span className="text-[10px] text-cs-muted normal-case font-normal">
+                · closed {formatTime(snapshotQ.data.closed_at)}
+              </span>
+            )}
+            {snapshotQ.data.coordinator_runtime && (
+              <span className={cn(runtimeBadge(snapshotQ.data.coordinator_runtime), "normal-case")}>
+                {snapshotQ.data.coordinator_runtime}
+              </span>
+            )}
+          </div>
+          {snapshotQ.data.auto_title && (
+            <div className="text-sm font-medium text-cs-text">
+              {snapshotQ.data.auto_title}
+            </div>
+          )}
+          <div className="text-sm text-cs-text whitespace-pre-wrap">
+            {snapshotQ.data.summary}
+          </div>
+          {/* v2.7.13 fix — human's free-form note. Rendered as a
+              distinct sub-block so a glance separates LLM output from
+              human framing. Skipped when null/empty. */}
+          {snapshotQ.data.human_comment && snapshotQ.data.human_comment.trim() && (
+            <div className="border-t border-cs-accent/20 pt-2 mt-2">
+              <div className="text-[10px] uppercase tracking-wider font-medium text-cs-muted mb-1">
+                Note from human
+              </div>
+              <div className="text-sm text-cs-text whitespace-pre-wrap">
+                {snapshotQ.data.human_comment}
+              </div>
+            </div>
+          )}
+          {snapshotQ.data.tags.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap pt-1">
+              <TagIcon size={10} className="text-cs-muted" />
+              {snapshotQ.data.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/10 text-cs-accent"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Header summary card — counts, badges, total cost. */}
       <div className="rounded-lg border border-cs-accent/30 bg-cs-card p-4 space-y-3">
@@ -679,35 +737,6 @@ export default function WarRoomDetailView({
               apps/cli/src/runtime.rs:pricing_for_model
             </code>
             .
-          </div>
-        </div>
-      )}
-
-      {/* v2.7.13 — coordinator summary card. Renders once the war
-          room is closed AND we have a summary. Same shape as the
-          session-side card so the UI feels consistent across types. */}
-      {isClosed && snapshotQ.data?.summary && (
-        <div className="border border-cs-accent/30 rounded-md bg-cs-accent/5 p-3 space-y-2">
-          <div className="text-xs font-medium uppercase text-cs-accent flex items-center gap-2">
-            <Sparkles size={12} /> Coordinator summary
-            {snapshotQ.data.closed_at && (
-              <span className="text-[10px] text-cs-muted normal-case font-normal">
-                · closed {formatTime(snapshotQ.data.closed_at)}
-              </span>
-            )}
-            {snapshotQ.data.coordinator_runtime && (
-              <span className={cn(runtimeBadge(snapshotQ.data.coordinator_runtime), "normal-case")}>
-                {snapshotQ.data.coordinator_runtime}
-              </span>
-            )}
-          </div>
-          {snapshotQ.data.auto_title && (
-            <div className="text-sm font-medium text-cs-text">
-              {snapshotQ.data.auto_title}
-            </div>
-          )}
-          <div className="text-sm text-cs-text whitespace-pre-wrap">
-            {snapshotQ.data.summary}
           </div>
         </div>
       )}

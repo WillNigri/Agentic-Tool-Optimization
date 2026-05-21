@@ -88,7 +88,7 @@ describe("CloseConversationModal (S12 v2.7.12)", () => {
     });
   });
 
-  it("coordinator picker shows only providers with configured keys", async () => {
+  it("coordinator picker shows every provider, disables ones without configured keys", async () => {
     vi.mocked(tauriApi.listLlmApiKeys).mockResolvedValue([
       // @ts-expect-error — partial shape is enough for the picker filter.
       { provider: "anthropic", name: "personal", isActive: true },
@@ -97,13 +97,22 @@ describe("CloseConversationModal (S12 v2.7.12)", () => {
     ]);
     renderModal();
     const select = screen.getByLabelText(/coordinator/i) as HTMLSelectElement;
+    // v2.7.13 fix — every supported provider renders so users discover
+    // the full set + know which are unconfigured. The configured /
+    // unconfigured distinction lives on the option's `disabled`
+    // attribute, not in/out of the list.
     await waitFor(() => {
-      const options = Array.from(select.options).map((o) => o.value);
-      // Default (empty value) + only the two providers with keys.
-      expect(options).toContain("anthropic");
-      expect(options).toContain("minimax");
-      expect(options).not.toContain("google");
-      expect(options).not.toContain("grok");
+      const optionMap: Record<string, boolean> = {};
+      for (const o of Array.from(select.options)) {
+        if (o.value) optionMap[o.value] = o.disabled;
+      }
+      // Configured → present + enabled.
+      expect(optionMap.anthropic).toBe(false);
+      expect(optionMap.minimax).toBe(false);
+      // Unconfigured → present + disabled (visible but unselectable).
+      expect(optionMap.google).toBe(true);
+      expect(optionMap.grok).toBe(true);
+      expect(optionMap.deepseek).toBe(true);
     });
   });
 

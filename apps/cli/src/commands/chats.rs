@@ -36,6 +36,11 @@ pub struct ChatThread {
     pub summary: Option<String>,
     pub coordinator_runtime: Option<String>,
     pub message_count: i64,
+    /// v2.7.13 fix — persisted human note. NULL when no comment was
+    /// attached.
+    pub human_comment: Option<String>,
+    /// v2.7.13 fix — persisted coordinator tags.
+    pub tags: Vec<String>,
     /// The agent_slug derived from agent_id (when set + resolvable).
     /// Fed to the summarizer resolution chain as the "stored agent"
     /// candidate so a chat anchored to e.g. `@reviewer` defaults to
@@ -153,7 +158,18 @@ impl Closeable for ChatThread {
 /// longer exists falls through to None (the summarizer chain handles
 /// the missing case gracefully).
 pub fn lookup(conn: &Connection, id: &str) -> Result<ChatThread> {
-    let (title, agent_id, status, closed_at, auto_title, summary, coordinator_runtime, message_count): (
+    let (
+        title,
+        agent_id,
+        status,
+        closed_at,
+        auto_title,
+        summary,
+        coordinator_runtime,
+        message_count,
+        human_comment,
+        tags_json,
+    ): (
         String,
         Option<String>,
         String,
@@ -162,10 +178,13 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<ChatThread> {
         Option<String>,
         Option<String>,
         i64,
+        Option<String>,
+        Option<String>,
     ) = conn
         .query_row(
             "SELECT title, agent_id, COALESCE(status, 'open'), closed_at,
-                    auto_title, summary, coordinator_runtime, message_count
+                    auto_title, summary, coordinator_runtime, message_count,
+                    human_comment, tags_json
                FROM chat_threads WHERE id = ?1",
             [id],
             |r| {
@@ -178,6 +197,8 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<ChatThread> {
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
                 ))
             },
         )
@@ -192,6 +213,10 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<ChatThread> {
             .ok(),
         None => None,
     };
+    let tags: Vec<String> = tags_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
     Ok(ChatThread {
         id: id.to_string(),
         title,
@@ -202,6 +227,8 @@ pub fn lookup(conn: &Connection, id: &str) -> Result<ChatThread> {
         summary,
         coordinator_runtime,
         message_count,
+        human_comment,
+        tags,
         agent_slug,
     })
 }
