@@ -11,6 +11,10 @@ mod ratchet_view;
 mod remote_runtimes_view;
 mod runtime_health;
 mod sessions_view;
+// S4 Felipe P2 — Linux install-method detection so the updater UI
+// can surface a manual upgrade path for .deb / Snap installs where
+// Tauri's in-place auto-swap fails on EACCES.
+pub mod installer_detect;
 pub mod pty;
 pub mod local_insights;
 pub mod events;
@@ -963,6 +967,10 @@ pub fn run() {
             active_runs::kill_active_run,
             active_runs::get_overlap_evidence,
             active_runs::finish_active_run,
+            // S4 Felipe P2 — surfaces .deb / Snap / AppImage detection
+            // to the UpdateBanner so we can show a copy-pasteable
+            // upgrade command instead of the failing in-place updater.
+            installer_detect::get_install_method,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
