@@ -747,6 +747,12 @@ pub struct SingleRunDetail {
     /// WarRoomDetailView groups by this to render rounds as
     /// stacked sections.
     pub war_room_round: Option<i64>,
+    /// F1 / S3 follow-up (v2.7.11) — raw JSON from
+    /// `execution_logs.tool_calls_summary` ([{name, args_brief,
+    /// is_error}, ...]) for the PermissionEventsPanel. NULL on
+    /// pre-v2.7.8 rows (the column is recent) and on dispatches
+    /// that didn't use any tools.
+    pub tool_calls_summary: Option<String>,
 }
 
 /// First-Chat Wizard (2026-05-18) — fire a war-room from the
@@ -781,7 +787,7 @@ pub fn get_war_room_constituents(
         .prepare(
             "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                     created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
-                    war_room_round
+                    war_room_round, tool_calls_summary
                FROM execution_logs
               WHERE war_room_id = ?1
               ORDER BY war_room_round ASC, created_at ASC",
@@ -805,6 +811,7 @@ pub fn get_war_room_constituents(
                 cost_usd_estimated: r.get(12)?,
                 auth_mode: r.get(13)?,
                 war_room_round: r.get(14)?,
+                tool_calls_summary: r.get(15)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -829,7 +836,7 @@ pub fn get_single_run_detail(
     conn.query_row(
         "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                 created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
-                war_room_round
+                war_room_round, tool_calls_summary
            FROM execution_logs
           WHERE id = ?1 AND session_id IS NULL",
         [&log_id],
@@ -850,6 +857,7 @@ pub fn get_single_run_detail(
                 cost_usd_estimated: r.get(12)?,
                 auth_mode: r.get(13)?,
                 war_room_round: r.get(14)?,
+                tool_calls_summary: r.get(15)?,
             })
         },
     )
