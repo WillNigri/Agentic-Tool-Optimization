@@ -885,6 +885,7 @@ pub fn get_session_transcript(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
     let (
         runtime,
@@ -896,10 +897,12 @@ pub fn get_session_transcript(
         summary,
         tags_json,
         project_id,
+        human_comment,
     ): Header = conn
         .query_row(
             "SELECT runtime, agent_slug, title,
-                    COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json, project_id
+                    COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json, project_id,
+                    human_comment
                FROM sessions WHERE id = ?1",
             [&session_id],
             |r| Ok((
@@ -912,6 +915,7 @@ pub fn get_session_transcript(
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
             )),
         )
         .map_err(|e| format!("session not found: {}", e))?;
@@ -956,6 +960,7 @@ pub fn get_session_transcript(
         summary,
         tags,
         project_id,
+        human_comment,
     })
 }
 

@@ -428,6 +428,21 @@ enum SessionsSub {
         /// Override the summarizer model.
         #[arg(long)]
         model: Option<String>,
+        /// v2.7.12 — pick which LLM runtime summarizes the session
+        /// (e.g. `--coordinator anthropic`, `--coordinator google`,
+        /// `--coordinator minimax`). Must be a registered API
+        /// provider slug with a resolvable key. Takes precedence over
+        /// --as / the session's stored agent_slug / the session's
+        /// anchor runtime when picking the summarizer.
+        #[arg(long)]
+        coordinator: Option<String>,
+        /// v2.7.12 — free-form human note persisted on the session's
+        /// `human_comment` column. Surfaced in the closed-session
+        /// summary card alongside the coordinator's auto-generated
+        /// summary so the human's framing of the conversation lives
+        /// next to the LLM's. Trimmed; empty becomes NULL.
+        #[arg(long = "human-comment")]
+        human_comment: Option<String>,
         /// Suppress the warning emitted to stderr when the coordinator
         /// omits `category` or `team` from its JSON response. Closing
         /// still proceeds in either case (NULL columns are allowed by
@@ -1079,6 +1094,8 @@ fn main() -> Result<()> {
                 id,
                 agent_slug,
                 model,
+                coordinator,
+                human_comment,
                 force_close_without_context,
             } => {
                 let conn = db::open_readwrite(&db_path)?;
@@ -1087,6 +1104,8 @@ fn main() -> Result<()> {
                     &id,
                     agent_slug,
                     model,
+                    coordinator,
+                    human_comment,
                     force_close_without_context,
                     &opts,
                 )

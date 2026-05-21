@@ -509,6 +509,10 @@ pub struct SessionCloseResult {
     pub coordinator_runtime: String,
     pub coordinator_model: Option<String>,
     pub duration_ms: i64,
+    /// v2.7.12 — the human's free-form note attached at close time.
+    /// Echoes whatever was passed via `--human-comment` (normalized:
+    /// trimmed, empty → None). Null when the caller didn't pass one.
+    pub human_comment: Option<String>,
 }
 
 /// Controlled vocabulary for `sessions.category`. The SQLite CHECK
@@ -569,7 +573,35 @@ fn resolve_summarizer(
     session: &Session,
     agent_override: Option<&str>,
     model_override: Option<&str>,
+    coordinator_override: Option<&str>,
 ) -> Result<(&'static crate::api_dispatch::ApiProvider, Option<String>, Option<String>)> {
+    // 0) Explicit coordinator runtime override wins over everything —
+    //    this is the "I want THIS LLM to summarize" UI/CLI path. Must
+    //    be a registered API provider with a resolvable key, otherwise
+    //    we fail loudly rather than silently falling through to a
+    //    different provider (that would defeat the whole point of the
+    //    override). v2.7.12 — Will UI/UX request.
+    if let Some(slug) = coordinator_override {
+        let p = crate::api_dispatch::find_provider(slug).ok_or_else(|| {
+            anyhow!(
+                "Coordinator '{}' is not a registered API provider. Try one of: {}.",
+                slug,
+                crate::api_dispatch::registry()
+                    .iter()
+                    .map(|p| p.slug)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        crate::api_dispatch::resolve_api_key(p, conn).map_err(|e| {
+            anyhow!(
+                "Coordinator '{}' has no resolvable API key — add one in Settings → API Keys. ({})",
+                slug, e
+            )
+        })?;
+        return Ok((p, model_override.map(String::from), session.agent_slug.clone()));
+    }
+
     // 1) Explicit agent override wins.
     if let Some(slug) = agent_override {
         if let Some(agent) = crate::commands::agents::lookup_by_slug(conn, slug, None)? {
@@ -771,6 +803,8 @@ pub fn close(
     id: &str,
     agent_slug_override: Option<String>,
     model_override: Option<String>,
+    coordinator_override: Option<String>,
+    human_comment: Option<String>,
     force_close_without_context: bool,
     opts: &Opts,
 ) -> Result<()> {
@@ -803,7 +837,18 @@ pub fn close(
         &session,
         agent_slug_override.as_deref(),
         model_override.as_deref(),
+        coordinator_override.as_deref(),
     )?;
+
+    // v2.7.12 — normalize human_comment: trim, treat empty as None so
+    // the COALESCE in the UPDATE below preserves any prior value the
+    // user attached on a previous close instead of clobbering it with
+    // an empty string.
+    let human_comment_normalized: Option<String> = human_comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     // Build the transcript inside an XML-style envelope. Each turn is
     // wrapped in <turn role="..." runtime="...">…</turn> with literal
@@ -999,20 +1044,31 @@ Session metadata:\n\
                 summary = ?,
                 tags_json = ?,
                 category = COALESCE(?, category),
-                team = COALESCE(?, team){}
+                team = COALESCE(?, team),
+                human_comment = COALESCE(?, human_comment){}
           WHERE id = ? AND status = 'open'",
         project_id_clause
     );
+    // v2.7.12 — human_comment is sticky like category/team: a NULL
+    // (the user closed without typing anything) leaves any prior value
+    // intact; a non-empty trimmed string overwrites. Pre-fix the close
+    // path had no concept of human commentary at all.
     let changed = if let Some(pid) = suggested_project_id.as_ref() {
         conn.execute(
             &sql,
-            rusqlite::params![now, auto_title, summary, tags_json, category, team, pid, session.id],
+            rusqlite::params![
+                now, auto_title, summary, tags_json, category, team,
+                human_comment_normalized, pid, session.id
+            ],
         )
         .context("UPDATE sessions on close")?
     } else {
         conn.execute(
             &sql,
-            rusqlite::params![now, auto_title, summary, tags_json, category, team, session.id],
+            rusqlite::params![
+                now, auto_title, summary, tags_json, category, team,
+                human_comment_normalized, session.id
+            ],
         )
         .context("UPDATE sessions on close")?
     };
@@ -1035,6 +1091,7 @@ Session metadata:\n\
         coordinator_runtime: provider.slug.to_string(),
         coordinator_model: Some(outcome.model_used.clone()),
         duration_ms: outcome.duration_ms,
+        human_comment: human_comment_normalized.clone(),
     };
 
     if opts.human {

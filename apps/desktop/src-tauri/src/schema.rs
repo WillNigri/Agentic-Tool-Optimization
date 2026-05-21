@@ -752,6 +752,12 @@ pub fn init_database(conn: &Connection) {
         [],
     );
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN team TEXT", []);
+    // v2.7.12 — free-form human note attached at close time. Surfaced
+    // in the closed-session summary card so the human's framing of the
+    // conversation lives alongside the coordinator's auto-generated
+    // summary. NULL when the user closed without adding a comment, or
+    // when the close happened before this column existed.
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN human_comment TEXT", []);
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_category_lastused
             ON sessions(category, last_used_at DESC)",

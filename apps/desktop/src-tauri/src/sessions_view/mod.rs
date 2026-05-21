@@ -140,6 +140,11 @@ pub struct SessionTranscript {
     pub summary: Option<String>,
     pub tags: Vec<String>,
     pub project_id: Option<String>,
+    /// v2.7.12 — free-form note the human attached at close time.
+    /// Renders in the closed-session summary card alongside the
+    /// coordinator's auto-generated summary. NULL when no comment
+    /// was added (or the session pre-dates the column).
+    pub human_comment: Option<String>,
 }
 
 // 2026-05-19 elegance war-room split (was 1635-line sessions_view.rs).

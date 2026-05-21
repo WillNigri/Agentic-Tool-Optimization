@@ -561,12 +561,32 @@ fn validate_agent_slug(v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// v2.7.12 — validate the coordinator runtime slug before passing it
+/// as a clap flag value. Same defense-in-depth as validate_agent_slug:
+/// constrain to ASCII alphanumerics + dash/underscore so a value like
+/// `--model evil` can't be smuggled in even if the parser misbehaves.
+/// API provider slugs in the registry (anthropic / google / minimax /
+/// grok / deepseek / qwen / openrouter) all match this shape.
+fn validate_coordinator_slug(v: &str) -> Result<(), String> {
+    if v.is_empty() || v.len() > 32 {
+        return Err(format!("coordinator slug length out of range: {}", v.len()));
+    }
+    for c in v.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("coordinator slug contains invalid characters: {}", v));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn close_session(
     inflight: State<'_, CloseInflight>,
     session_id: String,
     agent_slug: Option<String>,
     model: Option<String>,
+    coordinator: Option<String>,
+    human_comment: Option<String>,
 ) -> Result<serde_json::Value, String> {
     validate_session_id(&session_id)?;
     let bin = resolve_ato_binary()?;
@@ -586,6 +606,29 @@ pub fn close_session(
     if let Some(m) = model.as_deref() {
         if !m.is_empty() {
             cmd.args(["--model", m]);
+        }
+    }
+    if let Some(c) = coordinator.as_deref() {
+        if !c.is_empty() {
+            validate_coordinator_slug(c)?;
+            cmd.args(["--coordinator", c]);
+        }
+    }
+    if let Some(text) = human_comment.as_deref() {
+        // Trim mirrors the CLI's normalization. An empty/whitespace-only
+        // comment is treated as "no comment passed" so the COALESCE on
+        // the CLI side preserves prior values instead of clobbering.
+        // Length cap (4 KB) keeps a runaway paste from blowing argv
+        // limits or the close payload's effective size.
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            if trimmed.len() > 4096 {
+                return Err(format!(
+                    "human_comment too long ({} bytes; cap is 4096)",
+                    trimmed.len()
+                ));
+            }
+            cmd.args(["--human-comment", trimmed]);
         }
     }
     cmd.arg("--");

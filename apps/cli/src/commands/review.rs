@@ -253,7 +253,7 @@ fn auto_close_review_session(session_id: &str, db_path: &PathBuf, opts: &Opts) {
     // on a review session can still close it manually before the
     // review fires (the close is idempotent → already-closed sessions
     // are skipped here).
-    match sessions::close(&conn, session_id, None, None, true, opts) {
+    match sessions::close(&conn, session_id, None, None, None, None, true, opts) {
         Ok(()) => { /* sessions::close already emits its own confirmation. */ }
         Err(e) => {
             // Common non-fatal cases:

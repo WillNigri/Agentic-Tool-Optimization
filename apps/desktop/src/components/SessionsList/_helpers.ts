@@ -140,6 +140,11 @@ export interface SessionTranscript {
   summary: string | null;
   tags: string[];
   projectId: string | null;
+  /** v2.7.12 — free-form human note attached at close time. Surfaced
+   *  in the closed-session summary card alongside the coordinator's
+   *  auto-generated summary. Null when the user closed without typing
+   *  one, or when the session pre-dates the column. */
+  humanComment: string | null;
 }
 
 export interface CloseSessionResult {
@@ -152,6 +157,9 @@ export interface CloseSessionResult {
   coordinatorRuntime: string;
   coordinatorModel: string | null;
   durationMs: number;
+  /** v2.7.12 — echo of the human_comment that was just persisted
+   *  (trimmed, empty → null). */
+  humanComment: string | null;
 }
 
 // Pretty-name lookup for runtimes. Used in chat-bubble sender labels

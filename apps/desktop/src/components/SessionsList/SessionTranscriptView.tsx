@@ -29,6 +29,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { listAgents, type Agent } from "@/lib/agents";
+import CloseSessionModal from "./CloseSessionModal";
 import {
   runtimeBadge,
   formatTime,
@@ -106,6 +107,11 @@ export default function SessionTranscriptView({
   const [closeError, setCloseError] = useState<string | null>(null);
   const [reopening, setReopening] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
+  // v2.7.12 — pre-close modal toggle. Opens when user clicks "Close
+  // session"; closes when user submits / cancels / clicks the backdrop.
+  // Distinct from `closing` (which gates the spinner overlay while the
+  // backend dispatch is in flight).
+  const [closeModalOpen, setCloseModalOpen] = useState(false);
   const isClosed = q.data?.status === "closed";
   // v2.3.48 — streaming buffer for the in-flight assistant turn.
   // Populated chunk-by-chunk from the Tauri `session-stream-chunk`
@@ -231,8 +237,16 @@ export default function SessionTranscriptView({
     }
   };
 
-  const handleClose = async () => {
+  // v2.7.12 — close is now two-step: the user picks coordinator +
+  // optional human comment in CloseSessionModal first, then we invoke
+  // the backend with those choices. Defaults preserve the pre-modal
+  // behaviour (null coordinator → backend's auto-pick chain).
+  const handleClose = async (opts: {
+    coordinator: string | null;
+    humanComment: string | null;
+  }) => {
     if (closing) return;
+    setCloseModalOpen(false);
     setClosing(true);
     setCloseError(null);
     setReopenError(null);
@@ -241,6 +255,8 @@ export default function SessionTranscriptView({
         sessionId,
         agentSlug: q.data?.agentSlug ?? null,
         model: null,
+        coordinator: opts.coordinator,
+        humanComment: opts.humanComment,
       });
       await queryClient.invalidateQueries({
         queryKey: ["session-transcript", sessionId],
@@ -359,10 +375,10 @@ export default function SessionTranscriptView({
             </button>
           ) : (
             <button
-              onClick={handleClose}
+              onClick={() => setCloseModalOpen(true)}
               disabled={closing || !q.data || q.data.turns.length === 0}
               className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-cs-border bg-cs-card hover:bg-cs-border/30 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Close this session. The coordinator agent will summarize the conversation, generate topic tags, and infer a project."
+              title="Close this session. You'll pick the coordinator LLM and can attach a note before the conversation is summarized."
             >
               <Lock size={14} /> Close session
             </button>
@@ -396,6 +412,19 @@ export default function SessionTranscriptView({
           <div className="text-sm text-cs-text whitespace-pre-wrap">
             {q.data.summary}
           </div>
+          {/* v2.7.12 — human's free-form note. Rendered as a distinct
+              sub-block so a glance separates LLM output from human
+              framing. Skipped entirely when null/empty. */}
+          {q.data.humanComment && q.data.humanComment.trim() && (
+            <div className="border-t border-cs-accent/20 pt-2 mt-2">
+              <div className="text-[10px] uppercase tracking-wider font-medium text-cs-muted mb-1">
+                Note from human
+              </div>
+              <div className="text-sm text-cs-text whitespace-pre-wrap">
+                {q.data.humanComment}
+              </div>
+            </div>
+          )}
           {q.data.tags.length > 0 && (
             <div className="flex items-center gap-1 flex-wrap pt-1">
               <Tag size={10} className="text-cs-muted" />
@@ -411,6 +440,18 @@ export default function SessionTranscriptView({
           )}
         </div>
       )}
+
+      {/* v2.7.12 — pre-close modal. Opens before close_session is
+          invoked so the user can pick the coordinator LLM and add a
+          comment. Submit calls handleClose with the user's choices;
+          the existing "Coordinator is summarizing…" blocker takes over
+          from there. */}
+      <CloseSessionModal
+        open={closeModalOpen}
+        busy={closing}
+        onCancel={() => setCloseModalOpen(false)}
+        onSubmit={handleClose}
+      />
 
       {/* Blocking close modal. While the coordinator runs, the UI is
           intentionally locked — the user picked "block with progress"
