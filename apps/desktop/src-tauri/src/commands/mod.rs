@@ -38,6 +38,7 @@ pub mod skills_validate;
 pub mod skills;
 pub mod skills_mutate;
 pub mod mcp;
+pub mod mcp_dispatch;
 pub mod mcp_install;
 pub use models::*;
 pub use usage_billing::*;
@@ -1401,30 +1402,53 @@ pub async fn prompt_api_provider(
         (ato_agent_permissions::AgentPermissions::default(), None)
     };
     let _ = agent_runtime_label; // captured for telemetry only today; PR-5 UI surfaces it
-    let agent_gate = ato_agent_permissions::to_api_tool_gate(&agent_perms, &[]);
+
+    // v2.7.10 PR-B — MCP-tool gating. Discover the tools the agent's
+    // attached MCP servers expose so the gate can decide which to
+    // offer, and so dispatch_with_tools can route a matching tool_call
+    // through execute_mcp_tool. All sync work (DB read + MCP stdio
+    // handshakes) is wrapped in spawn_blocking inside
+    // mcp_dispatch::load_agent_mcp_tools — fixes v2.7.9's blocked-
+    // worker ship blocker. Per-(slug, mcps_hash) cache means repeat
+    // dispatches don't re-spawn the MCP servers.
+    let mcp_bindings: Vec<crate::commands::mcp_dispatch::McpToolBinding> =
+        if let Some(slug) = agent_slug.as_deref() {
+            crate::commands::mcp_dispatch::load_agent_mcp_tools(slug).await
+        } else {
+            Vec::new()
+        };
+    let mcp_perm_tools: Vec<ato_agent_permissions::ToolDef> =
+        mcp_bindings.iter().map(Into::into).collect();
+    let agent_gate = ato_agent_permissions::to_api_tool_gate(&agent_perms, &mcp_perm_tools);
 
     // Decide between the tool-call loop and the legacy text-only
     // dispatch:
     //   - tool loop: agent has at least one tool the model would
-    //     actually be able to use (gate.check returns Allow on some
-    //     review_tool's name) AND provider supports tools.
+    //     actually be able to use — built-in (read_file, grep, …) OR
+    //     MCP-declared — AND provider supports tools.
     //   - text-only: otherwise. Preserves pre-PR-3b behaviour for
     //     agents without permissions and for non-tools providers.
     //
-    // v2.7.9 — MCP-tool gating (PR-B) deferred to v2.7.10. War-room
-    // V279_REVIEW found two ship blockers: (1) discover_mcp_server_tools
-    // is sync, called from this async fn → blocks the tokio worker;
-    // (2) offering MCP tools whose execution path isn't wired returns
-    // "unknown tool" to the model — deceptive UX. v2.7.10 adds
-    // spawn_blocking wrap + actual MCP execution.
+    // S7 fix (war-room finding B1): use `agent_gate.allowed_tools`
+    // as the AUTHORITY for what's exposed — `gate.check()` returns
+    // Allow for any name not in `denied`/`approval_required`, which
+    // would leak every MCP tool past the permission filter. The
+    // catalogue intersection that `to_api_tool_gate` already did is
+    // the right source of truth.
+    let allowed_tool_names: std::collections::HashSet<String> = agent_gate
+        .allowed_tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let any_builtin_allowed = ato_review_tools::registry()
+        .iter()
+        .any(|t| allowed_tool_names.contains(&t.name));
+    let any_mcp_allowed = mcp_bindings
+        .iter()
+        .any(|b| allowed_tool_names.contains(&b.name));
     let use_tool_loop = !agent_gate.allowed_tools.is_empty()
         && crate::api_dispatch_tools::provider_supports_tools(provider)
-        && ato_review_tools::registry().iter().any(|t| {
-            matches!(
-                agent_gate.check(&t.name),
-                ato_agent_permissions::GateDecision::Allow
-            )
-        });
+        && (any_builtin_allowed || any_mcp_allowed);
 
     let outcome = if use_tool_loop {
         // PR-3b — explicit workspace root is REQUIRED for tool
@@ -1454,13 +1478,52 @@ pub async fn prompt_api_provider(
                 ws_str
             ));
         }
-        let tools = crate::api_dispatch_tools::build_filtered_review_tools(&agent_gate);
+        // Built-in tools the gate allows (read_file / grep / …).
+        let mut tools = crate::api_dispatch_tools::build_filtered_review_tools(&agent_gate);
+        // S7 fix (war-room finding B2): drop any MCP binding whose
+        // name collides with a built-in. The Anthropic API rejects
+        // duplicate tool names in the request body with HTTP 400; the
+        // built-in-wins precedence in dispatch_with_tools doesn't
+        // matter if the wire call never happens. Built-ins take
+        // precedence — an MCP can't shadow them. The skipped MCP
+        // entries are logged so operators can rename their MCP tool
+        // (or remove the offending entry) and try again.
+        let builtin_names: std::collections::HashSet<String> = ato_review_tools::registry()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        // S7 fix (war-room finding B1): filter by membership in
+        // agent_gate.allowed_tools — that's the catalogue
+        // intersection `to_api_tool_gate` computed against
+        // p.allowed / p.denied. `gate.check` would Allow everything
+        // not explicitly denied, which silently exposes every MCP
+        // tool the model can imagine.
+        let mut mcp_bindings_allowed: Vec<crate::commands::mcp_dispatch::McpToolBinding> = Vec::new();
+        for b in &mcp_bindings {
+            if !allowed_tool_names.contains(&b.name) {
+                continue;
+            }
+            if builtin_names.contains(&b.name) {
+                eprintln!(
+                    "prompt_api_provider: dropping MCP tool '{}' from '{}' — name collides with built-in (built-in wins).",
+                    b.name, b.mcp_slug
+                );
+                continue;
+            }
+            mcp_bindings_allowed.push(b.clone());
+        }
+        tools.extend(
+            mcp_bindings_allowed
+                .iter()
+                .map(ato_review_tools::ToolDef::from),
+        );
         crate::api_dispatch_tools::dispatch_with_tools(
             provider,
             &[],
             &prompt,
             model.as_deref(),
             &tools,
+            &mcp_bindings_allowed,
             &workspace_path,
             &db_path,
         )
