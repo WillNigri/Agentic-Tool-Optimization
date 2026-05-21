@@ -19,8 +19,10 @@
 //   - anthropic  (PR-3 target)
 
 use crate::api_dispatch::{resolve_api_key, ApiDispatchOutcome, ApiProvider, ToolCallAudit};
+use crate::commands::mcp_dispatch::{execute_mcp_tool, McpToolBinding};
 use ato_review_tools::{execute_call_with_root, ToolCall, ToolDef, ToolResult, MAX_TOOL_ROUNDS};
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -38,6 +40,12 @@ pub async fn dispatch_with_tools(
     prompt: &str,
     model_override: Option<&str>,
     tools: &[ToolDef],
+    // v2.7.10 PR-B — MCP bindings the agent's gate allowed. When a
+    // tool_call's name matches an entry here, route to
+    // execute_mcp_tool instead of the in-process review_tools
+    // executor. Empty for legacy callers that only offer built-in
+    // tools.
+    mcp_bindings: &[McpToolBinding],
     workspace_root: &Path,
     db_path: &Path,
 ) -> Result<ApiDispatchOutcome, String> {
@@ -137,29 +145,54 @@ pub async fn dispatch_with_tools(
         let assistant_text = conv.extract_final_text(provider, &payload);
         if !calls.is_empty() && rounds < MAX_TOOL_ROUNDS {
             conv.append_assistant_tool_calls(provider, &payload, &calls);
-            let results: Vec<ToolResult> = calls
-                .iter()
-                .map(|c| {
+            // v2.7.10 PR-B — route each tool_call: built-in tools
+            // (read_file/grep/…) execute synchronously via the
+            // review-tools sandbox; MCP tools execute via the awaited
+            // execute_mcp_tool which wraps the stdio JSON-RPC round-
+            // trip in spawn_blocking. Anything matching neither yields
+            // the existing "unknown tool" error so the model sees a
+            // recoverable failure on the next turn.
+            let builtin_names: HashSet<String> = ato_review_tools::registry()
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            let mut results: Vec<ToolResult> = Vec::with_capacity(calls.len());
+            for c in &calls {
+                let r = if builtin_names.contains(&c.name) {
                     // PR-3b — sandbox root is the explicit workspace
                     // root, not the desktop process cwd. Otherwise
                     // every read_file would resolve under
                     // `apps/desktop/`, not the user's repo.
-                    let r = execute_call_with_root(workspace_root, c);
-                    eprintln!(
-                        "  [tool] {} {} -> {}{}",
-                        c.name,
-                        truncate(&c.arguments.to_string(), 80),
-                        if r.is_error { "ERR " } else { "" },
-                        truncate(&r.content, 80)
-                    );
-                    audit.push(ToolCallAudit {
+                    execute_call_with_root(workspace_root, c)
+                } else if let Some(binding) = mcp_bindings.iter().find(|b| b.name == c.name) {
+                    execute_mcp_tool(&binding.mcp_slug, &c.name, &c.arguments, &c.id).await
+                } else {
+                    // Mirror execute_call_with_root's unknown-tool
+                    // shape so the model gets a uniform error surface.
+                    ToolResult {
+                        tool_call_id: c.id.clone(),
                         name: c.name.clone(),
-                        args_brief: truncate(&c.arguments.to_string(), 120),
-                        is_error: r.is_error,
-                    });
-                    r
-                })
-                .collect();
+                        content: format!(
+                            "error: unknown tool '{}'. Tool was not in the offered set.",
+                            c.name
+                        ),
+                        is_error: true,
+                    }
+                };
+                eprintln!(
+                    "  [tool] {} {} -> {}{}",
+                    c.name,
+                    truncate(&c.arguments.to_string(), 80),
+                    if r.is_error { "ERR " } else { "" },
+                    truncate(&r.content, 80)
+                );
+                audit.push(ToolCallAudit {
+                    name: c.name.clone(),
+                    args_brief: truncate(&c.arguments.to_string(), 120),
+                    is_error: r.is_error,
+                });
+                results.push(r);
+            }
             conv.append_tool_results(provider, &results);
             rounds += 1;
             continue;
