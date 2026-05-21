@@ -7,6 +7,7 @@ import CreditBurnCard from "./CreditBurnCard";
 import RuntimeComparison from "./RuntimeComparison";
 import RemoteRuntimes from "./RemoteRuntimes";
 import MonitoringToggles from "./MonitoringToggles";
+import PreTrustToggle from "@/components/Settings/PreTrustToggle";
 
 // Settings → Runtimes panel.
 // v1.4.0 Polish-T5 — Adds a "Compare" sub-tab that surfaces the per-runtime
@@ -100,7 +101,15 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
         </div>
       )}
 
-      {active === "monitoring" && <MonitoringToggles />}
+      {active === "monitoring" && (
+        <div className="space-y-4">
+          <MonitoringToggles />
+          {/* F3 / S8 follow-up — claude pre-trust toggle. Self-contained
+              card; lives here because dispatch-behavior settings cluster
+              naturally with monitoring toggles. */}
+          <PreTrustToggle />
+        </div>
+      )}
 
       {active === "compare" && <RuntimeComparison />}
 
