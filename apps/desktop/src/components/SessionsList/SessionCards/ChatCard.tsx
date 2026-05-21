@@ -68,12 +68,33 @@ export function ChatCard({ session: s, onOpen }: Props) {
             </span>
           </div>
         )}
-        <span
-          className={cn(runtimeBadge(s.runtime))}
-          title={`Most recent runtime: ${runtimeDisplay(s.runtime)}`}
-        >
-          {s.runtime}
-        </span>
+        {/* v2.7.14 — When anchorRuntime is set, it's the WhatsApp-row
+            "this chat is with X" identity (stable across runtime hops).
+            Render with a small "with" label + ring to distinguish from
+            the per-message latest-runtime fallback. When anchor isn't
+            set (legacy chat with no backfill, OR a chat with no
+            assistant turn yet) we still show s.runtime as a plain
+            badge so something always renders. */}
+        {s.anchorRuntime ? (
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-cs-muted font-medium">
+              With
+            </span>
+            <span
+              className={cn(runtimeBadge(s.anchorRuntime), "ring-1 ring-cs-muted/40")}
+              title={`Anchor runtime: ${runtimeDisplay(s.anchorRuntime)} — the LLM this chat thread is primarily with. Individual messages can be routed to other runtimes; this stays stable.`}
+            >
+              {s.anchorRuntime}
+            </span>
+          </div>
+        ) : (
+          <span
+            className={cn(runtimeBadge(s.runtime))}
+            title={`Most recent runtime: ${runtimeDisplay(s.runtime)}`}
+          >
+            {s.runtime}
+          </span>
+        )}
         {isClosed && (
           <span
             className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted"

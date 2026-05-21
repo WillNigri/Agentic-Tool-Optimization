@@ -117,6 +117,14 @@ pub struct SessionListRow {
     /// sessions.coordinator_runtime (added in v2.7.12); war rooms +
     /// chats populate from their own lifecycle rows (v2.7.13).
     pub coordinator_runtime: Option<String>,
+    /// v2.7.14 — the stable anchor runtime for chats (the WhatsApp-row
+    /// "this chat is with claude" identity). Distinct from `runtime`
+    /// which CAN flip to the latest assistant message's runtime as a
+    /// fallback. NULL for sessions / war-rooms / single-runs (the
+    /// anchor concept only applies to chat threads today). Lets the
+    /// UI render a dedicated anchor badge that doesn't flicker when a
+    /// thread hops runtimes mid-conversation.
+    pub anchor_runtime: Option<String>,
     /// v2.7.13 — the human's free-form note attached at close time.
     /// Exposed here so list cards (which today don't drill into the
     /// detail view) can still surface it. NULL when no comment.

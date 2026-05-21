@@ -96,6 +96,11 @@ export interface SessionListRow {
    *  on the list card so users see their own framing without having
    *  to drill in. NULL when no comment was attached. */
   humanComment: string | null;
+  /** v2.7.14 — stable anchor runtime for chats (the WhatsApp-row
+   *  "this chat is with claude" identity). Distinct from `runtime`
+   *  which can flip per-message. NULL for sessions / war-rooms /
+   *  single-runs (anchor concept only applies to chat threads). */
+  anchorRuntime: string | null;
   rowKind: "session" | "single_run" | "war_room" | "chat";
 }
 

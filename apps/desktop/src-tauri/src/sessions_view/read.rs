@@ -107,6 +107,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 // falls back to s.runtime for the coordinator label.
                 coordinator_runtime: None,
                 human_comment: r.get(16)?,
+                anchor_runtime: None, // sessions have a single anchor (s.runtime) — no separate column
                 row_kind: "session".to_string(),
             })
         })?
@@ -301,6 +302,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 // dispatches, not multi-turn conversations.
                 coordinator_runtime: None,
                 human_comment: None,
+                anchor_runtime: None,
                 row_kind: "single_run".to_string(),
             })
         })?
@@ -509,6 +511,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             team: wr_team,
             coordinator_runtime: wr_coordinator,
             human_comment: wr_human_comment,
+            anchor_runtime: None, // war-rooms don't have a single anchor by design (multi-runtime peers)
             row_kind: "war_room".to_string(),
         });
     }
@@ -683,6 +686,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 team,
                 coordinator_runtime,
                 human_comment,
+                anchor_runtime: anchor_runtime.clone(),
                 row_kind: "chat".to_string(),
             }
         })
@@ -760,6 +764,7 @@ fn list_sessions_narrow_chat_fallback(
             team: None,
             coordinator_runtime: None,
             human_comment: None,
+            anchor_runtime: None, // fallback predates the anchor column
             row_kind: "chat".to_string(),
         })
         .collect();
