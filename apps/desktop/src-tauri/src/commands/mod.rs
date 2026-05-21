@@ -784,6 +784,281 @@ async fn dispatch_command_killable(
     }
 }
 
+// Felipe P3 (v2.7.10) — pre-trust for ATO-registered projects.
+//
+// Claude Code prompts "trust this folder?" on every dispatch into an
+// unfamiliar directory because the trust state lives in its own
+// SQLite database under a different macOS identity than the ATO
+// desktop. Result: every claude `--print` from ATO has historically
+// hit the trust gate even on workspaces the user has been working in
+// all morning.
+//
+// Felipe's fix: if the dispatch's workspace IS a project the user
+// has registered in ATO (projects.path), append
+// `--dangerously-skip-permissions`.
+//
+// Scope honesty (war-room review 2026-05-20): this flag is BROADER
+// than the per-folder trust prompt — claude also uses it to suppress
+// per-tool approval prompts (Bash, Edit, Write, …). Project
+// registration in ATO is the user's act of consent. The behaviour
+// is gated by a user-visible toggle (default ON) so anyone who
+// does not want claude's tool-approval flow skipped can opt out;
+// when OFF, dispatch falls back to claude's native prompts (trust
+// + per-tool). The toggle copy makes this explicit so the consent
+// is not hidden behind "trust this folder?"-shaped framing.
+//
+// Storage: ~/.ato/settings.json with key `trust_registered_projects`
+// (bool). JSON sidecar instead of the SQLite `settings` table because
+// this session can not add a new Tauri get/set command — the FE
+// toggle writes the file directly via @tauri-apps/plugin-fs. Precedent
+// for sidecar JSON in `~/.ato/` is the openclaw-config.json read in
+// load_openclaw_config (mod.rs:2345). Default ON applies when the
+// file is missing, malformed, or the key is absent.
+//
+// Workspace matching trims a single trailing slash on both sides
+// (the only realistic input variability we see in dogfood — paths
+// arriving from path-pickers vs. typed by hand). Symlinks and `~`
+// expansion are NOT resolved: ATO's project registration stores the
+// path as-typed, and other lookups (projects.rs) compare raw
+// strings; resolving here would create asymmetry with the row that
+// was inserted. The trust prompt is one ENOENT — the failure mode
+// of a stale registration is "claude asks again", which is harmless.
+
+const TRUST_REGISTERED_PROJECTS_KEY: &str = "trust_registered_projects";
+
+/// Read the `trust_registered_projects` toggle from ~/.ato/settings.json.
+/// Missing file / unreadable / malformed JSON / missing key → true.
+/// Default-ON is the contract — the toggle is opt-OUT, not opt-in.
+fn read_trust_registered_projects(settings_path: &std::path::Path) -> bool {
+    let Ok(contents) = fs::read_to_string(settings_path) else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return true;
+    };
+    value
+        .get(TRUST_REGISTERED_PROJECTS_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Predicate: should the claude dispatch append `--dangerously-skip-permissions`
+/// for this workspace? Three conjuncts:
+///   1. workspace is non-empty (None or "" → false; we can't pre-trust nothing)
+///   2. a row exists in `projects` with `path` exactly equal to the workspace
+///   3. the user's trust toggle is ON (or absent — default ON)
+///
+/// Extracted as a free fn so the unit tests below can exercise every
+/// branch against an in-memory SQLite + a tmp settings.json — the
+/// spawn-side stays untested.
+fn should_pretrust_workspace(
+    workspace: Option<&str>,
+    conn: &rusqlite::Connection,
+    settings_path: &std::path::Path,
+) -> bool {
+    let ws = match workspace {
+        Some(w) if !w.trim().is_empty() => w,
+        _ => return false,
+    };
+    if !read_trust_registered_projects(settings_path) {
+        return false;
+    }
+    // Match against both the workspace as-typed AND with a single
+    // trailing slash stripped. Project registration is the source of
+    // truth: a user who registered `/Users/x/repo` shouldn't lose
+    // pre-trust because the path-picker handed us `/Users/x/repo/`.
+    // We only strip ONE trailing slash (not normalize) — `~` and
+    // symlinks remain unresolved by design (see module-level comment).
+    let trimmed = ws.strip_suffix('/').unwrap_or(ws);
+    conn.query_row(
+        "SELECT 1 FROM projects WHERE path = ?1 OR path = ?2 LIMIT 1",
+        rusqlite::params![ws, trimmed],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Path to the ATO-wide settings JSON sidecar at `~/.ato/settings.json`.
+fn ato_settings_path() -> PathBuf {
+    crate::home_dir().join(".ato").join("settings.json")
+}
+
+#[cfg(test)]
+mod pretrust_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::io::Write;
+
+    fn fresh_projects_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE projects (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                path          TEXT NOT NULL UNIQUE,
+                is_active     INTEGER NOT NULL DEFAULT 0,
+                skill_count   INTEGER NOT NULL DEFAULT 0,
+                last_accessed TEXT,
+                created_at    TEXT NOT NULL
+             );",
+        )
+        .expect("create projects table");
+        conn
+    }
+
+    fn insert_project(conn: &Connection, id: &str, path: &str) {
+        conn.execute(
+            "INSERT INTO projects (id, name, path, is_active, skill_count, created_at)
+             VALUES (?1, ?2, ?3, 0, 0, '2026-05-20T00:00:00Z')",
+            rusqlite::params![id, format!("Project {}", id), path],
+        )
+        .expect("insert project");
+    }
+
+    fn write_settings(dir: &tempfile::TempDir, contents: &str) -> PathBuf {
+        let p = dir.path().join("settings.json");
+        let mut f = std::fs::File::create(&p).expect("create settings.json");
+        f.write_all(contents.as_bytes()).expect("write settings");
+        p
+    }
+
+    #[test]
+    fn read_trust_defaults_on_when_file_missing() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let missing = dir.path().join("nope.json");
+        assert!(read_trust_registered_projects(&missing));
+    }
+
+    #[test]
+    fn read_trust_defaults_on_when_json_malformed() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = write_settings(&dir, "{not json");
+        assert!(read_trust_registered_projects(&p));
+    }
+
+    #[test]
+    fn read_trust_defaults_on_when_key_absent() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = write_settings(&dir, r#"{"some_other_key": false}"#);
+        assert!(read_trust_registered_projects(&p));
+    }
+
+    #[test]
+    fn read_trust_respects_false_value() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = write_settings(&dir, r#"{"trust_registered_projects": false}"#);
+        assert!(!read_trust_registered_projects(&p));
+    }
+
+    #[test]
+    fn read_trust_respects_true_value() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = write_settings(&dir, r#"{"trust_registered_projects": true}"#);
+        assert!(read_trust_registered_projects(&p));
+    }
+
+    #[test]
+    fn pretrust_true_when_registered_and_toggle_default() {
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = dir.path().join("settings.json"); // does not exist → default ON
+        assert!(should_pretrust_workspace(
+            Some("/Users/alice/repo"),
+            &conn,
+            &settings,
+        ));
+    }
+
+    #[test]
+    fn pretrust_false_when_toggle_off_even_if_registered() {
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = write_settings(&dir, r#"{"trust_registered_projects": false}"#);
+        assert!(!should_pretrust_workspace(
+            Some("/Users/alice/repo"),
+            &conn,
+            &settings,
+        ));
+    }
+
+    #[test]
+    fn pretrust_false_when_workspace_unregistered() {
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = dir.path().join("settings.json");
+        assert!(!should_pretrust_workspace(
+            Some("/Users/alice/other-repo"),
+            &conn,
+            &settings,
+        ));
+    }
+
+    #[test]
+    fn pretrust_false_when_no_workspace() {
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = dir.path().join("settings.json");
+        assert!(!should_pretrust_workspace(None, &conn, &settings));
+        assert!(!should_pretrust_workspace(Some(""), &conn, &settings));
+        assert!(!should_pretrust_workspace(Some("   "), &conn, &settings));
+    }
+
+    #[test]
+    fn pretrust_normalizes_single_trailing_slash() {
+        // Trailing slash on the query side should still match a
+        // registration without trailing slash. Path-pickers and
+        // hand-typed paths disagree on this in dogfood; we paper
+        // over the single-slash case explicitly while keeping
+        // symlinks + `~` unresolved (see module-level comment).
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = dir.path().join("settings.json");
+        assert!(should_pretrust_workspace(
+            Some("/Users/alice/repo/"),
+            &conn,
+            &settings,
+        ));
+    }
+
+    #[test]
+    fn pretrust_handles_registration_with_trailing_slash() {
+        // The symmetric case: registration carries a trailing slash
+        // (e.g. directory picker output on some platforms), query
+        // comes in without one. The OR-clause in the SQL handles it.
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo/");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = dir.path().join("settings.json");
+        assert!(should_pretrust_workspace(
+            Some("/Users/alice/repo/"),
+            &conn,
+            &settings,
+        ));
+    }
+
+    #[test]
+    fn pretrust_false_for_sub_paths() {
+        // Sub-path under a registered project is NOT pre-trusted.
+        // Pre-trust is opt-in per workspace, not transitive — claude
+        // re-prompts and the user can register the sub-path if they
+        // want it covered.
+        let conn = fresh_projects_conn();
+        insert_project(&conn, "p1", "/Users/alice/repo");
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings = dir.path().join("settings.json");
+        assert!(!should_pretrust_workspace(
+            Some("/Users/alice/repo/sub"),
+            &conn,
+            &settings,
+        ));
+    }
+}
+
 #[tauri::command]
 pub async fn prompt_agent(
     runtime: String,
@@ -907,6 +1182,27 @@ async fn prompt_agent_inner(
             // agent-save time (queued for v2.7.9+).
             let claude_flags = ato_agent_permissions::to_claude(&agent_perms);
             c.arg("--allowedTools").arg(&claude_flags.allowed_tools);
+            // Felipe P3 — pre-trust ATO-registered projects so claude
+            // does not re-prompt on every dispatch. See module-level
+            // doc above prompt_agent for the rationale + storage
+            // contract. Opens its own read-only connection; failure
+            // (DB missing, locked, etc.) silently degrades to the
+            // pre-Felipe behaviour (claude shows its trust prompt),
+            // matching the agent-permissions plumbing's "observability
+            // never breaks dispatch" guarantee.
+            let trust_db = rusqlite::Connection::open_with_flags(
+                &crate::get_db_path(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            );
+            if let Ok(conn) = trust_db {
+                if should_pretrust_workspace(
+                    workspace.as_deref(),
+                    &conn,
+                    &ato_settings_path(),
+                ) {
+                    c.arg("--dangerously-skip-permissions");
+                }
+            }
             c
         }
         "codex" => {
