@@ -100,12 +100,14 @@ fn prepend_agent_persona(
 /// direction — runtime → provider slug):
 ///   claude  → "anthropic"
 ///   gemini  → "google"
-///   codex   → no fallback yet; OpenAI not in the api-provider
-///             registry today, queued for v2.8.x.
+///   codex   → "openai"  (v2.7.14: unblocked by adding OpenAI to the
+///             api-provider registry — see packages/ato-api-providers
+///             and the v2.8.x docket entry it closed)
 fn api_fallback_for_missing_cli(runtime_name: &str, db_path: &PathBuf) -> Option<&'static str> {
     let fallback_slug = match runtime_name {
         "claude" => "anthropic",
         "gemini" => "google",
+        "codex" => "openai",
         _ => return None,
     };
     let provider = crate::api_dispatch::find_provider(fallback_slug)?;
@@ -1839,13 +1841,31 @@ mod tests {
     }
 
     #[test]
-    fn pr5a_fallback_codex_never_falls_back() {
-        // Codex has no OpenAI api-provider registration. Even with
-        // OPENAI_API_KEY set, no fallback fires.
+    fn pr5a_fallback_codex_to_openai_when_env_set() {
+        // v2.7.14 — codex → openai fallback unblocked. Was
+        // pr5a_fallback_codex_never_falls_back when OpenAI wasn't
+        // in the api-provider registry; now that
+        // packages/ato-api-providers registers slug=openai with
+        // env_var=OPENAI_API_KEY, codex auto-falls-back the same
+        // way claude→anthropic and gemini→google do.
         let _lock = PR5A_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("OPENAI_API_KEY", "sk-openai-fake");
         let got = super::api_fallback_for_missing_cli("codex", &nonexistent_db_path());
         std::env::remove_var("OPENAI_API_KEY");
+        assert_eq!(got, Some("openai"));
+    }
+
+    #[test]
+    fn pr5a_fallback_codex_no_key_returns_none() {
+        // Parity with the claude / gemini "no key → no fallback"
+        // assertion: when OPENAI_API_KEY isn't set and no
+        // llm_api_keys row matches, return None so the caller
+        // surfaces the original "CLI not found" error instead of
+        // routing to a key-less openai attempt that would itself
+        // fail with a less helpful message.
+        let _lock = PR5A_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("OPENAI_API_KEY");
+        let got = super::api_fallback_for_missing_cli("codex", &nonexistent_db_path());
         assert_eq!(got, None);
     }
 
