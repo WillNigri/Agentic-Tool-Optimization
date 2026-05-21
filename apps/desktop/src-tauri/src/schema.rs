@@ -324,6 +324,13 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE agents ADD COLUMN permissions_migrated_at TEXT",
         [],
     );
+    // v2.7.9 — Felipe P5. Optional prompt that fires automatically when
+    // an agent is dispatched without one. Enables one-click "Run" for
+    // monitoring agents (VPS health, telemetry) where the prompt is
+    // always the same. NULL/empty preserves today's interactive
+    // behavior. S9 wires the "use default when prompt is blank" branch
+    // in prompt_agent_inner.
+    let _ = conn.execute("ALTER TABLE agents ADD COLUMN default_prompt TEXT", []);
     // v2.1.0 — execution_logs links to its corresponding cloud
     // agent_traces row when the dispatch was uploaded. Powers replay
     // ("look up the local prompt for this cloud trace ID"). Existing

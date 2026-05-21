@@ -1,14 +1,18 @@
-import { useState, lazy, Suspense } from "react";
+import { useEffect, useState, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen, Code2, History, TrendingDown } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { X, Variable, Layers, Brain, Cpu, FileText, Zap, Loader2, Globe, Lock, BookOpen, Code2, History, TrendingDown, Save } from "lucide-react";
 import { getRegressions, type RegressionRow } from "@/lib/cloudAgentTraces";
 import { useFeatureFlag } from "@/lib/tier";
 import { useAuthStore } from "@/hooks/useAuth";
 import { asNumber } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/agents";
-import { updateAgentKind } from "@/lib/agents";
+import {
+  updateAgentKind,
+  getAgentDefaultPrompt,
+  updateAgentDefaultPrompt,
+} from "@/lib/agents";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import BrowserToolsButton from "./BrowserToolsButton";
 
@@ -326,10 +330,76 @@ function OverviewTab({ agent }: { agent: Agent }) {
         </pre>
       </Detail>
 
+      <DefaultPromptEditor agent={agent} />
+
       <Detail label={t("agentDetail.overview.quickTools", "Quick tools")}>
         <BrowserToolsButton agent={agent} />
       </Detail>
     </div>
+  );
+}
+
+// v2.7.9 Felipe P5 — inline editor for the optional default dispatch
+// prompt. Loaded on demand via getAgentDefaultPrompt because list_agents/
+// get_agent are owned by S9's dispatch lock and don't return the value.
+function DefaultPromptEditor({ agent }: { agent: Agent }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+
+  const { data: initial, isLoading } = useQuery({
+    queryKey: ["agent", agent.id, "defaultPrompt"],
+    queryFn: () => getAgentDefaultPrompt(agent.id),
+  });
+
+  const [value, setValue] = useState<string>("");
+  useEffect(() => {
+    setValue(initial ?? "");
+  }, [initial]);
+
+  const dirty = (initial ?? "") !== value;
+
+  const save = useMutation({
+    mutationFn: () => {
+      const trimmed = value.trim();
+      return updateAgentDefaultPrompt(agent.id, trimmed.length === 0 ? null : trimmed);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["agent", agent.id, "defaultPrompt"],
+      });
+    },
+  });
+
+  return (
+    <Detail label={t("agentDetail.overview.defaultPrompt", "Default dispatch prompt")}>
+      <textarea
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        disabled={isLoading || save.isPending}
+        rows={3}
+        placeholder={t(
+          "agentDetail.overview.defaultPromptPlaceholder",
+          "Optional: prompt that fires automatically when this agent is dispatched. Leave blank for interactive prompts.",
+        )}
+        className="w-full rounded-md border border-cs-border bg-cs-bg p-2.5 text-xs text-cs-text font-mono focus:border-cs-accent focus:outline-none disabled:opacity-50"
+      />
+      <div className="mt-1.5 flex items-center justify-end gap-2">
+        {save.isError && (
+          <span className="text-[11px] text-cs-danger">
+            {save.error instanceof Error ? save.error.message : String(save.error)}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => save.mutate()}
+          disabled={!dirty || isLoading || save.isPending}
+          className="inline-flex items-center gap-1.5 rounded-md bg-cs-accent px-3 py-1 text-[11px] font-medium text-cs-bg hover:bg-cs-accent-hover disabled:opacity-50"
+        >
+          {save.isPending ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+          {t("common.save", "Save")}
+        </button>
+      </div>
+    </Detail>
   );
 }
 

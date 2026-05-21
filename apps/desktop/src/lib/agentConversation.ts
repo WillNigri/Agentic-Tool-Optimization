@@ -45,6 +45,11 @@ export type AgentSpec = {
   credentials: CredentialRequest[];
   permissions: Permissions;
   reasoning: string;
+  /** v2.7.9 Felipe P5 — optional dispatch-time prompt that fires
+   *  automatically when the agent is run without one. Used by
+   *  monitoring agents (VPS health, telemetry) where every run is
+   *  the same prompt. Empty/undefined preserves interactive behavior. */
+  defaultPrompt?: string;
 };
 
 export class NoRuntimeError extends Error {
@@ -241,6 +246,10 @@ function parseAssistantTurn(raw: string): Extract<Turn, { role: "assistant" }> {
           : [],
         permissions: parsePermissions(spec.permissions),
         reasoning: spec.reasoning ?? "",
+        defaultPrompt:
+          typeof spec.defaultPrompt === "string" && spec.defaultPrompt.trim().length > 0
+            ? spec.defaultPrompt
+            : undefined,
       },
     };
   }
