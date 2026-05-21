@@ -229,6 +229,22 @@ enum Commands {
         #[command(subcommand)]
         sub: SessionsSub,
     },
+    /// v2.7.13 — close / reopen / inspect war rooms. A war room is the
+    /// N execution_logs rows sharing a war_room_id; closing one runs
+    /// the coordinator over every seat's reply and persists a
+    /// title/summary/tags/category on the new `war_rooms` row.
+    #[command(name = "war-rooms")]
+    WarRooms {
+        #[command(subcommand)]
+        sub: WarRoomsSub,
+    },
+    /// v2.7.13 — close / reopen / inspect chat threads. Same close
+    /// shape as sessions (coordinator summarizes the messages) but
+    /// targets the chat_threads / chat_messages tables.
+    Chats {
+        #[command(subcommand)]
+        sub: ChatsSub,
+    },
     /// Cross-runtime conversation bridge (Phase 6 Slice B). Scans the
     /// latest assistant turn of a session for `@<runtime>` mentions and
     /// loops dispatches between runtimes until `[CONSENSUS]` or the
@@ -457,6 +473,73 @@ enum SessionsSub {
     /// continue the conversation; the next close will refresh the
     /// summary with the new turns.
     Reopen { id: String },
+}
+
+/// v2.7.13 — war-room close lifecycle subcommands. Mirrors the shape
+/// of `SessionsSub::Close/Reopen/Get` since both go through the same
+/// `conversation_close::close_conversation` orchestrator.
+#[derive(Subcommand, Debug)]
+enum WarRoomsSub {
+    /// Close a war room — coordinator summarizes every seat's reply
+    /// and persists title/summary/tags/category/team to the war_rooms
+    /// row. A closed war room can be reopened with `ato war-rooms
+    /// reopen <id>`.
+    Close {
+        id: String,
+        #[arg(long = "as")]
+        agent_slug: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// Pick which LLM runtime summarizes the war room (e.g.
+        /// `--coordinator anthropic`). Required when no API key has
+        /// been configured for the default-resolution chain.
+        #[arg(long)]
+        coordinator: Option<String>,
+        /// Free-form human note persisted on the war_rooms row,
+        /// rendered alongside the coordinator's summary in the UI.
+        #[arg(long = "human-comment")]
+        human_comment: Option<String>,
+        /// Suppress the soft warning when the coordinator omits
+        /// category / team. Close still proceeds with NULLs.
+        #[arg(long = "force-close-without-context", default_value_t = false)]
+        force_close_without_context: bool,
+    },
+    /// Reopen a previously-closed war room.
+    Reopen { id: String },
+    /// Print the war room snapshot (status, seat count, last summary).
+    Get { id: String },
+}
+
+/// v2.7.13 — chat-thread close lifecycle subcommands. Same shape as
+/// the sessions/war-rooms variants.
+#[derive(Subcommand, Debug)]
+enum ChatsSub {
+    /// Close a chat thread — coordinator summarizes the messages and
+    /// persists title/summary/tags/category/team to the chat_threads
+    /// row.
+    Close {
+        id: String,
+        #[arg(long = "as")]
+        agent_slug: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// Pick which LLM runtime summarizes (e.g. `--coordinator
+        /// google`). Falls through to the chat's anchored agent or
+        /// the first registered API provider with a key when omitted.
+        #[arg(long)]
+        coordinator: Option<String>,
+        /// Free-form human note persisted on the chat_threads row.
+        #[arg(long = "human-comment")]
+        human_comment: Option<String>,
+        /// Suppress the soft warning when the coordinator omits
+        /// category / team.
+        #[arg(long = "force-close-without-context", default_value_t = false)]
+        force_close_without_context: bool,
+    },
+    /// Reopen a previously-closed chat thread.
+    Reopen { id: String },
+    /// Print the chat thread snapshot.
+    Get { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1114,6 +1197,60 @@ fn main() -> Result<()> {
                 let conn = db::open_readwrite(&db_path)?;
                 commands::sessions::reopen(&conn, &id, &opts)
             }
+        },
+        Commands::WarRooms { sub } => match sub {
+            WarRoomsSub::Close {
+                id,
+                agent_slug,
+                model,
+                coordinator,
+                human_comment,
+                force_close_without_context,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::war_rooms::close(
+                    &conn,
+                    &id,
+                    agent_slug,
+                    model,
+                    coordinator,
+                    human_comment,
+                    force_close_without_context,
+                    &opts,
+                )
+            }
+            WarRoomsSub::Reopen { id } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::war_rooms::reopen(&conn, &id, &opts)
+            }
+            WarRoomsSub::Get { id } => commands::war_rooms::get(&ro_conn()?, &id, &opts),
+        },
+        Commands::Chats { sub } => match sub {
+            ChatsSub::Close {
+                id,
+                agent_slug,
+                model,
+                coordinator,
+                human_comment,
+                force_close_without_context,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::chats::close(
+                    &conn,
+                    &id,
+                    agent_slug,
+                    model,
+                    coordinator,
+                    human_comment,
+                    force_close_without_context,
+                    &opts,
+                )
+            }
+            ChatsSub::Reopen { id } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::chats::reopen(&conn, &id, &opts)
+            }
+            ChatsSub::Get { id } => commands::chats::get(&ro_conn()?, &id, &opts),
         },
         Commands::Bridge {
             session,

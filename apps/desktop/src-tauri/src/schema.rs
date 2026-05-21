@@ -758,6 +758,79 @@ pub fn init_database(conn: &Connection) {
     // summary. NULL when the user closed without adding a comment, or
     // when the close happened before this column existed.
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN human_comment TEXT", []);
+
+    // v2.7.13 — war rooms become first-class closeable conversations.
+    // Today they exist as a `war_room_id` grouping on `execution_logs`
+    // (each LLM seat = one execution_logs row sharing the same id).
+    // The `war_rooms` table is the lifecycle anchor: a row appears the
+    // first time `ato war-rooms close <id>` runs (or `reopen` flips it
+    // back to open). Sessions parity — same shape, same close-time
+    // coordinator fields, same human_comment. No NOT NULL constraints
+    // on the per-close fields so a partially-closed war room (close
+    // failed mid-coordinator) doesn't poison the row.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS war_rooms (
+            id                  TEXT PRIMARY KEY,
+            status              TEXT NOT NULL DEFAULT 'open'
+                                CHECK (status IN ('open', 'closed')),
+            closed_at           TEXT,
+            auto_title          TEXT,
+            summary             TEXT,
+            tags_json           TEXT,
+            category            TEXT
+                                CHECK (category IS NULL OR category IN
+                                  ('Business','Marketing','Dev','Frontend','Backend',
+                                   'Design','Security','Compliance','Ops','Other')),
+            team                TEXT,
+            project_id          TEXT,
+            coordinator_runtime TEXT,
+            coordinator_model   TEXT,
+            human_comment       TEXT,
+            duration_ms         INTEGER,
+            created_at          TEXT NOT NULL,
+            updated_at          TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_war_rooms_status_updated
+            ON war_rooms(status, updated_at DESC)",
+        [],
+    );
+
+    // v2.7.13 — chat lifecycle parity. `chat_threads` already had an
+    // `archived INTEGER` flag that the UI hides closed-like threads
+    // with; the new columns add real coordinator-generated summary +
+    // sticky taxonomy + human_comment matching sessions/war-rooms.
+    // archived stays untouched (UI hides; not a coordinator-driven
+    // close). status defaults to 'open' so existing rows behave as
+    // they did pre-migration.
+    let _ = conn.execute(
+        "ALTER TABLE chat_threads ADD COLUMN status TEXT NOT NULL DEFAULT 'open' \
+         CHECK (status IN ('open', 'closed'))",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN closed_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN auto_title TEXT", []);
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN summary TEXT", []);
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN tags_json TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE chat_threads ADD COLUMN category TEXT CHECK (category IS NULL OR category IN \
+         ('Business','Marketing','Dev','Frontend','Backend','Design','Security','Compliance','Ops','Other'))",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN team TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE chat_threads ADD COLUMN coordinator_runtime TEXT",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN coordinator_model TEXT", []);
+    let _ = conn.execute("ALTER TABLE chat_threads ADD COLUMN human_comment TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_threads_status_updated
+            ON chat_threads(status, last_message_at DESC)",
+        [],
+    );
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_category_lastused
             ON sessions(category, last_used_at DESC)",

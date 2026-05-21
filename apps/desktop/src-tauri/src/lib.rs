@@ -814,6 +814,15 @@ pub fn run() {
             sessions_view::close_session,
             sessions_view::cancel_close_session,
             sessions_view::reopen_session,
+            // v2.7.13 — war-room + chat close/reopen/get. Same shape
+            // as sessions; the shared cancel_close_session works for
+            // any of the three (the inflight map is keyed by id).
+            sessions_view::close_war_room,
+            sessions_view::reopen_war_room,
+            sessions_view::get_war_room,
+            sessions_view::close_chat,
+            sessions_view::reopen_chat,
+            sessions_view::get_chat,
             sessions_view::search_session_turns,
             // 2026-05-16 — cost receipts panel
             sessions_view::get_session_cost_breakdown,

@@ -1,9 +1,12 @@
 pub mod agents;
 pub mod bridge;
+pub mod chats;
 pub mod compare;
 pub mod config_changes;
+pub mod conversation_close;
 pub mod demo_compare;
 pub mod cost;
+pub mod war_rooms;
 pub mod dispatch;
 pub mod dispatches;
 pub mod events;

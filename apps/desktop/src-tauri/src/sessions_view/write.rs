@@ -711,19 +711,199 @@ pub fn cancel_close_session(
 #[tauri::command]
 pub fn reopen_session(session_id: String) -> Result<serde_json::Value, String> {
     validate_session_id(&session_id)?;
+    run_simple_subcommand(&["sessions", "reopen"], &session_id)
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// v2.7.13 — war-room + chat close/reopen/get Tauri commands. Both
+// types share the same shape as sessions: shell out to the canonical
+// CLI (`ato war-rooms close <id>` / `ato chats close <id>`) so the
+// shared `conversation_close::close_conversation` orchestrator is the
+// only place the prompt + summarizer logic lives.
+//
+// All three close paths (sessions, war-rooms, chats) register an
+// inflight PID under the same map keyed by id; Cancel works for any
+// of them with the same `cancel_close_session(id)` call.
+
+/// Run a close-shaped `ato <subcommand>` subprocess with the given
+/// type-specific id + optional coordinator-flow args. Returns the
+/// parsed JSON payload the CLI emits. Distinguishable cancel errors
+/// surface as `Err("__cancelled__")` so the frontend can tell user-
+/// initiated cancels from real failures.
+#[allow(clippy::too_many_arguments)]
+fn run_close_subprocess(
+    inflight: &CloseInflight,
+    subcommand: &[&str],
+    id: &str,
+    agent_slug: Option<&str>,
+    model: Option<&str>,
+    coordinator: Option<&str>,
+    human_comment: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let bin = resolve_ato_binary()?;
     let mut cmd = Command::new(&bin);
-    cmd.args(["sessions", "reopen", "--", &session_id]);
+    cmd.args(subcommand);
+    if let Some(slug) = agent_slug {
+        if !slug.is_empty() {
+            validate_agent_slug(slug)?;
+            cmd.args(["--as", slug]);
+        }
+    }
+    if let Some(m) = model {
+        if !m.is_empty() {
+            cmd.args(["--model", m]);
+        }
+    }
+    if let Some(c) = coordinator {
+        if !c.is_empty() {
+            validate_coordinator_slug(c)?;
+            cmd.args(["--coordinator", c]);
+        }
+    }
+    if let Some(text) = human_comment {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            if trimmed.len() > 4096 {
+                return Err(format!(
+                    "human_comment too long ({} bytes; cap is 4096)",
+                    trimmed.len()
+                ));
+            }
+            cmd.args(["--human-comment", trimmed]);
+        }
+    }
+    cmd.arg("--");
+    cmd.arg(id);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd.spawn().map_err(|e| format!("spawn ato: {}", e))?;
+    let pid = child.id();
+    {
+        let mut map = inflight.0.lock().map_err(|e| e.to_string())?;
+        map.insert(id.to_string(), pid);
+    }
+    let result = child
+        .wait_with_output()
+        .map_err(|e| format!("wait ato: {}", e));
+    {
+        let mut map = inflight.0.lock().map_err(|e| e.to_string())?;
+        map.remove(id);
+    }
+    let out = result?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        if let Some(code) = out.status.code() {
+            if code != 0 && stderr.trim().is_empty() && stdout.trim().is_empty() {
+                return Err("__cancelled__".to_string());
+            }
+        }
+        return Err(format!(
+            "ato {} failed (status {}): {}",
+            subcommand.join(" "),
+            out.status,
+            stderr.trim()
+        ));
+    }
+    serde_json::from_str(stdout.trim()).map_err(|_| {
+        format!(
+            "ato {} returned unparseable JSON",
+            subcommand.join(" ")
+        )
+    })
+}
+
+/// Run a simple non-close subcommand that takes only the id (reopen
+/// and get). No inflight registration since these complete in milli-
+/// seconds; no Cancel button is wired for them.
+fn run_simple_subcommand(subcommand: &[&str], id: &str) -> Result<serde_json::Value, String> {
+    let bin = resolve_ato_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(subcommand);
+    cmd.arg("--");
+    cmd.arg(id);
     let out = cmd.output().map_err(|e| format!("spawn ato: {}", e))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     if !out.status.success() {
         return Err(format!(
-            "ato sessions reopen failed (status {}): {}",
+            "ato {} failed (status {}): {}",
+            subcommand.join(" "),
             out.status,
             stderr.trim()
         ));
     }
-    serde_json::from_str(stdout.trim())
-        .map_err(|_| "ato sessions reopen returned unparseable JSON".to_string())
+    serde_json::from_str(stdout.trim()).map_err(|_| {
+        format!(
+            "ato {} returned unparseable JSON",
+            subcommand.join(" ")
+        )
+    })
+}
+
+#[tauri::command]
+pub fn close_war_room(
+    inflight: State<'_, CloseInflight>,
+    war_room_id: String,
+    agent_slug: Option<String>,
+    model: Option<String>,
+    coordinator: Option<String>,
+    human_comment: Option<String>,
+) -> Result<serde_json::Value, String> {
+    validate_session_id(&war_room_id)?; // war_room_ids are UUIDs too.
+    run_close_subprocess(
+        &inflight,
+        &["war-rooms", "close"],
+        &war_room_id,
+        agent_slug.as_deref(),
+        model.as_deref(),
+        coordinator.as_deref(),
+        human_comment.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn reopen_war_room(war_room_id: String) -> Result<serde_json::Value, String> {
+    validate_session_id(&war_room_id)?;
+    run_simple_subcommand(&["war-rooms", "reopen"], &war_room_id)
+}
+
+#[tauri::command]
+pub fn get_war_room(war_room_id: String) -> Result<serde_json::Value, String> {
+    validate_session_id(&war_room_id)?;
+    run_simple_subcommand(&["war-rooms", "get"], &war_room_id)
+}
+
+#[tauri::command]
+pub fn close_chat(
+    inflight: State<'_, CloseInflight>,
+    chat_id: String,
+    agent_slug: Option<String>,
+    model: Option<String>,
+    coordinator: Option<String>,
+    human_comment: Option<String>,
+) -> Result<serde_json::Value, String> {
+    validate_session_id(&chat_id)?; // chat_thread.id are UUIDs too.
+    run_close_subprocess(
+        &inflight,
+        &["chats", "close"],
+        &chat_id,
+        agent_slug.as_deref(),
+        model.as_deref(),
+        coordinator.as_deref(),
+        human_comment.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn reopen_chat(chat_id: String) -> Result<serde_json::Value, String> {
+    validate_session_id(&chat_id)?;
+    run_simple_subcommand(&["chats", "reopen"], &chat_id)
+}
+
+#[tauri::command]
+pub fn get_chat(chat_id: String) -> Result<serde_json::Value, String> {
+    validate_session_id(&chat_id)?;
+    run_simple_subcommand(&["chats", "get"], &chat_id)
 }
