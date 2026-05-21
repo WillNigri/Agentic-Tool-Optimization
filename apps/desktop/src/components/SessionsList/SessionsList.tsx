@@ -686,19 +686,28 @@ export default function SessionsList() {
               const rowsForStatusCount = nonEmptyData!.filter((s) =>
                 rowMatchesFilters(s, filterFields, "status")
               );
+              // Lifecycle applies to sessions only — Open/Closed match
+              // session rows by definition. "All" must count from the
+              // same denominator so the math adds up (All = Open + Closed).
+              // Pre-fix this was rowsForStatusCount.length which mixed in
+              // single-runs / war-rooms / chats and showed e.g. All (49)
+              // alongside Open (6) Closed (1). Will's dogfood 2026-05-21.
+              const sessionRows = rowsForStatusCount.filter(
+                (row) => row.rowKind === "session"
+              );
               return (["all", "open", "closed"] as StatusFilter[]).map((s) => {
                 const count =
                   s === "all"
-                    ? rowsForStatusCount.length
-                    : rowsForStatusCount.filter((row) => row.status === s).length;
+                    ? sessionRows.length
+                    : sessionRows.filter((row) => row.status === s).length;
               return (
                 <button
                   key={s}
                   onClick={() => setStatusFilter(s)}
                   title={
                     s === "all"
-                      ? "Show every row (sessions + single-runs)"
-                      : `Show sessions whose lifecycle is "${s}". Single-runs are hidden here — they have no open/closed lifecycle.`
+                      ? "Show every session regardless of lifecycle. Non-session rows (single-runs, war-rooms, chats) are unaffected by this filter."
+                      : `Show sessions whose lifecycle is "${s}". Non-session rows are hidden when a lifecycle is selected — they have no open/closed state.`
                   }
                   className={cn(
                     "px-2 py-1 rounded-md border capitalize transition-colors",
