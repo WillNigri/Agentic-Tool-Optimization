@@ -25,6 +25,7 @@ import {
 } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 import RunAgentDialog from "./RunAgentDialog";
+import MigrationToast from "./MigrationToast";
 import AgentDetail from "@/components/AgentDetail/AgentDetail";
 import { useTerminalStore } from "@/stores/useTerminalStore";
 import { getRuntimeCapability, shellRequestForAgent } from "@/lib/runtimeCapabilities";
@@ -182,6 +183,7 @@ export default function MyAgentsList() {
 
   return (
     <div className="space-y-4">
+      <MigrationToast />
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-cs-muted" />

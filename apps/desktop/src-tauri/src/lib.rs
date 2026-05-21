@@ -897,6 +897,8 @@ pub fn run() {
             // v1.3.0: Agents (T3)
             create_agent,
             list_agents,
+            // S11 (v2.7.11) — pre-v2.7.8 agents have NULL permissions_migrated_at
+            count_unmigrated_agents,
             get_agent,
             delete_agent,
             touch_agent_last_used,

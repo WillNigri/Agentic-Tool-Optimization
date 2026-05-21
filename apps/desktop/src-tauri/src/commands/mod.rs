@@ -6244,6 +6244,23 @@ pub fn create_agent(
     Ok(agent)
 }
 
+/// S11 (v2.7.11) — pre-v2.7.8 agents have `permissions_migrated_at`
+/// NULL and dispatch falls back to pre-PR-2 defaults (the new permission
+/// DSL is recorded but NOT enforced). The MigrationToast surfaces the
+/// count so users re-save those agents to engage enforcement. Read-only;
+/// the stamp itself happens via the normal save flow (which already sets
+/// `permissions_migrated_at = now`).
+#[tauri::command]
+pub fn count_unmigrated_agents(db: State<'_, DbState>) -> Result<i64, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM agents WHERE permissions_migrated_at IS NULL",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_agents(
     db: State<'_, DbState>,

@@ -240,6 +240,14 @@ export async function listAgents(filter?: {
   });
 }
 
+/** S11 (v2.7.11) — number of agents created before v2.7.8 whose
+ *  permission DSL is recorded but not enforced. Powers MigrationToast.
+ *  Re-saving an agent via the existing flow stamps
+ *  `permissions_migrated_at = now` and the count drops. */
+export async function countUnmigratedAgents(): Promise<number> {
+  return invoke<number>("count_unmigrated_agents");
+}
+
 export async function getAgent(id: string): Promise<Agent> {
   return invoke<Agent>("get_agent", { id });
 }
