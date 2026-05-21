@@ -148,8 +148,16 @@ pub fn dispatch_with_history(
         (_, default) => default.to_string(),
     };
 
+    // v2.7.13 (Will dogfood 2026-05-21) — buffered timeout raised
+    // from 120s to 300s to match the streaming path. MiniMax's
+    // content-moderation pass on 20K-token code-review prompts
+    // routinely takes 60-180s; the 120s cap silently truncated those
+    // as "POST <url>" connect-failures in the audit log. 300s still
+    // bounds the worst case (a hung api) without falsely failing
+    // legitimate slow responses. Streaming uses the same 300s at
+    // line ~360 below; keep them in sync.
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(300))
         .build()
         .context("build reqwest client")?;
 
@@ -236,10 +244,34 @@ pub fn dispatch_with_history(
             .header("x-api-key", &key)
             .header("anthropic-version", "2023-06-01");
     }
-    let resp = req
-        .json(&body)
-        .send()
-        .with_context(|| format!("POST {}", url))?;
+    // v2.7.13 (Will dogfood 2026-05-21) — when reqwest.send() fails,
+    // classify into timeout / connect / request shape and surface
+    // each distinctly. Pre-fix the audit row showed only "POST <url>",
+    // which made a 120s timeout look identical to a DNS failure, a
+    // TLS error, or a connection reset — see the war-room
+    // 76F7CEEB-… reproduction: MiniMax took >120s to process a 20K-
+    // token code-review prompt (content-moderation latency on
+    // dense code blocks) and the audit just said "POST <url>".
+    // duration_ms is also recorded on error now so the operator can
+    // tell "instant fail" from "timed out at 120s" at a glance.
+    let resp = match req.json(&body).send() {
+        Ok(r) => r,
+        Err(e) => {
+            let elapsed = start.elapsed().as_millis() as i64;
+            let kind = if e.is_timeout() {
+                format!("timeout after {}ms (client cap is 120s)", elapsed)
+            } else if e.is_connect() {
+                "connect failed (DNS / TLS / network)".to_string()
+            } else if e.is_request() {
+                "request building or transport error".to_string()
+            } else {
+                "transport error".to_string()
+            };
+            return Err(anyhow::Error::new(e)).with_context(|| {
+                format!("POST {}: {}", url, kind)
+            });
+        }
+    };
     let http_status = resp.status();
     // MiniMax-as-reviewer flagged that unwrap_or_default() here would
     // silently swallow a body-read error after a successful response
