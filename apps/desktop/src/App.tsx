@@ -5,6 +5,7 @@ import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
 import UpdateBanner from "@/components/UpdateBanner";
+import IdentityProbeBanner from "@/components/Security/IdentityProbeBanner";
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -107,6 +108,16 @@ export default function App() {
           <UpdateBanner />
         </div>
       )}
+      {/* PR-5 master_key_v2 — identity-probe mismatch banner. Renders
+          ONLY when PR-3's check_for_mismatch returned Mismatched.
+          v2.7.15 — moved from top-LEFT to top-RIGHT (Will dogfood
+          2026-05-22: original placement overlapped the "ATO" brand
+          and project switcher, hiding both). Stacked under
+          UpdateBanner via `top-32` offset so both are simultaneously
+          visible during a Linux installer + identity-cliff overlap. */}
+      <div className="fixed top-32 right-4 z-50 w-96 max-w-[90vw]">
+        <IdentityProbeBanner />
+      </div>
     <Routes>
       <Route
         path="/"
