@@ -54,7 +54,8 @@ export type Feature =
   // F6 — Cloud trace retention (local trace view stays free)
   | "cloud-traces"
   // F7 — Evaluators
-  | "evaluators"
+  | "evaluators"                  // ad-hoc evaluator runs (Free; local-only)
+  | "evaluators.scheduled"        // cron-driven batch evals (Pro; cloud cron)
   // Cloud sync of agents
   | "cloud-sync"
   // v2.6 — Encrypted provider-key store for the cron usage-poller
@@ -68,17 +69,37 @@ export type Feature =
   | "enterprise.audit";
 
 export const FEATURE_MIN_TIER: Record<Feature, Tier> = {
-  "variables.advanced": "pro",
-  "context-hooks": "pro",
-  "summarizer.tunable": "pro",
-  "groups.unlimited": "pro",
-  "groups.editor": "pro",
-  "role-models": "pro",
-  "cloud-traces": "pro",
-  "evaluators": "pro",
-  "cloud-sync": "pro",
-  "provider-keys": "pro",
-  "team-workspaces": "team",
+  // ─── FREE (local power, unlimited) ─────────────────────────────
+  // v2.8.x re-tier (war-room 87E6CADF round 3, doctrine locked
+  // 2026-05-22): "scarcity in cloud, not in BYOK / local." Anything
+  // that runs entirely on the user's Mac with the user's API keys
+  // is FREE — we add zero incremental infra cost, so charging for
+  // it is the artificial scarcity the doctrine forbids.
+  "variables.advanced": "free",   // local resolvers (file/db/mcp/computed)
+  "context-hooks": "free",        // local pre-call hooks
+  "summarizer.tunable": "free",   // local model picker
+  "groups.unlimited": "free",     // ⚠ 3-child cap killed — see groupsCap.ts
+  "groups.editor": "free",        // local group editor UI
+  "role-models": "free",          // local per-task model selection
+  "evaluators": "free",           // AD-HOC ONLY — single-shot, local
+  "evaluators.scheduled": "pro",  // CRON-DRIVEN — requires cloud cron worker
+
+  // ─── PRO $29/seat/mo (cloud infra, real cost-of-goods) ─────────
+  // These features REQUIRE ato-cloud infrastructure (storage,
+  // hosted compute, cron workers). Price = cloud cost-of-goods +
+  // margin. NEVER gate a feature behind Pro just because it's
+  // a feature — only because it costs us money to host.
+  "cloud-traces": "pro",          // trace upload + cloud aggregation
+  "cloud-sync": "pro",            // cross-device sync (agents + skills)
+
+  // ─── TEAM $49/seat/mo (multi-user + credential custody) ───────
+  // war-room 87E6CADF round 3 — security-specialist AMEND: any
+  // cloud feature where ATO HOLDS a user credential belongs at
+  // the highest trust threshold (Team), not Pro.
+  "provider-keys": "team",        // ATO holds encrypted API keys for cron poller
+  "team-workspaces": "team",      // multi-user workspace primitive
+
+  // ─── ENTERPRISE ─────────────────────────────────────────────
   "enterprise.evaluator-budgets": "enterprise",
   "enterprise.halo": "enterprise",
   "enterprise.sso": "enterprise",
@@ -114,17 +135,30 @@ export function resolveEffectiveTier(
 
 /** Hook: reads the current user's effective tier.
  *
- *  Phase 1 PR-A (2026-05-21) — alpha free-Pro grant becomes a
- *  14-day trial. Returns "pro" only when:
- *    - the cached tier is already paid (Team / Enterprise / Pro), OR
- *    - the user is in Tauri or cloud-authed AND the trial window
- *      is active.
+ *  HISTORY:
+ *  - v1.5.x: cloud-account users silently auto-promoted to Pro (alpha promo)
+ *  - v2.0.0: Tauri desktop users silently auto-promoted to Pro
+ *    (Beatriz couldn't login locally; alpha trust)
+ *  - PR-A (2026-05-21, commit 4638d46): silent grants replaced by a 14-day
+ *    Pro trial. resolveEffectiveTier composes: paid tier wins → trial
+ *    window grants "pro" → otherwise "free".
+ *  - v2.8.x re-tier (2026-05-22, war-room 87E6CADF round 3): doctrine
+ *    LOCKED "scarcity in cloud, not in BYOK / local." Most features that
+ *    were Pro are now Free (vars / hooks / summarizer / groups /
+ *    role-models / ad-hoc evaluators). What remains Pro is cloud-traces
+ *    + cloud-sync — the things that actually cost us infra to host.
+ *    provider-keys elevated to Team because ATO holds user credentials.
  *
- *  Starting the trial is a side effect — first call from a Tauri
- *  or cloud-auth context with a free cache sets `trialStartedAt`
- *  if missing. We do this here (rather than at "first Pro feature
- *  view") because every Pro-gated surface calls useTier; the first
- *  view through a TierGate is the trigger by construction. */
+ *  Starting the trial is a side effect — first call from a Tauri or
+ *  cloud-auth context with a free cache sets `trialStartedAt` if
+ *  missing. We do this here (rather than at "first Pro feature view")
+ *  because every Pro-gated surface calls useTier; the first view through
+ *  a TierGate is the trigger by construction.
+ *
+ *  War-room 1C5C5135 (chunk-1 code review) VETO precondition: this hook
+ *  MUST compose with the trial chain — if useTier ever returns the bare
+ *  cached tier, all silent-grant users hard-cut to Free without their
+ *  trial. Keep `resolveEffectiveTier` in the return path. */
 export function useTier(): Tier {
   const cachedTier = useAuthStore((s) => s.tier);
   const isCloudUser = useAuthStore((s) => s.isCloudUser);

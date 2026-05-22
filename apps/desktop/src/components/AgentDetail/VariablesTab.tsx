@@ -156,11 +156,8 @@ export default function VariablesTab({ agent }: Props) {
         />
       )}
 
-      <UpgradePrompt
-        feature="variables.advanced"
-        open={proPrompt}
-        onClose={() => setProPrompt(false)}
-      />
+      {/* v2.8.x — UpgradePrompt removed: variables.advanced is now Free per
+          war-room 87E6CADF round 3 doctrine. */}
     </div>
   );
 }

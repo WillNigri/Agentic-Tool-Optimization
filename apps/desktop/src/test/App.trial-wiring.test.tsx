@@ -51,14 +51,14 @@ describe("TierGate trial-aware modal swap", () => {
   it("opens UpgradePrompt for a Free user when the trial has not started", () => {
     // Plain web user — no trial, no localStorage key.
     render(
-      <TierGate feature="evaluators">
+      <TierGate feature="evaluators.scheduled">
         <div>evaluators panel</div>
       </TierGate>,
     );
     // mode="block" renders the upgrade button; click it.
     fireEvent.click(screen.getByRole("button"));
     // UpgradePrompt has the per-feature title for "evaluators".
-    expect(screen.getByText(/Continuous quality evaluation/i)).toBeInTheDocument();
+    expect(screen.getByText(/Scheduled batch evaluators/i)).toBeInTheDocument();
     // TrialExpiredModal should NOT render in this branch.
     expect(screen.queryByText(/Your Pro trial has ended/i)).not.toBeInTheDocument();
   });
@@ -66,20 +66,20 @@ describe("TierGate trial-aware modal swap", () => {
   it("opens TrialExpiredModal once the trial has expired", () => {
     setTrialStartedDaysAgo(20); // expired
     render(
-      <TierGate feature="evaluators">
+      <TierGate feature="evaluators.scheduled">
         <div>evaluators panel</div>
       </TierGate>,
     );
     fireEvent.click(screen.getByRole("button"));
     expect(screen.getByText(/Your Pro trial has ended/i)).toBeInTheDocument();
     // Per-feature UpgradePrompt should NOT render in the expired branch.
-    expect(screen.queryByText(/Continuous quality evaluation/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Scheduled batch evaluators/i)).not.toBeInTheDocument();
   });
 
   it("both trial-aware modal variants link to the shared UPGRADE_URL", () => {
     // Not-expired branch first.
     const { unmount } = render(
-      <TierGate feature="evaluators">
+      <TierGate feature="evaluators.scheduled">
         <div>evaluators panel</div>
       </TierGate>,
     );
@@ -90,7 +90,7 @@ describe("TierGate trial-aware modal swap", () => {
     // Expired branch.
     setTrialStartedDaysAgo(20);
     render(
-      <TierGate feature="evaluators">
+      <TierGate feature="evaluators.scheduled">
         <div>evaluators panel</div>
       </TierGate>,
     );
