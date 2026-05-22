@@ -541,6 +541,12 @@ impl Conversation {
         model: &str,
         suppress_tools: bool,
     ) -> serde_json::Value {
+        // v2.8.x P0 — when tools are enabled, every request gets the
+        // UNTRUSTED_INPUT system-prompt fragment so the model knows
+        // to treat tool outputs as data, not instructions. Skipped
+        // when suppress_tools is true (final-answer round, no tools
+        // exposed so no injection surface to defend).
+        let tools_active = !suppress_tools && !tools.is_empty();
         match provider.flavor {
             "anthropic" => {
                 let mut body = serde_json::json!({
@@ -548,6 +554,9 @@ impl Conversation {
                     "max_tokens": 8192,
                     "messages": self.anthropic_messages,
                 });
+                if tools_active {
+                    body["system"] = serde_json::json!(ato_review_tools::UNTRUSTED_INPUT_PROMPT_FRAGMENT);
+                }
                 if !suppress_tools {
                     // Anthropic tool definitions use {name, description, input_schema}.
                     let anth_tools: Vec<serde_json::Value> = tools
@@ -568,6 +577,11 @@ impl Conversation {
                     "contents": self.gemini_contents,
                     "generationConfig": { "maxOutputTokens": 8192 },
                 });
+                if tools_active {
+                    body["systemInstruction"] = serde_json::json!({
+                        "parts": [{ "text": ato_review_tools::UNTRUSTED_INPUT_PROMPT_FRAGMENT }],
+                    });
+                }
                 if !suppress_tools {
                     let decls: Vec<serde_json::Value> = tools
                         .iter()
@@ -582,9 +596,25 @@ impl Conversation {
                 body
             }
             _ => {
+                // OpenAI-shaped providers: system message lives as
+                // the first entry in the messages array. We prepend
+                // the UNTRUSTED_INPUT fragment when tools are active
+                // without mutating self.openai_messages (so the next
+                // round still starts from the same conversation).
+                let messages: Vec<serde_json::Value> = if tools_active {
+                    let mut prefixed = Vec::with_capacity(self.openai_messages.len() + 1);
+                    prefixed.push(serde_json::json!({
+                        "role": "system",
+                        "content": ato_review_tools::UNTRUSTED_INPUT_PROMPT_FRAGMENT,
+                    }));
+                    prefixed.extend(self.openai_messages.iter().cloned());
+                    prefixed
+                } else {
+                    self.openai_messages.clone()
+                };
                 let mut body = serde_json::json!({
                     "model": model,
-                    "messages": self.openai_messages,
+                    "messages": messages,
                     "max_tokens": 8192,
                 });
                 if !suppress_tools {
@@ -822,6 +852,15 @@ impl Conversation {
     }
 
     fn append_tool_results(&mut self, provider: &ApiProvider, results: &[ToolResult]) {
+        // v2.8.x P0 — wrap every tool result in <UNTRUSTED_INPUT>
+        // tags before serialization (war-room 87E6CADF, 2026-05-22).
+        // Source attribution is "tool:<name>" so the model and the
+        // audit log can trace which tool produced which payload.
+        // The wrap_untrusted helper defangs in-payload closing tags
+        // so an injection can't break out of the wrapper.
+        let wrap = |r: &ToolResult| -> String {
+            ato_review_tools::wrap_untrusted_input(&format!("tool:{}", r.name), &r.content)
+        };
         match provider.flavor {
             "anthropic" => {
                 // Anthropic expects ALL tool_results for a turn in
@@ -831,7 +870,7 @@ impl Conversation {
                     .map(|r| serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": r.tool_call_id,
-                        "content": r.content,
+                        "content": wrap(r),
                         "is_error": r.is_error,
                     }))
                     .collect();
@@ -848,7 +887,7 @@ impl Conversation {
                     .map(|r| serde_json::json!({
                         "functionResponse": {
                             "name": r.name,
-                            "response": { "content": r.content },
+                            "response": { "content": wrap(r) },
                         }
                     }))
                     .collect();
@@ -864,7 +903,7 @@ impl Conversation {
                     self.openai_messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": r.tool_call_id,
-                        "content": r.content,
+                        "content": wrap(r),
                     }));
                 }
             }
