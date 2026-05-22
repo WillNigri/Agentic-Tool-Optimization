@@ -3,6 +3,7 @@ import { Clock, X, ExternalLink } from "lucide-react";
 
 import { useTrialStatus } from "@/lib/tier";
 import { TRIAL_BANNER_DISMISSED_KEY } from "@/lib/trial";
+import { UPGRADE_URL } from "@/lib/constants";
 
 // Phase 1 PR-A — persistent trial countdown banner.
 //
@@ -12,11 +13,9 @@ import { TRIAL_BANNER_DISMISSED_KEY } from "@/lib/trial";
 // next launch — the cost of a missed conversion outweighs the
 // annoyance of a single re-show.
 //
-// Component is INERT until wired into the app shell. Caller is
-// expected to render `<TrialBanner />` once at the top of the
-// main content area. No global side effects on import.
-
-const UPGRADE_URL = "https://cal.com/willnigri/ato-onboarding";
+// Wired in PR-B at the top of Dashboard's content column (above
+// <main>) so it persists across section scrolls and only shows
+// inside the authenticated app chrome.
 
 export default function TrialBanner() {
   const trial = useTrialStatus();
