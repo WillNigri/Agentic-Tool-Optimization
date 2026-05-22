@@ -902,7 +902,7 @@ mod tests {
             ["stored-abc"],
         )
         .unwrap();
-        let status = check_for_mismatch(&conn, "computed-xyz");
+        let status = check_for_mismatch(&conn, "deadbeefcafef00d1234567890abcdef");
         match status {
             ProbeStatus::Mismatched {
                 stored_probe,
@@ -911,7 +911,7 @@ mod tests {
                 audit_logged,
             } => {
                 assert_eq!(stored_probe, "stored-abc");
-                assert_eq!(computed_probe, "computed-xyz");
+                assert_eq!(computed_probe, "deadbeefcafef00d1234567890abcdef");
                 assert!(!detected_at.is_empty(), "detected_at must be set");
                 assert!(audit_logged, "first detect must write audit row");
             }
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(resource_id, "v1");
         // JSON shape contract — PR-5's frontend reads these keys.
         assert!(details.contains("\"stored_probe\":\"stored-abc\""));
-        assert!(details.contains("\"computed_probe\":\"computed-xyz\""));
+        assert!(details.contains("\"computed_probe\":\"deadbeefcafef00d1234567890abcdef\""));
         assert!(details.contains("\"detected_at\""));
     }
 
@@ -953,8 +953,8 @@ mod tests {
             ["stored-abc"],
         )
         .unwrap();
-        let first = check_for_mismatch(&conn, "computed-xyz");
-        let second = check_for_mismatch(&conn, "computed-xyz");
+        let first = check_for_mismatch(&conn, "deadbeefcafef00d1234567890abcdef");
+        let second = check_for_mismatch(&conn, "deadbeefcafef00d1234567890abcdef");
         match (&first, &second) {
             (
                 ProbeStatus::Mismatched { audit_logged: true, .. },
@@ -985,8 +985,8 @@ mod tests {
             ["stored-abc"],
         )
         .unwrap();
-        let _ = check_for_mismatch(&conn, "first-drift");
-        let _ = check_for_mismatch(&conn, "second-drift");
+        let _ = check_for_mismatch(&conn, "1111111111111111aaaaaaaaaaaaaaaa");
+        let _ = check_for_mismatch(&conn, "2222222222222222bbbbbbbbbbbbbbbb");
         let audit_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM audit_logs", [], |r| r.get(0))
             .unwrap();
@@ -1007,7 +1007,7 @@ mod tests {
             ["stored-abc"],
         )
         .unwrap();
-        let status = check_for_mismatch(&conn, "computed-xyz");
+        let status = check_for_mismatch(&conn, "deadbeefcafef00d1234567890abcdef");
         std::env::remove_var("ATO_MASTER_KEY_B64");
         assert_eq!(status, ProbeStatus::NotPopulated);
         let audit_count: i64 = conn
