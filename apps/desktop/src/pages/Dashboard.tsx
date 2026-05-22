@@ -6,6 +6,7 @@ import CommandPalette from "@/components/CommandPalette";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import DemoOverlay from "@/components/DemoOverlay";
 import WelcomeTour from "@/components/WelcomeTour";
+import TrialBanner from "@/components/Trial/TrialBanner";
 import { useUiStore } from "@/stores/useUiStore";
 
 const CreateAgentWizard = lazy(() => import("@/components/CreateAgentWizard"));
@@ -56,6 +57,12 @@ export default function Dashboard() {
     <div className="flex h-screen overflow-hidden">
       <Sidebar active={section} onNavigate={setSection} />
       <div className="flex-1 flex flex-col overflow-hidden">
+        {/* PR-B (Phase 1) — full-width trial countdown strip. Self-gates
+            to render only from day 7 of the trial onward (TrialBanner
+            internally checks showBanner), so this is a no-op for paid
+            users and the first week of a fresh trial. Mounted ABOVE the
+            scroll container so it stays pinned across section scrolls. */}
+        <TrialBanner />
         <main className="flex-1 overflow-y-auto p-6">
           <ErrorBoundary key={section}>
             <Suspense

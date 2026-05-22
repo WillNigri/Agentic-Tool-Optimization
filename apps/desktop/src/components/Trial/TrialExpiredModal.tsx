@@ -1,6 +1,7 @@
 import { Clock, X, ExternalLink } from "lucide-react";
 
 import { useTrialStatus } from "@/lib/tier";
+import { UPGRADE_URL } from "@/lib/constants";
 
 // Phase 1 PR-A — trial-expired block modal.
 //
@@ -10,12 +11,9 @@ import { useTrialStatus } from "@/lib/tier";
 // "intercept on app start" because it punishes free users on every
 // cold launch even when they're not trying to use a Pro feature.
 //
-// Component is INERT until wired. The simplest integration point
-// is to render once at the app shell and let a hook flip `open`
-// when a Pro feature is clicked. Wiring is deferred to a follow-up
-// PR so this session doesn't collide with the parallel OSS work.
-
-const UPGRADE_URL = "https://cal.com/willnigri/ato-onboarding";
+// Wired in PR-B inside TierGate: when a Free user clicks a locked
+// surface AND the trial is expired, this modal renders instead of
+// UpgradePrompt (same `promptOpen` state — no separate store).
 
 type Props = {
   open: boolean;

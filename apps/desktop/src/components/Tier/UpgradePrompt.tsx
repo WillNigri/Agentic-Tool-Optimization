@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Crown, X, Check, ExternalLink } from "lucide-react";
 import { tierForFeature, TIER_LABEL, type Feature, type Tier } from "@/lib/tier";
+import { UPGRADE_URL } from "@/lib/constants";
 
 // v1.4.0 — Upgrade prompt modal.
 //
@@ -196,7 +197,7 @@ export default function UpgradePrompt({ feature, open, onClose }: Props) {
             {t("tier.notNow", "Not now")}
           </button>
           <a
-            href="https://cal.com/willnigri/ato-onboarding"
+            href={UPGRADE_URL}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1.5 rounded-lg bg-cs-accent px-4 py-2 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover"
