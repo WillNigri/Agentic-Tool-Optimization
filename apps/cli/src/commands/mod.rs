@@ -12,6 +12,7 @@ pub mod dispatches;
 pub mod events;
 pub mod files_touched;
 pub mod kill;
+pub mod master_key;
 pub mod posts;
 pub mod providers;
 pub mod ratchet;
