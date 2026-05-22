@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Sparkles, Bot, Activity, AlertCircle, ArrowRight, Plus, Settings, Play } from "lucide-react";
 import CreateAgentWizard, { type WizardPath } from "@/components/CreateAgentWizard";
 import RuntimeHealthBanner from "@/components/RuntimeHealthBanner";
+import RoiScanTile from "@/components/RoiScanTile/RoiScanTile";
 import { queryAllAgentStatuses } from "@/lib/api";
 import { listAgents, type Agent } from "@/lib/agents";
 import RunAgentDialog from "@/components/MyAgentsList/RunAgentDialog";
@@ -45,6 +46,9 @@ interface HomeProps {
   onOpenAgent?: (agentId: string) => void;
   onOpenRun?: (runId: string) => void;
   onOpenSettings?: () => void;
+  /** PR-C (2026-05-21) — opens Insights from the ROI scan tile.
+   *  Optional so tests can mount Home without wiring routing. */
+  onOpenInsights?: () => void;
   /** Override runtime detection (used in tests). */
   runtimeReady?: boolean;
 }
@@ -71,6 +75,7 @@ export default function Home({
   onOpenAgent,
   onOpenRun,
   onOpenSettings,
+  onOpenInsights,
   runtimeReady,
 }: HomeProps) {
   const { t } = useTranslation();
@@ -312,6 +317,13 @@ export default function Home({
           />
         )}
       </section>
+
+      {/* PR-C (2026-05-21) — Day-1 ROI scan tile. Mounted between Recent
+          Agents and Recent Runs so a fresh user sees the value loop close
+          (dispatch an agent → see savings + regressions) without scrolling.
+          The tile defers its own data fetch via requestIdleCallback so it
+          never delays first paint. */}
+      <RoiScanTile onOpenInsights={onOpenInsights} />
 
       {/* Recent Runs */}
       <section>
