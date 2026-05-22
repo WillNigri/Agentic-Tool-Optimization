@@ -231,7 +231,16 @@ fn decode_key_b64(b64: &str) -> Result<[u8; 32], String> {
 /// base64 (callers depend on the returned string being a real cipher).
 pub fn encrypt(plaintext: &str) -> Result<String, String> {
     let key_bytes = master_key()?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    encrypt_with_key(plaintext, &key_bytes)
+}
+
+/// PR-4 (master_key_v2) — pure crypto, no keychain access. Lets the
+/// rekey transaction re-encrypt rows with an EXPLICIT new key
+/// without touching the OS keychain inside the transaction. Same
+/// AES-256-GCM + nonce format as `encrypt`; only the key source
+/// differs.
+pub(crate) fn encrypt_with_key(plaintext: &str, key_bytes: &[u8; 32]) -> Result<String, String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -254,30 +263,8 @@ pub fn encrypt(plaintext: &str) -> Result<String, String> {
 /// values on the next UPDATE so the DB drains itself.
 pub fn decrypt(stored: &str) -> Result<String, String> {
     if let Some(b64) = stored.strip_prefix(VERSION_PREFIX) {
-        let bytes = general_purpose::STANDARD
-            .decode(b64.trim())
-            .map_err(|e| format!("decode v1 payload: {}", e))?;
-        if bytes.len() < NONCE_LEN + TAG_LEN {
-            return Err(format!(
-                "v1 payload too short ({} bytes, need ≥{})",
-                bytes.len(),
-                NONCE_LEN + TAG_LEN
-            ));
-        }
-        let (nonce_bytes, ciphertext) = bytes.split_at(NONCE_LEN);
         let key_bytes = master_key()?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-        let plaintext = cipher
-            .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
-            .map_err(|_| {
-                // Don't echo the underlying error — AES-GCM's "auth tag
-                // mismatch" message is unhelpful and could leak across
-                // bug reports. The cause is almost always: master key
-                // was regenerated (keychain wipe), or the row was
-                // copied from a different machine.
-                "v1 decrypt failed — master key mismatch (was the OS keychain reset?)".to_string()
-            })?;
-        return String::from_utf8(plaintext).map_err(|e| format!("v1 plaintext not utf-8: {}", e));
+        return decrypt_v1_with_key(b64, &key_bytes);
     }
     // Legacy plain-base64 row. The migration UPDATE that runs after
     // each successful decrypt rewrites these as v1.
@@ -285,6 +272,35 @@ pub fn decrypt(stored: &str) -> Result<String, String> {
         .decode(stored)
         .map_err(|e| format!("legacy decode: {}", e))?;
     String::from_utf8(bytes).map_err(|e| format!("legacy plaintext not utf-8: {}", e))
+}
+
+/// PR-4 (master_key_v2) — pure crypto for re-keying. Accepts an
+/// explicit master key (the OLD key for decrypt, then the NEW key
+/// for re-encrypt) so the rekey transaction can swap keys per row
+/// without touching the OS keychain inside the SQLite transaction.
+/// Takes only the v1: payload bytes (caller strips the prefix).
+pub(crate) fn decrypt_v1_with_key(
+    b64_payload: &str,
+    key_bytes: &[u8; 32],
+) -> Result<String, String> {
+    let bytes = general_purpose::STANDARD
+        .decode(b64_payload.trim())
+        .map_err(|e| format!("decode v1 payload: {}", e))?;
+    if bytes.len() < NONCE_LEN + TAG_LEN {
+        return Err(format!(
+            "v1 payload too short ({} bytes, need ≥{})",
+            bytes.len(),
+            NONCE_LEN + TAG_LEN
+        ));
+    }
+    let (nonce_bytes, ciphertext) = bytes.split_at(NONCE_LEN);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .map_err(|_| {
+            "v1 decrypt failed — wrong master key (re-key paste mismatch?)".to_string()
+        })?;
+    String::from_utf8(plaintext).map_err(|e| format!("v1 plaintext not utf-8: {}", e))
 }
 
 /// True iff the stored value is already in the encrypted v1 format.

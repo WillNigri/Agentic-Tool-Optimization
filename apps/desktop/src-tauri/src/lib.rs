@@ -25,6 +25,7 @@ pub mod api_dispatch_tools;
 pub mod recipes_engine;
 mod schema;
 mod identity_probe;
+mod rekey;
 
 use rusqlite::{Connection, params};
 use schema::init_database;
@@ -276,6 +277,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             identity_probe::get_identity_probe_status,
+            rekey::rekey_master_key,
             get_local_skills,
             get_skill_detail,
             toggle_local_skill,
