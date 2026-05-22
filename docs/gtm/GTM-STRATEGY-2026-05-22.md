@@ -9,6 +9,76 @@
 
 ---
 
+## 0. The doctrine (read this first; everything else follows)
+
+**ATO does not compete with the LLM providers. ATO does not
+compete with the observability tools. ATO does not compete with
+the gateways. ATO is the integration + orchestration + control
+layer that sits ABOVE all of them.**
+
+| Layer | Who does it | ATO's role |
+|-------|-------------|------------|
+| **Model research / training** | Anthropic, OpenAI, Google, Meta, Mistral | Use whichever the customer prefers — never train our own |
+| **Model fine-tuning** | Same providers + Together, Fireworks, OctoAI | Customer fine-tunes there; ATO supports the resulting custom model ID as a first-class citizen (BYOM) |
+| **Model inference** | Same providers | Customer's API key calls them directly; ATO never holds inference compute |
+| **Provider-specific platform features** | Anthropic Console, OpenAI Playground, Google AI Studio, Vertex | Use them for what they do well — vendor-specific tooling |
+| **Gateway / routing / caching** | Helicone, PortKey | Point ATO at their endpoint as the LLM URL |
+| **Production trace observability** | Langfuse, LangSmith, Braintrust | Output traces to them; never duplicate |
+| **Eval workbench** | Promptfoo, Braintrust | Export at design time; never replace |
+| **★ Dev workflow + team control plane** | **ATO** | Build agents · multi-LLM war-rooms · room ACLs · audit · anti-injection · deploy bundles |
+
+**The pitch in one sentence:**
+
+> *"The big players do training, inference, and provider-specific
+> tools. The observability tools watch what happened. The gateways
+> route traffic. **ATO is where your team controls and organizes
+> all of it.**"*
+
+**What "control and organize" means concretely:**
+
+1. **Multi-LLM orchestration** — same prompt to Claude, GPT, Gemini,
+   Grok in parallel (war-rooms). Pick the right answer per question.
+2. **Team coordination** — rooms, RBAC, audit per user, denial
+   surfacing. The layer that turns "this dev's experiment" into
+   "the team's process."
+3. **Guardrails at the moment of decision** — UNTRUSTED_INPUT
+   wrapping, identity passthrough, content policy enforcement.
+   Not post-hoc — *before* the model runs.
+4. **Deploy anywhere** — same agent definition exports to Vercel,
+   Cloudflare Workers, Lambda, Anthropic's hosted infra. We don't
+   host runtime; we ship to wherever the customer's infra lives.
+5. **One artifact for the lifecycle** — build → test → compare →
+   deploy → audit. Every other tool is one slice.
+
+**What ATO will NEVER build (locked):**
+
+- ❌ Our own foundation model
+- ❌ Our own fine-tuning service
+- ❌ Our own LLM hosting / inference
+- ❌ Our own vector DB / RAG layer (MCP is the right abstraction)
+- ❌ Our own observability backend (Langfuse / LangSmith own this)
+- ❌ Our own gateway (Helicone / PortKey own this)
+
+**Why this matters strategically:**
+
+- Every dollar saved by NOT building those layers compounds into
+  shipping the control plane faster
+- Every customer that arrives already using one of the big players
+  becomes a win — we layer on top, not replace
+- Every customer's existing API spend + fine-tuning spend stays
+  intact — we add NEW value, not displace existing value
+- Every provider that ships a new capability (Claude 4.7, GPT-5,
+  Gemini Ultra) lands in ATO automatically — we're upstream of
+  their innovation, not racing it
+
+This doctrine is load-bearing. If any future product decision
+violates it — *"should we host our own LLMs?"*, *"should we
+build our own trace viewer?"*, *"should we replace MCP with our
+own protocol?"* — the answer is NO unless the doctrine is
+explicitly re-debated by the full G-stack first.
+
+---
+
 ## 1. Why this document exists
 
 On 2026-05-22 Daniel Lestinge asked Eduardo Tolmasquim on LinkedIn:
