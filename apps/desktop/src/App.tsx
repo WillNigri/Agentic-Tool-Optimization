@@ -5,6 +5,7 @@ import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
 import UpdateBanner from "@/components/UpdateBanner";
+import IdentityProbeBanner from "@/components/Security/IdentityProbeBanner";
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -107,6 +108,13 @@ export default function App() {
           <UpdateBanner />
         </div>
       )}
+      {/* PR-5 master_key_v2 — identity-probe mismatch banner. Renders
+          ONLY when PR-3's check_for_mismatch returned Mismatched.
+          Stacked below UpdateBanner so a simultaneous Linux-install
+          update prompt + identity-cliff prompt are both readable. */}
+      <div className="fixed top-4 left-4 z-50 w-96 max-w-[90vw]">
+        <IdentityProbeBanner />
+      </div>
     <Routes>
       <Route
         path="/"
