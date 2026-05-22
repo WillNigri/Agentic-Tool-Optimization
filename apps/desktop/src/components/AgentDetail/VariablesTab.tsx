@@ -22,12 +22,18 @@ import {
   findReferencedVariables,
   FREE_VARIABLE_KINDS,
   PRO_VARIABLE_KINDS,
+  // v2.8.x P2 Security AMEND — consent grant flow for privileged kinds.
+  variableKindNeedsConsent,
+  describeGrantedResource,
+  grantVariableConsent,
+  type ConsentScope,
   type AgentVariable,
   type VariableKind,
   type VariableConfig,
 } from "@/lib/agentVariables";
 import { useFeatureFlag } from "@/lib/tier";
 import UpgradePrompt from "@/components/Tier/UpgradePrompt";
+import ConsentModal from "@/components/Permissions/ConsentModal";
 import type { Agent } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 
@@ -348,17 +354,17 @@ function VariableEditor({
   const [config, setConfig] = useState<VariableConfig>(initial);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // v2.8.x P2 — consent modal state. Opens for privileged kinds
+  // (file/db-query/computed) BEFORE save so the user grants access
+  // explicitly. Cancelling closes the modal AND the save without
+  // persisting anything to the DB.
+  const [consentOpen, setConsentOpen] = useState(false);
 
-  const save = async () => {
-    if (!name.trim() || saving) return;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-      setErr(t("agentDetail.variables.badName", "Name must be letters/digits/underscores"));
-      return;
-    }
+  const performSave = async (afterSave?: (savedId: string) => Promise<void>) => {
     setErr(null);
     setSaving(true);
     try {
-      await saveAgentVariable({
+      const saved = await saveAgentVariable({
         id: existing?.id,
         agentId,
         name: name.trim(),
@@ -366,12 +372,32 @@ function VariableEditor({
         configJson: configToJson(config),
         enabled,
       });
+      if (afterSave) {
+        await afterSave(saved.id);
+      }
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
+  };
+
+  const save = async () => {
+    if (!name.trim() || saving) return;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      setErr(t("agentDetail.variables.badName", "Name must be letters/digits/underscores"));
+      return;
+    }
+    // Privileged kinds: prompt for consent BEFORE saving. The grant
+    // is upserted right after save (we need the variable id from the
+    // backend save response to attach the grant).
+    if (variableKindNeedsConsent(kind)) {
+      setConsentOpen(true);
+      return;
+    }
+    await performSave();
+    return;
   };
 
   const pickKind = (k: VariableKind) => {
@@ -478,6 +504,51 @@ function VariableEditor({
           {t("common.save", "Save")}
         </button>
       </div>
+
+      {/* v2.8.x P2 Security AMEND — consent modal for privileged kinds
+          (file/db-query/computed). Opens BEFORE save; on confirm we save
+          AND immediately grant consent so the resolver gate passes on
+          the very next dispatch. */}
+      <ConsentModal
+        open={consentOpen}
+        variableName={name.trim() || "(unnamed)"}
+        variableKind={kind}
+        resourceDescription={describeGrantedResource(config)}
+        onCancel={() => setConsentOpen(false)}
+        onConfirm={async (scope: ConsentScope) => {
+          setConsentOpen(false);
+          // Chunks 3+4 war-room CRITICAL AMEND (claude + minimax both
+          // caught): if grant fails AFTER save succeeds, the variable
+          // row exists but is unusable + on retry we'd insert a
+          // duplicate (existing.id still null in this closure). Rollback
+          // by deleting the just-inserted row, then re-throw so the
+          // form's `err` state shows what failed.
+          await performSave(async (savedId: string) => {
+            try {
+              await grantVariableConsent(
+                savedId,
+                scope,
+                describeGrantedResource(config),
+              );
+            } catch (grantErr) {
+              // Best-effort cleanup. Swallowing this would hide the
+              // root cause (consent failure) behind a transient cleanup
+              // failure; log + continue so the original error surfaces.
+              try {
+                await deleteAgentVariable(savedId);
+              } catch (cleanupErr) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "consent-grant failed AND rollback delete failed; orphan variable id=",
+                  savedId,
+                  cleanupErr,
+                );
+              }
+              throw grantErr;
+            }
+          });
+        }}
+      />
     </div>
   );
 }

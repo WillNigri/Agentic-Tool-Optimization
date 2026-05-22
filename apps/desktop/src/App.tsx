@@ -5,6 +5,7 @@ import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
 import UpdateBanner from "@/components/UpdateBanner";
+import MigrationBanner from "@/components/Migration/MigrationBanner";
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -80,6 +81,10 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const refreshTier = useAuthStore((s) => s.refreshTier);
+  // v2.8.x chunks 3+4 war-room AMEND: MigrationBanner must not render
+  // on /login or /register routes (UX leak per claude + minimax both).
+  // Mirrors the existing isAuthenticated pattern at line 59.
+  const isAuthenticatedForBanner = useAuthStore((s) => s.isAuthenticated);
   const [needsManualUpgrade, setNeedsManualUpgrade] = useState(false);
 
   useEffect(() => {
@@ -107,6 +112,14 @@ export default function App() {
           <UpdateBanner />
         </div>
       )}
+      {/* v2.8.x Phase A chunk 4 — one-time re-tier migration banner.
+          Renders only for AUTHENTICATED users (gated below) who haven't
+          dismissed it. War-room AMEND (claude + minimax both flagged):
+          showing this on /login or /register before sign-in is a UX
+          leak — pre-auth visitors shouldn't see "your local ATO just
+          got more powerful" before they've even logged in. Mirrors
+          the UpdateBanner pattern of gating banners by auth state. */}
+      {(isTauri || isAuthenticatedForBanner) && <MigrationBanner />}
     <Routes>
       <Route
         path="/"
