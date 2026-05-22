@@ -306,7 +306,14 @@ export function renderProviderCall(provider: DeployProvider, model: string, apiK
       const data = await r.json();
       response = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
       promptTokens = data?.usageMetadata?.promptTokenCount ?? 0;
-      responseTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
+      // v2.7.15 — include thoughtsTokenCount. Gemini 2.5 thinking
+      // tokens are billed at the output rate but were previously
+      // ignored, causing deployed bundles to under-track cost by
+      // 30-50% (Will dogfood 2026-05-22; war-room C37BD156 #H —
+      // claude flagged this generator as a missed site).
+      responseTokens =
+        (data?.usageMetadata?.candidatesTokenCount ?? 0) +
+        (data?.usageMetadata?.thoughtsTokenCount ?? 0);
       costUsd = computeCostUsd(${JSON.stringify(model)}, promptTokens, responseTokens);`;
   }
   const url = OPENAI_COMPAT_URLS[provider];

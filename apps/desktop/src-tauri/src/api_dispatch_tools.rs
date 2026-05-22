@@ -768,11 +768,18 @@ impl Conversation {
                 (u["input_tokens"].as_i64(), u["output_tokens"].as_i64())
             }
             "gemini" => {
+                // v2.7.15 — include thoughtsTokenCount. Gemini 2.5
+                // has thinking enabled by default; Google bills
+                // thoughts at the output rate alongside candidates.
+                // Some(..) anchored on candidates per war-room
+                // C37BD156 round 1 #B — preserves None passthrough
+                // when usageMetadata is missing entirely so we
+                // don't conflate "unmeasured" with "$0 free run".
                 let u = &payload["usageMetadata"];
-                (
-                    u["promptTokenCount"].as_i64(),
-                    u["candidatesTokenCount"].as_i64(),
-                )
+                let tokens_out = u["candidatesTokenCount"].as_i64().map(|cand| {
+                    cand + u["thoughtsTokenCount"].as_i64().unwrap_or(0)
+                });
+                (u["promptTokenCount"].as_i64(), tokens_out)
             }
             _ => {
                 let u = &payload["usage"];

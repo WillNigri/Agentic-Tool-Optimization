@@ -49,9 +49,16 @@ function formatUsd(n: number): string {
 
 function monthLabel(iso: string): string {
   try {
+    // Backend sends UTC midnight of the first-of-month
+    // (e.g. "2026-05-01T00:00:00Z"). In any timezone west of UTC,
+    // toLocaleDateString without `timeZone: 'UTC'` rolls back to
+    // April 30 local + renders "April" — the BRT-dogfood "abril"
+    // bug (Will 2026-05-22 screenshot). Force UTC interpretation
+    // so we always render the same month the backend selected.
     return new Date(iso).toLocaleDateString(undefined, {
       month: "long",
       year: "numeric",
+      timeZone: "UTC",
     });
   } catch {
     return iso;
@@ -203,6 +210,50 @@ export default function CreditBurnCard() {
               "Estimates use a 4-chars-per-token heuristic + the per-million-token rates in pricing.ts. Real billing may differ by ±15%. Subscription rows are the API-equivalent — your actual subscription pool consumption isn't tracked here.",
             )}
           </p>
+
+          {/* v2.7.15 — Cost scope disclosure (Will dogfood 2026-05-22):
+              users were reading this card as their TOTAL LLM spend.
+              It's not — it's only what ATO sees. Spell that out so the
+              gap between this number and the user's provider billing
+              portal is intelligible instead of looking like an
+              undercount bug. */}
+          <details className="mt-3 group">
+            <summary className="text-[11px] text-cs-muted cursor-pointer hover:text-cs-text inline-flex items-center gap-1.5">
+              <Info size={11} />
+              {t(
+                "runtimes.burnScopeSummary",
+                "What ATO tracks vs. what's missing →",
+              )}
+            </summary>
+            <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
+              <div className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
+                <div className="font-medium text-emerald-300 mb-1">
+                  {t("runtimes.burnScopeTracked", "✓ Tracked")}
+                </div>
+                <ul className="text-cs-muted space-y-0.5 list-none">
+                  <li>{t("runtimes.burnScopeT1", "ATO-dispatched calls (war-rooms, sessions, chats, agents)")}</li>
+                  <li>{t("runtimes.burnScopeT2", "External Claude Code + Codex CLI sessions (via passive observer)")}</li>
+                </ul>
+              </div>
+              <div className="rounded border border-amber-500/20 bg-amber-500/5 p-3">
+                <div className="font-medium text-amber-300 mb-1">
+                  {t("runtimes.burnScopeNotTracked", "✗ NOT tracked")}
+                </div>
+                <ul className="text-cs-muted space-y-0.5 list-none">
+                  <li>{t("runtimes.burnScopeN1", "Browser sessions: claude.ai, chatgpt.com, gemini.google.com, aistudio.google.com")}</li>
+                  <li>{t("runtimes.burnScopeN2", "IDE integrations: Cursor, Continue.dev, GitHub Copilot in VS Code")}</li>
+                  <li>{t("runtimes.burnScopeN3", "Other terminal tools (aider, etc.) unless we add a watcher")}</li>
+                  <li>{t("runtimes.burnScopeN4", "Direct API calls from your own scripts that bypass ato dispatch")}</li>
+                </ul>
+              </div>
+            </div>
+            <p className="text-[10px] text-cs-muted mt-2">
+              {t(
+                "runtimes.burnScopeFooter",
+                "For your total LLM spend, check each provider's billing portal directly. The gap between that number and the total above is your non-ATO usage.",
+              )}
+            </p>
+          </details>
         </>
       )}
     </section>
