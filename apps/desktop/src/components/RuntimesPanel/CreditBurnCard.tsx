@@ -207,7 +207,7 @@ export default function CreditBurnCard() {
           <p className="text-[10px] text-cs-muted mt-3">
             {t(
               "runtimes.burnDisclaimer",
-              "Estimates use a 4-chars-per-token heuristic + the per-million-token rates in pricing.ts. Real billing may differ by ±15%. Subscription rows are the API-equivalent — your actual subscription pool consumption isn't tracked here.",
+              "BYOK API rows (Google / Anthropic / OpenAI / MiniMax etc. with an API key via `ato dispatch`) use the EXACT token counts the provider returned + the published per-million rates in pricing.ts — should match your provider billing portal within rounding. Subscription rows (claude / codex / gemini CLI) estimate tokens with a 4-chars-per-token heuristic because the CLIs don't return token counts; expect ±15% on those. Subscription rows are the API-equivalent dollar amount — your actual subscription pool consumption isn't tracked here.",
             )}
           </p>
 
