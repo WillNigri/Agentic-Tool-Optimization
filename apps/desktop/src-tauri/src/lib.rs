@@ -1,6 +1,7 @@
 mod openclaw_ws;
 mod byok;
 mod encryption;
+mod identity;
 mod log_watcher;
 mod passive_observer;
 mod health_poller;
