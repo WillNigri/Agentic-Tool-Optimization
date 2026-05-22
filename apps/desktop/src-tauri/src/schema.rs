@@ -1191,6 +1191,48 @@ pub fn init_database(conn: &Connection) {
             e
         );
     }
+    // Strategy PR-B (2026-05-21) — conversion telemetry. Every
+    // useFeatureFlag() invocation gets aggregated in the renderer and
+    // flushed here every 60s (1 row per (session_id, feature, flush)).
+    // tier_at_event + trial_cohort are snapshotted at write time, never
+    // joined later — a user's tier can change mid-session and we need the
+    // pricing question "did this user touch <feature> while on Free"
+    // answered correctly forever. session_id is a boot-time UUID, NOT a
+    // FK to sessions.id — keeps the behavioral profile join-blocked per
+    // 2026-05-21 architecture war-room (CSO seat). Rows are LOCAL ONLY
+    // in this PR; cloud-forwarding would need a separate opt-in surface.
+    // Surfaces creation failures instead of `let _ =` — matches the
+    // activity_posts precedent four blocks up (code-review war-room
+    // 2026-05-22, claude #6). For a fresh CREATE TABLE IF NOT EXISTS
+    // on a writable DB this is effectively dead code, but if a future
+    // migration ever tightens the column shape the WARN avoids silent
+    // truncation.
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversion_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            feature         TEXT NOT NULL,
+            tier_at_event   TEXT NOT NULL,
+            trial_cohort    TEXT,
+            count           INTEGER NOT NULL DEFAULT 1,
+            first_seen_at   TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL,
+            flushed_at      TEXT NOT NULL
+        )",
+        [],
+    ) {
+        eprintln!("WARN: failed to create conversion_events table: {}", e);
+    }
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversion_events_feature
+            ON conversion_events(feature, flushed_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversion_events_session
+            ON conversion_events(session_id, flushed_at DESC)",
+        [],
+    );
 }
 
 #[cfg(test)]

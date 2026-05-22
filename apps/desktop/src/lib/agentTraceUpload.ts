@@ -1,5 +1,6 @@
 import { useAuthStore } from "@/hooks/useAuth";
 import { tierMeetsRequirement } from "@/lib/tier";
+import { getTrialCohort } from "@/lib/conversionTelemetry";
 
 // v1.4.0 F6 — Pro+ trace upload.
 //
@@ -71,7 +72,7 @@ export async function uploadAgentTrace(trace: AgentTraceInput): Promise<void> {
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify({ traces: [trace] }),
+      body: JSON.stringify({ traces: [withTrialCohort(trace)] }),
     });
     if (!response.ok) {
       const body = await response.text().catch(() => "<unreadable>");
@@ -149,7 +150,7 @@ export async function uploadAgentTraces(traces: AgentTraceInput[]): Promise<void
 
   // Chunk to 100.
   for (let i = 0; i < traces.length; i += 100) {
-    const chunk = traces.slice(i, i + 100);
+    const chunk = traces.slice(i, i + 100).map(withTrialCohort);
     try {
       await fetch(`${CLOUD_API_URL}/api/agent-traces`, {
         method: "POST",
@@ -163,4 +164,26 @@ export async function uploadAgentTraces(traces: AgentTraceInput[]): Promise<void
       // Continue — best effort.
     }
   }
+}
+
+/** Strategy PR-B (2026-05-21) A5 amendment — stamp the active trial
+ *  cohort onto every uploaded trace. The cohort goes into the existing
+ *  `metadata` bag (which the server's zod schema treats as a
+ *  `Record<string, unknown>`) so this PR ships without a coordinated
+ *  server-side schema change. Top-level addition would have reproduced
+ *  the 2026-05-14 RFC3339 silent-strip failure mode.
+ *
+ *  Cohort is null for users not enrolled — those rows still upload, the
+ *  field is just absent. Server-side aggregation should treat absence
+ *  as "unenrolled", not "missing data". */
+function withTrialCohort(trace: AgentTraceInput): AgentTraceInput {
+  const cohort = getTrialCohort();
+  if (cohort === null) return trace;
+  return {
+    ...trace,
+    metadata: {
+      ...(trace.metadata ?? {}),
+      trial_cohort: cohort,
+    },
+  };
 }
