@@ -137,6 +137,33 @@ export default function CostBenchmarksPanel() {
     staleTime: 60_000,
   });
 
+  // v2.7.15 — HOOK MUST LIVE HERE (above early returns) per React's
+  // rules-of-hooks. Pre-fix this useMemo lived at line ~190 AFTER
+  // the `if (query.isLoading) return …` early returns; on the first
+  // render with isLoading=true the hook was skipped; on the second
+  // render with isLoading=false it was called for the first time;
+  // React threw "Rendered more hooks than during the previous render"
+  // and the user saw a generic "Something went wrong" until they
+  // hit Reload (Will dogfood 2026-05-22).
+  const surfaceRows = useMemo(() => {
+    const summary = summaryQuery.data;
+    if (!summary) return [];
+    const map = new Map<string, BillingSurfaceRow>();
+    for (const r of summary.rows) {
+      const existing = map.get(r.billing_surface);
+      if (!existing) {
+        map.set(r.billing_surface, { ...r, dispatch_kind: "merged" });
+      } else {
+        existing.runs += r.runs;
+        existing.tokens_in += r.tokens_in;
+        existing.tokens_out += r.tokens_out;
+        existing.cost_usd += r.cost_usd;
+        existing.duration_seconds += r.duration_seconds;
+      }
+    }
+    return Array.from(map.values());
+  }, [summaryQuery.data]);
+
   if (!isPro) {
     return (
       <Empty
@@ -184,26 +211,9 @@ export default function CostBenchmarksPanel() {
   const median = query.data?.medianCostPerOk ?? 0;
   const outliers = rows.filter((r) => r.is_outlier);
   const summary = summaryQuery.data;
-  // Surface rows for the by-billing-surface view. Coalesce passive +
-  // active under the same surface so the user sees "Claude Code
-  // Subscription: 47 calls" regardless of who fired them.
-  const surfaceRows = useMemo(() => {
-    if (!summary) return [];
-    const map = new Map<string, BillingSurfaceRow>();
-    for (const r of summary.rows) {
-      const existing = map.get(r.billing_surface);
-      if (!existing) {
-        map.set(r.billing_surface, { ...r, dispatch_kind: "merged" });
-      } else {
-        existing.runs += r.runs;
-        existing.tokens_in += r.tokens_in;
-        existing.tokens_out += r.tokens_out;
-        existing.cost_usd += r.cost_usd;
-        existing.duration_seconds += r.duration_seconds;
-      }
-    }
-    return Array.from(map.values());
-  }, [summary]);
+  // surfaceRows is now derived ABOVE the early returns (see useMemo
+  // moved to top of component) to fix the "Rendered more hooks than
+  // during the previous render" violation Will caught 2026-05-22.
   // v2.1.9 — PG DECIMAL columns serialize as strings. Coerce on every
   // arithmetic/.toFixed read so the panel doesn't crash when real
   // cloud cost values land (was latent before v2.1.4 wired uploads).
