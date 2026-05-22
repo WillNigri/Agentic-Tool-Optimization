@@ -1242,17 +1242,33 @@ fn run_api(
                 tc_summary,
             )
         }
-        Err(e) => (
-            "error",
-            None,
-            Some(truncate(&e.to_string())),
-            0_i64,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
+        Err(e) => {
+            // v2.7.15 — record the REQUESTED model even when the
+            // dispatch errors (Will dogfood 2026-05-22 cost-accuracy
+            // audit). Pre-fix the error path returned `model = None`,
+            // which collapsed cost_usd to None at line 1269 below,
+            // meaning errored BYOK calls that actually hit Google /
+            // Anthropic / OpenAI's API + got billed showed as $0 in
+            // ATO. 35 minimax errors + 22 google errors in May 2026
+            // alone were ledger-invisible because of this. The
+            // requested model is what model_override/default_model
+            // resolved to BEFORE the call — we already know it here.
+            let requested_model = model_override
+                .clone()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| provider.default_model.to_string());
+            (
+                "error",
+                None,
+                Some(truncate(&e.to_string())),
+                0_i64,
+                Some(requested_model),
+                None,
+                None,
+                None,
+                None,
+            )
+        }
     };
 
     // Fall back to char-count estimate when the provider didn't return

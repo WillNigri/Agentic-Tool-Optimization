@@ -2022,12 +2022,28 @@ pub async fn prompt_api_provider(
                     ),
                     None => (None, None),
                 };
+            // v2.7.15 — cost-tracking bug fix (war-room 2A5D9504 #B,
+            // claude VETO of original premise). Pre-fix this path
+            // hardcoded `cost_usd_estimated = NULL` AND omitted the
+            // `model` column entirely. EVERY desktop BYOK dispatch
+            // recorded $0 cost — strictly worse than the CLI's
+            // partial coverage. Now we compute cost the same way
+            // CLI run_api does: prefer real provider tokens via
+            // cost_from_tokens; fall back to chars-heuristic.
+            let cost_usd: Option<f64> = match (o.tokens_in, o.tokens_out) {
+                (Some(ti), Some(to)) => ato_pricing::cost_from_tokens(&o.model_used, ti, to),
+                _ => estimate_cost_usd(
+                    &o.model_used,
+                    &prompt,
+                    o.response.as_deref().unwrap_or(""),
+                ),
+            };
             // MiniMax round-1 6.x-C: surface write failures instead
             // of swallowing them. The dispatch still succeeds; the
             // log row just doesn't exist, and the user sees why.
             if let Err(e) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, NULL, ?11, ?12)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -2039,8 +2055,11 @@ pub async fn prompt_api_provider(
                     status,
                     o.error_message.as_ref().map(|s| truncate_api_log(s)),
                     now,
+                    cost_usd,
                     tool_calls_count,
                     tool_calls_summary,
+                    o.model_used,
+                    "api_key",
                 ],
             ) {
                 eprintln!("prompt_api_provider: execution_logs write failed: {}", e);
@@ -2059,10 +2078,36 @@ pub async fn prompt_api_provider(
             }
         }
         Err(e) => {
+            // v2.7.15 — error path now records the REQUESTED model
+            // + prompt-only cost estimate (war-room 2A5D9504 #E).
+            // Pre-fix this branch recorded NULL for both, hiding the
+            // cost of failed dispatches that the provider DID bill us
+            // for (input tokens scanned before rejection). Mirror the
+            // CLI fix in dispatch.rs::run_api's Err arm.
+            let requested_model = model
+                .clone()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| provider.default_model.to_string());
+            let est_input_tokens = estimate_text_tokens(&prompt);
+            let cost_usd: Option<f64> =
+                ato_pricing::cost_from_tokens(&requested_model, est_input_tokens, 0);
+            // explicit Option type annotation so the rusqlite params!
+            // macro can infer the binding correctly.
+            let cost_usd_opt: Option<f64> = cost_usd;
             if let Err(write_err) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated)
-                 VALUES (?1, ?2, ?3, NULL, NULL, NULL, 0, 'error', ?4, NULL, NULL, ?5, NULL)",
-                rusqlite::params![id, provider.slug, truncate_api_log(&prompt), &e, now],
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode)
+                 VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, 'error', ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    id,
+                    provider.slug,
+                    truncate_api_log(&prompt),
+                    est_input_tokens,
+                    &e,
+                    now,
+                    cost_usd_opt,
+                    requested_model,
+                    "api_key",
+                ],
             ) {
                 eprintln!(
                     "prompt_api_provider: execution_logs error-write failed: {}",
