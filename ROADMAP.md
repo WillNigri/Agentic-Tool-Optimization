@@ -341,6 +341,28 @@ the LinkedIn thread was a hallway echo, not real pull. Drop the
 security narrative + refocus on the GUI-for-agents wedge that
 v1.3.0 just shipped.
 
+**Companion public-facing artifacts shipping alongside P0+P2:**
+
+- `docs/comparison.md` — public stack-map showing where ATO sits
+  (above the gateway, above the LLM, above observability) and
+  which tools are explicitly complementary (Langfuse / Helicone /
+  LangSmith / Braintrust). The scope-boundary doctrine stays
+  load-bearing: ATO is **complementary** to observability tools,
+  NOT a replacement.
+- `docs/mcp-author-guide.md` — one-pager on the P2 header
+  convention (`X-ATO-User-Id` / `X-ATO-Workspace` / `X-ATO-Room`)
+  with sample code for row-level Postgres ACLs, document-scoping
+  in vector stores, and S3 prefix filtering. Target audience: the
+  MCP authors who shipped a custom MCP in the last 90 days.
+- 90-second product Loom — single visual asset that lands the
+  3-minute install → first dispatch → war-room → team scope →
+  Vercel deploy arc. Posted to ato.dev landing and linked from
+  every Phase 1 outreach.
+
+Strategic / tier / named-prospect details for Phase 2 (cloud) live
+in the private `ato-strategy` repo and the `ato-cloud` closed-source
+repo per the open-source / closed-source split convention.
+
 ### Path to 85+ on all five elegance fronts (war-roomed 2026-05-19)
 
 Honest audit after v2.7.6 dogfood pass: the "85%+ across all 5 fronts" framing in earlier release notes was aspirational, not measured. Real scores: TS gate ~95, DB schema ~85, Backend org ~70 (`commands/mod.rs` still 9,133 lines + 3 other Rust files over 1,500), Frontend org ~65 (`PromptBar/index.tsx` 1,501 lines), Surface ~55 (7 UX bugs caught in one dogfood session — chevron-hidden launcher, FirstChatWizard not globally mounted, SessionsList pending-flag subscription wrong, NewSessionModal hidden behind detail view, line-through pills, subtab routing bug, 0-msg ghost rows). Weighted average ~70%.
