@@ -40,6 +40,7 @@ pub mod skills_mutate;
 pub mod mcp;
 pub mod mcp_dispatch;
 pub mod mcp_install;
+pub mod telemetry;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -69,6 +70,7 @@ pub use skills::*;
 pub use skills_mutate::*;
 pub use mcp::*;
 pub use mcp_install::*;
+pub use telemetry::*;
 
 use crate::*;
 use std::collections::HashMap;

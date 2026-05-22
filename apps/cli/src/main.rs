@@ -51,6 +51,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Upgrade / status for ATO Pro subscription (Phase A chunk 6).
+    Pro(commands::pro::ProArgs),
     /// Inspect recent dispatches (executions of an agent / runtime)
     Dispatches {
         #[command(subcommand)]
@@ -963,6 +965,10 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
+        Commands::Pro(args) => {
+            commands::pro::run(args);
+            return Ok(());
+        }
         Commands::Dispatches { sub } => match sub {
             DispatchesSub::Recent {
                 limit,

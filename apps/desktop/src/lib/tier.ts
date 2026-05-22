@@ -7,6 +7,10 @@ import {
   startTrialIfUnset,
   type TrialStatus,
 } from "@/lib/trial";
+// v2.8.x chunk 5 — telemetry-as-value-exchange (Will's "we have no
+// telemetry" correction). conv-telemetry branch added the local
+// recording side; cloud-forward lives in conversionTelemetry.ts.
+import { recordFeatureUse } from "@/lib/conversionTelemetry";
 
 // v1.4.0 — Tier helper.
 //
@@ -204,9 +208,23 @@ export function useTrialStatus(): TrialStatus {
   return trial;
 }
 
-/** Hook: returns true when the current tier is high enough for `feature`. */
+/** Hook: returns true when the current tier is high enough for `feature`.
+ *
+ *  Strategy PR-B (2026-05-21) — every mount of a gated UI bumps a
+ *  conversion counter via `recordFeatureUse`. The bump fires from a
+ *  `useEffect`, NOT during render — code-review war-room (claude/minimax
+ *  seats, 2026-05-22) caught that a render-time bump turns "user opened
+ *  panel" into "React re-rendered this many times" and corrupts the WTP
+ *  signal. Effect re-fires only on (feature, tier) change so a
+ *  mid-session tier flip starts a new counter; otherwise one mount =
+ *  one bump (plus the dev StrictMode double-mount, which is contained
+ *  to dev). The counter flushes to SQLite every 60s; see
+ *  `lib/conversionTelemetry.ts` for the flush model. */
 export function useFeatureFlag(feature: Feature): boolean {
   const tier = useTier();
+  useEffect(() => {
+    recordFeatureUse(feature, tier);
+  }, [feature, tier]);
   return TIER_ORDER[tier] >= TIER_ORDER[FEATURE_MIN_TIER[feature]];
 }
 
