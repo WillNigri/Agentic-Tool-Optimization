@@ -315,14 +315,55 @@ queued for the next focused session. See the "v2.7.14 — Released
   lines) into `recipes_engine/{mod,triggers,placeholders,actions,
   audit}.rs`. War-roomed plan (`726F8702`) before code. `pub(super)`
   visibility; behavior unchanged. Backend 85 → 88.
-- ⚠️ PARTIAL `2ad9441` (v2.7.14) — Versioned master-key (`master_key_v2`).
-  PR-1 SHIPPED: additive `master_key_ledger` table + `llm_api_keys.
-  key_version` column + idempotent v1 backfill on startup. Zero
-  behavior change today. PRs 2-6 (per-OS identity probe, mismatch
-  detection, atomic re-encryption transaction, rekey UI, CLI mirror)
-  designed in memory `project_master_key_v2_design.md` and war-roomed
-  (`C14E2735`) — held for live dogfood because they touch destructive
-  paths. Surface 85 → 87 partial; full credit lands when PRs 2-6 ship.
+- ✅ SHIPPED (v2.7.14 + chained session branches 2026-05-22) —
+  Versioned master-key (`master_key_v2`).
+  - **PR-1 on main** `2ad9441` — `master_key_ledger` table +
+    `llm_api_keys.key_version` column + idempotent v1 backfill on
+    startup. Additive, zero behavior change.
+  - **PR-2 on `session-master-key-pr2`** `834ea73` — per-OS identity
+    probe + `populate_active_row`. macOS via `codesign -d
+    --verbose=2` subprocess (war-room deviation from FFI for dep-
+    pin stability); Linux via `$APPIMAGE` sentinel; Windows coarse
+    `exe_path‖$OS` fallback. 11 unit tests. War-rooms `9B1F252F`.
+  - **PR-3 on `session-master-key-pr3`** `9484c1c` — mismatch
+    detection (`check_for_mismatch` + `ProbeStatus` enum +
+    `IdentityProbeState` + `get_identity_probe_status` Tauri
+    command + `identity-probe-status` event). Audit log dedup by
+    `(action, resource_id, computed_probe LIKE)`. Hex-invariant
+    `debug_assert` guard. 10 unit tests + serde-round-trip
+    contract for PR-5. War-room `FC2FAB88`.
+  - **PR-4 on `session-master-key-pr4`** `a62c8b2` — atomic
+    re-encryption transaction. `rekey_inner(conn, old, new) ->
+    Result<(usize, String), RekeyError>` opens `BEGIN IMMEDIATE`,
+    re-encrypts every v1 row, retires v1 in the ledger, INSERTs
+    v2 row, writes audit_logs entry, COMMITs. `rekey_master_key`
+    Tauri command handles the keychain dance (write v2 entry
+    BEFORE transaction; delete v1 AFTER commit) + re-runs
+    `run_full_probe_cycle` on success so PR-5's UI flips from
+    Mismatched to Matched without a relaunch. Typed `RekeyError`
+    enum surfaces row_id on decrypt failure. 10 unit tests
+    (including atomicity rollback verification). War-room
+    `3883E920`.
+  - **PR-5 on `session-master-key-pr5`** `0e918ae` — desktop UI:
+    `IdentityProbeBanner` (subscribes to `identity-probe-status`
+    Tauri event + polls command for race-safety; renders only on
+    `mismatched`) + `RekeyMasterKeyModal` (textarea + Submit
+    invoking `rekey_master_key`). Tooltip surfaces the macOS
+    `security find-generic-password` command for cross-machine
+    rekey. Banner mounted globally in `App.tsx` alongside
+    `UpdateBanner`. No unit tests — UI dogfood by driver.
+  - **PR-6 on `session-master-key-pr6`** `9e1cc1f` — CLI mirror:
+    `ato master-key export --confirm-i-understand-this-prints-the-key`
+    prints the keychain master key to stdout (warning to stderr
+    so a pipe to `pbcopy`/`xclip` stays clean). Refusal without
+    the safety flag pins the leakage concern. 2 unit tests.
+  - **Merge order** (per
+    `~/.claude/projects/.../memory/project_master_key_v2_merge_guide.md`):
+    PR-2 → PR-3 → PR-4 → PR-5 → PR-6. Each is a fast-forward;
+    PR-5 dogfood includes a forced-mismatch test that exercises
+    the whole chain end-to-end against the prod DB.
+  - **Architectural surface 85 → 87 ✅** — cliff detection +
+    recovery shipped without orphaning ciphertexts.
 - ✅ SHIPPED `94cb10f` + `3235b97` (v2.7.14) — `anchor_runtime` column
   on `chat_threads` + distinct "With <runtime>" badge in ChatCard.
   WhatsApp-row LLM-icon column the v2.7.6 truncation war-room shipped
