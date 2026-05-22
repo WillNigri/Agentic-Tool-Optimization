@@ -533,6 +533,12 @@ pub fn run() {
             list_agent_variables,
             save_agent_variable,
             delete_agent_variable,
+            // v2.8.x P2 Security AMEND — consent grants for file/db/computed
+            // resolvers. War-room 87E6CADF round 3 non-negotiable: any
+            // local-file-reading resolver requires explicit user consent.
+            grant_variable_consent,
+            revoke_variable_consent,
+            list_variable_consents,
             prompt_agent_with_context,
             prompt_agent_with_history,
             // v1.4.0 F2: Pre-call context hooks

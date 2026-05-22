@@ -211,6 +211,31 @@ pub fn init_database(conn: &Connection) {
             UNIQUE (agent_id, name)
         );
         CREATE INDEX IF NOT EXISTS idx_agent_vars_agent ON agent_variables(agent_id);
+        -- v2.8.x P2 — Security AMEND (war-room 87E6CADF round 3, security-
+        -- specialist NON-NEGOTIABLE): when variables.advanced re-tiered to
+        -- Free, every user can now configure variables of kind 'file',
+        -- 'db-query', or 'computed' that read local files / run code. A
+        -- hostile MCP could spawn an agent that reads ~/.ssh/id_rsa and
+        -- the file content gets inlined into the next LLM prompt — direct
+        -- exfiltration. Mitigation: explicit per-variable consent grant
+        -- required BEFORE the resolver will execute. Frontend prompts at
+        -- save time with the exact path; user must acknowledge.
+        --
+        -- Scope semantics:
+        --   'once'    — single resolve, then revoke (debug / one-shot use)
+        --   'session' — until the app restart (not yet wired; future)
+        --   'always'  — until user revokes from Settings → Permissions
+        CREATE TABLE IF NOT EXISTS variable_consent_grants (
+            id           TEXT PRIMARY KEY,
+            variable_id  TEXT NOT NULL,
+            scope        TEXT NOT NULL,        -- 'once' | 'session' | 'always'
+            granted_at   TEXT NOT NULL,
+            granted_resource TEXT NOT NULL,    -- the exact path/sql/expr at consent time
+            revoked_at   TEXT,                  -- NULL = still active
+            FOREIGN KEY (variable_id) REFERENCES agent_variables(id) ON DELETE CASCADE,
+            UNIQUE (variable_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_consent_variable ON variable_consent_grants(variable_id);
         -- F2: Pre-call context hooks. Ordered list of resolvers that run
         --     before each LLM turn and inject results into the user message.
         CREATE TABLE IF NOT EXISTS agent_hooks (
