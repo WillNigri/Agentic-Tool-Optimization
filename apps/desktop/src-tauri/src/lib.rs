@@ -24,6 +24,7 @@ pub mod api_dispatch;
 pub mod api_dispatch_tools;
 pub mod recipes_engine;
 mod schema;
+mod identity_probe;
 
 use rusqlite::{Connection, params};
 use schema::init_database;
@@ -207,6 +208,14 @@ pub fn run() {
     // will migrate them. Old rows stay decryptable in the meantime
     // via the encryption module's legacy fallback path.
     migrate_legacy_api_keys(&conn);
+    // v2.7.14 master_key_v2 PR-2 — populate the active master_key_ledger
+    // row's identity_probe column. PR-1 created the row with the probe
+    // NULL; PR-2 fills it. UPDATE-WHERE-NULL semantics means re-launches
+    // are no-ops once populated. Env-bypass (ATO_MASTER_KEY_B64) skips
+    // the write so dev probes don't corrupt the prod-keychain row.
+    // Errors are swallowed because probe writes are observational —
+    // never block app startup. Architecture war-room: 9B1F252F.
+    let _ = identity_probe::populate_active_row(&conn);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
