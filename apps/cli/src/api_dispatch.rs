@@ -583,10 +583,27 @@ fn parse_response(
                 });
             }
         };
-        // usageMetadata = {promptTokenCount, candidatesTokenCount, totalTokenCount}.
-        let usage = &payload["usageMetadata"];
-        let tokens_in = usage["promptTokenCount"].as_i64();
-        let tokens_out = usage["candidatesTokenCount"].as_i64();
+        // v2.7.15 — usageMetadata shape (Google billing 2026):
+        //   { promptTokenCount, candidatesTokenCount, thoughtsTokenCount,
+        //     cachedContentTokenCount, totalTokenCount }
+        //
+        // PRE-FIX BUG (Will dogfood 2026-05-22): we only summed
+        // promptTokenCount + candidatesTokenCount. Gemini 2.5 Flash
+        // (and the 2.5 family generally) has THINKING ENABLED BY
+        // DEFAULT; the model produces hidden "thoughts" before its
+        // visible answer. Google bills `thoughtsTokenCount` at the
+        // SAME RATE as `candidatesTokenCount` ($2.50/M for 2.5 Flash).
+        // Ignoring it meant ATO's recorded output tokens were 30-50%
+        // LOWER than what Google billed — Will's R$15.97 actual vs
+        // our $1.40 recorded ≈ ~56% undercount.
+        //
+        // Fix: add thoughts to output. Cached input is billed
+        // separately at a discount, but for cost-comparison
+        // purposes we count cached input as input (it's still
+        // "what the model received" semantically).
+        // v2.7.15 — parse_gemini_usage handles the thoughtsTokenCount
+        // accounting. See its docstring + test module below.
+        let (tokens_in, tokens_out) = parse_gemini_usage(&payload["usageMetadata"]);
         return Ok(ApiDispatchOutcome {
             response: Some(response),
             error_message: None,
@@ -798,5 +815,106 @@ fn truncate_for_audit(s: &str, max_chars: usize) -> String {
         let mut out: String = s.chars().take(max_chars).collect();
         out.push('…');
         out
+    }
+}
+
+/// Extract (input, output) token counts from Gemini's
+/// `usageMetadata` block. Returns `(tokens_in, tokens_out)` as
+/// `(Option<i64>, Option<i64>)` so callers can distinguish
+/// "unmeasured" (None — usageMetadata was malformed or absent) from
+/// "$0 free dispatch" (Some(0)).
+///
+/// Output handling: Gemini 2.5 has thinking enabled by default;
+/// Google bills `thoughtsTokenCount` at the SAME RATE as
+/// `candidatesTokenCount` ($2.50/M for 2.5 Flash). Pre-v2.7.15 we
+/// only counted candidates, undercounting real billing by 30-50%
+/// (Will dogfood 2026-05-22). `tokens_out` is anchored on
+/// `candidatesTokenCount` being present (otherwise None) so a
+/// malformed response doesn't get logged as a successful $0 run —
+/// claude war-room C37BD156 round 1 #B regression catch.
+///
+/// Note: `cachedContentTokenCount` is a BREAKDOWN of
+/// `promptTokenCount` per Google's docs (the cached portion is
+/// counted within prompt, just billed at a discount). We don't
+/// add it again here — that would double-count.
+pub(crate) fn parse_gemini_usage(
+    usage: &serde_json::Value,
+) -> (Option<i64>, Option<i64>) {
+    let tokens_in = usage["promptTokenCount"].as_i64();
+    let tokens_out = usage["candidatesTokenCount"].as_i64().map(|cand| {
+        cand + usage["thoughtsTokenCount"].as_i64().unwrap_or(0)
+    });
+    (tokens_in, tokens_out)
+}
+
+#[cfg(test)]
+mod gemini_usage_tests {
+    use super::parse_gemini_usage;
+    use serde_json::json;
+
+    // Pin all three cost-tracking-correctness invariants for the
+    // Gemini usageMetadata extraction. The bug Will caught on
+    // 2026-05-22 cost ATO ~56% of its tracked Google spend; these
+    // tests stop a regression from costing it again.
+
+    #[test]
+    fn sums_candidates_plus_thoughts_for_25_thinking_models() {
+        // Gemini 2.5 Flash response: 150 thoughts + 200 visible output.
+        let usage = json!({
+            "promptTokenCount": 1000,
+            "candidatesTokenCount": 200,
+            "thoughtsTokenCount": 150,
+            "totalTokenCount": 1350,
+        });
+        let (tin, tout) = parse_gemini_usage(&usage);
+        assert_eq!(tin, Some(1000));
+        assert_eq!(tout, Some(350), "must sum candidates + thoughts");
+    }
+
+    #[test]
+    fn returns_candidates_only_when_thoughts_field_absent() {
+        // Gemini 2.0 Flash (pre-thinking) — no thoughtsTokenCount key.
+        let usage = json!({
+            "promptTokenCount": 500,
+            "candidatesTokenCount": 100,
+            "totalTokenCount": 600,
+        });
+        let (tin, tout) = parse_gemini_usage(&usage);
+        assert_eq!(tin, Some(500));
+        assert_eq!(tout, Some(100), "no thoughts field → just candidates");
+    }
+
+    #[test]
+    fn returns_none_when_usagemetadata_is_absent_or_malformed() {
+        // Pre-AMEND regression case (claude C37BD156 #B): empty /
+        // malformed usageMetadata MUST yield None, not Some(0). The
+        // db.rs cost-aggregator treats None as "unmeasured" and
+        // Some(0) as "free successful run" — conflating them was
+        // the regression the war-room caught.
+        let absent = json!({});
+        let (tin, tout) = parse_gemini_usage(&absent);
+        assert_eq!(tin, None, "no promptTokenCount → unmeasured");
+        assert_eq!(tout, None, "no candidatesTokenCount → unmeasured");
+
+        let null_meta = json!(null);
+        let (tin, tout) = parse_gemini_usage(&null_meta);
+        assert_eq!(tin, None);
+        assert_eq!(tout, None);
+    }
+
+    #[test]
+    fn does_not_double_count_cached_input() {
+        // cachedContentTokenCount is a BREAKDOWN of promptTokenCount
+        // per Google's docs — the cached portion is INSIDE prompt,
+        // billed at a discount. We must NOT add it to tokens_in or
+        // we'd over-count input on every cached dispatch.
+        let usage = json!({
+            "promptTokenCount": 1000,         // total input
+            "cachedContentTokenCount": 800,   // 800 of those were cache hits
+            "candidatesTokenCount": 50,
+            "totalTokenCount": 1050,
+        });
+        let (tin, _) = parse_gemini_usage(&usage);
+        assert_eq!(tin, Some(1000), "tokens_in is the full prompt — cache breakdown stays out");
     }
 }
