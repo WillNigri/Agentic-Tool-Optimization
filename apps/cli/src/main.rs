@@ -82,6 +82,11 @@ enum Commands {
     Pro(commands::pro::ProArgs),
     /// Scheduled evaluators — run quality checks on cloud traces automatically (Pro).
     Evaluators(commands::evaluators::EvaluatorsArgs),
+    /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
+    #[command(name = "optimize")]
+    Optimize(commands::cost_recommend::CostRecommendArgs),
+    /// Cloud trace management — backfill local traces to cloud.
+    Traces(commands::traces::TracesArgs),
     /// Inspect recent dispatches (executions of an agent / runtime)
     Dispatches {
         #[command(subcommand)]
@@ -1056,6 +1061,14 @@ fn main() -> Result<()> {
         }
         Commands::Evaluators(args) => {
             commands::evaluators::run(args, cli.human);
+            return Ok(());
+        }
+        Commands::Traces(args) => {
+            commands::traces::run(args, cli.human);
+            return Ok(());
+        }
+        Commands::Optimize(args) => {
+            commands::cost_recommend::run(args, cli.human, &cli.db.as_ref().map(|p| p.to_string_lossy().to_string()));
             return Ok(());
         }
         Commands::Dispatches { sub } => match sub {

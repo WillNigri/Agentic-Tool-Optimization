@@ -76,6 +76,12 @@ export const useAuthStore = create<AuthState>()(
           tier: resolvedTier,
         });
         latchEverPaidIfPaid(resolvedTier);
+        // Backfill local traces to cloud on login (non-blocking).
+        // Gives day-1 analytics for new Pro users and fills gaps
+        // from periods when the user was logged out.
+        import("@/lib/traceBackfill").then(({ backfillLocalTraces }) => {
+          backfillLocalTraces().catch(() => {});
+        });
       },
 
       setTier: (tier) => {
