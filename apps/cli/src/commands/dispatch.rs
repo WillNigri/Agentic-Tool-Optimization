@@ -19,6 +19,79 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
+/// Upload a trace to the cloud for Pro analytics. Fire-and-forget:
+/// failures are silent because the local execution_log already has
+/// the data. This closes the pipeline gap where CLI dispatches
+/// (war rooms, sessions, direct) were silently lost.
+fn upload_trace_to_cloud(
+    runtime: &str,
+    agent_slug: Option<&str>,
+    started_at: &str,
+    duration_ms: i64,
+    ok: bool,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
+    cost_usd: Option<f64>,
+    error: Option<&str>,
+    prompt: &str,
+    war_room_id: Option<&str>,
+) {
+    // Read token from ~/.ato/auth.json — if not logged in, skip
+    let auth_path = crate::db::home_dir().join(".ato").join("auth.json");
+    let token = match std::fs::read_to_string(&auth_path) {
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(j) => j.get("token").and_then(|v| v.as_str()).map(String::from),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+    let token = match token {
+        Some(t) => t,
+        None => return, // Not logged in — skip silently
+    };
+
+    let cloud_url = std::env::var("ATO_CLOUD_URL")
+        .unwrap_or_else(|_| "https://api.agentictool.ai".to_string());
+
+    let slug = agent_slug.unwrap_or("unknown-agent");
+    let summary: String = prompt.chars().take(200).collect();
+
+    let mut trace = serde_json::json!({
+        "agentSlug": slug,
+        "runtime": runtime,
+        "startedAt": started_at,
+        "durationMs": duration_ms,
+        "ok": ok,
+        "source": "cli-dispatch",
+    });
+    if let Some(ti) = tokens_in { trace["promptTokens"] = serde_json::json!(ti); }
+    if let Some(to) = tokens_out { trace["responseTokens"] = serde_json::json!(to); }
+    if let Some(c) = cost_usd { trace["costUsd"] = serde_json::json!(c); }
+    if let Some(e) = error { trace["error"] = serde_json::json!(e); }
+    if !summary.is_empty() { trace["promptSummary"] = serde_json::json!(summary); }
+    if let Some(wrid) = war_room_id {
+        trace["metadata"] = serde_json::json!({ "warRoomId": wrid });
+    }
+
+    let body = serde_json::json!({ "traces": [trace] });
+
+    // Fire-and-forget in a background thread so dispatch latency is unaffected
+    std::thread::spawn(move || {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _ = client
+            .post(format!("{}/api/agent-traces", cloud_url))
+            .bearer_auth(&token)
+            .json(&body)
+            .send();
+    });
+}
+
 /// PR-A.5 — load `agents.system_prompt` for `--agent <slug>` and
 /// prepend it as a `## Persona` block to the dispatch body. Mirrors
 /// the pattern review.rs:733-751 already uses for `--reviewer @<slug>`.
@@ -857,6 +930,23 @@ pub fn run(
     // group this row into a war-room synthetic card.
     tag_war_room(&conn, &id, war_room_id.as_deref(), war_room_round)?;
 
+    // ── Cloud trace upload (Pro) ───────────────────────────────
+    // Non-blocking: failures are silent. Local log already has the
+    // data. Mirrors the desktop's uploadAgentTrace() in TypeScript.
+    upload_trace_to_cloud(
+        runtime_name,
+        agent_slug_for_event.as_deref(),
+        &now,
+        duration_ms,
+        status == "success",
+        tokens_in,
+        tokens_out,
+        cost_usd,
+        error_persisted.as_deref(),
+        prompt,
+        war_room_id.as_deref(),
+    );
+
     // v2.3.27 Phase 6.x — quota capture. On error, try to parse a
     // reset time from the message and persist it so the next
     // dispatch's pre-flight can short-circuit. On success, clear
@@ -1319,6 +1409,21 @@ fn run_api(
     // PR 14 — war_room_id tag (API-dispatch path).
     tag_war_room(&conn, &id, war_room_id.as_deref(), war_room_round)?;
 
+    // Cloud trace upload (API-dispatch path)
+    upload_trace_to_cloud(
+        provider.slug,
+        agent_slug_for_event.as_deref(),
+        &now,
+        duration_ms,
+        status == "success",
+        tokens_in,
+        tokens_out,
+        cost_usd,
+        error_persisted.as_deref(),
+        prompt,
+        war_room_id.as_deref(),
+    );
+
     if status == "error" {
         crate::events_publisher::publish_dispatch_failed(
             &conn,
@@ -1567,6 +1672,21 @@ fn run_remote(
     .context("Failed to write execution_logs row (remote)")?;
     // PR 14 — war_room_id tag (remote-dispatch path).
     tag_war_room(&conn, &id, war_room_id.as_deref(), war_room_round)?;
+
+    // Cloud trace upload (remote-dispatch path)
+    upload_trace_to_cloud(
+        &remote.slug,
+        agent_slug_for_event.as_deref(),
+        &now,
+        duration_ms,
+        status == "success",
+        tokens_in,
+        tokens_out,
+        cost_usd,
+        error_persisted.as_deref(),
+        prompt,
+        war_room_id.as_deref(),
+    );
 
     let result = DispatchResult {
         id: id.clone(),
