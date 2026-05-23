@@ -80,6 +80,8 @@ enum Commands {
     Whoami,
     /// Upgrade / status for ATO Pro subscription (Phase A chunk 6).
     Pro(commands::pro::ProArgs),
+    /// Scheduled evaluators — run quality checks on cloud traces automatically (Pro).
+    Evaluators(commands::evaluators::EvaluatorsArgs),
     /// Inspect recent dispatches (executions of an agent / runtime)
     Dispatches {
         #[command(subcommand)]
@@ -1050,6 +1052,10 @@ fn main() -> Result<()> {
         }
         Commands::Pro(args) => {
             commands::pro::run(args, cli.human);
+            return Ok(());
+        }
+        Commands::Evaluators(args) => {
+            commands::evaluators::run(args, cli.human);
             return Ok(());
         }
         Commands::Dispatches { sub } => match sub {
