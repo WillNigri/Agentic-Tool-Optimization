@@ -15,7 +15,12 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-const API_BASE: &str = "https://ato.cloud/api/auth";
+fn api_base() -> String {
+    match std::env::var("ATO_CLOUD_URL") {
+        Ok(url) => format!("{}/api/auth", url.trim_end_matches('/')),
+        Err(_) => "https://ato.cloud/api/auth".to_string(),
+    }
+}
 
 fn auth_file_path() -> PathBuf {
     crate::db::home_dir().join(".ato").join("auth.json")
@@ -114,7 +119,7 @@ fn handle_login(email: Option<String>, password: Option<String>) {
     };
 
     let resp = client
-        .post(format!("{}/login", API_BASE))
+        .post(format!("{}/login", api_base()))
         .json(&serde_json::json!({ "email": email, "password": password }))
         .send();
 
@@ -184,7 +189,7 @@ fn handle_signup(email: Option<String>, password: Option<String>, name: Option<S
     }
 
     let resp = client
-        .post(format!("{}/register", API_BASE))
+        .post(format!("{}/register", api_base()))
         .json(&body)
         .send();
 
@@ -238,7 +243,7 @@ fn handle_logout() {
                 body["refreshToken"] = serde_json::Value::String(r.clone());
             }
             let _ = client
-                .post(format!("{}/logout", API_BASE))
+                .post(format!("{}/logout", api_base()))
                 .bearer_auth(t)
                 .json(&body)
                 .send();
@@ -271,7 +276,7 @@ fn handle_whoami() {
     };
 
     let resp = client
-        .get(format!("{}/me", API_BASE))
+        .get(format!("{}/me", api_base()))
         .bearer_auth(&token)
         .send();
 
@@ -338,7 +343,7 @@ fn handle_resend_verify(email: Option<String>) {
     };
 
     let resp = client
-        .post(format!("{}/resend-verification", API_BASE))
+        .post(format!("{}/resend-verification", api_base()))
         .json(&serde_json::json!({ "email": email }))
         .send();
 

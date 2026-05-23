@@ -9,8 +9,14 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 
-const CHECKOUT_URL: &str = "https://ato.cloud/pro/checkout?source=cli";
-const API_BASE: &str = "https://ato.cloud/api";
+fn cloud_base() -> String {
+    std::env::var("ATO_CLOUD_URL")
+        .unwrap_or_else(|_| "https://ato.cloud".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+fn checkout_url() -> String { format!("{}/pro/checkout?source=cli", cloud_base()) }
+fn api_base() -> String { format!("{}/api", cloud_base()) }
 
 fn auth_file_path() -> PathBuf {
     crate::db::home_dir().join(".ato").join("auth.json")
@@ -45,7 +51,7 @@ fn open_browser(url: &str) -> bool {
 /// Fetch user profile from /api/auth/me. Returns (tier, email) or exits.
 fn fetch_me(token: &str) -> (String, String) {
     let client = http_client().unwrap_or_else(|e| { eprintln!("{}", e); std::process::exit(1); });
-    let resp = client.get(format!("{}/auth/me", API_BASE)).bearer_auth(token).send();
+    let resp = client.get(format!("{}/auth/me", api_base())).bearer_auth(token).send();
     match resp {
         Ok(r) if r.status().is_success() => {
             let body: serde_json::Value = r.json().unwrap_or_default();
@@ -132,8 +138,9 @@ const FEATURES: &[FeatureInfo] = &[
 
 fn handle_enable() {
     println!("Opening browser to ATO Pro checkout…");
-    if !open_browser(CHECKOUT_URL) {
-        eprintln!("Could not open browser. Visit:\n  {}", CHECKOUT_URL);
+    let url = checkout_url();
+    if !open_browser(&url) {
+        eprintln!("Could not open browser. Visit:\n  {}", url);
         std::process::exit(1);
     }
     println!("After paying, run `ato pro status` to confirm.");
@@ -241,7 +248,7 @@ fn handle_test(human: bool) {
 
     // Test 2: Tier endpoint
     {
-        let resp = client.get(format!("{}/tier/me", API_BASE))
+        let resp = client.get(format!("{}/tier/me", api_base()))
             .bearer_auth(&token).send();
         let (passed, detail) = match resp {
             Ok(r) if r.status().is_success() => {
@@ -257,7 +264,7 @@ fn handle_test(human: bool) {
 
     // Test 3: Embed key (Pro+ only)
     {
-        let resp = client.get(format!("{}/auth/me/embed-key", API_BASE))
+        let resp = client.get(format!("{}/auth/me/embed-key", api_base()))
             .bearer_auth(&token).send();
         let (passed, detail) = match resp {
             Ok(r) if r.status().is_success() => {
@@ -281,7 +288,7 @@ fn handle_test(human: bool) {
 
     // Test 4: Checkout session creation (Pro tier — uses test mode, doesn't charge)
     {
-        let resp = client.post(format!("{}/billing/checkout", API_BASE))
+        let resp = client.post(format!("{}/billing/checkout", api_base()))
             .bearer_auth(&token)
             .json(&serde_json::json!({
                 "tier": "pro",
@@ -307,7 +314,7 @@ fn handle_test(human: bool) {
 
     // Test 5: Cloud traces endpoint (Pro+ only)
     {
-        let resp = client.get(format!("{}/agent-traces?limit=1", API_BASE))
+        let resp = client.get(format!("{}/agent-traces?limit=1", api_base()))
             .bearer_auth(&token).send();
         let (passed, detail) = match resp {
             Ok(r) if r.status().is_success() => {
