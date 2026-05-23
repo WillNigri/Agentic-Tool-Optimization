@@ -1142,6 +1142,87 @@ as `kind=session_turn` posts grouped by `payload.session_id`,
 making the feed and sessions the same substrate viewed two ways.
 Or sessions get their own table — TBD when scoping.
 
+### v2.8.0 — Pro Pipeline + Cost Optimization Engine (Released 2026-05-23)
+
+The "is Pro worth $29/mo?" release. Closes the loop from "we have features" to "they work end-to-end on production and we can honestly sell them." War-room-tested README (6 rounds, 3 runtimes, 10/10/10 lock). Website hero rewritten (7 seats, 3 runtimes, 8.6/10).
+
+**Pro pipeline (all verified on production api.agentictool.ai):**
+- ✅ Cloud trace upload from ALL dispatch paths (was: only 2/12 paths uploaded — critical leak fixed)
+- ✅ Trace backfill on login — desktop auto-uploads local history to cloud, giving day-1 analytics
+- ✅ `ato traces backfill --days 30` — CLI command for manual backfill (1,649/1,749 traces uploaded on first test)
+- ✅ Cloud trace metrics verified correct — upload, query, aggregation math manually verified against source data
+- ✅ Scheduled evaluators — migration 024, cloud cron service (60s poll), CRUD endpoints, CLI (`ato evaluators schedule/list/results/delete`)
+- ✅ Compare-judge endpoint — POST `/api/compare-judge` scores two responses on same prompt using our Anthropic key (Haiku). Quality scoring on our dime, not the user's.
+- ✅ `ato optimize recommend` — analyzes war-room head-to-head data, recommends runtime switches with evidence ("Switch CLAUDE→GOOGLE: 85% savings, 81 rounds, HIGH confidence")
+- ✅ `ato optimize schedule` — recurring optimization tests with user-controlled intensity (Light $0.05/cycle, Normal $0.15, Deep $0.50) and token budget cap
+
+**CLI auth (agentic-first):**
+- ✅ `ato login/signup/logout/whoami` + `ato auth resend-verify`
+- ✅ `--email`/`--password` flags for headless agent usage
+- ✅ Tokens saved to `~/.ato/auth.json` with 0600 permissions
+- ✅ `ATO_CLOUD_URL` env override for local testing
+
+**Pro feature audit + test commands:**
+- ✅ `ato pro features` — lists all 17 features with tier requirement and access status (JSON for agents, --human for table)
+- ✅ `ato pro test` — smoke-tests 5 cloud endpoints (auth, tier, embed-key, checkout, traces)
+
+**Merged branches (11 branches, 35 worktrees cleaned):**
+- ✅ master_key_v2 PR-2→PR-6 (identity probe, mismatch detection, re-encryption, rekey UI, CLI export)
+- ✅ P0 tool-result sanitization (UNTRUSTED_INPUT wrappers)
+- ✅ P2 identity passthrough for MCPs + author guide
+- ✅ Cost disclosure (BYOK exact vs CLI ±15% split)
+- ✅ Cost error path fix (record model+cost on all BYOK dispatch paths)
+- ✅ Insights hooks fix (useMemo above early returns)
+- ✅ Master-key UX (banner placement + step-by-step modal + recovery path)
+- ✅ Day-1 ROI scan + Regressions-as-landing + crown tooltips
+- ✅ GTM strategy + sales pitch + slide deck + integration doctrine
+- ✅ Roadmap security docs
+
+**Fixes:**
+- ✅ Version bump 2.7.7→2.8.0 (root cause of infinite update loop — binary version never matched release tag)
+- ✅ Update error handling — manual download fallback when downloadAndInstall fails silently
+- ✅ Update dismiss — localStorage persists dismissed version to prevent re-prompt
+- ✅ RESEND_API_KEY security fix — no longer sent in HTTP body between services
+- ✅ Default API URL corrected to api.agentictool.ai (was ato.cloud which serves Vercel frontend)
+
+**README + website:**
+- ✅ README war-roomed to 10/10/10 (900→75 lines, 6 rounds, Claude+Google+Minimax)
+- ✅ Website hero rewritten: "WHICH AI ACTUALLY WINS?" + live receipt table + pricing section (7 seats, 8.6/10)
+
+---
+
+## Next: v2.9.0 — Paid Tier Completion
+
+### Pro ($29/mo) — remaining work
+- [ ] Wire compare-judge quality scores INTO `ato optimize recommend` output (currently cost-only, quality column needs cloud judge integration)
+- [ ] Stripe checkout fix — restricted key needs full permissions or test-mode keys for checkout flow
+- [ ] Auto-optimization runner — desktop/CLI periodically replays prompts and calls compare-judge without user intervention
+- [ ] GIF/terminal recording for README + website hero (both have TODO placeholders)
+- [ ] Public trace share URLs (PR-E from strategy doc — one-click "copy link" on any trace for viral loop)
+- [ ] Trial-end email bridge (A4 amendment — email summary of Pro features used + upgrade link on days 10-13)
+
+### Team ($49/seat/mo, min 5) — not started
+- [ ] Team workspaces — shared agents + skills across teammates (UI shell exists, backend wiring needed)
+- [ ] Team-scoped session browse (`team_id` on trace queries)
+- [ ] Agent config sharing via TeamWorkspaces (extend skills-only model to full agent config)
+- [ ] Provider keys — encrypted key store for team-wide cron usage-poller (Team tier because ATO holds credentials)
+- [ ] Team cost dashboard — per-member breakdown, budget caps
+- [ ] Activity timeline — who changed what across the team
+- [ ] `ato serve` — HTTP server for local dispatches (enables Slack/Discord bot integration)
+
+### Platform ($99/mo flat) — not started
+- [ ] Single-seat unlimited agent-operator volume (high-volume solo user)
+- [ ] Usage metering infrastructure (track dispatches per platform user)
+- [ ] Platform-specific pricing page + checkout flow
+
+### Enterprise (custom) — not started
+- [ ] SSO/OIDC (Google Workspace, Okta, Entra) — `ato-cloud` has OAuth scaffolding
+- [ ] Evaluator budgets — per-team eval spend caps
+- [ ] HALO — org-wide safety guardrails via RLM
+- [ ] SOC2-aligned unlimited audit retention
+- [ ] On-prem deployment option
+- [ ] SLA + dedicated support
+
 ---
 
 ## Future Runtime Support
