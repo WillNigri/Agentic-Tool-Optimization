@@ -9,6 +9,7 @@ import {
   TIER_LABEL,
   type Feature,
 } from "@/lib/tier";
+import { featureRoiCopy } from "@/lib/featureRoiCopy";
 import UpgradePrompt from "./UpgradePrompt";
 import TrialExpiredModal from "@/components/Trial/TrialExpiredModal";
 
@@ -49,8 +50,16 @@ export default function TierGate({ feature, children, mode = "block", hint }: Pr
   if (allowed) return <>{children}</>;
 
   const tierLabel = TIER_LABEL[requiredTier];
+  // PR-F (2026-05-21) — Crown badge tooltips lead with the ROI / capability
+  // story per feature, not the generic "Upgrade to Pro" copy. The caller's
+  // explicit `hint` still wins (some surfaces need contextual copy);
+  // featureRoiCopy is the next-best default; generic i18n is the fallback
+  // for any future Feature key added without an ROI line. War-room
+  // de8ffb6d-8b39-4b5c-a2e9-6665e6e7e9f3, R1 Q4 3/3 LOCK.
+  const roiCopy = featureRoiCopy(feature);
   const tooltip =
     hint ??
+    roiCopy ??
     t("tier.lockedTooltip", "Upgrade to {{tier}} to unlock", { tier: tierLabel });
 
   // Phase 1 PR-B — when the 14-day Pro trial has expired, the click on

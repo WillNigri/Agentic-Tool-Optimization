@@ -121,5 +121,13 @@ export default function InsightsSection() {
       Component: AuditLog,
     },
   ];
-  return <SectionTabs storageKey="ato.subtab.insights" tabs={tabs} defaultTab="live" />;
+  // PR-D (2026-05-21) — Regressions promoted to default landing tab.
+  // R4 competitive research confirmed cross-runtime regression detection is
+  // unique to ATO across Langfuse / Helicone / LangSmith / Braintrust /
+  // Promptfoo / Phoenix; making it the first thing a new install sees is
+  // the cheapest moat move available. SectionTabs reads storageKey first,
+  // so existing users keep their saved tab — the default only affects
+  // fresh installs and users who haven't picked a tab yet. War-room
+  // de8ffb6d-8b39-4b5c-a2e9-6665e6e7e9f3, R1 3/3 LOCK.
+  return <SectionTabs storageKey="ato.subtab.insights" tabs={tabs} defaultTab="regressions" />;
 }
