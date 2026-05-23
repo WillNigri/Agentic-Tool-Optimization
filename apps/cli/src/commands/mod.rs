@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod auth;
 pub mod bridge;
 pub mod chats;
 // v2.8.x Phase A chunk 6 — `ato pro enable` / `ato pro status`

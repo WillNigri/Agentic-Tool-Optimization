@@ -25,14 +25,23 @@ async function checkForUpdates() {
     const { ask } = await import("@tauri-apps/plugin-dialog");
     const update = await check();
     if (update) {
+      // Skip if user already dismissed (or installed) this version
+      const dismissed = localStorage.getItem("ato.update.dismissedVersion");
+      if (dismissed === update.version) return;
+
       const yes = await ask(
         `ATO ${update.version} is available. Would you like to update now?`,
         { title: "Update Available", kind: "info", okLabel: "Update", cancelLabel: "Later" }
       );
       if (yes) {
         await update.downloadAndInstall();
+        // Mark as handled so we don't re-prompt if relaunch fails
+        localStorage.setItem("ato.update.dismissedVersion", update.version);
         const { relaunch } = await import("@tauri-apps/plugin-process");
         await relaunch();
+      } else {
+        // User clicked "Later" — suppress until next app launch cycle
+        localStorage.setItem("ato.update.dismissedVersion", update.version);
       }
     }
   } catch (e) {

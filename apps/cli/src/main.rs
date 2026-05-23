@@ -51,6 +51,33 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Sign in, sign up, or manage your ATO Cloud account.
+    Auth(commands::auth::AuthArgs),
+    /// Shortcut for `ato auth login`.
+    Login {
+        /// Email (prompted if omitted)
+        #[arg(long)]
+        email: Option<String>,
+        /// Password (prompted securely if omitted)
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Shortcut for `ato auth signup`.
+    Signup {
+        /// Email (prompted if omitted)
+        #[arg(long)]
+        email: Option<String>,
+        /// Password (prompted securely if omitted)
+        #[arg(long)]
+        password: Option<String>,
+        /// Display name (prompted if omitted)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Shortcut for `ato auth logout`.
+    Logout,
+    /// Shortcut for `ato auth whoami`.
+    Whoami,
     /// Upgrade / status for ATO Pro subscription (Phase A chunk 6).
     Pro(commands::pro::ProArgs),
     /// Inspect recent dispatches (executions of an agent / runtime)
@@ -993,6 +1020,34 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
+        Commands::Auth(args) => {
+            commands::auth::run(args);
+            return Ok(());
+        }
+        Commands::Login { email, password } => {
+            commands::auth::run(commands::auth::AuthArgs {
+                cmd: commands::auth::AuthCommand::Login { email, password },
+            });
+            return Ok(());
+        }
+        Commands::Signup { email, password, name } => {
+            commands::auth::run(commands::auth::AuthArgs {
+                cmd: commands::auth::AuthCommand::Signup { email, password, name },
+            });
+            return Ok(());
+        }
+        Commands::Logout => {
+            commands::auth::run(commands::auth::AuthArgs {
+                cmd: commands::auth::AuthCommand::Logout,
+            });
+            return Ok(());
+        }
+        Commands::Whoami => {
+            commands::auth::run(commands::auth::AuthArgs {
+                cmd: commands::auth::AuthCommand::Whoami,
+            });
+            return Ok(());
+        }
         Commands::Pro(args) => {
             commands::pro::run(args);
             return Ok(());

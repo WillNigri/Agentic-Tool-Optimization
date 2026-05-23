@@ -104,11 +104,10 @@ export function debReleaseUrl(version: string): string {
 export default function UpdateBanner() {
   const [state, setState] = useState<BannerState>({ kind: "loading" });
   const [copied, setCopied] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     if (!isTauri) {
-      // Outside Tauri (dev server, vitest jsdom) there's no updater
-      // and no install method — render nothing.
       setState({ kind: "uptodate" });
       return;
     }
@@ -121,6 +120,12 @@ export default function UpdateBanner() {
           check(),
         ]);
         if (!update) {
+          setState({ kind: "uptodate" });
+          return;
+        }
+        // Skip if user already handled this version
+        const prev = localStorage.getItem("ato.update.dismissedVersion");
+        if (prev === update.version) {
           setState({ kind: "uptodate" });
           return;
         }
@@ -148,12 +153,26 @@ export default function UpdateBanner() {
   }, [state]);
 
   // Fall-through cases: when there's no update, when we errored,
-  // or when this install method doesn't need the manual path
-  // (macOS/Windows/AppImage/Unknown) → render nothing and let the
-  // existing checkForUpdates() ask-dialog handle the prompt.
-  if (state.kind !== "available" || manualCmd === null) {
+  // when dismissed, or when this install method doesn't need the
+  // manual path → render nothing.
+  if (state.kind !== "available" || manualCmd === null || dismissed) {
     return null;
   }
+
+  const handleDismiss = () => {
+    localStorage.setItem("ato.update.dismissedVersion", state.update.version);
+    setDismissed(true);
+  };
+
+  const handleRestart = async () => {
+    try {
+      localStorage.setItem("ato.update.dismissedVersion", state.update.version);
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch {
+      // relaunch not available — tell user to restart manually
+    }
+  };
 
   const onCopy = async () => {
     try {
@@ -202,15 +221,34 @@ export default function UpdateBanner() {
         </button>
       </div>
 
-      <a
-        href="https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex items-center gap-1 text-xs text-cs-accent hover:underline"
-      >
-        <ExternalLink size={11} />
-        View the release on GitHub
-      </a>
+      <div className="flex items-center gap-3">
+        <a
+          href="https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-cs-accent hover:underline"
+        >
+          <ExternalLink size={11} />
+          Release notes
+        </a>
+        <button
+          type="button"
+          onClick={handleRestart}
+          className="inline-flex items-center gap-1 text-xs font-medium text-cs-accent hover:underline"
+        >
+          Restart ATO
+        </button>
+        <button
+          type="button"
+          onClick={handleDismiss}
+          className="ml-auto text-xs text-cs-muted hover:text-cs-text"
+        >
+          Dismiss
+        </button>
+      </div>
+      <p className="text-[10px] text-cs-muted">
+        After running the command above, click "Restart ATO" to finish.
+      </p>
     </div>
   );
 }
