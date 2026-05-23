@@ -313,6 +313,13 @@ fn execute_mcp_tool_blocking(
         }
     };
 
+    // v2.8.x P2 — inject ATO identity into the MCP call via two
+    // channels: (1) `params._meta` field per MCP spec for runtime
+    // access, (2) spawn env vars below for the MCP process startup.
+    // MCP authors can read either; both convey the same identity.
+    // OSS Phase 1 sources identity from process env; cloud Phase 2
+    // replaces this with an authenticated workspace session.
+    let identity = crate::identity::AtoIdentity::from_env();
     let request_payload = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -320,11 +327,20 @@ fn execute_mcp_tool_blocking(
         "params": {
             "name": tool_name,
             "arguments": args,
+            "_meta": identity.to_meta_json(),
         },
     });
 
+    // Merge identity env vars into the per-MCP env BEFORE spawn so
+    // the child can read them via std::env::var. ATO-prefixed keys
+    // win over any MCP-config env collision (defense against an
+    // MCP author trying to spoof identity).
+    let mut env_with_identity = env.clone();
+    for (k, v) in identity.to_env() {
+        env_with_identity.insert(k, v);
+    }
     let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
-    match rpc_call_blocking(&command, &args_refs, &env, &request_payload) {
+    match rpc_call_blocking(&command, &args_refs, &env_with_identity, &request_payload) {
         Ok(response) => {
             let result = response.get("result").cloned().unwrap_or(JsonValue::Null);
             let (content, is_error) = parse_mcp_content(&result);
