@@ -247,6 +247,16 @@ enum Commands {
         #[command(subcommand)]
         sub: ChatsSub,
     },
+    /// v2.7.14 master_key_v2 PR-6 — read the OS-keychain master key
+    /// for export (so PR-5's desktop "paste the old key" flow is
+    /// ergonomic on machines where the user can't drop to `security`
+    /// CLI). Behind a confirmation flag so accidental shell-history
+    /// captures stay rare.
+    #[command(name = "master-key")]
+    MasterKey {
+        #[command(subcommand)]
+        sub: MasterKeySub,
+    },
     /// Cross-runtime conversation bridge (Phase 6 Slice B). Scans the
     /// latest assistant turn of a session for `@<runtime>` mentions and
     /// loops dispatches between runtimes until `[CONSENSUS]` or the
@@ -542,6 +552,24 @@ enum ChatsSub {
     Reopen { id: String },
     /// Print the chat thread snapshot.
     Get { id: String },
+}
+
+/// v2.7.14 master_key_v2 PR-6 — CLI mirror of the master-key
+/// lifecycle. Today the only subcommand is `export`. Future PRs
+/// may add `rekey --from-stdin` for headless rekey without the
+/// desktop UI; held until a real headless dogfood asks for it.
+#[derive(Subcommand, Debug)]
+enum MasterKeySub {
+    /// Print the current OS-keychain master key to stdout, base64-
+    /// encoded. Used to populate PR-5's "paste the old key"
+    /// textarea on a different machine / install. Requires
+    /// `--confirm-i-understand-this-prints-the-key` so it never
+    /// runs by accident (the key in shell history is a real
+    /// leakage risk).
+    Export {
+        #[arg(long = "confirm-i-understand-this-prints-the-key", default_value_t = false)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1257,6 +1285,9 @@ fn main() -> Result<()> {
                 commands::chats::reopen(&conn, &id, &opts)
             }
             ChatsSub::Get { id } => commands::chats::get(&ro_conn()?, &id, &opts),
+        },
+        Commands::MasterKey { sub } => match sub {
+            MasterKeySub::Export { confirm } => commands::master_key::export(confirm, &opts),
         },
         Commands::Bridge {
             session,

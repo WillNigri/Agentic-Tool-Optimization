@@ -49,6 +49,19 @@ const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
 // boundary across processes; in-process caching shouldn't bypass it).
 static MASTER_KEY_CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
 
+// PR-6 (master_key_v2) — exposed to `commands::master_key::export`
+// so the CLI's `ato master-key export` subcommand can read the
+// current keychain key without duplicating the keychain + cache
+// + ATO_MASTER_KEY_B64 env-bypass logic. Keep `master_key` itself
+// private (callers should go through encrypt/decrypt); this wrapper
+// is the only PR-6-blessed access path. SYNC WITH: any future
+// rename of master_key must also rename here.
+pub(crate) fn export_master_key_b64() -> Result<String> {
+    use base64::{engine::general_purpose, Engine as _};
+    let bytes = master_key()?;
+    Ok(general_purpose::STANDARD.encode(bytes))
+}
+
 fn master_key() -> Result<[u8; 32]> {
     if let Some(cached) = MASTER_KEY_CACHE.get() {
         return Ok(*cached);

@@ -24,6 +24,8 @@ pub mod api_dispatch;
 pub mod api_dispatch_tools;
 pub mod recipes_engine;
 mod schema;
+mod identity_probe;
+mod rekey;
 
 use rusqlite::{Connection, params};
 use schema::init_database;
@@ -207,6 +209,21 @@ pub fn run() {
     // will migrate them. Old rows stay decryptable in the meantime
     // via the encryption module's legacy fallback path.
     migrate_legacy_api_keys(&conn);
+    // v2.7.14 master_key_v2 PR-2 — populate the active master_key_ledger
+    // row's identity_probe column. PR-1 created the row with the probe
+    // NULL; PR-2 fills it. UPDATE-WHERE-NULL semantics means re-launches
+    // are no-ops once populated. Env-bypass (ATO_MASTER_KEY_B64) skips
+    // the write so dev probes don't corrupt the prod-keychain row.
+    // Errors are swallowed because probe writes are observational —
+    // never block app startup. Architecture war-room: 9B1F252F.
+    // v2.7.14 master_key_v2 PR-3 — full probe cycle: compute probe
+    // once, populate the ledger (PR-2), then check for drift between
+    // the stored value and the just-computed one (PR-3). Returns the
+    // ProbeStatus we stash in IdentityProbeState below so
+    // `get_identity_probe_status` Tauri commands serve the cached
+    // view (compute_probe is the only non-trivial cost; one call per
+    // launch). Architecture war-room: FC2FAB88.
+    let initial_probe_status = identity_probe::run_full_probe_cycle(&conn);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -221,7 +238,20 @@ pub fn run() {
         .manage(HealthPollerState::new())
         .manage(TelemetryState::new())
         .manage(PtyState::new())
-        .setup(|app| {
+        // v2.7.14 master_key_v2 PR-3 — make the initial ProbeStatus
+        // available to `get_identity_probe_status` Tauri commands
+        // without re-running the (codesign-spawning) compute_probe
+        // on every poll. PR-5's UI can poll cheap or subscribe to
+        // the `identity-probe-status` event emitted in .setup below.
+        .manage(identity_probe::IdentityProbeState::new(initial_probe_status.clone()))
+        .setup(move |app| {
+            // PR-3 — fire the identity-probe-status event so any
+            // frontend listener installed at app boot sees the state
+            // without needing to call the polling command. Frontend
+            // is responsible for debouncing (banner appears once per
+            // detected mismatch, not once per launch).
+            use tauri::Emitter;
+            let _ = app.emit("identity-probe-status", &initial_probe_status);
             // Auto-start health poller on app launch
             let db_path_str = get_db_path().to_string_lossy().to_string();
             let poller_state = app.state::<HealthPollerState>();
@@ -246,6 +276,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            identity_probe::get_identity_probe_status,
+            rekey::rekey_master_key,
             get_local_skills,
             get_skill_detail,
             toggle_local_skill,
