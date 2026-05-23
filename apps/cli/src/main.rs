@@ -1049,7 +1049,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Commands::Pro(args) => {
-            commands::pro::run(args);
+            commands::pro::run(args, cli.human);
             return Ok(());
         }
         Commands::Dispatches { sub } => match sub {
