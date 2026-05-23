@@ -18,7 +18,7 @@ use std::path::PathBuf;
 fn api_base() -> String {
     match std::env::var("ATO_CLOUD_URL") {
         Ok(url) => format!("{}/api/auth", url.trim_end_matches('/')),
-        Err(_) => "https://ato.cloud/api/auth".to_string(),
+        Err(_) => "https://api.agentictool.ai/api/auth".to_string(),
     }
 }
 

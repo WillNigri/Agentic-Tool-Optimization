@@ -11,7 +11,7 @@ use std::process::Command;
 
 fn cloud_base() -> String {
     std::env::var("ATO_CLOUD_URL")
-        .unwrap_or_else(|_| "https://ato.cloud".to_string())
+        .unwrap_or_else(|_| "https://api.agentictool.ai".to_string())
         .trim_end_matches('/')
         .to_string()
 }
