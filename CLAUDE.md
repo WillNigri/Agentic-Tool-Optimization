@@ -10,7 +10,7 @@ Positioning as of v1.3.0 (The GUI Pivot): "the place where you create an agent, 
 apps/desktop/        # Tauri 2.x desktop app (Rust + React)
 packages/core/       # Shared types, token utils, config paths (no I/O)
 packages/db/         # Database abstraction (SQLite for desktop)
-services/mcp-server/ # Standalone MCP server for AI coding tools (stdio, 8 tools)
+services/mcp-server/ # Standalone MCP server for AI coding tools (stdio, 17 tools)
 ```
 
 ## Commands
@@ -47,15 +47,33 @@ Supported runtimes: Claude, Codex, OpenClaw (SSH), Hermes.
 - OpenClaw: `~/.openclaw/skills/`, workspace/skills/, AGENTS.md, SOUL.md, TOOLS.md ($OPENCLAW_HOME)
 - Hermes: `~/.hermes/skills/` (with category subdirs), SOUL.md, memories/
 
-## MCP Server Tools
+## MCP Server Tools (17 total)
 
+**Agent dispatch:**
+- `list_agents` — All ATO agents + groups
+- `run_agent` — Dispatch to any agent or group, transparently
+
+**Context & usage:**
 - `get_context_usage` — Context window breakdown
-- `list_skills` / `toggle_skill` — Manage skills
-- `get_usage_stats` — Token/cost analytics
+- `get_usage_stats` — Token and cost analytics
 - `get_mcp_status` — MCP server health
-- `get_runtime_status` — Health check for any runtime
+
+**Skills management:**
+- `list_skills` / `toggle_skill` — Manage skills
+- `get_skill_index_stats` — Index & watcher status
+- `rescan_skills` — Force full rescan
+
+**Runtime health:**
+- `get_runtime_status` — Check any runtime
 - `get_all_runtime_statuses` — All runtimes at once
-- `get_agent_logs` — Execution logs (filterable by runtime)
+- `get_agent_logs` — Execution logs / traces
+- `get_runtime_path_cache` — Cached CLI paths
+- `refresh_runtime_paths` — Re-discover CLIs
+- `set_runtime_path` — Manual CLI path
+
+**Cache management:**
+- `get_cache_stats` — Cache statistics
+- `clear_cache` — Flush cache
 
 ## Key Implementation Details
 
@@ -115,7 +133,7 @@ Replaces chat-only PromptBar with an expandable bottom pane, two modes:
 
 ## Open Source vs Closed Source
 
-**Open source (this repo)**: Skills manager + marketplace, multi-agent runtime, subagents, **Create Agent wizard (v1.3.0)**, **MCP install UI (v1.3.0)**, **embedded terminal (v1.3.0)**, automation builder, cron scheduling, context visualizer, hooks, ATO MCP server (8 tools), config editor, command palette, i18n.
+**Open source (this repo)**: Skills manager + marketplace, multi-agent runtime, subagents, **Create Agent wizard (v1.3.0)**, **MCP install UI (v1.3.0)**, **embedded terminal (v1.3.0)**, automation builder, cron scheduling, context visualizer, hooks, ATO MCP server (17 tools), config editor, command palette, i18n.
 
 **Closed source (`ato-cloud`, paid)**: Real-time cron monitoring, silent failure detection, push notifications, usage analytics (cloud), cloud sync of agents + skills, team workspaces, MCP registry mirror, hosted LLM-as-judge evaluators, agent-trace upload + retention, cross-runtime config-change ledger, provider-key + provider-usage tracking, mesh-relay (paid-tier WebSocket router for laptop↔server dispatch), SSO + audit retention (Enterprise).
 
