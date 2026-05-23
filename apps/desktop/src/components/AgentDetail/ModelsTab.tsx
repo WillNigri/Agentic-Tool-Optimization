@@ -162,7 +162,8 @@ export default function ModelsTab({ agent }: Props) {
         </button>
       </div>
 
-      <UpgradePrompt feature="role-models" open={proPrompt} onClose={() => setProPrompt(false)} />
+      {/* v2.8.x — UpgradePrompt removed: role-models is now Free per
+          war-room 87E6CADF round 3 doctrine. */}
     </div>
   );
 }

@@ -532,11 +532,8 @@ export default function GroupDetail({ existing, onClose, onSaved }: Props) {
         )}
       </div>
 
-      <UpgradePrompt
-        feature="groups.unlimited"
-        open={proPrompt}
-        onClose={() => setProPrompt(false)}
-      />
+      {/* v2.8.x — UpgradePrompt removed: groups.unlimited is now Free per
+          war-room 87E6CADF round 3 doctrine (3-child cap killed). */}
     </div>
   );
 }

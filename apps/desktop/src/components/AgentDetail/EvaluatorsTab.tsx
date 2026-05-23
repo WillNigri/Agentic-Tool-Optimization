@@ -453,7 +453,8 @@ function EvaluatorEditorForm({
         </button>
       </div>
 
-      <UpgradePrompt feature="evaluators" open={proPrompt} onClose={() => setProPrompt(false)} />
+      {/* v2.8.x — ad-hoc evaluators are Free; scheduled-batch (cron) is Pro.
+          When "Run on schedule" toggle ships, use feature="evaluators.scheduled". */}
     </div>
   );
 }

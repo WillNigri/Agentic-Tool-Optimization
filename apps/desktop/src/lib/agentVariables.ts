@@ -106,6 +106,76 @@ export async function deleteAgentVariable(id: string): Promise<void> {
   return invoke("delete_agent_variable", { id });
 }
 
+// v2.8.x P2 Security AMEND — consent grants for privileged variable
+// kinds (file / db-query / computed). War-room 87E6CADF round 3
+// non-negotiable: any local-file-reading resolver requires explicit
+// per-variable consent before the Rust resolver will execute.
+// Without consent, resolver returns "{consent-required:<kind>}"
+// as the resolved value — the LLM sees the marker, the user sees
+// a "grant access" prompt the next time they edit the variable.
+
+export type ConsentScope = "once" | "session" | "always";
+
+export interface VariableConsentRow {
+  variable_id: string;
+  variable_name: string;
+  kind: string;
+  scope: ConsentScope;
+  granted_at: string;
+  granted_resource: string;
+}
+
+/** Privileged kinds that require consent before resolution.
+ *  Must stay in sync with the Rust `needs_consent` check in
+ *  resolve_agent_variables. */
+export const PRIVILEGED_VARIABLE_KINDS: VariableKind[] = [
+  "file",
+  "db-query",
+  "computed",
+];
+
+export function variableKindNeedsConsent(kind: VariableKind): boolean {
+  return (PRIVILEGED_VARIABLE_KINDS as VariableKind[]).includes(kind);
+}
+
+/** Human-readable summary of what the user is granting access to.
+ *  Shown verbatim in the consent modal and stored in
+ *  `granted_resource` so future audits can prove what was consented. */
+export function describeGrantedResource(cfg: VariableConfig): string {
+  switch (cfg.kind) {
+    case "file":
+      return `Read local file: ${cfg.path || "(no path set)"}`;
+    case "db-query":
+      return `Run read-only SQL on: ${cfg.path || "(no db path set)"}`;
+    case "computed":
+      return `Evaluate expression: ${cfg.expr || "(empty)"}`;
+    default:
+      return "(no privileged resource)";
+  }
+}
+
+export async function grantVariableConsent(
+  variableId: string,
+  scope: ConsentScope,
+  grantedResource: string,
+): Promise<void> {
+  return invoke("grant_variable_consent", {
+    variableId,
+    scope,
+    grantedResource,
+  });
+}
+
+export async function revokeVariableConsent(variableId: string): Promise<void> {
+  return invoke("revoke_variable_consent", { variableId });
+}
+
+export async function listVariableConsents(
+  agentId: string,
+): Promise<VariableConsentRow[]> {
+  return invoke<VariableConsentRow[]>("list_variable_consents", { agentId });
+}
+
 /** Single-shot dispatch with variable resolution. Used by Quick Test. */
 export async function promptAgentWithContext(input: {
   agentId: string;

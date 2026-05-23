@@ -4,11 +4,13 @@ import { Crown, Lock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   useFeatureFlag,
+  useTrialStatus,
   tierForFeature,
   TIER_LABEL,
   type Feature,
 } from "@/lib/tier";
 import UpgradePrompt from "./UpgradePrompt";
+import TrialExpiredModal from "@/components/Trial/TrialExpiredModal";
 
 // v1.4.0 — TierGate.
 //
@@ -39,6 +41,7 @@ interface Props {
 
 export default function TierGate({ feature, children, mode = "block", hint }: Props) {
   const allowed = useFeatureFlag(feature);
+  const trial = useTrialStatus();
   const { t } = useTranslation();
   const [promptOpen, setPromptOpen] = useState(false);
   const requiredTier = tierForFeature(feature);
@@ -49,6 +52,19 @@ export default function TierGate({ feature, children, mode = "block", hint }: Pr
   const tooltip =
     hint ??
     t("tier.lockedTooltip", "Upgrade to {{tier}} to unlock", { tier: tierLabel });
+
+  // Phase 1 PR-B — when the 14-day Pro trial has expired, the click on
+  // a locked surface triggers the trial-expired modal instead of the
+  // per-feature UpgradePrompt. The trial modal frames the loss ("your
+  // Pro trial has ended") rather than the unlock ("unlock context
+  // hooks"), which converts better at the expiry moment. Same promptOpen
+  // state — no new store, follows the existing per-TierGate modal pattern.
+  const prompt =
+    trial.state === "expired" ? (
+      <TrialExpiredModal open={promptOpen} onClose={() => setPromptOpen(false)} />
+    ) : (
+      <UpgradePrompt feature={feature} open={promptOpen} onClose={() => setPromptOpen(false)} />
+    );
 
   if (mode === "overlay") {
     return (
@@ -73,7 +89,7 @@ export default function TierGate({ feature, children, mode = "block", hint }: Pr
             </span>
           </div>
         </div>
-        <UpgradePrompt feature={feature} open={promptOpen} onClose={() => setPromptOpen(false)} />
+        {prompt}
       </>
     );
   }
@@ -92,7 +108,7 @@ export default function TierGate({ feature, children, mode = "block", hint }: Pr
             {tierLabel}
           </span>
         </span>
-        <UpgradePrompt feature={feature} open={promptOpen} onClose={() => setPromptOpen(false)} />
+        {prompt}
       </>
     );
   }
@@ -121,7 +137,7 @@ export default function TierGate({ feature, children, mode = "block", hint }: Pr
           {t("tier.upgrade", "Upgrade")} →
         </span>
       </button>
-      <UpgradePrompt feature={feature} open={promptOpen} onClose={() => setPromptOpen(false)} />
+      {prompt}
     </>
   );
 }

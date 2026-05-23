@@ -2,6 +2,18 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { refreshToken as refreshTokenApi } from "@/lib/api";
 import { getCurrentUser, storeTokens, clearTokens } from "@/lib/cloud-api";
+import { markEverPaid } from "@/lib/trial";
+
+// Phase 1 PR-B (2026-05-21) — `latchEverPaidIfPaid` runs at every store
+// transition that can promote the user's tier (setAuth, setTier,
+// refreshTier). It calls markEverPaid() iff the new tier is paid
+// (pro / team / enterprise). The latch is monotonic + idempotent
+// (writes "1" to localStorage), so over-firing is a no-op. Under-firing
+// would leave the trial-re-arm loophole open — a paid user signs out
+// and gets a fresh 14-day trial. Defense in depth at near-zero cost.
+function latchEverPaidIfPaid(tier: Tier): void {
+  if (tier !== "free") markEverPaid();
+}
 
 interface User {
   id: string;
@@ -54,17 +66,22 @@ export const useAuthStore = create<AuthState>()(
         // backups) fails with "Not authenticated" even though zustand
         // says we're signed in. Two stores; one truth.
         storeTokens({ accessToken, refreshToken });
+        const resolvedTier = tier ?? "pro"; // signed-in cloud users default to pro until /auth/me reports otherwise
         set({
           user,
           accessToken,
           refreshTokenValue: refreshToken,
           isAuthenticated: true,
           isCloudUser: true,
-          tier: tier ?? "pro", // signed-in cloud users default to pro until /auth/me reports otherwise
+          tier: resolvedTier,
         });
+        latchEverPaidIfPaid(resolvedTier);
       },
 
-      setTier: (tier) => set({ tier }),
+      setTier: (tier) => {
+        set({ tier });
+        latchEverPaidIfPaid(tier);
+      },
 
       logout: () => {
         clearTokens(); // wipe the localStorage mirror so cloud-api stops sending stale Bearer
@@ -98,7 +115,9 @@ export const useAuthStore = create<AuthState>()(
         try {
           const { user } = await getCurrentUser();
           if (user.subscription_tier) {
-            set({ tier: user.subscription_tier as Tier });
+            const newTier = user.subscription_tier as Tier;
+            set({ tier: newTier });
+            latchEverPaidIfPaid(newTier);
           }
         } catch {
           // Silent — keep the cached tier on offline / 401.

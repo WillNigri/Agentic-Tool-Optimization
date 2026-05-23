@@ -40,6 +40,7 @@ pub mod skills_mutate;
 pub mod mcp;
 pub mod mcp_dispatch;
 pub mod mcp_install;
+pub mod telemetry;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -69,6 +70,7 @@ pub use skills::*;
 pub use skills_mutate::*;
 pub use mcp::*;
 pub use mcp_install::*;
+pub use telemetry::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -6719,8 +6721,12 @@ pub fn resolve_agent_variables(
 ) -> HashMap<String, String> {
     let mut out = HashMap::new();
 
+    // v2.8.x P2 Security AMEND — pull the variable id so the consent
+    // check has something to look up. Pre-fix this function only
+    // selected (name, kind, config_json) which made per-variable
+    // consent untrackable.
     let mut stmt = match conn.prepare(
-        "SELECT name, kind, config_json FROM agent_variables
+        "SELECT id, name, kind, config_json FROM agent_variables
          WHERE agent_id = ?1 AND enabled = 1",
     ) {
         Ok(s) => s,
@@ -6732,6 +6738,7 @@ pub fn resolve_agent_variables(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
         ))
     }) {
         Ok(r) => r,
@@ -6739,12 +6746,137 @@ pub fn resolve_agent_variables(
     };
 
     for row in rows.flatten() {
-        let (name, kind, config_json) = row;
+        let (var_id, name, kind, config_json) = row;
+        // Privileged resolver kinds (file/db-query/computed) MUST have
+        // an active consent grant or they return a consent-required
+        // error. The static/env/project-path kinds bypass the check —
+        // they read no local resource that wasn't already in the
+        // process's env / config.
+        let needs_consent = matches!(kind.as_str(), "file" | "db-query" | "computed");
+        if needs_consent && !has_active_consent(conn, &var_id) {
+            // Insert a placeholder string so the LLM prompt template
+            // gets a HONEST marker — better than silent empty-string
+            // resolution which would hide the security gate from the
+            // user.
+            out.insert(
+                name,
+                format!("{{consent-required:{}}}", kind),
+            );
+            continue;
+        }
         let value = resolve_one_variable(&kind, &config_json, active_project_path)
             .unwrap_or_else(|err| format!("{{{}:{}}}", name, err));
         out.insert(name, value);
     }
     out
+}
+
+/// Check if a variable has an active (non-revoked) consent grant.
+/// Returns false on any DB error to fail closed (security default).
+///
+/// War-room 87E6CADF round 3 security-specialist AMEND: variables of
+/// kind file / db-query / computed require explicit user consent
+/// before the resolver runs. This function is the gate.
+fn has_active_consent(conn: &Connection, variable_id: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM variable_consent_grants
+         WHERE variable_id = ?1 AND revoked_at IS NULL",
+        params![variable_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// v2.8.x P2 Security AMEND — Tauri command for the frontend
+/// consent dialog. Called when user clicks "Allow ATO to read
+/// [path]" on the consent modal that appears at variable save
+/// time for file / db-query / computed kinds.
+///
+/// `granted_resource` is the human-readable string the user
+/// SAW when consenting (the path, the SQL, the expr) — recorded
+/// so a later audit can prove what specifically was consented to,
+/// not just "they clicked allow."
+#[tauri::command]
+pub fn grant_variable_consent(
+    variable_id: String,
+    scope: String,                   // 'once' | 'session' | 'always'
+    granted_resource: String,
+) -> Result<(), String> {
+    if !matches!(scope.as_str(), "once" | "session" | "always") {
+        return Err(format!("invalid scope: {}", scope));
+    }
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    // INSERT OR REPLACE so re-granting consent for an already-granted
+    // variable updates the scope + resource without leaving stale rows.
+    // UNIQUE(variable_id) makes this an upsert.
+    conn.execute(
+        "INSERT OR REPLACE INTO variable_consent_grants
+         (id, variable_id, scope, granted_at, granted_resource, revoked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+        params![id, variable_id, scope, now, granted_resource],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Revoke an existing consent grant. Sets revoked_at instead of
+/// deleting so the audit trail survives.
+#[tauri::command]
+pub fn revoke_variable_consent(variable_id: String) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE variable_consent_grants
+         SET revoked_at = ?1 WHERE variable_id = ?2 AND revoked_at IS NULL",
+        params![now, variable_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// List all active consents for a given agent. Powers the
+/// Settings → Permissions UI ("Variables this agent can read").
+#[tauri::command]
+pub fn list_variable_consents(agent_id: String) -> Result<Vec<VariableConsentRow>, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT g.variable_id, v.name, v.kind, g.scope, g.granted_at, g.granted_resource
+             FROM variable_consent_grants g
+             JOIN agent_variables v ON v.id = g.variable_id
+             WHERE v.agent_id = ?1 AND g.revoked_at IS NULL
+             ORDER BY g.granted_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![agent_id], |r| {
+            Ok(VariableConsentRow {
+                variable_id: r.get(0)?,
+                variable_name: r.get(1)?,
+                kind: r.get(2)?,
+                scope: r.get(3)?,
+                granted_at: r.get(4)?,
+                granted_resource: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct VariableConsentRow {
+    pub variable_id: String,
+    pub variable_name: String,
+    pub kind: String,
+    pub scope: String,
+    pub granted_at: String,
+    pub granted_resource: String,
 }
 
 fn resolve_one_variable(

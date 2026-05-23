@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Crown, X, Check, ExternalLink } from "lucide-react";
 import { tierForFeature, TIER_LABEL, type Feature, type Tier } from "@/lib/tier";
+import { UPGRADE_URL } from "@/lib/constants";
 
 // v1.4.0 — Upgrade prompt modal.
 //
@@ -14,82 +15,46 @@ import { tierForFeature, TIER_LABEL, type Feature, type Tier } from "@/lib/tier"
 // fake checkout. Founding-user pricing will be grandfathered when paid tiers
 // switch on. Anything claiming a dollar amount today is a trust leak (the
 // 2026-05-16 design seat scored the old copy 2/10).
+// v2.8.x — real prices after the silent-grant removal (war-room
+// 87E6CADF round 3, doctrine LOCKED 2026-05-22). Grandfather $14/mo
+// for first-100 alpha users is applied at Stripe-checkout time via
+// coupon; it's not shown here so the public copy stays honest.
 const TIER_PRICE: Record<Tier, string> = {
-  free: "Free",
-  pro: "Free during beta",
-  team: "Free during beta",
+  free: "Free forever",
+  pro: "$29 / seat / month",
+  team: "$49 / seat / month",
   enterprise: "Talk to us",
 };
 
+// v2.8.x — entries for features that re-tiered to Free (variables.advanced,
+// context-hooks, summarizer.tunable, groups.unlimited, groups.editor,
+// role-models, evaluators ad-hoc) are REMOVED. They never gate now, so
+// their upgrade copy is dead code. Doctrine 87E6CADF: "scarcity in cloud,
+// not in local" — if it never gates, it never needs an upgrade prompt.
 const FEATURE_COPY: Partial<Record<Feature, { title: string; bullets: string[] }>> = {
-  "variables.advanced": {
-    title: "Dynamic prompts powered by your data",
-    bullets: [
-      "Resolve {variables} from files, databases, MCP tool calls, computed expressions",
-      "CRM-style context: every turn gets the right data injected automatically",
-      "No more rebuilding agents to swap a value — just edit a resolver",
-    ],
-  },
-  "context-hooks": {
-    title: "Pre-call context hooks",
-    bullets: [
-      "Run resolvers before each LLM turn and inject the results inline",
-      "Pull from MCPs, files, databases, webhooks, computed code",
-      "The CRM-as-context pattern — without writing a server",
-    ],
-  },
-  "summarizer.tunable": {
-    title: "Production-grade conversation memory",
-    bullets: [
-      "Summarize on a tunable threshold so long sessions stay sharp",
-      "Pick a cheaper model for summarization to cut cost",
-      "Free is fixed defaults; Pro lets you optimize per agent",
-    ],
-  },
-  "groups.unlimited": {
-    title: "Multi-agent groups without limits",
-    bullets: [
-      "Free supports 3 children per group",
-      "Pro: unlimited specialized children + custom router rules",
-      "Specialization beats one mega-agent every time",
-    ],
-  },
-  "groups.editor": {
-    title: "Visual graph editor for agent groups",
-    bullets: [
-      "Drag children, edit the router, preview routing — all visually",
-      "Free is view-only on existing groups",
-    ],
-  },
-  "role-models": {
-    title: "Different model per task",
-    bullets: [
-      "Use Haiku for routing (cheap, fast); Sonnet for the reply (smart)",
-      "Cut agent cost 4-10× without losing quality on the response",
-      "Free agents use a single model for everything",
-    ],
-  },
   "cloud-traces": {
-    title: "Cloud trace retention",
+    title: "Cloud trace retention + regression detection",
     bullets: [
-      "Free: last 100 runs, local-only",
-      "Pro: 30 days in the cloud · Team: 90 days · Enterprise: unlimited",
-      "Search, filter, and audit any agent run since you started",
-    ],
-  },
-  "evaluators": {
-    title: "Continuous quality evaluation",
-    bullets: [
-      "Heuristic + LLM-as-judge evaluators on demand or on a schedule",
-      "Score every run; surface regressions before users feel them",
-      "Manual + scheduled batch only — no per-call cost",
+      "Every dispatch uploads to the cloud — search, replay, compare",
+      "Cross-runtime regression detection: catch the moment claude > gemini",
+      "Cost-per-dispatch dashboard: which model + MCP is burning your budget?",
+      "Pro: 30 days retention · Team: 90 days · Enterprise: unlimited",
     ],
   },
   "cloud-sync": {
-    title: "Cloud sync of agents across devices",
+    title: "Your agents follow you across devices",
     bullets: [
       "Edit on your laptop, run on your desktop — same agent, same config",
       "First step toward team sharing on the Team tier",
+      "Works for agents, skills, and MCPs",
+    ],
+  },
+  "provider-keys": {
+    title: "Encrypted provider-key store for usage polling",
+    bullets: [
+      "ATO holds your API keys (encrypted) so the cloud poller can fetch",
+      "real spend from Anthropic / OpenAI / Google billing endpoints",
+      "Team-only — credential custody belongs at the highest trust threshold",
     ],
   },
   "team-workspaces": {
@@ -97,7 +62,18 @@ const FEATURE_COPY: Partial<Record<Feature, { title: string; bullets: string[] }
     bullets: [
       "Share agents, skills, MCPs across your team",
       "Per-member roles + activity timeline",
-      "Real-time multiplayer cursors (v1.5)",
+      "Cloud audit aggregated across team members",
+    ],
+  },
+  // v2.8.x — even though `evaluators` (ad-hoc) is now Free, the
+  // scheduled-batch variant requires cloud cron infra. Keep this
+  // copy in place for the "Run on schedule" toggle in EvaluatorsTab.
+  "evaluators.scheduled": {
+    title: "Scheduled batch evaluators",
+    bullets: [
+      "Run your eval suite hourly / daily / weekly — automated",
+      "Catch regressions overnight, before users feel them in the morning",
+      "Ad-hoc evaluator runs stay Free; the cron worker is the Pro piece",
     ],
   },
   "enterprise.evaluator-budgets": {
@@ -196,7 +172,7 @@ export default function UpgradePrompt({ feature, open, onClose }: Props) {
             {t("tier.notNow", "Not now")}
           </button>
           <a
-            href="https://cal.com/willnigri/ato-onboarding"
+            href={UPGRADE_URL}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1.5 rounded-lg bg-cs-accent px-4 py-2 text-sm font-medium text-cs-bg hover:bg-cs-accent-hover"
