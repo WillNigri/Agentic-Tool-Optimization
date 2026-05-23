@@ -73,10 +73,22 @@ export default function AboutPanel() {
         return;
       }
       await update.downloadAndInstall();
+      localStorage.setItem("ato.update.dismissedVersion", update.version);
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (err) {
-      setCheck({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+      // If auto-update fails, offer manual download
+      const version = check.kind === "available" ? (check as { version: string }).version : "";
+      const manualUrl = `https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest`;
+      setCheck({
+        kind: "error",
+        message: `Auto-update failed: ${err instanceof Error ? err.message : String(err)}. Download manually from ${manualUrl}`,
+      });
+      // Open releases page in browser
+      try {
+        const { open } = await import("@tauri-apps/plugin-shell");
+        await open(manualUrl);
+      } catch { /* ignore */ }
     }
   };
 

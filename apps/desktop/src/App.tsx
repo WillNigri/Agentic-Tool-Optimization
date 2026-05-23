@@ -34,11 +34,25 @@ async function checkForUpdates() {
         { title: "Update Available", kind: "info", okLabel: "Update", cancelLabel: "Later" }
       );
       if (yes) {
-        await update.downloadAndInstall();
-        // Mark as handled so we don't re-prompt if relaunch fails
-        localStorage.setItem("ato.update.dismissedVersion", update.version);
-        const { relaunch } = await import("@tauri-apps/plugin-process");
-        await relaunch();
+        try {
+          await update.downloadAndInstall();
+          localStorage.setItem("ato.update.dismissedVersion", update.version);
+          const { relaunch } = await import("@tauri-apps/plugin-process");
+          await relaunch();
+        } catch (installErr) {
+          // downloadAndInstall can fail silently on macOS (Gatekeeper,
+          // code signing, permissions). Show manual download link.
+          console.error("Auto-update failed:", installErr);
+          const { open } = await import("@tauri-apps/plugin-shell");
+          const manualUrl = `https://github.com/WillNigri/Agentic-Tool-Optimization/releases/tag/v${update.version}`;
+          await ask(
+            `Auto-update failed. Please download v${update.version} manually from the releases page.`,
+            { title: "Update Failed", kind: "warning", okLabel: "Open Downloads", cancelLabel: "Later" }
+          ).then(async (openIt) => {
+            if (openIt) await open(manualUrl);
+          });
+          localStorage.setItem("ato.update.dismissedVersion", update.version);
+        }
       } else {
         // User clicked "Later" — suppress until next app launch cycle
         localStorage.setItem("ato.update.dismissedVersion", update.version);
