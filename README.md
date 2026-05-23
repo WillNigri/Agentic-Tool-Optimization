@@ -149,9 +149,49 @@ ATO writes everything to `~/.ato/` on the developer's machine:
 
 Sign-in is **optional** and only unlocks cloud-side features (cross-device trace history, hosted LLM-as-judge, team workspaces). Every core operation — dispatch, replay, compare, file attribution, configuration ledger — works fully offline.
 
-[**Sign in to unlock cloud sync, evaluators, and trace retention — free during beta →**](https://agentictool.ai/signup)
+---
 
-*Built in the open — star the repo if comparing AI runtimes sounds useful: [github.com/WillNigri/Agentic-Tool-Optimization](https://github.com/WillNigri/Agentic-Tool-Optimization)*
+## Free vs Pro
+
+Everything local is free. Pro adds cloud-powered automation and cross-runtime intelligence.
+
+| Capability | Free | Pro ($29/mo) |
+|---|:---:|:---:|
+| Multi-runtime dispatch (Claude, Codex, Gemini, 7+) | yes | yes |
+| Agent creation wizard + templates | yes | yes |
+| War rooms + sessions | yes | yes |
+| Variables, hooks, groups, role-models | yes | yes |
+| Local trace viewer + metrics | yes | yes |
+| Ad-hoc evaluators (heuristic + manual) | yes | yes |
+| Embedded terminal + command palette | yes | yes |
+| Skills manager + MCP install | yes | yes |
+| Cross-runtime cost comparison | manual | **automated** |
+| Runtime optimization recommendations | manual | **automated** |
+| Quality-scored A/B testing across runtimes | -- | **cloud judge** |
+| Cloud trace retention (30 days, cross-device) | -- | yes |
+| Regression detection + cost benchmarks | -- | yes |
+| Scheduled evaluators (hourly/daily/weekly) | -- | yes |
+| Cross-device agent + skill sync | -- | yes |
+| Login backfill (day-1 analytics from local data) | -- | yes |
+| Embed key (trace upload from deployed bundles) | -- | yes |
+
+**The difference:** Free gives you the tools — you run comparisons manually, one at a time. Pro does it while you sleep: replays your prompts across runtimes, scores quality with an LLM judge (on our key, not yours), and tells you "switch your code-reviewer from Claude to Gemini — 85% cheaper, same quality, 81 head-to-head rounds prove it."
+
+```bash
+# Free — manual comparison
+ato dispatch claude "review this PR" && ato dispatch google "review this PR"
+ato compare <run-a> <run-b>
+
+# Pro — automated optimization
+ato optimize recommend --human
+# → "Switch CLAUDE → GOOGLE: 85% savings, 81 rounds, HIGH confidence"
+
+ato optimize schedule --intensity normal --frequency weekly
+# → ATO tests your agents against alternative runtimes every week
+#    and updates recommendations automatically
+```
+
+**[Start free](https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest)** | **[ATO Pro](https://agentictool.ai/pro)**
 
 ---
 
@@ -439,6 +479,6 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-**[Website](https://agentictool.ai)** | **[Sign in (free during beta)](https://agentictool.ai/signup)** | **[SDK Docs](docs/SDK.md)** | **[Roadmap](ROADMAP.md)**
+**[Website](https://agentictool.ai)** | **[ATO Pro](https://agentictool.ai/pro)** | **[SDK Docs](docs/SDK.md)** | **[Roadmap](ROADMAP.md)**
 
 **MIT Licensed** | **Local-first** | **macOS, Windows, Linux**
