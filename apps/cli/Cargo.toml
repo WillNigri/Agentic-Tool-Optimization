@@ -1,6 +1,6 @@
 [package]
 name = "ato"
-version = "2.7.4"
+version = "2.8.0"
 edition = "2021"
 description = "ATO CLI — local-first developer-workflow operations platform for multi-runtime AI agents"
 license = "MIT"
