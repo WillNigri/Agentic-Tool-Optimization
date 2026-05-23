@@ -1,12 +1,16 @@
-// commands/cost_recommend.rs — `ato cost recommend`
+// commands/cost_recommend.rs — `ato optimize`
 //
 // Pro feature: scans the user's agents and runtimes, compares
 // head-to-head performance from war-room data, and recommends
 // runtime switches that save money at equal quality.
 //
-// This is the core Pro value: "Your CPO agent uses Claude at
-// $0.025/round. On 81 head-to-head rounds, Google gave comparable
-// answers at $0.004/round. Switch and save 85%. Want me to do it?"
+// Three tiers of optimization testing:
+//   Light  — 3 prompts × 2 runtimes =  6 replays (~2K tokens, ~$0.05)
+//   Normal — 5 prompts × 3 runtimes = 15 replays (~5K tokens, ~$0.15) ← RECOMMENDED
+//   Deep   — 10 prompts × all runtimes = 40+ replays (~15K tokens, ~$0.50)
+//
+// Smaller tests = lower confidence recommendations.
+// Users choose frequency: weekly (default), daily, or monthly.
 
 use clap::{Args, Subcommand};
 use rusqlite::Connection;
@@ -269,6 +273,202 @@ fn handle_autotest(agent: String, db_override: &Option<String>, human: bool) {
     }
 }
 
+fn handle_schedule(agent: Option<String>, intensity: String, frequency: String, token_budget: Option<u32>, db_override: &Option<String>, human: bool) {
+    let conn = open_db(db_override);
+
+    let (prompts_per_run, max_runtimes, budget_tokens, tier_name) = match intensity.as_str() {
+        "light" => (3u32, 2u32, token_budget.unwrap_or(2000), "Light"),
+        "deep" => (10, 99, token_budget.unwrap_or(15000), "Deep"),
+        _ => (5, 3, token_budget.unwrap_or(5000), "Normal (recommended)"),
+    };
+
+    // Get all agents or the specified one
+    let agents: Vec<String> = if let Some(ref a) = agent {
+        vec![a.clone()]
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT agent_slug FROM execution_logs WHERE agent_slug IS NOT NULL AND agent_slug != '' ORDER BY agent_slug"
+        ).unwrap();
+        stmt.query_map([], |row| row.get(0)).unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    // Get available runtimes
+    let runtimes: Vec<String> = conn.prepare(
+        "SELECT DISTINCT runtime FROM execution_logs WHERE runtime NOT IN ('fake-server','anthropic','openclaw') ORDER BY runtime"
+    ).unwrap().query_map([], |row| row.get(0)).unwrap().filter_map(|r| r.ok()).collect();
+
+    // Store schedule in local SQLite
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS optimization_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_slug TEXT,
+            intensity TEXT NOT NULL,
+            frequency TEXT NOT NULL DEFAULT 'weekly',
+            prompts_per_run INTEGER NOT NULL DEFAULT 5,
+            max_runtimes INTEGER NOT NULL DEFAULT 3,
+            token_budget INTEGER NOT NULL DEFAULT 5000,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            runs_completed INTEGER NOT NULL DEFAULT 0,
+            last_run_at TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    ").unwrap_or_else(|e| { eprintln!("DB error: {}", e); std::process::exit(1); });
+
+    for a in &agents {
+        conn.execute(
+            "INSERT INTO optimization_schedules (agent_slug, intensity, frequency, prompts_per_run, max_runtimes, token_budget) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![a, intensity, frequency, prompts_per_run, max_runtimes, budget_tokens],
+        ).unwrap_or_else(|e| { eprintln!("Insert error: {}", e); std::process::exit(1); });
+    }
+
+    if human {
+        println!("Optimization schedule created:\n");
+        println!("  Intensity:    {} ({} prompts × {} runtimes per cycle)", tier_name, prompts_per_run, max_runtimes.min(runtimes.len() as u32));
+        println!("  Frequency:    {}", frequency);
+        println!("  Token budget: {} tokens/cycle (~${:.2})", budget_tokens, budget_tokens as f64 * 0.000025);
+        println!("  Agents:       {}", agents.join(", "));
+        println!("  Runtimes:     {}", runtimes.join(", "));
+        println!();
+        println!("  Estimated cost per cycle: ~${:.2}", budget_tokens as f64 * 0.000025);
+        println!("  Estimated cost per month: ~${:.2}", budget_tokens as f64 * 0.000025 * match frequency.as_str() {
+            "daily" => 30.0, "weekly" => 4.3, "monthly" => 1.0, _ => 4.3
+        });
+        println!();
+        if intensity == "light" {
+            println!("  ⚠ Light intensity gives LOW confidence recommendations.");
+            println!("    We recommend 'normal' (5 prompts × 3 runtimes) for reliable results.");
+        }
+        println!();
+        println!("  The optimizer will replay recent prompts from each agent against");
+        println!("  alternative runtimes, score quality, and update recommendations.");
+        println!("  Run `ato optimize recommend --human` anytime to see current results.");
+        println!();
+        println!("  To run immediately: ato optimize run --human");
+    } else {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "agents": agents,
+            "runtimes": runtimes,
+            "intensity": intensity,
+            "frequency": frequency,
+            "prompts_per_run": prompts_per_run,
+            "max_runtimes": max_runtimes,
+            "token_budget": budget_tokens,
+            "estimated_cost_per_cycle_usd": budget_tokens as f64 * 0.000025,
+        })).unwrap());
+    }
+}
+
+fn handle_run(agent: Option<String>, db_override: &Option<String>, human: bool) {
+    let conn = open_db(db_override);
+
+    // Get schedules
+    let has_table = conn.prepare("SELECT 1 FROM optimization_schedules LIMIT 1").is_ok();
+    if !has_table {
+        if human { println!("No optimization schedule. Create one: ato optimize schedule"); }
+        return;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT agent_slug, prompts_per_run, max_runtimes, token_budget FROM optimization_schedules WHERE enabled = 1"
+    ).unwrap();
+
+    let schedules: Vec<(String, i64, i64, i64)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap().filter_map(|r| r.ok()).collect();
+
+    if schedules.is_empty() {
+        if human { println!("No active optimization schedules."); }
+        return;
+    }
+
+    // Get available runtimes
+    let runtimes: Vec<String> = conn.prepare(
+        "SELECT DISTINCT runtime FROM execution_logs WHERE runtime NOT IN ('fake-server','anthropic','openclaw') ORDER BY runtime"
+    ).unwrap().query_map([], |row| row.get(0)).unwrap().filter_map(|r| r.ok()).collect();
+
+    if human {
+        println!("Running optimization tests...\n");
+    }
+
+    for (agent_slug, prompts_n, max_rt, _budget) in &schedules {
+        // Get recent prompts for this agent
+        let mut pstmt = conn.prepare(
+            "SELECT id, runtime, prompt FROM execution_logs WHERE agent_slug = ?1 AND status = 'success' AND prompt IS NOT NULL AND LENGTH(prompt) > 20 ORDER BY created_at DESC LIMIT ?2"
+        ).unwrap();
+
+        let prompts: Vec<(String, String, String)> = pstmt
+            .query_map(rusqlite::params![agent_slug, prompts_n], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }).unwrap().filter_map(|r| r.ok()).collect();
+
+        if prompts.is_empty() {
+            if human { println!("  {} — no prompts with content found, skipping", agent_slug); }
+            continue;
+        }
+
+        let primary_rt = &prompts[0].1;
+        let alt_runtimes: Vec<&String> = runtimes.iter()
+            .filter(|r| *r != primary_rt)
+            .take(*max_rt as usize)
+            .collect();
+
+        if human {
+            println!("  Agent: {}", agent_slug);
+            println!("  Primary runtime: {}", primary_rt);
+            println!("  Testing {} prompts against: {}", prompts.len(), alt_runtimes.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            println!("  Replay commands:");
+            for (id, _, _) in prompts.iter().take(3) {
+                for rt in &alt_runtimes {
+                    println!("    ato replay start {} --runtime {}", id, rt);
+                }
+            }
+            println!("  ... ({} total replays)", prompts.len() * alt_runtimes.len());
+            println!();
+        }
+    }
+
+    if human {
+        println!("  To execute all replays, pipe the JSON output to your shell:");
+        println!("    ato optimize run | jq -r '.replays[].command' | sh");
+        println!();
+        println!("  After replays complete, run: ato optimize recommend --human");
+    }
+
+    // JSON output with all replay commands
+    if !human {
+        let mut all_replays: Vec<serde_json::Value> = Vec::new();
+        for (agent_slug, prompts_n, max_rt, _budget) in &schedules {
+            let mut pstmt = conn.prepare(
+                "SELECT id, runtime FROM execution_logs WHERE agent_slug = ?1 AND status = 'success' AND prompt IS NOT NULL AND LENGTH(prompt) > 20 ORDER BY created_at DESC LIMIT ?2"
+            ).unwrap();
+            let prompts: Vec<(String, String)> = pstmt
+                .query_map(rusqlite::params![agent_slug, prompts_n], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap().filter_map(|r| r.ok()).collect();
+
+            let alt_runtimes: Vec<&String> = runtimes.iter()
+                .filter(|r| *r != &prompts.first().map(|p| p.1.clone()).unwrap_or_default())
+                .take(*max_rt as usize)
+                .collect();
+
+            for (id, _) in &prompts {
+                for rt in &alt_runtimes {
+                    all_replays.push(serde_json::json!({
+                        "agent": agent_slug,
+                        "source_id": id,
+                        "target_runtime": rt,
+                        "command": format!("ato replay start {} --runtime {}", id, rt),
+                    }));
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "replays": all_replays,
+            "total": all_replays.len(),
+        })).unwrap());
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum CostRecommendCommand {
     /// Analyze head-to-head data and recommend runtime switches.
@@ -278,6 +478,27 @@ pub enum CostRecommendCommand {
         /// Agent slug to test
         #[arg(long)]
         agent: String,
+    },
+    /// Set up recurring optimization tests.
+    Schedule {
+        /// Agent slug (omit to schedule all agents)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Test intensity: light (3×2, ~$0.05), normal (5×3, ~$0.15, RECOMMENDED), deep (10×all, ~$0.50)
+        #[arg(long, default_value = "normal")]
+        intensity: String,
+        /// Frequency: daily, weekly (default), monthly
+        #[arg(long, default_value = "weekly")]
+        frequency: String,
+        /// Max tokens per optimization cycle (overrides intensity default)
+        #[arg(long)]
+        token_budget: Option<u32>,
+    },
+    /// Run optimization tests now (generates replay commands).
+    Run {
+        /// Agent slug (omit to run all scheduled)
+        #[arg(long)]
+        agent: Option<String>,
     },
 }
 
@@ -291,5 +512,9 @@ pub fn run(args: CostRecommendArgs, human: bool, db_override: &Option<String>) {
     match args.cmd {
         CostRecommendCommand::Recommend => handle_recommend(db_override, human),
         CostRecommendCommand::Autotest { agent } => handle_autotest(agent, db_override, human),
+        CostRecommendCommand::Schedule { agent, intensity, frequency, token_budget } => {
+            handle_schedule(agent, intensity, frequency, token_budget, db_override, human);
+        }
+        CostRecommendCommand::Run { agent } => handle_run(agent, db_override, human),
     }
 }
