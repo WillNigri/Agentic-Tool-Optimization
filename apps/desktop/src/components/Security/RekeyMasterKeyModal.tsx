@@ -12,7 +12,7 @@
 
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Loader2, X, ShieldCheck } from "lucide-react";
+import { KeyRound, Loader2, X, ShieldCheck, Copy, Check, Terminal as TerminalIcon } from "lucide-react";
 
 interface RekeyResult {
   rowsRekeyed: number;
@@ -31,6 +31,15 @@ export default function RekeyMasterKeyModal({ onClose, onSuccess }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RekeyResult | null>(null);
+  const [cmdCopied, setCmdCopied] = useState(false);
+
+  const MACOS_CMD = "security find-generic-password -s ato-desktop -a master_key_v1 -w";
+  const copyCmd = () => {
+    navigator.clipboard.writeText(MACOS_CMD).then(() => {
+      setCmdCopied(true);
+      setTimeout(() => setCmdCopied(false), 2000);
+    });
+  };
 
   const handleSubmit = async () => {
     if (submitting || !oldKey.trim()) return;
@@ -77,19 +86,84 @@ export default function RekeyMasterKeyModal({ onClose, onSuccess }: Props) {
 
         {!result ? (
           <>
-            <div className="text-sm text-cs-muted mb-3 space-y-2">
+            <div className="text-sm text-cs-muted mb-4 space-y-3">
               <p>
-                Paste the OLD master key (base64) below. ATO will
-                generate a new master key, re-encrypt every stored
-                API key under it, and retire the old one — all in a
-                single atomic transaction.
+                ATO needs the OLD master key (the one stored on your
+                Mac's Keychain) to re-encrypt your saved API keys
+                under a new identity. The whole flow is one atomic
+                transaction — your stored keys never get orphaned.
               </p>
-              <p className="text-xs">
-                <strong className="text-cs-text">How to get the old key on macOS:</strong>{" "}
-                <code className="bg-cs-bg px-1.5 py-0.5 rounded text-[11px]">
-                  security find-generic-password -s ato-desktop -a master_key_v1 -w
-                </code>
-              </p>
+
+              <div className="rounded-md border border-cs-border bg-cs-bg/50 p-3 space-y-2">
+                <div className="text-xs font-medium text-cs-text mb-1">
+                  How to get the old key on macOS:
+                </div>
+                <ol className="text-xs space-y-2 list-decimal list-inside text-cs-muted">
+                  <li>
+                    Open the <strong className="text-cs-text">Terminal</strong> app
+                    (⌘+Space, type "Terminal", press Enter).
+                  </li>
+                  <li className="space-y-1.5">
+                    <span>Paste this command and press Enter:</span>
+                    <div className="flex items-stretch gap-1 not-italic">
+                      <code className="flex-1 bg-cs-bg px-2 py-1.5 rounded-l text-[11px] font-mono text-cs-text break-all">
+                        {MACOS_CMD}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={copyCmd}
+                        className="px-2 rounded-r border-l border-cs-border bg-cs-bg hover:bg-cs-card flex items-center gap-1 text-[11px] text-cs-muted hover:text-cs-text"
+                        title="Copy command"
+                      >
+                        {cmdCopied ? (
+                          <>
+                            <Check size={12} className="text-cs-accent" /> copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={12} /> copy
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="text-[10px] text-cs-muted pl-1 flex items-start gap-1">
+                      <TerminalIcon size={11} className="mt-0.5 shrink-0" />
+                      <span>
+                        macOS will prompt you to Allow access — click
+                        Always Allow (it's reading the key ATO itself
+                        stored there).
+                      </span>
+                    </div>
+                  </li>
+                  <li>
+                    Terminal prints a long base64 string. Select the
+                    whole line and copy it (⌘+C).
+                  </li>
+                  <li>
+                    Paste it into the box below and click <strong className="text-cs-text">Re-key now</strong>.
+                  </li>
+                </ol>
+              </div>
+
+              <details className="text-xs">
+                <summary className="cursor-pointer text-cs-muted hover:text-cs-text">
+                  I already rotated the macOS keychain — the old key is gone →
+                </summary>
+                <div className="mt-2 pl-3 border-l-2 border-amber-500/30 text-cs-muted space-y-1">
+                  <p>
+                    If you've already wiped the Keychain entry, the
+                    old key is unrecoverable and ATO can't decrypt
+                    your stored API keys.
+                  </p>
+                  <p>
+                    Recovery: close this dialog, go to{" "}
+                    <strong className="text-cs-text">Settings → API Keys</strong>,
+                    delete the orphaned rows, and re-enter the keys
+                    fresh. They'll encrypt under the new identity
+                    automatically.
+                  </p>
+                </div>
+              </details>
             </div>
             <textarea
               value={oldKey}

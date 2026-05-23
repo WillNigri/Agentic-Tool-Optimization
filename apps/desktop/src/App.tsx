@@ -115,8 +115,9 @@ export default function App() {
       )}
       {/* v2.8.x Phase A chunk 4 — one-time re-tier migration banner. */}
       {(isTauri || isAuthenticatedForBanner) && <MigrationBanner />}
-      {/* PR-5 master_key_v2 — identity-probe mismatch banner. */}
-      <div className="fixed top-4 left-4 z-50 w-96 max-w-[90vw]">
+      {/* PR-5 master_key_v2 — identity-probe mismatch banner.
+          v2.7.15 — moved to top-RIGHT, stacked under UpdateBanner via top-32. */}
+      <div className="fixed top-32 right-4 z-50 w-96 max-w-[90vw]">
         <IdentityProbeBanner />
       </div>
     <Routes>
