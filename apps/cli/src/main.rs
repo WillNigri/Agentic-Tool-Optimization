@@ -1219,6 +1219,54 @@ fn main() -> Result<()> {
                     )
                     .map_err(|e| anyhow::anyhow!("grounding policy compile failed: {}", e))?;
 
+                // v2.9.0 PR-4 — refuse strict-mode dispatches against
+                // the parserless runtimes (Ollama / OpenClaw / Hermes).
+                // These runtimes ARE full agents and DO have tools, but
+                // their dispatch paths don't yet emit structured tool-
+                // call telemetry that ATO can parse to verify rule
+                // compliance. Running strict mode against them today
+                // would either (a) silently succeed every dispatch as
+                // `compliant` despite zero observation (false positive,
+                // the opposite of the PR-1 claude regression), or
+                // (b) silently fail every dispatch as `violation`
+                // regardless of behavior (false negative, useless
+                // signal). Both are theater.
+                //
+                // The synthesis decision from the design debate (see
+                // plan §A2 and docs/grounding.md): refuse with options.
+                // The user sees three concrete paths forward rather
+                // than a black-box rejection. The experimental tool-
+                // call marker parser (option 3) is documented but not
+                // wired in PR-4 minimum — that's a v2.9.x follow-on.
+                let parserless_runtimes = ["ollama", "openclaw", "hermes"];
+                if policy.mode == commands::dispatch::GroundingMode::Strict
+                    && parserless_runtimes.contains(&runtime.as_str())
+                {
+                    anyhow::bail!(
+                        "Strict mode is not yet supported on the '{}' runtime — its dispatch \
+                         path doesn't emit structured tool-call telemetry, so the verdict \
+                         couldn't be honestly computed. Three options:\n\
+                         \n\
+                         1. Switch runtime: re-run with claude / codex / gemini (CLI runtimes \
+                            with native tool-call telemetry) or any API provider (anthropic / \
+                            openai / google / mistral / groq / etc — routed through the \
+                            function-calling tool loop in v2.9 PR-3).\n\
+                         \n\
+                         2. Downgrade to soft: re-run with `--mode-override soft`. The \
+                            mandatory rules are listed in the system prompt as expected \
+                            behavior and the verdict will record `advisory` regardless of \
+                            actual compliance — observe-only, no false positives or false \
+                            negatives.\n\
+                         \n\
+                         3. Wait for the experimental marker parser: a follow-on slice will \
+                            ship a best-effort tool-call marker parser for these runtimes \
+                            (documented in docs/grounding.md §strict-on-parserless). Until \
+                            then, the dispatch is refused rather than silently misreport \
+                            its compliance.\n",
+                        runtime
+                    );
+                }
+
                 if opts.human {
                     output::emit_human(&format!(
                         "Grounding policy compiled:\n  mode: {}\n  denies: {}\n  mandatories: {}\n  override audit entries: {}",
