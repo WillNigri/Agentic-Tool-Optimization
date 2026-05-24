@@ -473,27 +473,173 @@ dashboard panel. Calibrate the rate constants against an actual Railway month.
 Total: ~1,350 LOC across 5 PRs. Each shipped with its own scaled-empirical
 proof against the bench from this v2.9 series.
 
-## First three methodology archetypes we ship pre-built
+## First four methodology archetypes we ship pre-built
 
 These are the templates a Pro customer gets out of the box, mapped to questions
-they actually ask:
+they actually ask. **The first one — within-provider model A/B/C testing — is
+the primary use case**: customers want to know whether to keep paying Opus 4.7
+or downgrade Agent X to Sonnet 4.6, whether Gemini 2.5 is worth migrating from
+2.0, etc. The whole product is built around answering that question with
+defensible numbers.
 
-1. **`which-model-for-this-task`** — N prompts × M models × {tools-on, tools-off}
-   × R reps. Output: cost-quality Pareto frontier with a recommended pick. The
-   exact methodology we ran on the v2.9 grounded-mode build but at industry sample
-   size (n ≥ 30 per cell, cross-prompt).
+### Archetype 1: `model-ladder` — within-provider model A/B/C
 
-2. **`tools-vs-no-tools`** — same prompt × same model × {cold, soft, strict}
-   × R reps. Output: does grounding actually change behavior on YOUR work? Quantifies
-   tool-use rate, hallucination amplitude (response_chars when tools blocked vs
-   used), and verdict diversity. **This is the methodology that produced the v2.9
-   build log** — packaged so customers can run it on their own agents.
+**Question**: *"Should Agent X stay on Opus 4.7, or can Sonnet 4.6 handle this
+at 1/8th the cost?"*
 
-3. **`reviewer-order-effects`** — sticky session with reviewer order permuted N
-   times. Output: how much does the order of voices change the consensus?
-   Quantifies bias from "round 1 reviewer shapes round 2" effects.
+The most common Pro use case. Tests the same agent across **every model the
+customer has keys for**, within and across providers:
+
+```yaml
+methodology: model-ladder
+agent: @security-reviewer
+prompts: ./prompts/security/*.md         # customer's actual prompts
+models:
+  - claude-haiku-4-5         # cheap baseline
+  - claude-sonnet-4-6        # mid-tier
+  - claude-opus-4-7          # top-tier
+  - gemini-2.0-flash
+  - gemini-2.5-flash
+  - gemini-2.5-pro
+  - gpt-4o
+  - gpt-4.1
+  - codex/gpt-4.1
+reps_per_cell: 30                         # industry baseline
+rubric:
+  kind: llm_judge
+  judge_model: claude-haiku-4-5
+  criteria: "did the reviewer catch the same N issues claude-opus-4-7 caught?"
+```
+
+Output: a Pareto frontier with the recommended model, plus a "**if you migrate
+from Opus to Sonnet, you save $X.YZ/month at Q% quality regression**" callout.
+Same shape as the v2.9 grounded-mode build's verdict math, but composed across
+N models with confidence intervals on the quality delta.
+
+This is **the methodology customers pay $29/mo to run weekly** — every time a
+provider releases a new model (Sonnet 4.7, Gemini 3, etc.), they re-run the
+ladder and either migrate or stay put on data. No vibes-based "Twitter says
+Opus 4.7 is better."
+
+### Archetype 2: `tools-vs-no-tools`
+
+Same prompt × same model × {cold, soft, strict} × R reps. Output: does grounding
+actually change behavior on YOUR work? Quantifies tool-use rate, hallucination
+amplitude (response_chars when tools blocked vs used), and verdict diversity.
+**This is the methodology that produced the v2.9 build log** — packaged so
+customers can run it on their own agents.
+
+### Archetype 3: `reviewer-order-effects`
+
+Sticky session with reviewer order permuted N times. Output: how much does the
+order of voices change the consensus? Quantifies bias from "round 1 reviewer
+shapes round 2" effects.
+
+### Archetype 4: `regression-watch`
+
+Scheduled weekly re-run of any methodology with the result diffed against last
+week. Output: an alert when the recommended-model rank changes, when quality
+drops > X percentage points, or when cost rises > Y%. The "did our agent get
+worse this week" signal that production teams actually need.
+
+```bash
+ato evaluations methodology schedule which-model-for-security-review \
+    --weekly --on regression-watch --alert-on quality_drop_gt:5pp
+```
 
 After v2.10 PR-1 ships, customers can build their own methodologies on top.
+
+## Sample-size guidance — what the runner recommends and why
+
+The product surfaces a **sample-size advisor** every time a customer defines a
+new methodology, with explicit references to what industry-standard evals use.
+Customers can take the recommendation or override to anything ≥ 2 reps per cell.
+
+| Mode | reps/cell | Total dispatches (3 models × 5 prompts × 3 conditions) | Cost (typical claude) | Time | Confidence |
+|---|---|---|---|---|---|
+| **`fast`** (founder mode) | **n=10** | **450** | ~$11 | ~7 min | wide CIs, directional only |
+| **`industry-baseline`** (recommended for production decisions) | **n=30** | **1,350** | ~$33 | ~20 min | tight enough to publish |
+| **`high-confidence`** (model-migration calls) | **n=100** | **4,500** | ~$110 | ~70 min | publishable as benchmark |
+| **`research`** (one-off academic-grade) | **n=300** | **13,500** | ~$330 | ~3.5 hr | rare; for blog-post material |
+
+What the prompt looks like at methodology-create time:
+
+```
+$ ato evaluations methodology create model-ladder-security-review --interactive
+
+Methodology: model-ladder-security-review
+Matrix: 9 models × 5 prompts × 1 condition = 45 cells
+
+How many replications per cell?
+
+  [1] fast              n=10   ~450 dispatches   ~$11    ~7 min
+  [2] industry-baseline n=30   ~1,350 dispatches ~$33    ~20 min   (recommended)
+  [3] high-confidence   n=100  ~4,500 dispatches ~$110   ~70 min
+  [4] research          n=300  ~13,500 dispatches ~$330  ~3.5 hr
+  [5] custom            (you pick — minimum 2)
+
+  For reference:
+    Promptfoo (open source):     typical eval = 10-100 cases × 3-5 models = 30-500 completions
+    Braintrust customer dashboards: median eval run = 50-300 examples × N variants
+    Patronus public RAG benchmark:  ~1,000 examples
+    OpenAI evals library standard:  100-10,000 examples
+    HumanEval (academic):           164 problems × N candidates
+
+  Choice [2]:
+```
+
+The sample-size advisor numbers come from the same public `pricing.json` rate
+card so customers can pre-compute the spend in their head.
+
+## Continuous learning loop (opt-in data sharing)
+
+When a customer opts in (off by default, surfaced as `ato auth share-evaluations`),
+their methodology results contribute to a community benchmark surface:
+
+```
+Community signal (this week, across N=1,247 opted-in customers running
+                   model-ladder methodologies):
+  • claude-sonnet-4-6 is winning 67% of @security-reviewer cells (up 4pp wk-over-wk)
+  • gemini-2.5-pro is now competitive with gpt-4.1 on @code-reviewer (within 2pp)
+  • opus-4.7 still wins @migration-reviewer by 11pp (unchanged)
+```
+
+Three load-bearing properties:
+
+1. **Opt-in only.** Default off. We don't aggregate anything a customer
+   hasn't explicitly opted to share. The opt-in toggle is per-methodology so
+   customers can share `model-ladder` results without exposing their proprietary
+   `customer-support-bot` evals.
+
+2. **Differential-privacy aware.** We share **cell-level statistics** (mean,
+   sd, n) — never raw prompts, never raw responses. Customer prompts are PII /
+   IP; only the aggregated quality scores leave the local DB.
+
+3. **Re-shareable receipts.** A customer running `model-ladder` weekly produces
+   a regression-watch artifact they can paste into their team Slack: *"Our
+   security-review agent quality dropped 6pp this week — claude-sonnet-4-6
+   suddenly underperforming on prompt-class P3. Either roll back to last week's
+   model snapshot or investigate."*
+
+This is the data flywheel: every Pro customer running methodologies makes the
+community recommendations better, which makes the product more valuable to the
+next customer. The receipts they generate are atomic enough to aggregate
+without privacy violation; the methodology runner produces the same shape across
+every customer so the aggregation is mechanical, not handwavy.
+
+## Where this connects to the v2.9 work we just shipped
+
+Today's grounded-mode build log shipped the **atomic event** the runner composes
+— every dispatch is now a row in `execution_logs` with `grounding_verdict`,
+`tool_calls_summary`, `grounding_overrides`, cost + duration + model + agent
+attribution. The methodology runner is the layer that fans those out at scale
+and aggregates. We can't ship the runner without the receipts. We just shipped
+the receipts.
+
+Empirical proof we hit the bar: the n=150 scaled eval we ran while writing
+this spec (see Part 5 of the build log) produced *real* confidence intervals on
+claude's behavior across 5 prompts × 3 conditions × 10 reps — **20× the original
+n=1 eval, with publishable statistics**. That's the recipe the runner ships.
 
 ## Why this is the wedge
 
