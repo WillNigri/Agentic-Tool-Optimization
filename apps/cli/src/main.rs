@@ -184,6 +184,53 @@ enum Commands {
         /// `--stream`; ignored without an API provider runtime.
         #[arg(long, default_value_t = false)]
         stream_jsonl: bool,
+        /// v2.9.0 PR-1 — grounded mode. Propose a different grounding
+        /// mode for this dispatch (off | soft | strict). Tighten-only:
+        /// refused if it would relax below the agent's allowed_mode_floor
+        /// (refusal is recorded on the receipt; the dispatch still runs
+        /// under the agent's record). When unset, the agent's record
+        /// mode applies. See docs/grounding.md.
+        #[arg(long = "mode-override")]
+        mode_override: Option<String>,
+        /// v2.9.0 PR-1 — grounded mode. Comma-separated list of tools
+        /// the agent MUST call at least once before its reply is marked
+        /// compliant (e.g. `--require-tools read_file,grep`).
+        /// Tightens only — always accepted. Recorded as
+        /// MustUseTool mandatory rules with auto-id `cli-tool-N`.
+        #[arg(long = "require-tools", value_delimiter = ',')]
+        require_tools: Vec<String>,
+        /// v2.9.0 PR-1 — grounded mode. Comma-separated list of file
+        /// path globs the agent MUST read via a read_file-style tool
+        /// at least once (e.g. `--require-paths "src/auth/**,tests/auth/**"`).
+        /// Tightens only — always accepted. Recorded as
+        /// MustReadPathGlob mandatory rules with auto-id `cli-path-N`.
+        #[arg(long = "require-paths", value_delimiter = ',')]
+        require_paths: Vec<String>,
+        /// v2.9.0 PR-1 — grounded mode. Comma-separated additional deny
+        /// rules (e.g. `--additional-denies "Bash,Bash(rm:*)"`).
+        /// Tightens only — always accepted. Format matches v2.7.8
+        /// permissions strings.
+        #[arg(long = "additional-denies", value_delimiter = ',')]
+        additional_denies: Vec<String>,
+        /// v2.9.0 PR-1 — grounded mode. Skip ONE mandatory rule for
+        /// this dispatch only. Pair with --skip-reason. The rule still
+        /// appears in the override audit so the receipt records the skip
+        /// + the reason verbatim (no silent bypass). Counts against
+        /// the agent's compliance metric.
+        #[arg(long = "skip-mandatory")]
+        skip_mandatory: Option<String>,
+        /// v2.9.0 PR-1 — grounded mode. Required when --skip-mandatory
+        /// is set. The reason is recorded verbatim on the receipt
+        /// (`grounding_overrides` JSON) so the audit trail is complete.
+        #[arg(long = "skip-reason")]
+        skip_reason: Option<String>,
+        /// v2.9.0 PR-1 — grounded mode. Preview the compiled policy
+        /// without invoking the runtime — useful for "what tools would
+        /// this agent be allowed to call?" before paying for a real
+        /// dispatch. Override audit records `DryRun`; no runtime call,
+        /// no execution_logs row written.
+        #[arg(long = "dry-run", default_value_t = false)]
+        grounding_dry_run: bool,
     },
     /// Replay an existing dispatch against a different runtime/model
     Replay {
@@ -1110,6 +1157,13 @@ fn main() -> Result<()> {
             max_rounds,
             stream,
             stream_jsonl,
+            mode_override,
+            require_tools,
+            require_paths,
+            additional_denies,
+            skip_mandatory,
+            skip_reason,
+            grounding_dry_run,
         } => {
             // stream-jsonl implies stream; a wrapper can set just
             // --stream-jsonl without needing to also pass --stream.
@@ -1119,16 +1173,90 @@ fn main() -> Result<()> {
                     "--tag-bridge requires --session (the bridge loop appends to that session's turn history)."
                 );
             }
-            // Run the primary dispatch first. dispatch::run handles
-            // session-turn persistence so by the time we return,
-            // session_turns has the assistant's reply.
+
+            // v2.9.0 PR-1 slice 2 — assemble the grounding overrides
+            // from CLI flags. When nothing was passed, `overrides.has_any()`
+            // is false and the dispatch path runs exactly as today; when
+            // at least one flag is set, we compile a policy + record the
+            // override audit + (if --dry-run) short-circuit before
+            // touching the runtime.
+            let parsed_mode_override = match mode_override.as_deref() {
+                None | Some("") => None,
+                Some(s) => {
+                    let m = commands::dispatch::GroundingMode::parse(s);
+                    if m.as_str() != s {
+                        anyhow::bail!(
+                            "--mode-override='{}' is not a known mode (expected: off | soft | strict)",
+                            s
+                        );
+                    }
+                    Some(m)
+                }
+            };
+            let grounding_overrides = commands::dispatch::DispatchGroundingOverrides {
+                mode_override: parsed_mode_override,
+                additional_denies,
+                require_tools,
+                require_paths,
+                skip_mandatory,
+                skip_reason,
+                dry_run: grounding_dry_run,
+            };
+
+            if grounding_overrides.has_any() {
+                // Compile the policy now against conservative record
+                // defaults (off / off / no rules). PR-2 will load the
+                // actual agent record so the compiled policy reflects
+                // the agent's denies + mandatories. The compile step is
+                // what validates the override is internally consistent
+                // (e.g. --skip-mandatory requires --skip-reason).
+                let policy = grounding_overrides
+                    .compile_with_record_defaults(
+                        commands::dispatch::GroundingMode::Off,
+                        commands::dispatch::GroundingMode::Off,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("grounding policy compile failed: {}", e))?;
+
+                if opts.human {
+                    output::emit_human(&format!(
+                        "Grounding policy compiled:\n  mode: {}\n  denies: {}\n  mandatories: {}\n  override audit entries: {}",
+                        policy.mode.as_str(),
+                        policy.denies.len(),
+                        policy.mandatories.len(),
+                        policy.overrides_audit.len(),
+                    ));
+                }
+
+                if grounding_overrides.dry_run {
+                    // No runtime invocation. Emit the policy as the
+                    // result and return early. Caller can pipe to jq
+                    // to inspect the compiled override audit.
+                    output::emit_json(&serde_json::json!({
+                        "dry_run": true,
+                        "mode": policy.mode.as_str(),
+                        "denies": policy.denies,
+                        "mandatories": policy.mandatories,
+                        "overrides_audit": policy.overrides_audit,
+                    }));
+                    return Ok(());
+                }
+            }
+
+            // Run the primary dispatch.
+            // dispatch::run handles session-turn persistence so by the
+            // time we return, session_turns has the assistant's reply.
+            // (When grounding_overrides were passed, the post-dispatch
+            // UPDATE below stamps the override audit onto the receipt
+            // row dispatch::run just wrote.)
             commands::dispatch::run(
                 &runtime,
                 &prompt,
                 model,
-                agent,
+                agent.clone(),
                 session.clone(),
-                war_room_id,
+                war_room_id.clone(),
                 war_room_round,
                 stream,
                 stream_jsonl,
@@ -1136,6 +1264,37 @@ fn main() -> Result<()> {
                 &db_path,
                 &opts,
             )?;
+
+            // v2.9.0 PR-1 slice 2 — if the caller passed any grounding
+            // overrides, stamp the audit JSON onto the latest
+            // execution_log row this process just wrote. The compile
+            // step happened earlier (above); we re-run it here because
+            // the inner dispatch path doesn't see the overrides yet
+            // (PR-2 will plumb them through dispatch::run). Same record
+            // defaults — conservative until PR-2.
+            //
+            // This UPDATE is fire-and-forget: if it fails, the dispatch
+            // itself already succeeded and the user already got their
+            // reply. The grounding audit is observability, not correctness.
+            if grounding_overrides.has_any() && !grounding_overrides.dry_run {
+                if let Ok(policy) = grounding_overrides.compile_with_record_defaults(
+                    commands::dispatch::GroundingMode::Off,
+                    commands::dispatch::GroundingMode::Off,
+                    Vec::new(),
+                    Vec::new(),
+                ) {
+                    if let Some(overrides_json) = policy.overrides_json() {
+                        let _ = commands::dispatch::stamp_grounding_overrides_on_latest(
+                            &db_path,
+                            agent.as_deref(),
+                            session.as_deref(),
+                            war_room_id.as_deref(),
+                            &overrides_json,
+                            &opts,
+                        );
+                    }
+                }
+            }
             // v2.3.33 Phase 6 Slice B — kick off the cross-runtime
             // bridge loop. Always Ok() — failures inside the loop are
             // surfaced via emit_human + execution_logs but don't

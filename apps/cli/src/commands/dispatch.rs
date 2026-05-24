@@ -11,13 +11,223 @@
 // or without the desktop running.
 
 use crate::db;
+use crate::grounding::policy::{
+    GroundingPolicy, MandatoryRule, MandatoryRuleKind,
+};
 use crate::output::{emit_human, emit_json, Opts};
 use crate::runtime;
 use anyhow::{Context, Result};
+use rusqlite::params;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
+
+// Re-export the grounding mode so the user-facing CLI handler in
+// main.rs can refer to it as `commands::dispatch::GroundingMode`
+// without reaching into the grounding module path directly. The
+// re-export keeps `dispatch` the canonical surface for everything
+// PR-1 added to the dispatch entry point.
+pub use crate::grounding::policy::GroundingMode;
+
+/// v2.9.0 PR-1 — per-dispatch grounding overrides.
+///
+/// Carries every flag a caller can pass at dispatch time to tighten the
+/// agent record's grounding policy (or, in the case of mode_override,
+/// to propose a different mode subject to the agent's `allowed_mode_floor`).
+/// Default-constructed = no overrides = pre-v2.9 dispatch behavior.
+///
+/// Passed in through `dispatch::run` as a single param so the function
+/// signature only grows by one slot. Callers that don't care about
+/// grounding (review.rs, bridge.rs, replay.rs internal dispatches)
+/// pass `DispatchGroundingOverrides::default()`. Only the user-facing
+/// `Commands::Dispatch` handler in main.rs populates this from CLI flags.
+///
+/// Plumbing happens at the receipt-write boundary: when this struct has
+/// anything set, `dispatch::run` compiles a `GroundingPolicy` (with the
+/// agent's record defaults of `off` / no rules until PR-2 loads the
+/// full record), serializes the override audit via
+/// `policy.overrides_json()`, and stores it on the new
+/// `execution_logs.grounding_overrides` column. Soft-mode prompt
+/// prepend + verdict computation land in PR-1 slice 2c once agent-
+/// record loading reaches every runtime path.
+#[derive(Debug, Default, Clone)]
+pub struct DispatchGroundingOverrides {
+    /// Propose a different grounding_mode for this dispatch. None = use
+    /// the agent's record. Refused (with audit) if the request would
+    /// relax below `allowed_mode_floor`.
+    pub mode_override: Option<GroundingMode>,
+    /// Add deny rules on top of the agent's. Tightens only — always
+    /// accepted. Format mirrors v2.7.8 `agents.permissions` strings
+    /// ("deny:Bash(rm:*)").
+    pub additional_denies: Vec<String>,
+    /// Add MustUseTool mandatory rules at dispatch time. Comma-separated
+    /// from `--require-tools`. Rule ids are auto-generated as
+    /// `cli-tool-<n>` so the override audit references them stably.
+    pub require_tools: Vec<String>,
+    /// Add MustReadPathGlob mandatory rules at dispatch time.
+    /// Comma-separated from `--require-paths`. Auto-id'd as
+    /// `cli-path-<n>`.
+    pub require_paths: Vec<String>,
+    /// Skip ONE mandatory rule for this dispatch. Pair with `skip_reason`.
+    /// The rule still appears in the override audit so the receipt
+    /// records the skip + the written reason verbatim — counts against
+    /// compliance metric.
+    pub skip_mandatory: Option<String>,
+    /// Required when `skip_mandatory` is set. The caller writes a
+    /// human-readable reason ("single-file diff, no read needed") that
+    /// the audit captures.
+    pub skip_reason: Option<String>,
+    /// Preview the compiled policy without invoking the runtime. The
+    /// audit records `DryRun`; no LLM call is made.
+    pub dry_run: bool,
+}
+
+impl DispatchGroundingOverrides {
+    /// True when at least one field has been set away from defaults.
+    /// Used by `dispatch::run` to decide whether to compile a
+    /// `GroundingPolicy` (and pay the small overhead) or skip the
+    /// grounding path entirely.
+    pub fn has_any(&self) -> bool {
+        self.mode_override.is_some()
+            || !self.additional_denies.is_empty()
+            || !self.require_tools.is_empty()
+            || !self.require_paths.is_empty()
+            || self.skip_mandatory.is_some()
+            || self.dry_run
+    }
+
+    /// Compile this override into a `GroundingPolicy` using the agent
+    /// record's defaults. PR-1 slice 2a passes `off` / `off` / empty /
+    /// empty for the record — that's the conservative path until the
+    /// per-runtime agent-record load reaches this function in slice 2c.
+    /// The composed policy still carries the override audit verbatim
+    /// so the receipt records what the caller asked for.
+    pub fn compile_with_record_defaults(
+        &self,
+        record_mode: GroundingMode,
+        record_floor: GroundingMode,
+        record_denies: Vec<String>,
+        record_mandatories: Vec<MandatoryRule>,
+    ) -> Result<GroundingPolicy, String> {
+        let additional_mandatories: Vec<MandatoryRule> = self
+            .require_tools
+            .iter()
+            .enumerate()
+            .map(|(i, tool)| MandatoryRule {
+                id: format!("cli-tool-{}", i + 1),
+                kind: MandatoryRuleKind::MustUseTool,
+                target: tool.clone(),
+                min_count: 1,
+                rationale: Some("dispatch-time --require-tools".to_string()),
+            })
+            .chain(self.require_paths.iter().enumerate().map(|(i, glob)| {
+                MandatoryRule {
+                    id: format!("cli-path-{}", i + 1),
+                    kind: MandatoryRuleKind::MustReadPathGlob,
+                    target: glob.clone(),
+                    min_count: 1,
+                    rationale: Some("dispatch-time --require-paths".to_string()),
+                }
+            }))
+            .collect();
+
+        let skip = match (&self.skip_mandatory, &self.skip_reason) {
+            (Some(rid), Some(reason)) => Some((rid.clone(), reason.clone())),
+            (Some(rid), None) => {
+                return Err(format!(
+                    "--skip-mandatory={} requires --skip-reason (the reason is recorded verbatim on the receipt; no silent skips)",
+                    rid
+                ));
+            }
+            _ => None,
+        };
+
+        GroundingPolicy::compose(
+            record_mode,
+            record_floor,
+            record_denies,
+            record_mandatories,
+            self.mode_override,
+            self.additional_denies.clone(),
+            additional_mandatories,
+            skip,
+            self.dry_run,
+        )
+    }
+}
+
+/// v2.9.0 PR-1 slice 2 — after a dispatch completes, stamp the
+/// override audit JSON onto the receipt row this process just wrote.
+/// Heuristic for "the row this process wrote" uses the row's
+/// (created_at, session_id, agent_slug, war_room_id) combination — we
+/// pick the most-recently-inserted matching row. This is intentionally
+/// conservative: if the call doesn't find a row (race condition, the
+/// INSERT path failed silently, etc.) we no-op and the audit is lost,
+/// rather than risk stamping the wrong row. The grounding audit is
+/// observability data, not correctness data — a missing audit row is
+/// recoverable; a misattributed one is not.
+///
+/// Returns Ok even when no row matches (silent no-op) so the caller
+/// can fire-and-forget without disturbing the user's primary reply.
+/// PR-2 will replace this with proper plumbing through dispatch::run
+/// (the receipt INSERT will carry grounding_overrides directly).
+pub fn stamp_grounding_overrides_on_latest(
+    db_path: &PathBuf,
+    agent_slug: Option<&str>,
+    session_id: Option<&str>,
+    war_room_id: Option<&str>,
+    overrides_json: &str,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+
+    // Find the most-recently-inserted row that matches the dispatch's
+    // session / agent / war-room context. Pre-PR-2 we don't have a
+    // direct id from dispatch::run so this heuristic is our seam. The
+    // 5-second wall-clock window guards against picking up an old row
+    // from a previous dispatch on the same agent.
+    let row_id: Option<String> = conn
+        .query_row::<String, _, _>(
+            "SELECT id
+             FROM execution_logs
+             WHERE COALESCE(agent_slug, '') = COALESCE(?1, '')
+               AND COALESCE(session_id, '') = COALESCE(?2, '')
+               AND COALESCE(war_room_id, '') = COALESCE(?3, '')
+               AND datetime(created_at) >= datetime('now', '-5 seconds')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![agent_slug, session_id, war_room_id],
+            |r| r.get(0),
+        )
+        .ok();
+
+    let Some(rid) = row_id else {
+        // No matching row — could be normal (dispatch failed before
+        // writing) or a race. Either way, silent no-op.
+        if opts.human {
+            emit_human(
+                "(grounding audit: no recent execution_logs row matched the dispatch context — \
+                 the override audit was not recorded; this is a known PR-1 limitation that PR-2's \
+                 dispatch::run plumbing will close)",
+            );
+        }
+        return Ok(());
+    };
+
+    let updated = conn.execute(
+        "UPDATE execution_logs SET grounding_overrides = ?1 WHERE id = ?2",
+        params![overrides_json, rid],
+    )?;
+
+    if updated > 0 && opts.human {
+        emit_human(&format!(
+            "Grounding override audit stamped on execution_log {}",
+            rid
+        ));
+    }
+    Ok(())
+}
 
 /// Upload a trace to the cloud for Pro analytics. Fire-and-forget:
 /// failures are silent because the local execution_log already has
