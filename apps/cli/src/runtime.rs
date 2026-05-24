@@ -39,8 +39,9 @@ pub fn resolve_runtime_cli(runtime: &str) -> Result<PathBuf> {
 // this module — silent breakage on a refactor would be worse than a
 // few unused imports.
 pub use ato_pricing::{
-    billing_mode, cost_from_tokens, estimate_cost_usd, estimate_text_tokens,
-    pricing_for_model, BillingMode,
+    all_providers, billing_mode, cheaper_cross_provider, cheaper_same_provider,
+    cost_from_tokens, estimate_cost_usd, estimate_text_tokens, models_for_provider,
+    pricing_for_model, provider_for_model, BillingMode,
 };
 
 /// CLI-runtime default model. Distinct from `pricing_for_model` — the

@@ -90,6 +90,87 @@ pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     }
 }
 
+/// Provider → model tiers, ordered cheapest-output-rate first.
+/// Used by the optimizer to enumerate cheaper alternatives.
+pub fn models_for_provider(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "anthropic" => &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
+        "openai" => &["gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1-mini", "o3-mini", "gpt-4.1", "o3", "gpt-4o", "gpt-5"],
+        "google" => &["gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-2.5-pro"],
+        "deepseek" => &["deepseek-chat", "deepseek-reasoner"],
+        "qwen" => &["qwen-turbo", "qwen-plus", "qwen-max"],
+        "minimax" => &["MiniMax-Text-01", "MiniMax-M2", "MiniMax-M2.7-highspeed"],
+        "grok" => &["grok-2-latest", "grok-3"],
+        _ => &[],
+    }
+}
+
+/// All known providers.
+pub fn all_providers() -> &'static [&'static str] {
+    &["anthropic", "openai", "google", "deepseek", "qwen", "minimax", "grok"]
+}
+
+/// Model → provider. Returns `None` for unknown models.
+pub fn provider_for_model(model: &str) -> Option<&'static str> {
+    match model {
+        m if m.starts_with("claude-") => Some("anthropic"),
+        m if m.starts_with("gpt-") || m.starts_with("o3") => Some("openai"),
+        m if m.starts_with("gemini-") => Some("google"),
+        m if m.starts_with("deepseek-") => Some("deepseek"),
+        m if m.starts_with("qwen-") => Some("qwen"),
+        m if m.starts_with("MiniMax-") => Some("minimax"),
+        m if m.starts_with("grok-") => Some("grok"),
+        _ => None,
+    }
+}
+
+/// Returns models cheaper than `current_model` from the same provider,
+/// ordered cheapest first.
+pub fn cheaper_same_provider(current_model: &str) -> Vec<&'static str> {
+    let provider = match provider_for_model(current_model) {
+        Some(p) => p,
+        None => return vec![],
+    };
+    let current_out = match pricing_for_model(current_model) {
+        Some((_, out)) => out,
+        None => return vec![],
+    };
+    models_for_provider(provider)
+        .iter()
+        .copied()
+        .filter(|m| {
+            *m != current_model
+                && pricing_for_model(m)
+                    .map(|(_, out)| out < current_out)
+                    .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Returns cheaper models from OTHER providers, ordered cheapest first.
+pub fn cheaper_cross_provider(current_model: &str) -> Vec<&'static str> {
+    let current_provider = provider_for_model(current_model);
+    let current_out = match pricing_for_model(current_model) {
+        Some((_, out)) => out,
+        None => return vec![],
+    };
+    let mut alts: Vec<(&str, f64)> = Vec::new();
+    for &provider in all_providers() {
+        if Some(provider) == current_provider {
+            continue;
+        }
+        for &model in models_for_provider(provider) {
+            if let Some((_, out)) = pricing_for_model(model) {
+                if out < current_out {
+                    alts.push((model, out));
+                }
+            }
+        }
+    }
+    alts.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    alts.into_iter().map(|(m, _)| m).collect()
+}
+
 /// Estimate cost from real token counts (preferred over chars/4
 /// when the provider returned a usage block). Returns `None` if the
 /// model isn't in the pricing table.
@@ -199,6 +280,34 @@ mod tests {
         assert_eq!(billing_mode("openai"), BillingMode::ApiKey);
         // Future provider not yet in the match arm should default to ApiKey
         assert_eq!(billing_mode("future-vendor"), BillingMode::ApiKey);
+    }
+
+    #[test]
+    fn model_registry_basics() {
+        for &p in all_providers() {
+            assert!(!models_for_provider(p).is_empty(), "provider {} has no models", p);
+        }
+        assert_eq!(provider_for_model("claude-sonnet-4-6"), Some("anthropic"));
+        assert_eq!(provider_for_model("gpt-4.1"), Some("openai"));
+        assert_eq!(provider_for_model("gemini-2.5-flash"), Some("google"));
+        assert_eq!(provider_for_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn cheaper_same_provider_works() {
+        let alts = cheaper_same_provider("claude-opus-4-6");
+        assert!(alts.contains(&"claude-sonnet-4-6"));
+        assert!(alts.contains(&"claude-haiku-4-5"));
+        assert_eq!(alts[0], "claude-haiku-4-5");
+        assert!(cheaper_same_provider("claude-haiku-4-5").is_empty());
+    }
+
+    #[test]
+    fn cheaper_cross_provider_works() {
+        let alts = cheaper_cross_provider("claude-opus-4-6");
+        assert!(alts.iter().any(|m| m.starts_with("gemini-")));
+        assert!(alts.iter().any(|m| m.starts_with("gpt-")));
+        assert!(!alts.iter().any(|m| m.starts_with("claude-")));
     }
 
     /// Parity contract — these are the model prices the dispatch + cost-
