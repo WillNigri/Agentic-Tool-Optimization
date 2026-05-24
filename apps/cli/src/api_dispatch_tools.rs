@@ -1451,7 +1451,17 @@ mod tests {
         let block = &last["content"][0];
         assert_eq!(block["type"], "tool_result");
         assert_eq!(block["tool_use_id"], "toolu_01abc");
-        assert_eq!(block["content"], "fn main() {}");
+        // v2.8.0 P0 sanitization (commit 2eaa719) wraps every tool
+        // result in <UNTRUSTED_INPUT source="tool:NAME"> ... </UNTRUSTED_INPUT>
+        // to defang prompt-injection at the model boundary. The
+        // assertion was missed when that wrapping shipped; this fix
+        // backfills it (caught 2026-05-24 during the v2.9 grounded-
+        // mode full-test sweep — the test sat red on main but the
+        // pre-commit gate only runs `cargo check`, not `cargo test`).
+        assert_eq!(
+            block["content"],
+            "<UNTRUSTED_INPUT source=\"tool:read_file\">\nfn main() {}\n</UNTRUSTED_INPUT>"
+        );
         assert_eq!(block["is_error"], false);
     }
 
