@@ -1293,6 +1293,21 @@ fn main() -> Result<()> {
                             &opts,
                         );
                     }
+                    // v2.9.0 PR-1 slice 3 — verdict computation. Runs
+                    // AFTER the overrides stamp because both walk the
+                    // same row-finding heuristic; doing the verdict
+                    // second means we can detect the row reliably (it
+                    // now carries grounding_overrides IS NOT NULL,
+                    // which the verdict query filters on for an extra
+                    // safety guard).
+                    let _ = commands::dispatch::stamp_grounding_verdict_on_latest(
+                        &db_path,
+                        agent.as_deref(),
+                        session.as_deref(),
+                        war_room_id.as_deref(),
+                        &policy,
+                        &opts,
+                    );
                 }
             }
             // v2.3.33 Phase 6 Slice B — kick off the cross-runtime

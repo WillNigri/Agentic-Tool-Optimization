@@ -229,6 +229,116 @@ pub fn stamp_grounding_overrides_on_latest(
     Ok(())
 }
 
+/// v2.9.0 PR-1 slice 3 — compile the verdict and write it onto the
+/// receipt row stamped by `stamp_grounding_overrides_on_latest`.
+///
+/// This is what turns the override audit from "we recorded what the
+/// caller asked for" into "we observed what the runtime actually did."
+/// For PR-1 the input is whatever the runtime captured into
+/// `tool_calls_summary` already (today: API providers via
+/// `api_dispatch_tools.rs`; CLI runtimes like claude don't write this
+/// column yet). When the column is empty, the verdict honestly
+/// reflects that — an `--require-tools read_file` rule with zero
+/// observed tool calls produces `advisory` + unmet (for soft mode)
+/// because the receipt CAN'T see whether the tool was actually used.
+/// PR-2 wires claude/codex CLI tool-use parsing so the verdict
+/// becomes accurate for every runtime; PR-1 ships the verdict
+/// column so the empirical test from the cold control gets RECORDED
+/// even if the parsing detail is still pending.
+pub fn stamp_grounding_verdict_on_latest(
+    db_path: &PathBuf,
+    agent_slug: Option<&str>,
+    session_id: Option<&str>,
+    war_room_id: Option<&str>,
+    policy: &GroundingPolicy,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+
+    // Same row-finding heuristic as stamp_grounding_overrides_on_latest.
+    // We want the row WE just wrote the overrides onto so the verdict
+    // lands on the same receipt. PR-2 plumbs the id through dispatch::run
+    // so this two-step heuristic goes away.
+    let row: Option<(String, Option<String>, Option<String>)> = conn
+        .query_row::<(String, Option<String>, Option<String>), _, _>(
+            "SELECT id, response, tool_calls_summary
+             FROM execution_logs
+             WHERE COALESCE(agent_slug, '') = COALESCE(?1, '')
+               AND COALESCE(session_id, '') = COALESCE(?2, '')
+               AND COALESCE(war_room_id, '') = COALESCE(?3, '')
+               AND grounding_overrides IS NOT NULL
+               AND datetime(created_at) >= datetime('now', '-10 seconds')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![agent_slug, session_id, war_room_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+
+    let Some((rid, response_text, tool_calls_summary_json)) = row else {
+        return Ok(()); // silent no-op — see overrides function for rationale
+    };
+
+    // Parse tool_calls_summary into observations. If the runtime didn't
+    // write that column (claude/codex CLI today), observations is empty
+    // and the verdict honestly reflects "no observed tool calls."
+    let observations: Vec<crate::grounding::verdict::ToolCallObservation> =
+        tool_calls_summary_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
+    let response_for_marker_rules = response_text.as_deref().unwrap_or("");
+    let (verdict, detail) =
+        crate::grounding::verdict::compile_verdict(policy, &observations, response_for_marker_rules);
+
+    // Stamp the verdict token. The detail (unmet_rules list) gets
+    // serialized into a small JSON wrapper appended to the audit array
+    // so the receipt rendering surface (CLI + GUI) can show which
+    // specific rules failed without a separate column.
+    let updated = conn.execute(
+        "UPDATE execution_logs SET grounding_verdict = ?1 WHERE id = ?2",
+        params![verdict.as_str(), rid],
+    )?;
+
+    if updated > 0 {
+        // Also append the verdict detail to the existing
+        // grounding_overrides JSON array. Failure here is logged but
+        // not fatal — the verdict token landed even if the detail
+        // append fails. Wrap-and-append rather than overwrite so the
+        // override audit entries we already wrote stay intact.
+        let detail_entry = serde_json::json!({
+            "kind": "verdict_detail",
+            "verdict": verdict.as_str(),
+            "unmet_rules": detail.unmet_rules,
+            "observed_tool_calls": observations.len(),
+        });
+        let _ = conn.execute(
+            "UPDATE execution_logs
+             SET grounding_overrides = json_insert(
+                 grounding_overrides,
+                 '$[#]',
+                 json(?1)
+             )
+             WHERE id = ?2 AND grounding_overrides IS NOT NULL",
+            params![detail_entry.to_string(), rid],
+        );
+
+        if opts.human {
+            emit_human(&format!(
+                "Grounding verdict for execution_log {}: {} ({} observed tool call{}, {} unmet rule{})",
+                rid,
+                verdict.as_str(),
+                observations.len(),
+                if observations.len() == 1 { "" } else { "s" },
+                detail.unmet_rules.len(),
+                if detail.unmet_rules.len() == 1 { "" } else { "s" },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Upload a trace to the cloud for Pro analytics. Fire-and-forget:
 /// failures are silent because the local execution_log already has
 /// the data. This closes the pipeline gap where CLI dispatches
