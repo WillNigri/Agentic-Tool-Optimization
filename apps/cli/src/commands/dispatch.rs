@@ -339,6 +339,99 @@ pub fn stamp_grounding_verdict_on_latest(
     Ok(())
 }
 
+/// v2.9.0 PR-2 — re-parse claude's --output-format stream-json response
+/// into (response_text, tool_calls), then UPDATE the latest matching
+/// execution_log row so the receipt carries the final assistant reply
+/// in `response` and the tool_use observations in `tool_calls_summary`
+/// + `tool_calls_count`.
+///
+/// This is the slice that closes the false-negative regression
+/// documented in PR-1 part-1 score sheet
+/// (/tmp/grounded-mode-receipts/07-empirical-score.md): pre-PR-2,
+/// claude's verdict came back `advisory + read_file unmet` even when
+/// claude actually used its native tools, because tool_calls_summary
+/// was empty. After this UPDATE runs, the grounding verdict
+/// (stamp_grounding_verdict_on_latest, called next in main.rs) sees
+/// the populated tool_calls_summary and produces `compliant`.
+///
+/// Silent no-op when the row can't be found (race / failed INSERT) —
+/// same fire-and-forget contract as stamp_grounding_overrides_on_latest.
+pub fn reparse_claude_stream_json_on_latest(
+    db_path: &PathBuf,
+    agent_slug: Option<&str>,
+    session_id: Option<&str>,
+    war_room_id: Option<&str>,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+
+    // Same row-finding shape as the override-stamp helper, plus a
+    // runtime='claude' guard since stream-json is claude-specific.
+    let row: Option<(String, Option<String>)> = conn
+        .query_row::<(String, Option<String>), _, _>(
+            "SELECT id, response
+             FROM execution_logs
+             WHERE COALESCE(agent_slug, '') = COALESCE(?1, '')
+               AND COALESCE(session_id, '') = COALESCE(?2, '')
+               AND COALESCE(war_room_id, '') = COALESCE(?3, '')
+               AND runtime = 'claude'
+               AND grounding_overrides IS NOT NULL
+               AND datetime(created_at) >= datetime('now', '-10 seconds')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![agent_slug, session_id, war_room_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+
+    let Some((rid, raw_response)) = row else {
+        return Ok(());
+    };
+    let Some(raw_response) = raw_response else {
+        return Ok(()); // no response stored — nothing to parse
+    };
+
+    // Parse the stream-json NDJSON. Empty parse output means either
+    // the response wasn't stream-json (env var didn't take effect) or
+    // the dispatch errored before producing events — either way, leave
+    // the receipt alone.
+    let parsed = crate::grounding::parse_claude_stream_json(&raw_response);
+    if parsed.response_text.is_empty() && parsed.tool_calls.is_empty() {
+        return Ok(());
+    }
+
+    // Serialize tool_calls into the v2.4.5 ToolCallAudit shape so the
+    // existing receipt UI + verdict code path can read it without a
+    // separate schema.
+    let tool_calls_summary_json = serde_json::to_string(&parsed.tool_calls).ok();
+    let tool_calls_count = parsed.tool_calls.len() as i64;
+
+    let updated = conn.execute(
+        "UPDATE execution_logs
+         SET response             = ?1,
+             tool_calls_summary   = ?2,
+             tool_calls_count     = ?3
+         WHERE id = ?4",
+        params![
+            parsed.response_text,
+            tool_calls_summary_json,
+            tool_calls_count,
+            rid
+        ],
+    )?;
+
+    if updated > 0 && opts.human {
+        emit_human(&format!(
+            "Reparsed claude stream-json on execution_log {} — {} tool call{} extracted",
+            rid,
+            tool_calls_count,
+            if tool_calls_count == 1 { "" } else { "s" }
+        ));
+    }
+
+    Ok(())
+}
+
 /// Upload a trace to the cloud for Pro analytics. Fire-and-forget:
 /// failures are silent because the local execution_log already has
 /// the data. This closes the pipeline gap where CLI dispatches
@@ -1058,7 +1151,23 @@ pub fn run(
             // that's bridging to claude shouldn't try to resume — there
             // is no claude-native session id to resume from. The
             // text-transcript prefix above covers that case.
-            if let Some(s) = &session {
+            //
+            // v2.9.0 PR-2 — when grounding is on (env-var opted in by
+            // the dispatch-flag pre-call hook), switch to stream-json
+            // so claude's tool_use blocks are surfaced for the verdict
+            // computation. Mutually exclusive with --output-format json
+            // (which is only used for session metadata capture, see
+            // v2.3.31 Slice A note above) — sessions + grounding land
+            // in a follow-up slice once we read the session_id from
+            // the stream-json result event instead.
+            let claude_stream_json_grounding =
+                std::env::var("ATO_CLAUDE_STREAM_JSON").ok().as_deref() == Some("1")
+                    && session.is_none();
+            if claude_stream_json_grounding {
+                cmd.arg("--verbose")
+                    .arg("--output-format")
+                    .arg("stream-json");
+            } else if let Some(s) = &session {
                 cmd.arg("--output-format").arg("json");
                 if s.runtime == "claude" {
                     if let Some(rsid) = &s.runtime_session_id {

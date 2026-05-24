@@ -20,9 +20,11 @@
 // `/Users/beatriznigri/.claude/plans/witty-crafting-harp.md`.
 
 pub mod badges;
+pub mod claude_stream_parser;
 pub mod policy;
 pub mod verdict;
 
 pub use badges::derive_badges;
+pub use claude_stream_parser::{parse_claude_stream_json, ClaudeStreamParseOutput};
 pub use policy::{GroundingMode, GroundingPolicy, MandatoryRule, MandatoryRuleKind, OverrideAudit};
 pub use verdict::{compile_verdict, GroundingVerdict, ToolCallObservation};

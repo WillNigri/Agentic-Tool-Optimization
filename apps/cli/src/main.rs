@@ -1244,6 +1244,22 @@ fn main() -> Result<()> {
                 }
             }
 
+            // v2.9.0 PR-2 — when grounding is on AND the runtime is
+            // claude AND there's no session (sessions + stream-json
+            // land in a follow-up slice), opt the claude CLI invocation
+            // into --output-format stream-json so tool_use blocks are
+            // surfaced for the verdict computation. The dispatch.rs
+            // claude arm reads this env var at command-build time.
+            // After dispatch::run returns, we parse the raw stream-json
+            // response back into (response_text, tool_calls) and write
+            // both onto the receipt row.
+            let claude_stream_json_active = grounding_overrides.has_any()
+                && runtime == "claude"
+                && session.is_none();
+            if claude_stream_json_active {
+                std::env::set_var("ATO_CLAUDE_STREAM_JSON", "1");
+            }
+
             // Run the primary dispatch.
             // dispatch::run handles session-turn persistence so by the
             // time we return, session_turns has the assistant's reply.
@@ -1293,6 +1309,29 @@ fn main() -> Result<()> {
                             &opts,
                         );
                     }
+
+                    // v2.9.0 PR-2 — when claude was invoked with
+                    // stream-json output, the row's `response` column
+                    // now holds the raw NDJSON event log instead of the
+                    // assistant's final text. Parse it back, extract
+                    // the response_text + tool_use observations, and
+                    // rewrite the row so:
+                    //   - response       = the actual assistant reply
+                    //   - tool_calls_summary = JSON of ToolCallAudit-shaped rows
+                    //   - tool_calls_count   = observation count
+                    // Then the verdict step below sees the tool calls
+                    // and correctly produces compliant (not false-
+                    // negative advisory+unmet, the PR-1 regression).
+                    if claude_stream_json_active {
+                        let _ = commands::dispatch::reparse_claude_stream_json_on_latest(
+                            &db_path,
+                            agent.as_deref(),
+                            session.as_deref(),
+                            war_room_id.as_deref(),
+                            &opts,
+                        );
+                    }
+
                     // v2.9.0 PR-1 slice 3 — verdict computation. Runs
                     // AFTER the overrides stamp because both walk the
                     // same row-finding heuristic; doing the verdict
@@ -1309,6 +1348,12 @@ fn main() -> Result<()> {
                         &opts,
                     );
                 }
+            }
+
+            // Clear the env var so it doesn't leak into any downstream
+            // commands the shell may run.
+            if claude_stream_json_active {
+                std::env::remove_var("ATO_CLAUDE_STREAM_JSON");
             }
             // v2.3.33 Phase 6 Slice B — kick off the cross-runtime
             // bridge loop. Always Ok() — failures inside the loop are
