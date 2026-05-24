@@ -46,6 +46,7 @@ import {
   personaBadge,
   runtimeDisplay,
   RUNTIME_COLORS,
+  clusterEvalRuns,
   type SessionListRow,
 } from "./_helpers";
 import {
@@ -54,6 +55,10 @@ import {
   SingleRunCard,
   SessionCard,
 } from "./SessionCards";
+// v2.10.0 PR-1 (UI) — eval-cluster card. Imported as a default-style
+// named import so re-exports from ./SessionCards/index don't have to
+// land in lockstep; the cluster card is opt-in render-path only.
+import { EvalClusterCard } from "./SessionCards/EvalClusterCard";
 
 // SessionListRow moved to ./_helpers.ts (2026-05-19) so SessionCards/
 // can import it without reaching back through this file.
@@ -348,10 +353,19 @@ export default function SessionsList() {
   const nonEmptyData = sessionsQ.data
     ? sessionsQ.data.filter((s) => s.turnCount > 0)
     : undefined;
-  const filteredSessions = nonEmptyData
+  // v2.10.0 PR-1 (UI) — collapse consecutive same-prompt single_runs
+  // into eval_cluster synthetic rows. Closes the "Runs tab is drowning
+  // in 150 identical SINGLE RUN cards from one methodology eval" bug.
+  // Applied BEFORE filtering so the eval_cluster row's metadata
+  // (runtime, category, etc) drives the filter chips — otherwise
+  // filtering would hide the cluster but show its members.
+  const clusteredData = nonEmptyData
+    ? clusterEvalRuns(nonEmptyData)
+    : undefined;
+  const filteredSessions = clusteredData
     ? (() => {
         const metaMatched = filterSessions(
-          nonEmptyData,
+          clusteredData,
           searchQuery,
           statusFilter,
           kindFilter,
@@ -373,7 +387,7 @@ export default function SessionsList() {
           team: teamFilter,
           tag: tagFilter,
         };
-        return nonEmptyData.filter((s) => {
+        return clusteredData.filter((s) => {
           if (!rowMatchesFilters(s, f)) return false;
           return metaIds.has(s.id) || contentMatchIds.has(s.id);
         });
@@ -783,6 +797,21 @@ export default function SessionsList() {
                   session={s}
                   onOpen={() =>
                     setOpenSelection({ kind: "single_run", id: s.id })
+                  }
+                />
+              );
+            }
+            // v2.10.0 PR-1 (UI) — collapsed cluster of same-prompt
+            // single_runs. Renders one card with an aggregate; expand
+            // reveals individual SingleRunCard children that drill
+            // into their own receipts.
+            if (s.rowKind === "eval_cluster") {
+              return (
+                <EvalClusterCard
+                  key={s.id}
+                  session={s}
+                  onOpenMember={(memberId) =>
+                    setOpenSelection({ kind: "single_run", id: memberId })
                   }
                 />
               );

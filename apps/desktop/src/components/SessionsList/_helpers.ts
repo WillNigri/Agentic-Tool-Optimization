@@ -101,7 +101,114 @@ export interface SessionListRow {
    *  which can flip per-message. NULL for sessions / war-rooms /
    *  single-runs (anchor concept only applies to chat threads). */
   anchorRuntime: string | null;
-  rowKind: "session" | "single_run" | "war_room" | "chat";
+  rowKind: "session" | "single_run" | "war_room" | "chat" | "eval_cluster";
+  /**
+   * v2.10.0 PR-1 (UI) — eval-cluster only. When `rowKind === "eval_cluster"`,
+   * this synthesized row stands in for N consecutive single_run rows that
+   * share the same prompt (typical signal of a methodology eval, like the
+   * v2.9 Part 5 n=150 sweep). The user can expand the cluster to see the
+   * individual receipts. NULL for non-cluster rows.
+   */
+  clusterCount?: number;
+  /** v2.10.0 PR-1 (UI) — for `rowKind === "eval_cluster"`: the original
+   *  single_run rows the cluster groups. Used by the expand/collapse UI
+   *  to render the individual receipts without re-fetching from the DB. */
+  clusterMembers?: SessionListRow[];
+  /** v2.10.0 PR-1 (UI) — aggregated total cost across cluster members.
+   *  Pre-summed at cluster-time so the card can render without iterating
+   *  members every paint. */
+  clusterTotalCostUsd?: number | null;
+}
+
+/**
+ * v2.10.0 PR-1 (UI) — cluster consecutive single_run rows with the same
+ * prompt into a single synthetic `eval_cluster` row.
+ *
+ * The Runs tab was getting drowned (Will reported 2026-05-24 after the
+ * n=150 Part 5 eval landed 150 identical-looking SINGLE RUN cards in
+ * the feed). This helper folds the noise into one expandable card per
+ * eval, surfacing the aggregate: count, total cost, runtime mix.
+ *
+ * Algorithm (intentionally simple — same-prompt + same-runtime,
+ * order-preserving):
+ *
+ *   1. Walk rows in display order (most-recent-first).
+ *   2. For each run of ≥ `minClusterSize` consecutive single_run rows
+ *      with the same title (prompt preview) AND the same runtime,
+ *      emit a single synthesized eval_cluster row in their place.
+ *   3. Sub-cluster-size runs pass through unchanged.
+ *
+ * Why same-prompt + same-runtime (not same-prompt only): a customer
+ * running a multi-model methodology will have interleaved claude /
+ * gemini / openai dispatches for the same prompt. Clustering across
+ * runtimes would hide the per-model breakdown that's the WHOLE POINT
+ * of a methodology eval. The methodology runner's own composer surface
+ * (v2.10 PR-3) shows the cross-runtime aggregate; the Runs tab cluster
+ * is for the within-runtime noise reduction.
+ *
+ * @param rows  source rows (any rowKind mix), display order
+ * @param minClusterSize  minimum consecutive same-prompt runs to fold
+ *                        into a cluster. Default 3 — below that, the
+ *                        individual cards are still readable. Above 3
+ *                        is where the feed starts to drown.
+ */
+export function clusterEvalRuns(
+  rows: SessionListRow[],
+  minClusterSize: number = 3,
+): SessionListRow[] {
+  const out: SessionListRow[] = [];
+  let i = 0;
+  while (i < rows.length) {
+    const row = rows[i];
+    if (row.rowKind !== "single_run") {
+      out.push(row);
+      i += 1;
+      continue;
+    }
+    // Greedy: find the longest run of consecutive same-prompt + same-
+    // runtime single_runs starting at i.
+    let j = i + 1;
+    while (
+      j < rows.length &&
+      rows[j].rowKind === "single_run" &&
+      rows[j].title === row.title &&
+      rows[j].runtime === row.runtime
+    ) {
+      j += 1;
+    }
+    const runLen = j - i;
+    if (runLen >= minClusterSize) {
+      const members = rows.slice(i, j);
+      const totalCost = members.reduce(
+        (acc, m) => acc + (m.totalCostUsd ?? 0),
+        0,
+      );
+      // Synthesize one cluster row using the FIRST member's metadata
+      // as the anchor (so the timestamp / runtime / agent badges read
+      // sensibly). The cluster's `id` borrows the first member's id
+      // so React keys stay stable across re-renders.
+      out.push({
+        ...row,
+        id: `cluster:${row.id}`,
+        rowKind: "eval_cluster",
+        clusterCount: runLen,
+        clusterMembers: members,
+        clusterTotalCostUsd: totalCost,
+        // lastAssistantPreview for the cluster card shows aggregate
+        // metadata, not the first member's response (which would be
+        // misleading — every member has a different response).
+        lastAssistantPreview: `${runLen} dispatches · same prompt · total $${totalCost.toFixed(4)}`,
+      });
+      i = j;
+    } else {
+      // Below threshold — pass through the run unchanged.
+      for (let k = i; k < j; k += 1) {
+        out.push(rows[k]);
+      }
+      i = j;
+    }
+  }
+  return out;
 }
 
 export interface SessionTurn {
