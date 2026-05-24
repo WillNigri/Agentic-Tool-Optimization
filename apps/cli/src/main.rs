@@ -20,6 +20,11 @@ mod encryption;
 // verdict that powers the "every AI follows your rules" pitch. Strict
 // enforcement (mid-stream tool rejection) lands in PR-2.
 mod grounding;
+// v2.10.0 PR-1 — Methodology Runner foundation. Composes grounded-mode
+// receipts into one methodology run with dual cost accounting (customer
+// spend + our margin). Spec at docs/methodology-runner.md; empirical
+// motivation in Part 5 of the v2.9 build log series.
+mod methodology;
 mod review_tools;
 mod daemon;
 mod db;
