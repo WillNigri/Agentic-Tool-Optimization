@@ -1260,6 +1260,26 @@ fn main() -> Result<()> {
                 std::env::set_var("ATO_CLAUDE_STREAM_JSON", "1");
             }
 
+            // v2.9.0 PR-3 — when grounding is on AND the runtime is an
+            // API provider (gemini/openai/anthropic/mistral/etc going
+            // through api_dispatch.rs path), flip with_tools=true so
+            // dispatch.rs's existing branch at line 1651 routes through
+            // api_dispatch_tools::dispatch_with_tools(). The
+            // function-calling tool loop fires, the model can call
+            // read_file/grep/git_log, every call lands in
+            // execution_logs.tool_calls_summary natively (no re-parsing
+            // like the claude PR-2 path), and the verdict computation
+            // sees real observations instead of empty.
+            //
+            // For claude/codex/gemini CLI runtimes, with_tools stays
+            // false — the per-runtime CLI handles tools natively
+            // (claude --allowedTools, codex sandbox, gemini --yolo) and
+            // PR-2's stream-json parser handles the audit channel.
+            let runtime_is_api_provider =
+                crate::api_dispatch::is_api_provider(&runtime);
+            let with_tools_for_grounding =
+                grounding_overrides.has_any() && runtime_is_api_provider;
+
             // Run the primary dispatch.
             // dispatch::run handles session-turn persistence so by the
             // time we return, session_turns has the assistant's reply.
@@ -1276,7 +1296,7 @@ fn main() -> Result<()> {
                 war_room_round,
                 stream,
                 stream_jsonl,
-                false, // ato dispatch top-level — no tools; that's ato review's surface
+                with_tools_for_grounding,
                 &db_path,
                 &opts,
             )?;
