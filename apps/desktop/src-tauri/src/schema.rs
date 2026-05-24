@@ -1258,6 +1258,66 @@ pub fn init_database(conn: &Connection) {
             ON conversion_events(session_id, flushed_at DESC)",
         [],
     );
+
+    // v2.9.0 — Grounded mode (PR-1: schema + soft-mode observability).
+    //
+    // Three additive columns on `agents` that together carry the
+    // "every AI follows your rules" contract:
+    //   * grounding_mode  — off | soft | strict (default off = no behavior
+    //                       change for pre-v2.9 agents; new agents created
+    //                       through the wizard land as 'soft').
+    //   * mandatory_rules — JSON array of {kind, target, min_count?} rows
+    //                       describing must-use-tool / must-read-path /
+    //                       must-emit-marker obligations.
+    //   * allowed_mode_floor — the laxer-bound dispatch can override toward.
+    //                       Defaults to 'off' so existing dispatches keep
+    //                       working unchanged; `ato agents serve`-deployed
+    //                       agents set this to 'strict' so end users can't
+    //                       relax the deployment.
+    //
+    // Rationale lives in docs/grounding.md (rollout, principles) and
+    // /Users/beatriznigri/.claude/plans/witty-crafting-harp.md (the plan
+    // that motivated this slice — informed by 4 ATO-driven test rounds).
+    // The empirical justification for the `off` default (vs `soft`/`strict`)
+    // is the gemini-hallucination control captured at receipts dir
+    // /tmp/grounded-mode-receipts/.
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN grounding_mode TEXT NOT NULL DEFAULT 'off'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE agents ADD COLUMN mandatory_rules TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN allowed_mode_floor TEXT NOT NULL DEFAULT 'off'",
+        [],
+    );
+
+    // v2.9.0 — Grounded mode (PR-1: per-dispatch verdict + override audit).
+    //
+    // Two additive columns on `execution_logs` that surface the rule
+    // outcome on every receipt:
+    //   * grounding_verdict   — compliant | violation | advisory |
+    //                           not_enforced | NULL (NULL for rows
+    //                           written before this column existed).
+    //   * grounding_overrides — JSON of the per-dispatch overrides the
+    //                           caller passed (mode_override,
+    //                           additional_denies, additional_mandatories,
+    //                           skip_mandatory with reason). Every override
+    //                           appears verbatim so a third party reading
+    //                           the receipt later can reconstruct exactly
+    //                           which rules applied to this dispatch.
+    //
+    // The receipt-rendering code (`ato dispatches show`,
+    // dispatches_panel.tsx) reads these columns and renders the verdict +
+    // override list inline with the existing tool_calls_summary surface
+    // shipped in v2.4.5.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN grounding_verdict TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN grounding_overrides TEXT",
+        [],
+    );
 }
 
 #[cfg(test)]
@@ -1349,6 +1409,87 @@ mod tests {
         assert_eq!(
             kv, "v1",
             "rows inserted without key_version should default to v1"
+        );
+    }
+
+    // v2.9.0 PR-1 — grounding columns: shape, defaults, back-compat.
+    //
+    // Pins the contract that PR-2 / PR-3 / PR-4 build on. The defaults
+    // matter: existing agents and execution_logs rows must keep working
+    // unchanged (no NOT NULL on retroactive nullable columns; grounding
+    // defaults to 'off' so pre-v2.9 callers see exactly today's behavior).
+    #[test]
+    fn agents_has_grounding_columns_with_back_compat_defaults() {
+        let conn = init_in_memory();
+
+        // Insert an agent the pre-v2.9 way — NO grounding fields specified.
+        // The migration must have populated the defaults so the row is valid.
+        conn.execute(
+            "INSERT INTO agents (
+                id, slug, display_name, runtime, created_at
+            ) VALUES (
+                'g-test-1', 'tester', 'Tester', 'claude', '2026-05-24'
+            )",
+            [],
+        )
+        .expect("insert agent without grounding fields");
+
+        let (mode, floor, mandatory): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT grounding_mode, allowed_mode_floor, mandatory_rules
+                 FROM agents WHERE id = 'g-test-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read grounding fields");
+
+        assert_eq!(
+            mode, "off",
+            "pre-v2.9 agents default to grounding_mode='off' so existing dispatch paths see no behavior change"
+        );
+        assert_eq!(
+            floor, "off",
+            "allowed_mode_floor defaults to 'off' — dispatch can override to anything until the author tightens"
+        );
+        assert_eq!(
+            mandatory, None,
+            "mandatory_rules is nullable — pre-v2.9 agents have no obligations"
+        );
+    }
+
+    #[test]
+    fn execution_logs_has_grounding_verdict_columns_nullable() {
+        let conn = init_in_memory();
+
+        // Insert an execution_log row WITHOUT specifying grounding columns.
+        // The columns are nullable on retroactive rows so the existing
+        // dispatch-write path keeps working unchanged.
+        conn.execute(
+            "INSERT INTO execution_logs (
+                id, runtime, status, created_at
+            ) VALUES (
+                'el-test-1', 'claude', 'success', '2026-05-24'
+            )",
+            [],
+        )
+        .expect("insert execution_log without grounding fields");
+
+        let (verdict, overrides): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT grounding_verdict, grounding_overrides
+                 FROM execution_logs WHERE id = 'el-test-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read grounding receipt columns");
+
+        assert_eq!(
+            verdict, None,
+            "rows written before grounding is wired must have NULL verdict (not_enforced is for grounding_mode='off' agents, NULL is for rows from runtimes that haven't been migrated yet)"
+        );
+        assert_eq!(
+            overrides, None,
+            "grounding_overrides is nullable — no dispatch-time override means no row"
         );
     }
 }

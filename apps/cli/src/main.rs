@@ -15,6 +15,11 @@ mod api_dispatch_tools;
 mod byok;
 mod commands;
 mod encryption;
+// v2.9.0 PR-1 — grounded mode foundation. Compiles agent record +
+// per-dispatch overrides into a checked policy; computes the receipt
+// verdict that powers the "every AI follows your rules" pitch. Strict
+// enforcement (mid-stream tool rejection) lands in PR-2.
+mod grounding;
 mod review_tools;
 mod daemon;
 mod db;
