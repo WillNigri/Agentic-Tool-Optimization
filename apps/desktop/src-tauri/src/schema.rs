@@ -1318,6 +1318,115 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE execution_logs ADD COLUMN grounding_overrides TEXT",
         [],
     );
+
+    // v2.10.0 PR-1 — Methodology Runner foundation.
+    //
+    // Three additive tables built on top of v2.9's grounded-mode receipts
+    // (every execution_logs row IS the atomic event a methodology composes):
+    //
+    //   * methodologies          — reusable test recipes (variant matrix +
+    //                              rubric). One row per methodology slug.
+    //   * methodology_runs       — one execution of a recipe with its full
+    //                              DUAL COST ACCOUNTING ledger (customer
+    //                              tokens/cost AND our provider compute/
+    //                              judge/storage). The pricing transparency
+    //                              the spec at docs/methodology-runner.md
+    //                              promises.
+    //   * methodology_run_dispatches — composition table: every
+    //                              execution_logs row a methodology run
+    //                              composed, with its variant cell coords
+    //                              and rubric score.
+    //
+    // All three are additive — no behavior change to pre-v2.10 callers.
+    // The spec + the n=150 empirical proof that motivated the load-
+    // bearing schema choices (especially the ~25x grounded-mode token
+    // multiplier that forces the cost-estimate UX) lives in
+    // docs/methodology-runner.md and the Part 5 build log post.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS methodologies (
+            id              TEXT PRIMARY KEY,
+            slug            TEXT NOT NULL UNIQUE,
+            description     TEXT,
+            archetype       TEXT NOT NULL,
+            variant_matrix  TEXT NOT NULL,
+            rubric          TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            created_by      TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_methodologies_archetype
+            ON methodologies(archetype)",
+        [],
+    );
+
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS methodology_runs (
+            id                          TEXT PRIMARY KEY,
+            methodology_id              TEXT NOT NULL,
+            customer_user_id            TEXT,
+            started_at                  TEXT NOT NULL,
+            ended_at                    TEXT,
+            status                      TEXT NOT NULL,
+            total_dispatches_planned    INTEGER NOT NULL,
+            total_dispatches_completed  INTEGER NOT NULL DEFAULT 0,
+
+            -- Customer-side cost (their LLM invoice / pool burn)
+            customer_cost_usd           REAL NOT NULL DEFAULT 0,
+            customer_tokens_in          INTEGER NOT NULL DEFAULT 0,
+            customer_tokens_out         INTEGER NOT NULL DEFAULT 0,
+            customer_dispatches         INTEGER NOT NULL DEFAULT 0,
+            customer_billing_mode       TEXT NOT NULL DEFAULT 'byok',
+
+            -- Provider-side cost (what WE pay)
+            provider_llm_cost_usd       REAL NOT NULL DEFAULT 0,
+            provider_judge_cost_usd     REAL NOT NULL DEFAULT 0,
+            provider_compute_seconds    REAL NOT NULL DEFAULT 0,
+            provider_storage_bytes      INTEGER NOT NULL DEFAULT 0,
+            provider_bandwidth_bytes    INTEGER NOT NULL DEFAULT 0,
+            provider_total_cost_usd     REAL NOT NULL DEFAULT 0,
+
+            -- Computed margin
+            margin_usd                  REAL NOT NULL DEFAULT 0,
+
+            -- Result
+            verdict_json                TEXT,
+            receipt_url                 TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_methodology_runs_status
+            ON methodology_runs(status, started_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_methodology_runs_customer
+            ON methodology_runs(customer_user_id, started_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_methodology_runs_methodology
+            ON methodology_runs(methodology_id, started_at DESC)",
+        [],
+    );
+
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS methodology_run_dispatches (
+            methodology_run_id  TEXT NOT NULL,
+            execution_log_id    TEXT NOT NULL,
+            variant_cell        TEXT NOT NULL,
+            score               REAL,
+            PRIMARY KEY (methodology_run_id, execution_log_id)
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_methodology_run_dispatches_run
+            ON methodology_run_dispatches(methodology_run_id)",
+        [],
+    );
 }
 
 #[cfg(test)]
@@ -1454,6 +1563,135 @@ mod tests {
         assert_eq!(
             mandatory, None,
             "mandatory_rules is nullable — pre-v2.9 agents have no obligations"
+        );
+    }
+
+    // v2.10.0 PR-1 — Methodology Runner schema.
+    //
+    // Pins the contract for the three new tables (methodologies +
+    // methodology_runs + methodology_run_dispatches). The dual-cost-
+    // accounting columns on methodology_runs are the load-bearing
+    // schema choice — they're what makes Pro economics auditable per
+    // customer per month. Tests below verify the columns exist with
+    // back-compat-safe defaults.
+
+    #[test]
+    fn methodologies_table_exists_with_required_columns() {
+        let conn = init_in_memory();
+        // Insert a minimal methodology record; succeeds only if the
+        // table + all NOT NULL columns landed.
+        conn.execute(
+            "INSERT INTO methodologies (
+                id, slug, archetype, variant_matrix, rubric, created_at
+            ) VALUES (
+                'm-1', 'which-model-test', 'which-model',
+                '{\"models\":[\"claude\",\"gemini\"]}',
+                '{\"kind\":\"regex\"}',
+                '2026-05-24T20:00:00Z'
+            )",
+            [],
+        )
+        .expect("insert methodology");
+
+        let (slug, archetype): (String, String) = conn
+            .query_row(
+                "SELECT slug, archetype FROM methodologies WHERE id = 'm-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read methodology");
+        assert_eq!(slug, "which-model-test");
+        assert_eq!(archetype, "which-model");
+    }
+
+    #[test]
+    fn methodology_runs_has_dual_cost_accounting_columns_with_defaults() {
+        let conn = init_in_memory();
+        // Insert a minimal run row — all the dual-cost-accounting
+        // columns must default cleanly so the runner can INSERT a
+        // pending row and UPDATE the cost fields as dispatches land.
+        conn.execute(
+            "INSERT INTO methodology_runs (
+                id, methodology_id, started_at, status,
+                total_dispatches_planned
+            ) VALUES (
+                'r-1', 'm-1', '2026-05-24T20:00:00Z', 'queued', 30
+            )",
+            [],
+        )
+        .expect("insert methodology_run");
+
+        let row: (
+            f64,    // customer_cost_usd
+            i64,    // customer_tokens_in
+            String, // customer_billing_mode
+            f64,    // provider_llm_cost_usd
+            f64,    // provider_compute_seconds
+            f64,    // margin_usd
+        ) = conn
+            .query_row(
+                "SELECT customer_cost_usd, customer_tokens_in,
+                        customer_billing_mode, provider_llm_cost_usd,
+                        provider_compute_seconds, margin_usd
+                 FROM methodology_runs WHERE id = 'r-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                    ))
+                },
+            )
+            .expect("read methodology_run defaults");
+
+        assert_eq!(row.0, 0.0, "customer_cost_usd defaults to 0");
+        assert_eq!(row.1, 0, "customer_tokens_in defaults to 0");
+        assert_eq!(
+            row.2, "byok",
+            "customer_billing_mode defaults to byok — most common case"
+        );
+        assert_eq!(row.3, 0.0, "provider_llm_cost_usd defaults to 0");
+        assert_eq!(row.4, 0.0, "provider_compute_seconds defaults to 0");
+        assert_eq!(row.5, 0.0, "margin_usd defaults to 0");
+    }
+
+    #[test]
+    fn methodology_run_dispatches_composite_pk_enforced() {
+        let conn = init_in_memory();
+
+        // Seed prerequisite rows
+        conn.execute(
+            "INSERT INTO methodologies (id, slug, archetype, variant_matrix, rubric, created_at)
+             VALUES ('m-pk', 'pk-test', 'custom', '{}', '{}', '2026-05-24')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO methodology_runs (id, methodology_id, started_at, status, total_dispatches_planned)
+             VALUES ('r-pk', 'm-pk', '2026-05-24', 'running', 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO execution_logs (id, runtime, status, created_at)
+             VALUES ('el-pk', 'claude', 'success', '2026-05-24')",
+            [],
+        ).unwrap();
+
+        // First insert succeeds
+        conn.execute(
+            "INSERT INTO methodology_run_dispatches (methodology_run_id, execution_log_id, variant_cell)
+             VALUES ('r-pk', 'el-pk', '{\"model\":\"claude\"}')",
+            [],
+        ).expect("first dispatch link should succeed");
+
+        // Duplicate insert (same composite PK) must fail
+        let dup = conn.execute(
+            "INSERT INTO methodology_run_dispatches (methodology_run_id, execution_log_id, variant_cell)
+             VALUES ('r-pk', 'el-pk', '{\"model\":\"claude\"}')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "duplicate (run_id, execution_log_id) must violate the composite PK — \
+             a dispatch can only contribute to one cell of a single methodology run"
         );
     }
 

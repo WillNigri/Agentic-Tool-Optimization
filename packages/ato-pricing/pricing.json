@@ -1,0 +1,87 @@
+{
+  "$schema": "https://agentictool.ai/schemas/pricing-v1.json",
+  "_comment": "ATO open-source pricing rate card. Public, version-controlled, customer-auditable. Anyone running the Methodology Runner can read this file to understand exactly what we charge ourselves for compute/storage/judge — same numbers the runner's pre-run cost estimate uses. If our actual cloud bills go up, this file gets a PR. No black-box pricing math. See docs/methodology-runner.md for full spec.",
+  "updated_at": "2026-05-24",
+  "rates": {
+    "_comment_judge": "LLM-judge default cost per call. claude-haiku-4-5 averaged ~$0.001 per scoring call in Q2 2026. Override at methodology-create time via rubric.judge_model.",
+    "llm_judge_default_model": "claude-haiku-4-5",
+    "llm_judge_cost_per_call_usd": 0.001,
+    "_comment_compute": "Railway shared CPU baseline 2026-Q2. Methodology orchestration burns minimal seconds per dispatch (the LLM call dominates wall-clock). Re-calibrated quarterly from actual invoice.",
+    "compute_per_second_usd": 0.000005,
+    "_comment_storage": "Cloudflare R2 standard tier 2026-Q2. Per-byte per-month. Receipts + transcripts persisted for trace retention. Typical methodology run = ~10MB compressed.",
+    "storage_per_byte_month_usd": 0.000000023,
+    "_comment_bandwidth": "Cloudflare R2 egress 2026-Q2. Per byte transferred out. Dominated by receipt-pull traffic to the GUI / MCP clients.",
+    "bandwidth_per_byte_usd": 0.00000009
+  },
+  "tiers": {
+    "free": {
+      "monthly_usd": 0,
+      "methodology_runs_per_month": 1,
+      "max_dispatches_per_run": 50,
+      "llm_judge_calls_included": 50,
+      "_comment": "Lets new users run one small methodology to see the loop. Anyone running n=10/cell × 3 cells (=30 dispatches) fits here."
+    },
+    "pro": {
+      "monthly_usd": 29,
+      "methodology_runs_per_month": 10,
+      "max_dispatches_per_run": 500,
+      "llm_judge_calls_included": 5000,
+      "_comment": "The headline tier. Covers a typical customer running one model-ladder methodology weekly at n=30/cell. Dispatch costs paid by the customer's API keys (byok)."
+    },
+    "team": {
+      "monthly_usd": 99,
+      "monthly_usd_per_seat": 99,
+      "methodology_runs_per_month": "unlimited",
+      "max_dispatches_per_run": 2000,
+      "llm_judge_calls_included": 25000,
+      "pool_key_credit_usd_per_seat": 50,
+      "_comment": "For teams running multiple methodologies per agent per week. Includes $50/seat of pool-key credit so the team can run methodologies against models they don't have personal API keys for."
+    }
+  },
+  "sample_size_advice": {
+    "_comment": "Recommendations the runner surfaces at methodology-create time. Industry references in the same struct so customers see the bar AND our suggestion in the same prompt.",
+    "fast": {
+      "reps_per_cell": 10,
+      "label": "founder mode — directional only",
+      "ci_width": "wide"
+    },
+    "industry_baseline": {
+      "reps_per_cell": 30,
+      "label": "publishable internal evals — recommended for production decisions",
+      "ci_width": "tight enough to publish",
+      "_default_for_new_methodologies": true
+    },
+    "high_confidence": {
+      "reps_per_cell": 100,
+      "label": "model-migration calls",
+      "ci_width": "publishable as benchmark"
+    },
+    "research": {
+      "reps_per_cell": 300,
+      "label": "academic-grade",
+      "ci_width": "rare; blog-post material"
+    },
+    "_industry_references": {
+      "promptfoo": "10-100 cases × 3-5 models per eval (30-500 completions)",
+      "braintrust_median_dashboard": "50-300 examples × N variants",
+      "patronus_rag_benchmark": "~1000 examples",
+      "openai_evals_library_standard": "100-10000 examples",
+      "humaneval_academic": "164 problems × N candidates",
+      "mmlu_academic": "15908 questions across 57 subjects",
+      "swe_bench": "2294 real GitHub issues"
+    }
+  },
+  "source_invoices": {
+    "_comment": "Where each rate constant comes from. Quarterly re-calibration target.",
+    "compute": "Railway shared CPU baseline 2026-Q2",
+    "storage": "Cloudflare R2 standard tier 2026-Q2",
+    "bandwidth": "Cloudflare R2 egress 2026-Q2",
+    "llm_judge": "Anthropic claude-haiku-4-5 averaged across Q2 2026 internal calls"
+  },
+  "history": [
+    {
+      "updated_at": "2026-05-24",
+      "change": "Initial rate card published with v2.10 PR-1 Methodology Runner foundation."
+    }
+  ]
+}
