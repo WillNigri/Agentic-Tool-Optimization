@@ -92,6 +92,11 @@ enum Commands {
     Pro(commands::pro::ProArgs),
     /// Scheduled evaluators — run quality checks on cloud traces automatically (Pro).
     Evaluators(commands::evaluators::EvaluatorsArgs),
+    /// v2.10.0 PR-2 — methodology runner (local-first, Pro extends to cloud later).
+    /// Define + list + inspect methodologies (reusable test recipes); estimate
+    /// cost before fan-out. The runner that actually fans out + composes the
+    /// receipts lands in v2.10 PR-3. See docs/methodology-runner.md.
+    Evaluations(commands::methodology::EvaluationsArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1118,6 +1123,10 @@ fn main() -> Result<()> {
         }
         Commands::Evaluators(args) => {
             commands::evaluators::run(args, cli.human);
+            return Ok(());
+        }
+        Commands::Evaluations(args) => {
+            commands::methodology::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

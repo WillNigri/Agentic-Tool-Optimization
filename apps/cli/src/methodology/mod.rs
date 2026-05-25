@@ -22,10 +22,13 @@ pub mod archetypes;
 pub mod cost;
 pub mod types;
 
+#[allow(unused_imports)] // re-exports for consumers (CLI commands, future Pro)
 pub use archetypes::Archetype;
+#[allow(unused_imports)]
 pub use cost::{
     cost_estimate_for_matrix, CostEstimate, CostRateCard, ProviderCostBreakdown,
 };
+#[allow(unused_imports)]
 pub use types::{
     BillingMode, Methodology, MethodologyRun, MethodologyRunDispatch, MethodologyRunStatus,
     VariantMatrix,

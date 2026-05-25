@@ -33,3 +33,7 @@ pub mod runtimes;
 pub mod setup_path;
 pub mod skills;
 pub mod traces;
+// v2.10.0 PR-2 — methodology CLI surface (`ato evaluations methodology …`).
+// Local-first CRUD over the methodology tables shipped in v2.10 PR-1.
+// Fan-out runner + composer + rubric library land in PR-3+.
+pub mod methodology;
