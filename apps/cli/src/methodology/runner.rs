@@ -165,7 +165,7 @@ fn run_with_matrix(
             .cloned()
             .unwrap_or_default();
         let cell_started = Instant::now();
-        let cell_outcome = dispatch_cell(db_path, &prompt, cell);
+        let cell_outcome = dispatch_cell(db_path, &prompt, cell, matrix.runtime.as_deref());
         let cell_elapsed = cell_started.elapsed().as_secs_f64();
         compute_seconds += cell_elapsed;
 
@@ -361,7 +361,17 @@ struct DispatchRecord {
 /// Shell out to `ato dispatch` for one cell. Captures the resulting
 /// execution_logs row via a rowid > before idiom so we don't depend on
 /// dispatch::run returning the inserted id (it doesn't).
-fn dispatch_cell(db_path: &Path, prompt: &str, cell: &VariantCell) -> Result<DispatchRecord> {
+///
+/// `runtime_override`: when `Some("claude" | "codex" | "gemini")`, use
+/// the CLI runtime instead of auto-deriving the API provider from the
+/// model name. Lets a methodology target a subscription path rather
+/// than burn BYOK API keys.
+fn dispatch_cell(
+    db_path: &Path,
+    prompt: &str,
+    cell: &VariantCell,
+    runtime_override: Option<&str>,
+) -> Result<DispatchRecord> {
     let conn = db::open_readonly(db_path)?;
     let before_max: i64 = conn
         .query_row(
@@ -372,7 +382,10 @@ fn dispatch_cell(db_path: &Path, prompt: &str, cell: &VariantCell) -> Result<Dis
         .context("read execution_logs MAX(rowid) before dispatch")?;
     drop(conn);
 
-    let runtime = runtime_for_model(&cell.model);
+    let runtime = match runtime_override {
+        Some(r) => r.to_string(),
+        None => runtime_for_model(&cell.model),
+    };
     let exe = std::env::current_exe().context("locate current ato binary for shell-out")?;
     let mut cmd = Command::new(&exe);
     cmd.arg("dispatch")
@@ -464,6 +477,7 @@ mod tests {
             models: vec!["claude-sonnet-4-6".to_string(), "claude-opus-4-7".to_string()],
             conditions: vec!["soft".to_string(), "strict".to_string()],
             reps_per_cell: 3,
+            runtime: None,
         }
     }
 
@@ -482,6 +496,7 @@ mod tests {
             models: vec!["claude-sonnet-4-6".to_string()],
             conditions: vec![],
             reps_per_cell: 5,
+            runtime: None,
         };
         let cells = expand_cells(&m);
         assert_eq!(cells.len(), 5);
@@ -495,6 +510,7 @@ mod tests {
             models: vec!["claude-sonnet-4-6".to_string()],
             conditions: vec!["soft".to_string()],
             reps_per_cell: 3,
+            runtime: None,
         };
         let cells = expand_cells(&m);
         assert_eq!(cells[0].rep, 0);

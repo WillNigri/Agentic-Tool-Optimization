@@ -169,6 +169,41 @@ pub enum MethodologySub {
     /// pass `--run-id` (or a positional run id) to drill into one run's
     /// composition (per-cell stats + pairwise Welch t).
     Runs(RunsArgs),
+    /// v2.10 PR-3 (Pro angle) — adopt EXISTING execution_logs into a
+    /// methodology_run without re-dispatching. Lets a customer compose
+    /// + (PR-4) score receipts they already paid for. Variant cell is
+    /// derived from the row: prompt_idx by distinct prompt, model
+    /// straight from the row, condition from grounding_verdict (or
+    /// "default" if pre-grounding).
+    Adopt {
+        /// Methodology slug to attach the adopted run to.
+        slug: String,
+        /// Lower bound on execution_logs.created_at (ISO-8601 or YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Upper bound on execution_logs.created_at.
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter by runtime (e.g. `--runtime claude`).
+        #[arg(long)]
+        runtime: Option<String>,
+        /// Filter by model (e.g. `--model claude-sonnet-4-6`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Filter by status (default `success`; pass `all` to include errors).
+        #[arg(long, default_value = "success")]
+        status: String,
+        /// Filter by agent slug.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Hard cap on adopted rows. Default 500 — keeps adopt from
+        /// silently swallowing a whole month of dispatches.
+        #[arg(long, default_value_t = 500)]
+        limit: u32,
+        /// Billing mode tag for the adopted run.
+        #[arg(long, default_value = "byok")]
+        billing: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -243,6 +278,19 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 }
                 RunsSub::Show { run_id } => handle_runs_show(run_id, db_path, opts),
             },
+            MethodologySub::Adopt {
+                slug,
+                since,
+                until,
+                runtime,
+                model,
+                status,
+                agent,
+                limit,
+                billing,
+            } => handle_adopt(
+                slug, since, until, runtime, model, status, agent, limit, billing, db_path, opts,
+            ),
         },
     }
 }
@@ -914,6 +962,264 @@ fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()
             "provider_total_cost_usd": provider_total_cost_usd,
             "margin_usd": margin_usd,
             "composition": composition,
+        }));
+    }
+    Ok(())
+}
+
+fn handle_adopt(
+    slug: String,
+    since: Option<String>,
+    until: Option<String>,
+    runtime: Option<String>,
+    model: Option<String>,
+    status: String,
+    agent: Option<String>,
+    limit: u32,
+    billing: String,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let billing_mode = BillingMode::parse(&billing).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown billing mode '{}'. Valid values: byok | pool",
+            billing
+        )
+    })?;
+    let conn = db::open_readwrite(db_path)?;
+    let methodology_id: String = conn
+        .query_row(
+            "SELECT id FROM methodologies WHERE slug = ?1",
+            params![&slug],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "no methodology with slug '{}'. `ato evaluations methodology create` first.",
+                slug
+            )
+        })?;
+
+    // Build the WHERE clause dynamically — keep params() positional + safe.
+    // Status special-cases: `all` skips the filter entirely.
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut bind: Vec<String> = Vec::new();
+    if let Some(s) = &since {
+        where_clauses.push(format!("created_at >= ?{}", bind.len() + 1));
+        bind.push(s.clone());
+    }
+    if let Some(u) = &until {
+        where_clauses.push(format!("created_at <= ?{}", bind.len() + 1));
+        bind.push(u.clone());
+    }
+    if let Some(r) = &runtime {
+        where_clauses.push(format!("runtime = ?{}", bind.len() + 1));
+        bind.push(r.clone());
+    }
+    if let Some(m) = &model {
+        where_clauses.push(format!("model = ?{}", bind.len() + 1));
+        bind.push(m.clone());
+    }
+    if status != "all" {
+        where_clauses.push(format!("status = ?{}", bind.len() + 1));
+        bind.push(status.clone());
+    }
+    if let Some(a) = &agent {
+        where_clauses.push(format!("agent_slug = ?{}", bind.len() + 1));
+        bind.push(a.clone());
+    }
+    let where_sql = if where_clauses.is_empty() {
+        "1=1".to_string()
+    } else {
+        where_clauses.join(" AND ")
+    };
+
+    let sql = format!(
+        "SELECT id, prompt, model, runtime, cost_usd_estimated, tokens_in, tokens_out,
+                duration_ms, status, grounding_verdict, response
+         FROM execution_logs
+         WHERE {}
+         ORDER BY created_at ASC
+         LIMIT {}",
+        where_sql, limit
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params_iter: Vec<&dyn rusqlite::ToSql> =
+        bind.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+    type AdoptRow = (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<AdoptRow> = stmt
+        .query_map(params_iter.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<f64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        anyhow::bail!(
+            "no execution_logs rows matched the filter. Widen --since / --status or check `ato evaluations methodology list`."
+        );
+    }
+
+    // Distinct prompts → prompt_idx, in first-seen order so the index
+    // matches what a human would expect when re-reading the corpus.
+    let mut prompt_index: Vec<String> = Vec::new();
+    let prompt_idx_of = |p: &str, idx: &mut Vec<String>| -> usize {
+        if let Some(i) = idx.iter().position(|x| x == p) {
+            i
+        } else {
+            idx.push(p.to_string());
+            idx.len() - 1
+        }
+    };
+
+    let run_id = Uuid::new_v4().to_string();
+    let started_at = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO methodology_runs
+            (id, methodology_id, customer_user_id, started_at, status,
+             total_dispatches_planned, total_dispatches_completed,
+             customer_billing_mode)
+         VALUES (?1, ?2, NULL, ?3, 'running', ?4, 0, ?5)",
+        params![
+            &run_id,
+            &methodology_id,
+            &started_at,
+            rows.len() as i64,
+            billing_mode.as_str(),
+        ],
+    )
+    .context("insert methodology_runs row for adopt")?;
+
+    let mut customer_cost_usd: f64 = 0.0;
+    let mut customer_tokens_in: i64 = 0;
+    let mut customer_tokens_out: i64 = 0;
+    let mut response_bytes: i64 = 0;
+    let mut adopted: u32 = 0;
+    for row in &rows {
+        let (id, prompt, model_opt, _runtime_v, cost, tok_in, tok_out, dur_ms, status_v, verdict, response) =
+            (&row.0, &row.1, &row.2, &row.3, &row.4, &row.5, &row.6, &row.7, &row.8, &row.9, &row.10);
+        let pidx = prompt_idx_of(prompt, &mut prompt_index);
+        let cell_model = model_opt
+            .clone()
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let cell_condition = verdict
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let cell = serde_json::json!({
+            "prompt_idx": pidx,
+            "model": cell_model,
+            "condition": cell_condition,
+            "rep": 0_u32,
+            "adopted_from": id,
+            "status": status_v,
+        });
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO methodology_run_dispatches
+                (methodology_run_id, execution_log_id, variant_cell, score)
+             VALUES (?1, ?2, ?3, NULL)",
+            params![&run_id, id, &cell.to_string()],
+        );
+        customer_cost_usd += cost.unwrap_or(0.0);
+        customer_tokens_in += tok_in.unwrap_or(0);
+        customer_tokens_out += tok_out.unwrap_or(0);
+        response_bytes += response.as_ref().map(|s| s.len() as i64).unwrap_or(0);
+        adopted += 1;
+    }
+
+    let rates = CostRateCard::defaults_v1();
+    let storage_bytes_estimate = (customer_tokens_in + customer_tokens_out) * 4;
+    let retention_months = 28.0 / 30.0;
+    let storage_cost = (storage_bytes_estimate as f64)
+        * rates.storage_per_byte_month_usd
+        * retention_months;
+    let bandwidth_cost = (response_bytes as f64) * rates.bandwidth_per_byte_usd;
+    let provider_llm_cost_usd = match billing_mode {
+        BillingMode::Byok => 0.0,
+        BillingMode::Pool => customer_cost_usd,
+    };
+    // Adopt has zero orchestrator compute cost (we re-read the receipts;
+    // we don't re-dispatch). Storage + bandwidth still apply because
+    // composition + show queries hit those bytes.
+    let provider_total = provider_llm_cost_usd + storage_cost + bandwidth_cost;
+    let per_run_pro_allocation = 0.29;
+    let margin_usd = per_run_pro_allocation - provider_total;
+    let ended_at = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "UPDATE methodology_runs SET
+            ended_at = ?1,
+            status = 'complete',
+            total_dispatches_completed = ?2,
+            customer_cost_usd = ?3,
+            customer_tokens_in = ?4,
+            customer_tokens_out = ?5,
+            customer_dispatches = ?6,
+            provider_llm_cost_usd = ?7,
+            provider_storage_bytes = ?8,
+            provider_bandwidth_bytes = ?9,
+            provider_total_cost_usd = ?10,
+            margin_usd = ?11
+         WHERE id = ?12",
+        params![
+            &ended_at,
+            adopted as i64,
+            customer_cost_usd,
+            customer_tokens_in,
+            customer_tokens_out,
+            adopted as i64,
+            provider_llm_cost_usd,
+            storage_bytes_estimate,
+            response_bytes,
+            provider_total,
+            margin_usd,
+            &run_id,
+        ],
+    )
+    .context("finalize adopted methodology_runs row")?;
+
+    if opts.human {
+        emit_human(&format!(
+            "Adopted {} execution_logs rows into methodology run {}.\n  methodology:     {}\n  distinct prompts: {}\n  YOUR cost:        ${:.4}\n  YOUR tokens:      {} in / {} out\n  OUR cost:         ${:.4}\n  margin (est):     ${:.4}\n\nNext: `ato evaluations methodology runs show {}` for the composition.",
+            adopted, run_id, slug, prompt_index.len(),
+            customer_cost_usd, customer_tokens_in, customer_tokens_out,
+            provider_total, margin_usd, run_id
+        ));
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "run_id": run_id,
+            "methodology_slug": slug,
+            "adopted": adopted,
+            "distinct_prompts": prompt_index.len(),
+            "customer_cost_usd": customer_cost_usd,
+            "customer_tokens_in": customer_tokens_in,
+            "customer_tokens_out": customer_tokens_out,
+            "provider_total_cost_usd": provider_total,
+            "margin_usd": margin_usd,
         }));
     }
     Ok(())

@@ -68,6 +68,17 @@ pub struct VariantMatrix {
     /// surfaces this number at methodology-create time with explicit
     /// references to Promptfoo / Braintrust / HumanEval / etc baselines.
     pub reps_per_cell: u32,
+
+    /// Optional runtime override. When `None`, the runner auto-derives
+    /// the runtime from each model name (`claude-*` → anthropic API,
+    /// `gemini-*` → google API, etc.). When `Some("claude")` /
+    /// `Some("codex")` / `Some("gemini")`, the runner uses the
+    /// **CLI** path instead of the API — same model, customer's
+    /// existing subscription pays, no BYOK keys required. v2.10 PR-3
+    /// addition: needed so a customer can A/B their Claude Max
+    /// subscription vs. an Anthropic API key on the same prompt.
+    #[serde(default)]
+    pub runtime: Option<String>,
 }
 
 impl VariantMatrix {
@@ -236,6 +247,7 @@ mod tests {
             models: vec!["claude".to_string(), "gemini".to_string()],
             conditions: vec!["cold".to_string(), "soft".to_string(), "strict".to_string()],
             reps_per_cell: 10,
+            runtime: None,
         };
         // 3 × 2 × 3 × 10 = 180
         assert_eq!(m.total_dispatches(), 180);
@@ -252,6 +264,7 @@ mod tests {
             models: vec!["claude".to_string(), "gemini".to_string()],
             conditions: vec![],
             reps_per_cell: 5,
+            runtime: None,
         };
         assert_eq!(m.total_dispatches(), 10);
     }

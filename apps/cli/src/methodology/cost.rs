@@ -321,6 +321,7 @@ mod tests {
             models: vec!["claude-haiku-4-5".to_string()],
             conditions: vec!["cold".to_string()],
             reps_per_cell: 5,
+            runtime: None,
         }
     }
 
@@ -440,6 +441,7 @@ mod tests {
             models: vec!["claude-opus-4-7".to_string()], // expensive model
             conditions: vec!["strict".to_string()],
             reps_per_cell: 100,
+            runtime: None,
         };
         let est = cost_estimate_for_matrix(
             &big,
@@ -471,6 +473,7 @@ mod tests {
             ],
             conditions: vec!["soft".to_string()],
             reps_per_cell: 10,
+            runtime: None,
         };
         let est = cost_estimate_for_matrix(
             &multi,
