@@ -170,7 +170,7 @@ fn run_with_matrix(
     let mut compute_seconds: f64 = 0.0;
     let mut bandwidth_bytes: i64 = 0;
     let mut judge_cost_usd: f64 = 0.0;
-    let rates = CostRateCard::defaults_v1();
+    let rates = CostRateCard::load_with_override();
 
     for cell in cells.iter().take(planned_capped as usize) {
         let prompt = matrix

@@ -57,6 +57,67 @@ impl CostRateCard {
             bandwidth_per_byte_usd: 0.00000009,
         }
     }
+
+    /// v2.10 PR-10 — load defaults then overlay any keys present in
+    /// `~/.ato/rate-card-override.json`. The override file is the
+    /// surface we'll use once Railway calibration data lands: drop
+    /// in the real measured constants without a rebuild. Unknown
+    /// keys are ignored; only the four supported fields override.
+    ///
+    /// File schema (all fields optional — only present fields override):
+    /// ```json
+    /// {
+    ///   "llm_judge_cost_per_call_usd": 0.0008,
+    ///   "compute_per_second_usd": 0.0000061,
+    ///   "storage_per_byte_month_usd": 0.000000026,
+    ///   "bandwidth_per_byte_usd": 0.00000012,
+    ///   "_note": "calibrated against Railway invoice 2026-05",
+    ///   "_calibrated_at": "2026-05-26"
+    /// }
+    /// ```
+    pub fn load_with_override() -> Self {
+        let mut card = Self::defaults_v1();
+        if let Some(path) = rate_card_override_path() {
+            if path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(x) = v
+                            .get("llm_judge_cost_per_call_usd")
+                            .and_then(|x| x.as_f64())
+                        {
+                            card.llm_judge_cost_per_call_usd = x;
+                        }
+                        if let Some(x) =
+                            v.get("compute_per_second_usd").and_then(|x| x.as_f64())
+                        {
+                            card.compute_per_second_usd = x;
+                        }
+                        if let Some(x) = v
+                            .get("storage_per_byte_month_usd")
+                            .and_then(|x| x.as_f64())
+                        {
+                            card.storage_per_byte_month_usd = x;
+                        }
+                        if let Some(x) =
+                            v.get("bandwidth_per_byte_usd").and_then(|x| x.as_f64())
+                        {
+                            card.bandwidth_per_byte_usd = x;
+                        }
+                    }
+                }
+            }
+        }
+        card
+    }
+}
+
+/// Resolves `~/.ato/rate-card-override.json` using the same home-dir
+/// machinery the rest of the CLI uses.
+pub fn rate_card_override_path() -> Option<std::path::PathBuf> {
+    let mut p = crate::db::home_dir();
+    p.push(".ato");
+    p.push("rate-card-override.json");
+    Some(p)
 }
 
 /// Per-LLM-provider token cost expectations (USD per 1M input + per 1M

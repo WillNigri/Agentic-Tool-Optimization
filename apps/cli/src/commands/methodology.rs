@@ -177,6 +177,15 @@ pub enum MethodologySub {
     /// regression-watch archetype's "diff this week against last week"
     /// loop closes here.
     Schedule(ScheduleArgs),
+    /// v2.10 PR-10 — view or override the cost rate card.
+    /// Reads (and optionally writes) `~/.ato/rate-card-override.json`,
+    /// which overlays values onto the published rate card from
+    /// `packages/ato-pricing/pricing.json`. The override is the surface
+    /// we'll use once real Railway cost calibration data lands — drop in
+    /// measured constants without a rebuild. Both the override and the
+    /// underlying defaults are shown side by side so the customer sees
+    /// exactly what's being applied.
+    Calibrate(CalibrateArgs),
     /// v2.10 PR-5 — admin margin report. Aggregates dual-cost ledger
     /// across all methodology_runs in a time window. Customer-side:
     /// sum of YOUR LLM spend. Our-side: storage + bandwidth + compute +
@@ -242,6 +251,36 @@ pub enum MethodologySub {
         #[arg(long, default_value = "byok")]
         billing: String,
     },
+}
+
+#[derive(Args, Debug)]
+pub struct CalibrateArgs {
+    #[command(subcommand)]
+    pub sub: CalibrateSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CalibrateSub {
+    /// Print the active rate card (defaults + any override file values).
+    Show,
+    /// Set one rate-card constant. Writes / updates
+    /// ~/.ato/rate-card-override.json. Use this when you've calibrated
+    /// against a real provider invoice.
+    ///
+    /// Valid keys: llm_judge_cost_per_call_usd | compute_per_second_usd |
+    /// storage_per_byte_month_usd | bandwidth_per_byte_usd.
+    Set {
+        /// Rate-card key to override.
+        key: String,
+        /// New value (USD).
+        value: f64,
+        /// Optional one-line note recorded alongside the override (e.g.
+        /// "from Railway invoice 2026-05").
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Remove the override file. Resets every rate to the published default.
+    Reset,
 }
 
 #[derive(Args, Debug)]
@@ -380,6 +419,13 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 until,
                 methodology,
             } => handle_margin(since, until, methodology, db_path, opts),
+            MethodologySub::Calibrate(args) => match args.sub {
+                CalibrateSub::Show => handle_calibrate_show(opts),
+                CalibrateSub::Set { key, value, note } => {
+                    handle_calibrate_set(key, value, note, opts)
+                }
+                CalibrateSub::Reset => handle_calibrate_reset(opts),
+            },
             MethodologySub::Schedule(sched_args) => match sched_args.sub {
                 ScheduleSub::Create {
                     id,
@@ -718,7 +764,7 @@ fn handle_cost_estimate(
     let matrix: VariantMatrix = serde_json::from_str(&variant_matrix_json)
         .context("parse variant_matrix from DB — methodology may be corrupted")?;
 
-    let rates = CostRateCard::defaults_v1();
+    let rates = CostRateCard::load_with_override();
     let estimate = cost_estimate_for_matrix(&matrix, &rates, billing_mode, judge_calls);
 
     if opts.human {
@@ -1270,7 +1316,7 @@ fn handle_adopt(
         adopted += 1;
     }
 
-    let rates = CostRateCard::defaults_v1();
+    let rates = CostRateCard::load_with_override();
     let storage_bytes_estimate = (customer_tokens_in + customer_tokens_out) * 4;
     let retention_months = 28.0 / 30.0;
     let storage_cost = (storage_bytes_estimate as f64)
@@ -1539,7 +1585,7 @@ fn handle_margin(
         },
     )?;
 
-    let rates = CostRateCard::defaults_v1();
+    let rates = CostRateCard::load_with_override();
     if opts.human {
         emit_human(&format!(
             "Methodology margin report\
@@ -1618,6 +1664,161 @@ fn handle_margin(
                 "source": "packages/ato-pricing/pricing.json",
             },
         }));
+    }
+    Ok(())
+}
+
+// ── v2.10 PR-10: rate-card override ─────────────────────────────────────
+
+fn rate_card_override_file() -> PathBuf {
+    let mut p = db::home_dir();
+    p.push(".ato");
+    let _ = std::fs::create_dir_all(&p);
+    p.push("rate-card-override.json");
+    p
+}
+
+fn handle_calibrate_show(opts: &Opts) -> Result<()> {
+    let defaults = CostRateCard::defaults_v1();
+    let active = CostRateCard::load_with_override();
+    let path = rate_card_override_file();
+    let raw_override: Option<serde_json::Value> = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+    if opts.human {
+        emit_human(&format!(
+            "Active cost rate card (override file: {}):\n  \
+             llm_judge / call:        ${:<14.6}  default ${:.6}{}\n  \
+             compute / second:        ${:<14.6}  default ${:.6}{}\n  \
+             storage / byte-month:    ${:<14.10}  default ${:.10}{}\n  \
+             bandwidth / byte:        ${:<14.10}  default ${:.10}{}",
+            if path.exists() {
+                path.display().to_string()
+            } else {
+                format!("(none — using published defaults at packages/ato-pricing/pricing.json)")
+            },
+            active.llm_judge_cost_per_call_usd,
+            defaults.llm_judge_cost_per_call_usd,
+            override_tag(active.llm_judge_cost_per_call_usd, defaults.llm_judge_cost_per_call_usd),
+            active.compute_per_second_usd,
+            defaults.compute_per_second_usd,
+            override_tag(active.compute_per_second_usd, defaults.compute_per_second_usd),
+            active.storage_per_byte_month_usd,
+            defaults.storage_per_byte_month_usd,
+            override_tag(active.storage_per_byte_month_usd, defaults.storage_per_byte_month_usd),
+            active.bandwidth_per_byte_usd,
+            defaults.bandwidth_per_byte_usd,
+            override_tag(active.bandwidth_per_byte_usd, defaults.bandwidth_per_byte_usd),
+        ));
+        if let Some(o) = &raw_override {
+            if let Some(note) = o.get("_note").and_then(|v| v.as_str()) {
+                emit_human(&format!("\nOverride note: {}", note));
+            }
+            if let Some(when) = o.get("_calibrated_at").and_then(|v| v.as_str()) {
+                emit_human(&format!("Calibrated at: {}", when));
+            }
+        }
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "override_file": path,
+            "override_present": path.exists(),
+            "raw_override": raw_override,
+            "defaults_v1": defaults,
+            "active": active,
+        }));
+    }
+    Ok(())
+}
+
+fn override_tag(active: f64, default: f64) -> &'static str {
+    if (active - default).abs() < 1e-15 {
+        ""
+    } else {
+        "  ← overridden"
+    }
+}
+
+fn handle_calibrate_set(
+    key: String,
+    value: f64,
+    note: Option<String>,
+    opts: &Opts,
+) -> Result<()> {
+    const VALID_KEYS: &[&str] = &[
+        "llm_judge_cost_per_call_usd",
+        "compute_per_second_usd",
+        "storage_per_byte_month_usd",
+        "bandwidth_per_byte_usd",
+    ];
+    if !VALID_KEYS.contains(&key.as_str()) {
+        anyhow::bail!(
+            "unknown rate-card key '{}'. Valid keys: {}",
+            key,
+            VALID_KEYS.join(" | ")
+        );
+    }
+    if !value.is_finite() || value < 0.0 {
+        anyhow::bail!("rate-card value must be a finite non-negative number; got {}", value);
+    }
+    let path = rate_card_override_file();
+    let mut data: serde_json::Map<String, serde_json::Value> = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    data.insert(key.clone(), serde_json::Value::from(value));
+    if let Some(n) = &note {
+        data.insert("_note".to_string(), serde_json::Value::from(n.as_str()));
+    }
+    data.insert(
+        "_calibrated_at".to_string(),
+        serde_json::Value::from(chrono::Utc::now().to_rfc3339()),
+    );
+    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(data))
+        .context("serialize rate-card override")?;
+    std::fs::write(&path, serialized).context("write rate-card override")?;
+    if opts.human {
+        emit_human(&format!(
+            "Override set: {} = {}\n  (file: {})\n  Run `ato evaluations methodology calibrate show` to confirm.",
+            key, value, path.display()
+        ));
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "ok": true,
+            "key": key,
+            "value": value,
+            "file": path,
+        }));
+    }
+    Ok(())
+}
+
+fn handle_calibrate_reset(opts: &Opts) -> Result<()> {
+    let path = rate_card_override_file();
+    if path.exists() {
+        std::fs::remove_file(&path).context("remove rate-card override file")?;
+        if opts.human {
+            emit_human(&format!(
+                "Removed {}. Rate card now uses published defaults.",
+                path.display()
+            ));
+        } else {
+            let _ = emit_json(&serde_json::json!({"reset": true, "file": path}));
+        }
+    } else {
+        if opts.human {
+            emit_human("(no override file present — already using defaults)");
+        } else {
+            let _ = emit_json(&serde_json::json!({"reset": false, "file": path}));
+        }
     }
     Ok(())
 }
