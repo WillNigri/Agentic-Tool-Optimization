@@ -170,6 +170,36 @@ pub enum MethodologySub {
     /// pass `--run-id` (or a positional run id) to drill into one run's
     /// composition (per-cell stats + pairwise Welch t).
     Runs(RunsArgs),
+    /// v2.11 PR-12.1 — diagnose a completed methodology run. Reads the
+    /// run's per-cell stats + worst/best dispatches, dispatches the
+    /// diagnose LLM (default claude-opus-4-7), and prints the
+    /// structured JSON proposal. PURE diagnose — `--apply` lands in
+    /// PR-12.2 behind a `--yes` confirmation gate. Pro-gated via the
+    /// `methodology.diagnose` feature flag.
+    Diagnose {
+        /// Methodology run id to diagnose.
+        run_id: String,
+        /// Override the diagnose model (default claude-opus-4-7 per
+        /// docs/v2.11-learning-loop.md §Q3).
+        #[arg(long)]
+        diagnose_model: Option<String>,
+        /// Override the runtime used to reach the diagnose model.
+        /// When unset, derives from the model name.
+        #[arg(long)]
+        diagnose_runtime: Option<String>,
+        /// Worst-K dispatches per failing cell to include in the prompt.
+        #[arg(long, default_value_t = 3)]
+        worst_k: u32,
+        /// Best-K dispatches per passing cell to include in the prompt.
+        #[arg(long, default_value_t = 2)]
+        best_k: u32,
+        /// Total cap on dispatches sent to the diagnose agent (token budget guard).
+        #[arg(long, default_value_t = 30)]
+        max_dispatches: u32,
+        /// Truncate every prompt + response to this many chars before bundling.
+        #[arg(long, default_value_t = 600)]
+        max_chars_per_dispatch: usize,
+    },
     /// v2.10 PR-7 — schedule a methodology to re-run automatically.
     /// Wraps the existing ATO cron infrastructure: the schedule lands
     /// in ~/.ato/cron-jobs.json with a `methodologySlug` field, and
@@ -419,6 +449,25 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 until,
                 methodology,
             } => handle_margin(since, until, methodology, db_path, opts),
+            MethodologySub::Diagnose {
+                run_id,
+                diagnose_model,
+                diagnose_runtime,
+                worst_k,
+                best_k,
+                max_dispatches,
+                max_chars_per_dispatch,
+            } => handle_diagnose(
+                run_id,
+                diagnose_model,
+                diagnose_runtime,
+                worst_k,
+                best_k,
+                max_dispatches,
+                max_chars_per_dispatch,
+                db_path,
+                opts,
+            ),
             MethodologySub::Calibrate(args) => match args.sub {
                 CalibrateSub::Show => handle_calibrate_show(opts),
                 CalibrateSub::Set { key, value, note } => {
@@ -1664,6 +1713,119 @@ fn handle_margin(
                 "source": "packages/ato-pricing/pricing.json",
             },
         }));
+    }
+    Ok(())
+}
+
+// ── v2.11 PR-12.1: methodology diagnose ────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn handle_diagnose(
+    run_id: String,
+    diagnose_model: Option<String>,
+    diagnose_runtime: Option<String>,
+    worst_k: u32,
+    best_k: u32,
+    max_dispatches: u32,
+    max_chars_per_dispatch: usize,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    // Pro-gated per the open-core tiering principle locked
+    // 2026-05-25: customers can build the same loop themselves with
+    // ato dispatch + their own LLM prompts. We charge for OUR codified
+    // diagnose button.
+    crate::tier::require_feature("methodology.diagnose")?;
+
+    let dopts = crate::methodology::diagnose::DiagnoseOptions {
+        worst_k_per_cell: worst_k,
+        best_k_per_cell: best_k,
+        failing_cell_count: 3,
+        passing_cell_count: 3,
+        total_dispatch_cap: max_dispatches,
+        diagnose_model,
+        diagnose_runtime,
+        max_chars_per_dispatch,
+    };
+
+    if opts.human {
+        emit_human(&format!(
+            "Diagnosing run {} (model: {}, worst-K: {}, best-K: {}, cap: {})...",
+            run_id,
+            dopts.diagnose_model
+                .clone()
+                .unwrap_or_else(|| crate::methodology::diagnose::default_diagnose_model().to_string()),
+            worst_k,
+            best_k,
+            max_dispatches,
+        ));
+    }
+
+    let result = crate::methodology::diagnose::diagnose_run(&run_id, db_path, &dopts)?;
+
+    if opts.human {
+        emit_human(&format!(
+            "\nDiagnose complete.\n  methodology:        {}\n  model:              {}\n  runtime:            {}\n  cost:               ${:.4}\n  tokens:             {} in / {} out\n  execution_log_id:   {}",
+            result.methodology_slug,
+            result.diagnose_model,
+            result.diagnose_runtime,
+            result.diagnose_cost_usd,
+            result.diagnose_tokens_in,
+            result.diagnose_tokens_out,
+            result.diagnose_execution_log_id.as_deref().unwrap_or("(none)"),
+        ));
+        match &result.proposal {
+            Some(p) => {
+                emit_human(&format!(
+                    "\n## Proposed variant: {}\n\n**Rationale:** {}\n\n**Changes ({}):**",
+                    p.variant_slug,
+                    p.rationale,
+                    p.changes.len(),
+                ));
+                for (i, c) in p.changes.iter().enumerate() {
+                    emit_human(&format!(
+                        "  [{}] {:?} → {}{}\n      {}",
+                        i,
+                        c.operation,
+                        c.target_file,
+                        c.section_marker
+                            .as_ref()
+                            .map(|s| format!(" §{}", s))
+                            .unwrap_or_default(),
+                        c.content.chars().take(120).collect::<String>(),
+                    ));
+                }
+                if !p.expected_improvements.is_empty() {
+                    emit_human(&format!(
+                        "\n**Expected improvements ({}):**",
+                        p.expected_improvements.len()
+                    ));
+                    for ei in &p.expected_improvements {
+                        emit_human(&format!(
+                            "  prompt[{}] · {} → {}",
+                            ei.prompt_idx,
+                            ei.condition.as_deref().unwrap_or("(any)"),
+                            ei.predicted_delta,
+                        ));
+                    }
+                }
+                if let Some(risks) = &p.risks_flagged {
+                    emit_human(&format!("\n**Risks flagged:** {}", risks));
+                }
+                emit_human(
+                    "\n→ Next (PR-12.2): `ato evaluations methodology diagnose <run-id> --apply` will write the variant file behind a `--yes` confirmation.",
+                );
+            }
+            None => {
+                emit_human(&format!(
+                    "\nNo structured proposal extracted from the diagnose response.\n  parse_error: {}\n  raw_response (first 600 chars):\n    {}",
+                    result.parse_error.as_deref().unwrap_or("(unknown)"),
+                    result.raw_response.chars().take(600).collect::<String>(),
+                ));
+            }
+        }
+    } else {
+        let _ = emit_json(&result);
     }
     Ok(())
 }

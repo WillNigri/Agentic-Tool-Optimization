@@ -416,6 +416,61 @@ Response to evaluate:
 /// Tolerant of pre/post text — finds the first JSON object that has both
 /// a `score` number and a `reason` string. Returns None if neither
 /// pattern matches.
+/// v2.11 PR-12.1 — brace-balanced JSON snippet extractor.
+///
+/// Public so the diagnose pipeline can reuse the same tolerance for
+/// LLMs that wrap their JSON in preamble text. Scans `text` for the
+/// first `{...}` block (tracking nesting + strings + escapes) where
+/// EVERY key in `required_keys` is present as a top-level field.
+/// Returns the slice (still as a `String` so the caller can re-parse
+/// into whatever target type they want). O(N·K) worst case where N is
+/// `text.len()` and K is the average distance to a closing brace —
+/// LLM responses are bounded, so this is fine in practice.
+pub fn parse_brace_balanced_json(text: &str, required_keys: &[&str]) -> Option<String> {
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] != b'{' {
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape = false;
+        for j in i..bytes.len() {
+            let c = bytes[j];
+            if escape {
+                escape = false;
+                continue;
+            }
+            if in_string {
+                match c {
+                    b'\\' => escape = true,
+                    b'"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let snippet = &text[i..=j];
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(snippet) {
+                            if required_keys.iter().all(|k| v.get(*k).is_some()) {
+                                return Some(snippet.to_string());
+                            }
+                        }
+                        break; // try next `{`
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn parse_judge_response(text: &str) -> Option<(f64, String)> {
     // Try whole-text JSON first (cleanest path).
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {

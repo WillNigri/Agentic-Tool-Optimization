@@ -1452,6 +1452,15 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.11 PR-12.1 (code-review finding #2, 2026-05-25): track diagnose
+    // dispatch cost on the run row so customers asking "what did this
+    // methodology cost me, with diagnose included?" get the right
+    // answer. Free runs that never trigger diagnose stay at 0.
+    let _ = conn.execute(
+        "ALTER TABLE methodology_runs ADD COLUMN provider_diagnose_cost_usd REAL NOT NULL DEFAULT 0",
+        [],
+    );
+
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_variant_lineage (
             variant_slug    TEXT PRIMARY KEY,
