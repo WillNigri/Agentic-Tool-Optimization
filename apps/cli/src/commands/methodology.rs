@@ -170,6 +170,13 @@ pub enum MethodologySub {
     /// pass `--run-id` (or a positional run id) to drill into one run's
     /// composition (per-cell stats + pairwise Welch t).
     Runs(RunsArgs),
+    /// v2.10 PR-7 — schedule a methodology to re-run automatically.
+    /// Wraps the existing ATO cron infrastructure: the schedule lands
+    /// in ~/.ato/cron-jobs.json with a `methodologySlug` field, and
+    /// fires through `--run-cron` (launchd / systemd / schtasks). The
+    /// regression-watch archetype's "diff this week against last week"
+    /// loop closes here.
+    Schedule(ScheduleArgs),
     /// v2.10 PR-5 — admin margin report. Aggregates dual-cost ledger
     /// across all methodology_runs in a time window. Customer-side:
     /// sum of YOUR LLM spend. Our-side: storage + bandwidth + compute +
@@ -241,6 +248,51 @@ pub enum MethodologySub {
 pub struct RunsArgs {
     #[command(subcommand)]
     pub sub: RunsSub,
+}
+
+#[derive(Args, Debug)]
+pub struct ScheduleArgs {
+    #[command(subcommand)]
+    pub sub: ScheduleSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScheduleSub {
+    /// Add (or update) a scheduled methodology run. Cron expression
+    /// uses the standard 5-field syntax (`min hour dom month dow`).
+    /// Example: `--cron "0 9 * * MON"` for every Monday at 9am.
+    Create {
+        /// Job id (URL-safe identifier). Reused across upserts.
+        id: String,
+        /// Methodology slug to run on the schedule.
+        #[arg(long)]
+        methodology: String,
+        /// Cron expression (5 fields: min hour day-of-month month day-of-week).
+        #[arg(long)]
+        cron: String,
+        /// Human-readable name shown in `ato evaluations methodology schedule list`.
+        #[arg(long)]
+        name: Option<String>,
+        /// Billing mode passed to each scheduled run.
+        #[arg(long, default_value = "byok")]
+        billing: String,
+        /// Cap each scheduled run at N dispatches.
+        #[arg(long)]
+        max_dispatches: Option<u32>,
+    },
+    /// List scheduled methodology jobs (the subset of ~/.ato/cron-jobs.json
+    /// that has a `methodologySlug` field).
+    List,
+    /// Remove a scheduled methodology job by id.
+    Delete {
+        id: String,
+    },
+    /// Manually fire one scheduled job right now (same code path the
+    /// OS scheduler would invoke). Useful for testing the schedule
+    /// before the first cron tick lands.
+    Trigger {
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -328,6 +380,28 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 until,
                 methodology,
             } => handle_margin(since, until, methodology, db_path, opts),
+            MethodologySub::Schedule(sched_args) => match sched_args.sub {
+                ScheduleSub::Create {
+                    id,
+                    methodology,
+                    cron,
+                    name,
+                    billing,
+                    max_dispatches,
+                } => handle_schedule_create(
+                    id,
+                    methodology,
+                    cron,
+                    name,
+                    billing,
+                    max_dispatches,
+                    db_path,
+                    opts,
+                ),
+                ScheduleSub::List => handle_schedule_list(opts),
+                ScheduleSub::Delete { id } => handle_schedule_delete(id, opts),
+                ScheduleSub::Trigger { id } => handle_schedule_trigger(id, db_path, opts),
+            },
         },
     }
 }
@@ -1544,6 +1618,227 @@ fn handle_margin(
                 "source": "packages/ato-pricing/pricing.json",
             },
         }));
+    }
+    Ok(())
+}
+
+// ── v2.10 PR-7: scheduled methodology runs ─────────────────────────────
+
+fn cron_jobs_path() -> PathBuf {
+    // Same shape the Tauri cron module uses — ~/.ato/cron-jobs.json — so
+    // the CLI-created schedule is visible to the desktop UI / OS scheduler
+    // out of the box.
+    let mut p = db::home_dir();
+    p.push(".ato");
+    let _ = std::fs::create_dir_all(&p);
+    p.push("cron-jobs.json");
+    p
+}
+
+fn load_cron_jobs() -> Vec<serde_json::Value> {
+    let path = cron_jobs_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_cron_jobs(jobs: &[serde_json::Value]) -> Result<()> {
+    let path = cron_jobs_path();
+    let serialized = serde_json::to_string_pretty(jobs)
+        .context("serialize cron-jobs.json")?;
+    std::fs::write(&path, serialized).context("write cron-jobs.json")?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_schedule_create(
+    id: String,
+    methodology_slug: String,
+    cron: String,
+    name: Option<String>,
+    billing: String,
+    max_dispatches: Option<u32>,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    // Validate the methodology exists before scheduling it — saves a
+    // confused-customer email at 9:01am Monday when the scheduled run
+    // fails because the slug was a typo.
+    let conn = db::open_readonly(db_path)?;
+    conn.query_row::<String, _, _>(
+        "SELECT slug FROM methodologies WHERE slug = ?1",
+        params![&methodology_slug],
+        |r| r.get(0),
+    )
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "no methodology with slug '{}'. `ato evaluations methodology list` to see what's defined.",
+            methodology_slug
+        )
+    })?;
+
+    let _ = BillingMode::parse(&billing).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown billing mode '{}'. Valid values: byok | pool",
+            billing
+        )
+    })?;
+
+    let mut jobs = load_cron_jobs();
+    let now = chrono::Utc::now().to_rfc3339();
+    let job = serde_json::json!({
+        "id": id,
+        "name": name.clone().unwrap_or_else(|| format!("Methodology: {}", methodology_slug)),
+        "type": "methodology",
+        "cron": cron,
+        "enabled": true,
+        "createdAt": now,
+        "methodologySlug": methodology_slug,
+        "methodologyBilling": billing,
+        "methodologyMaxDispatches": max_dispatches,
+        // ATO desktop cron expects a `runtime` and `prompt` even when
+        // they don't drive the dispatch path; set sentinels so the
+        // existing list_cron_jobs UI doesn't error reading them.
+        "runtime": "methodology",
+        "prompt": format!("(methodology run: {})", methodology_slug),
+    });
+
+    if let Some(idx) = jobs
+        .iter()
+        .position(|j| j.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+    {
+        jobs[idx] = job;
+    } else {
+        jobs.push(job);
+    }
+    save_cron_jobs(&jobs)?;
+
+    if opts.human {
+        emit_human(&format!(
+            "Scheduled methodology '{}' as cron job '{}' on `{}`. \
+             Next: register with the OS scheduler from the ATO desktop app \
+             (Settings → Cron → Register) so the schedule actually fires. \
+             To smoke-test now, run: `ato evaluations methodology schedule trigger {}`",
+            methodology_slug, id, cron, id,
+        ));
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "id": id,
+            "methodologySlug": methodology_slug,
+            "cron": cron,
+            "enabled": true,
+        }));
+    }
+    Ok(())
+}
+
+fn handle_schedule_list(opts: &Opts) -> Result<()> {
+    let jobs = load_cron_jobs();
+    let methodology_jobs: Vec<&serde_json::Value> = jobs
+        .iter()
+        .filter(|j| j.get("methodologySlug").and_then(|v| v.as_str()).is_some())
+        .collect();
+    if opts.human {
+        if methodology_jobs.is_empty() {
+            emit_human("(no scheduled methodologies — `ato evaluations methodology schedule create <id> --methodology <slug> --cron \"<expr>\"`)");
+        } else {
+            emit_human(&format!(
+                "{} scheduled methodology runs:",
+                methodology_jobs.len()
+            ));
+            for j in &methodology_jobs {
+                emit_human(&format!(
+                    "  {}  [{}]  cron=`{}`  enabled={}  →  {}",
+                    j.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    j.get("methodologySlug").and_then(|v| v.as_str()).unwrap_or(""),
+                    j.get("cron").and_then(|v| v.as_str()).unwrap_or(""),
+                    j.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                    j.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)"),
+                ));
+            }
+        }
+    } else {
+        let _ = emit_json(&methodology_jobs);
+    }
+    Ok(())
+}
+
+fn handle_schedule_delete(id: String, opts: &Opts) -> Result<()> {
+    let mut jobs = load_cron_jobs();
+    let before = jobs.len();
+    jobs.retain(|j| j.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+    if jobs.len() == before {
+        anyhow::bail!(
+            "no scheduled job with id '{}'. `ato evaluations methodology schedule list` to see what's there.",
+            id
+        );
+    }
+    save_cron_jobs(&jobs)?;
+    if opts.human {
+        emit_human(&format!("Removed scheduled job '{}'.", id));
+    } else {
+        let _ = emit_json(&serde_json::json!({"deleted": id}));
+    }
+    Ok(())
+}
+
+fn handle_schedule_trigger(id: String, db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let jobs = load_cron_jobs();
+    let job = jobs
+        .iter()
+        .find(|j| j.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no scheduled job with id '{}'. `ato evaluations methodology schedule list` to see what's there.",
+                id
+            )
+        })?;
+    let methodology_slug = job
+        .get("methodologySlug")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("scheduled job '{}' has no methodologySlug field", id))?
+        .to_string();
+    let billing = job
+        .get("methodologyBilling")
+        .and_then(|v| v.as_str())
+        .unwrap_or("byok")
+        .to_string();
+    let max = job.get("methodologyMaxDispatches").and_then(|v| v.as_u64());
+
+    let billing_mode = BillingMode::parse(&billing).ok_or_else(|| {
+        anyhow::anyhow!("unknown billing mode '{}' on scheduled job", billing)
+    })?;
+    let run_opts = RunOptions {
+        billing_mode,
+        max_dispatches: max.map(|n| n as u32),
+        stop_on_error: false,
+        progress_jsonl: false,
+    };
+    if opts.human {
+        emit_human(&format!(
+            "Manually firing scheduled job '{}' (methodology={}, cap={})",
+            id,
+            methodology_slug,
+            max.map(|n| n.to_string()).unwrap_or_else(|| "all".to_string()),
+        ));
+    }
+    let summary = runner::run_by_slug(&methodology_slug, db_path, &run_opts)?;
+    if opts.human {
+        emit_human(&format!(
+            "Scheduled run {} {} — completed {}/{} dispatches, ${:.4} customer, ${:.4} ours.",
+            summary.run_id,
+            summary.status,
+            summary.completed,
+            summary.planned,
+            summary.customer_cost_usd,
+            summary.provider_total_cost_usd,
+        ));
+    } else {
+        let _ = emit_json(&summary);
     }
     Ok(())
 }

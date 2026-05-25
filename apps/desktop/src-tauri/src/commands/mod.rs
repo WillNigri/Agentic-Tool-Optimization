@@ -9706,6 +9706,17 @@ async fn dispatch_cron_headless(job_id: &str) -> Result<String, String> {
     let config = job.get("runtimeConfig").map(|v| v.to_string());
     let agent_slug = job.get("agentSlug").and_then(|v| v.as_str()).map(String::from);
     let group_slug = job.get("groupSlug").and_then(|v| v.as_str()).map(String::from);
+    // v2.10 PR-7 — methodology cron support. When the job carries a
+    // methodologySlug, fan out the methodology via the `ato` CLI
+    // instead of doing a single-prompt dispatch. The CLI is the
+    // canonical implementation of the runner; this is a thin shell-out.
+    let methodology_slug = job.get("methodologySlug").and_then(|v| v.as_str()).map(String::from);
+    let methodology_billing = job.get("methodologyBilling").and_then(|v| v.as_str()).unwrap_or("byok").to_string();
+    let methodology_max = job.get("methodologyMaxDispatches").and_then(|v| v.as_u64());
+
+    if let Some(slug) = methodology_slug {
+        return headless_dispatch_methodology(&slug, &methodology_billing, methodology_max).await;
+    }
 
     // Open the DB ourselves — we're outside the Tauri State context.
     let db_path = crate::get_db_path();
@@ -9736,6 +9747,78 @@ async fn dispatch_cron_headless(job_id: &str) -> Result<String, String> {
     }
 
     prompt_agent(runtime, prompt, config, None, None).await
+}
+
+/// v2.10 PR-7 — scheduled methodology runs. Shell out to the `ato` CLI
+/// with `evaluations methodology run <slug>`; capture stdout into the
+/// cron log. The CLI is the source-of-truth implementation; replicating
+/// the runner inside the Tauri process would drift over time.
+///
+/// Locates the `ato` binary via: $ATO_CLI_PATH → which("ato") →
+/// /opt/homebrew/bin/ato → /usr/local/bin/ato. Fails fast with a
+/// clear error if none of those resolve.
+async fn headless_dispatch_methodology(
+    slug: &str,
+    billing: &str,
+    max_dispatches: Option<u64>,
+) -> Result<String, String> {
+    let exe = locate_ato_cli()?;
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.arg("evaluations")
+        .arg("methodology")
+        .arg("run")
+        .arg(slug)
+        .arg("--billing")
+        .arg(billing)
+        .arg("--quiet");
+    if let Some(n) = max_dispatches {
+        cmd.arg("--max-dispatches").arg(n.to_string());
+    }
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("spawn `{} evaluations methodology run {}`: {}", exe, slug, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "methodology run {} failed (exit {:?}): {}",
+            slug,
+            output.status.code(),
+            stderr.trim()
+        ));
+    }
+    Ok(format!(
+        "methodology={} billing={} max={}\n{}",
+        slug,
+        billing,
+        max_dispatches.map(|n| n.to_string()).unwrap_or_else(|| "all".to_string()),
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+fn locate_ato_cli() -> Result<String, String> {
+    if let Ok(p) = std::env::var("ATO_CLI_PATH") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    if let Ok(p) = which::which("ato") {
+        return Ok(p.to_string_lossy().to_string());
+    }
+    for candidate in &[
+        "/opt/homebrew/bin/ato",
+        "/usr/local/bin/ato",
+        "/Applications/ATO.app/Contents/MacOS/ato",
+    ] {
+        if std::path::Path::new(candidate).exists() {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err(
+        "could not locate the `ato` CLI binary. Install via `brew install willnigri/ato/ato` \
+         or set ATO_CLI_PATH to point at the binary."
+            .to_string(),
+    )
 }
 
 async fn headless_dispatch_agent(
