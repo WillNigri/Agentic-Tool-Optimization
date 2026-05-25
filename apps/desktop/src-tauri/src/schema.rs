@@ -1461,6 +1461,17 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.11 PR-12.4 — methodology.agent_slug. When set, the diagnose
+    // pipeline reads the real agent definition file (resolving the
+    // path via runtime-specific conventions) instead of the synthetic
+    // stand-in. The --apply CLI refuses to write a variant on
+    // methodologies without an agent_slug binding (code-review
+    // finding #5 from PR-12.1).
+    let _ = conn.execute(
+        "ALTER TABLE methodologies ADD COLUMN agent_slug TEXT",
+        [],
+    );
+
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_variant_lineage (
             variant_slug    TEXT PRIMARY KEY,

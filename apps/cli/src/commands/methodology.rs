@@ -217,6 +217,16 @@ pub enum MethodologySub {
         /// Truncate every prompt + response to this many chars before bundling.
         #[arg(long, default_value_t = 600)]
         max_chars_per_dispatch: usize,
+        /// v2.11 PR-12.4 — write the proposed variant agent file to disk.
+        /// Requires the methodology to have an agent_slug binding;
+        /// rejects on cold-dispatch runs. Default off — `ato` never
+        /// changes the customer's files without explicit consent.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        /// Skip the interactive confirmation prompt that --apply
+        /// normally fires. Use in CI scripts where stdin isn't a TTY.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
     /// v2.10 PR-7 — schedule a methodology to re-run automatically.
     /// Wraps the existing ATO cron infrastructure: the schedule lands
@@ -413,6 +423,11 @@ pub struct MethodologyConfig {
     pub archetype: String,
     pub variant_matrix: VariantMatrix,
     pub rubric: serde_json::Value,
+    /// v2.11 PR-12.4 — bind the methodology to a real agent. When set,
+    /// diagnose reads the actual agent file and `--apply` will write
+    /// a variant to the runtime-specific agent directory.
+    #[serde(default)]
+    pub agent_slug: Option<String>,
 }
 
 pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
@@ -479,6 +494,8 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 best_k,
                 max_dispatches,
                 max_chars_per_dispatch,
+                apply,
+                yes,
             } => handle_diagnose(
                 run_id,
                 diagnose_model,
@@ -487,6 +504,8 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 best_k,
                 max_dispatches,
                 max_chars_per_dispatch,
+                apply,
+                yes,
                 db_path,
                 opts,
             ),
@@ -581,8 +600,8 @@ fn handle_create(
     // SQLite error; convert it to a user-facing message.
     let result = conn.execute(
         "INSERT INTO methodologies
-            (id, slug, description, archetype, variant_matrix, rubric, created_at, created_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            (id, slug, description, archetype, variant_matrix, rubric, created_at, created_by, agent_slug)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
         params![
             &id,
             &slug,
@@ -591,6 +610,7 @@ fn handle_create(
             &variant_matrix_json,
             &rubric_json,
             &created_at,
+            cfg.agent_slug.as_deref(),
         ],
     );
 
@@ -1739,6 +1759,99 @@ fn handle_margin(
     Ok(())
 }
 
+// ── v2.11 PR-12.4: methodology diagnose --apply ────────────────────────
+
+fn handle_apply(
+    result: &crate::methodology::diagnose::DiagnoseResult,
+    run_id: &str,
+    yes: bool,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let proposal = result.proposal.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no parseable proposal in the diagnose response — cannot --apply. parse_error: {}",
+            result.parse_error.as_deref().unwrap_or("(unknown)")
+        )
+    })?;
+
+    // Look up the methodology's agent_slug binding. Refuse to apply
+    // on cold-dispatch runs (code-review finding #5 from PR-12.1).
+    let conn = db::open_readonly(db_path)?;
+    let (agent_slug, methodology_slug): (Option<String>, String) = conn
+        .query_row(
+            "SELECT m.agent_slug, m.slug
+             FROM methodology_runs r
+             JOIN methodologies m ON m.id = r.methodology_id
+             WHERE r.id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .context("look up methodology agent_slug for --apply")?;
+    drop(conn);
+
+    let agent_slug = agent_slug.ok_or_else(|| {
+        anyhow::anyhow!(
+            "methodology '{}' has no agent_slug binding — refusing to --apply.\n\
+             \n\
+             The diagnose proposal targets a fictional agent file when the methodology was a cold-dispatch eval. \
+             To use --apply, create a methodology bound to a real agent with `agent_slug` set in the JSON config.",
+            methodology_slug
+        )
+    })?;
+
+    // Interactive y/N gate (skipped if --yes).
+    if !yes {
+        let parent_path =
+            crate::methodology::diagnose::resolve_claude_agent_path(&agent_slug);
+        let question = format!(
+            "Apply proposed variant '{}' as a copy of agent '{}' (file: {} → ~/.claude/agents/{}.md)?",
+            proposal.variant_slug,
+            agent_slug,
+            parent_path.display(),
+            proposal.variant_slug
+        );
+        let confirmed = crate::methodology::diagnose::prompt_confirm(&question)?;
+        if !confirmed {
+            if opts.human {
+                emit_human("Apply cancelled. No files written. No lineage row recorded.");
+            } else {
+                let _ = emit_json(&serde_json::json!({
+                    "applied": false,
+                    "reason": "user declined",
+                }));
+            }
+            return Ok(());
+        }
+    }
+
+    let outcome = crate::methodology::diagnose::apply_proposal(
+        proposal,
+        &agent_slug,
+        db_path,
+        &result.diagnose_model,
+        run_id,
+    )?;
+
+    if opts.human {
+        emit_human(&format!(
+            "\n✓ Applied variant '{}' (generation {}):\n  parent: {}\n  variant file: {} ({} bytes)\n  lineage: agent_variant_lineage row written\n\nNext: `ato evaluations methodology compare {} <new-variant-run-id>` after re-running the methodology against the variant.",
+            outcome.variant_slug,
+            outcome.generation,
+            outcome.parent_slug,
+            outcome.variant_file_path,
+            outcome.bytes_written,
+            run_id,
+        ));
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "applied": true,
+            "outcome": outcome,
+        }));
+    }
+    Ok(())
+}
+
 // ── v2.11 PR-12.2: methodology compare (A/B verdict) ───────────────────
 
 fn handle_compare(
@@ -1905,6 +2018,8 @@ fn handle_diagnose(
     best_k: u32,
     max_dispatches: u32,
     max_chars_per_dispatch: usize,
+    apply: bool,
+    yes: bool,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -1989,9 +2104,13 @@ fn handle_diagnose(
                 if let Some(risks) = &p.risks_flagged {
                     emit_human(&format!("\n**Risks flagged:** {}", risks));
                 }
-                emit_human(
-                    "\n→ Next (PR-12.2): `ato evaluations methodology diagnose <run-id> --apply` will write the variant file behind a `--yes` confirmation.",
-                );
+                if apply {
+                    handle_apply(&result, &run_id, yes, db_path, opts)?;
+                } else {
+                    emit_human(
+                        "\n→ Run again with `--apply` to write the variant agent file. Requires `--yes` confirmation by default (no surprise file writes).",
+                    );
+                }
             }
             None => {
                 emit_human(&format!(

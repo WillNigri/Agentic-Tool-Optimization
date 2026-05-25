@@ -502,19 +502,20 @@ pub fn diagnose_run(
     opts: &DiagnoseOptions,
 ) -> Result<DiagnoseResult> {
     let conn = db::open_readonly(db_path)?;
-    let (methodology_id, methodology_slug, archetype, rubric_json): (
+    let (methodology_id, methodology_slug, archetype, rubric_json, agent_slug): (
         String,
         String,
         String,
         String,
+        Option<String>,
     ) = conn
         .query_row(
-            "SELECT m.id, m.slug, m.archetype, m.rubric
+            "SELECT m.id, m.slug, m.archetype, m.rubric, m.agent_slug
              FROM methodology_runs r
              JOIN methodologies m ON m.id = r.methodology_id
              WHERE r.id = ?1",
             params![run_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .with_context(|| {
             format!(
@@ -522,22 +523,18 @@ pub fn diagnose_run(
                 run_id
             )
         })?;
-    let _ = methodology_id; // currently unused; reserved for variant-creation in PR-12.2.
+    let _ = methodology_id; // currently unused; reserved for variant-creation in PR-12.5.
 
-    // Code-review finding #5 (2026-05-25): when the run was a cold
-    // dispatch (no agent_slug recorded — currently every run, since
-    // methodology_run_dispatches has no agent_slug field yet), the
-    // synthetic agent definition tells the diagnose LLM to edit a
-    // fictional file. Warn the customer + restrict downstream
-    // operations. We still produce a proposal (informational), but
-    // PR-12.2's `--apply` will refuse to write a variant file that
-    // doesn't correspond to a real source agent. The prompt warns
-    // the LLM to use `replace_file` exclusively in this mode.
-    let is_cold_run = true; // PR-12.2 will replace this with an actual lookup.
+    // Code-review finding #5 (PR-12.1) full closeout: when the
+    // methodology has an agent_slug binding, read the REAL agent file
+    // and use its content as the diagnose input (not the synthetic
+    // stand-in). PR-12.4 ships the claude path only; PR-12.4.x will
+    // add codex/gemini/openclaw/hermes paths.
+    let is_cold_run = agent_slug.is_none();
     if is_cold_run {
         eprintln!(
-            "warning: run '{}' is a cold-dispatch run (no agent_slug binding). The diagnose proposal will target a fictional agent file; PR-12.2's `--apply` will reject it. Use this output as informational signal only.",
-            run_id
+            "warning: methodology '{}' has no agent_slug binding (cold-dispatch run). The diagnose proposal will target a fictional agent file; `--apply` will reject it. Use this output as informational signal only.",
+            methodology_slug
         );
     }
 
@@ -557,12 +554,39 @@ pub fn diagnose_run(
         worst_k.iter().map(|d| d.execution_log_id.clone()).collect();
     let best_k = sample_best_k(&dispatches, &cells, opts, worst_k.len(), &worst_ids);
 
-    // Agent definition: PR-12.1 keeps it synthetic when the run wasn't
-    // bound to a specific agent slug (the part5-real-150-eval case).
-    // PR-12.2 will inspect methodology_run_dispatches.agent_slug-style
-    // fields when those land; for now we describe the "cold dispatch"
-    // shape verbatim so the diagnose agent has SOMETHING to modify.
-    let agent_definition = synthetic_agent_definition(&cells);
+    // Agent definition: read the real file when the methodology has
+    // an agent_slug binding; fall back to the synthetic stand-in for
+    // cold-dispatch runs (already warned above). Per PR-12.4 scope we
+    // resolve the claude-runtime path only — other runtimes land in
+    // PR-12.4.x.
+    let agent_definition = match &agent_slug {
+        Some(slug) => {
+            let path = resolve_claude_agent_path(slug);
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    if contents.is_empty() {
+                        eprintln!(
+                            "warning: agent file at {} is empty; falling back to synthetic definition",
+                            path.display()
+                        );
+                        synthetic_agent_definition(&cells)
+                    } else {
+                        contents
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: agent_slug '{}' is set but no file found at {} ({}); falling back to synthetic definition",
+                        slug,
+                        path.display(),
+                        e
+                    );
+                    synthetic_agent_definition(&cells)
+                }
+            }
+        }
+        None => synthetic_agent_definition(&cells),
+    };
 
     let prompt = build_diagnose_prompt(
         &methodology_slug,
@@ -1222,7 +1246,328 @@ mod tests {
     }
 }
 
-// (PR-12.2 will add: apply_proposal(path, proposal) → writes the
-// variant file with the strict operations enum, and run_ab(run_id,
-// variant_slug) → re-runs the methodology against the variant + emits
-// the three win-condition predicates.)
+// v2.11 PR-12.4 — apply mechanic.
+//
+// Reads the methodology's agent_slug, resolves the runtime-specific
+// agent file path, applies the strict-operations change to a variant
+// copy, and writes the lineage row. PR-12.4 ships the claude path only
+// (`~/.claude/agents/<slug>.md`) — codex/gemini/openclaw/hermes
+// resolution lands in PR-12.4.x.
+//
+// Refuses to apply when:
+//   - methodology has no agent_slug (cold-dispatch run, finding #5)
+//   - target_file fails the validate_target_file allowlist (finding #3)
+//   - the variant_slug already exists on disk (no silent overwrites)
+//   - the user didn't pass --yes and stdin is not a TTY (no surprise writes in scripts)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyOutcome {
+    pub variant_slug: String,
+    pub variant_file_path: String,
+    pub parent_slug: String,
+    pub generation: i64,
+    pub bytes_written: usize,
+}
+
+/// Resolve the on-disk path for `<slug>.md` under the claude runtime.
+/// PR-12.4.x will add codex/gemini/openclaw/hermes paths per CLAUDE.md
+/// "File-writing contract per runtime" — for now we hardcode the
+/// claude convention since all v2.11 dogfood methodologies target it.
+pub fn resolve_claude_agent_path(slug: &str) -> PathBuf {
+    let mut p = crate::db::home_dir();
+    p.push(".claude");
+    p.push("agents");
+    p.push(format!("{}.md", slug));
+    p
+}
+
+/// Apply a validated proposal to disk. Variant lives at
+/// `~/.claude/agents/<variant_slug>.md` (claude-only for PR-12.4).
+/// Lineage row goes into agent_variant_lineage with auto-incremented
+/// generation (parent's max generation + 1, default 1).
+pub fn apply_proposal(
+    proposal: &DiagnoseProposal,
+    parent_slug: &str,
+    db_path: &Path,
+    diagnose_model: &str,
+    run_id: &str,
+) -> Result<ApplyOutcome> {
+    validate_proposal(proposal)?;
+
+    // Read the parent agent file. PR-12.4 = claude path only.
+    let parent_path = resolve_claude_agent_path(parent_slug);
+    if !parent_path.exists() {
+        anyhow::bail!(
+            "parent agent file not found at {}. The methodology's agent_slug must point to an existing claude-runtime agent (~/.claude/agents/<slug>.md). Multi-runtime path resolution lands in PR-12.4.x.",
+            parent_path.display()
+        );
+    }
+    let parent_content = std::fs::read_to_string(&parent_path)
+        .with_context(|| format!("read parent agent file at {}", parent_path.display()))?;
+
+    // Compose the variant content by applying each change to the parent.
+    let mut variant_content = parent_content.clone();
+    for change in &proposal.changes {
+        variant_content = apply_change(&variant_content, change)?;
+    }
+
+    // Variant path. No-overwrite guard — fresh slug per --apply.
+    let variant_path = resolve_claude_agent_path(&proposal.variant_slug);
+    if variant_path.exists() {
+        anyhow::bail!(
+            "variant file already exists at {}. Pick a different variant_slug or delete the existing file first.",
+            variant_path.display()
+        );
+    }
+    if let Some(parent_dir) = variant_path.parent() {
+        std::fs::create_dir_all(parent_dir)
+            .with_context(|| format!("ensure variant directory exists at {}", parent_dir.display()))?;
+    }
+    std::fs::write(&variant_path, &variant_content)
+        .with_context(|| format!("write variant agent file at {}", variant_path.display()))?;
+
+    // Lineage row: parent's max generation + 1.
+    let conn = db::open_readwrite(db_path)?;
+    let parent_max_gen: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(generation), 0) FROM agent_variant_lineage WHERE parent_slug = ?1",
+            params![parent_slug],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let generation = parent_max_gen + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "INSERT INTO agent_variant_lineage
+            (variant_slug, parent_slug, generation, created_at, birthed_by_run, diagnose_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            &proposal.variant_slug,
+            parent_slug,
+            generation,
+            &now,
+            run_id,
+            diagnose_model,
+        ],
+    );
+
+    Ok(ApplyOutcome {
+        variant_slug: proposal.variant_slug.clone(),
+        variant_file_path: variant_path.display().to_string(),
+        parent_slug: parent_slug.to_string(),
+        generation,
+        bytes_written: variant_content.len(),
+    })
+}
+
+fn apply_change(content: &str, change: &ProposedChange) -> Result<String> {
+    match change.operation {
+        ProposedOperation::ReplaceFile => Ok(change.content.clone()),
+        ProposedOperation::Append => Ok(format!(
+            "{}{}{}",
+            content,
+            if content.ends_with('\n') { "" } else { "\n" },
+            change.content
+        )),
+        ProposedOperation::Prepend => Ok(format!(
+            "{}{}{}",
+            change.content,
+            if change.content.ends_with('\n') { "" } else { "\n" },
+            content
+        )),
+        ProposedOperation::ReplaceSection => {
+            let marker = change.section_marker.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "replace_section requires a section_marker (e.g. \"## System Prompt\")"
+                )
+            })?;
+            replace_markdown_section(content, marker, &change.content)
+        }
+    }
+}
+
+/// Replace a markdown section starting at the given heading through to
+/// the next heading at the same or shallower level. The marker must be
+/// the full heading text including the `## ` prefix. If the marker
+/// isn't found, returns Err so the caller surfaces a clear failure
+/// instead of silently appending. The new section content REPLACES
+/// everything from the marker line (inclusive) through to (but
+/// excluding) the next heading line.
+pub(crate) fn replace_markdown_section(
+    content: &str,
+    marker: &str,
+    new_section: &str,
+) -> Result<String> {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let start_idx = lines
+        .iter()
+        .position(|l| l.trim_end_matches('\n') == marker)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "section_marker '{}' not found in target file (operations are strict — section must exist as a heading line)",
+                marker
+            )
+        })?;
+    // Determine the heading level of the marker (count leading #s).
+    let marker_level = marker.chars().take_while(|c| *c == '#').count();
+    if marker_level == 0 {
+        anyhow::bail!(
+            "section_marker '{}' must start with one or more `#` characters (be a markdown heading)",
+            marker
+        );
+    }
+    // Find the next heading at the same or shallower level after start_idx.
+    let end_idx = lines
+        .iter()
+        .enumerate()
+        .skip(start_idx + 1)
+        .find(|(_, l)| {
+            let trimmed = l.trim_start();
+            let level = trimmed.chars().take_while(|c| *c == '#').count();
+            level > 0 && level <= marker_level
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+
+    let prefix: String = lines.iter().take(start_idx).copied().collect();
+    let suffix: String = lines.iter().skip(end_idx).copied().collect();
+    let mut new_body = new_section.to_string();
+    if !new_body.ends_with('\n') {
+        new_body.push('\n');
+    }
+    Ok(format!("{}{}{}", prefix, new_body, suffix))
+}
+
+/// Interactive y/N confirmation. Reads a single line from stdin.
+/// Returns true on "y" / "yes" (case-insensitive). Any other input
+/// (including EOF) returns false. Non-TTY callers should pass `--yes`
+/// upstream to skip this entirely.
+pub(crate) fn prompt_confirm(question: &str) -> Result<bool> {
+    use std::io::{BufRead, Write};
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    writeln!(handle, "{} [y/N]", question)
+        .context("write apply confirmation prompt to stdout")?;
+    handle
+        .flush()
+        .context("flush apply confirmation prompt")?;
+    let stdin = std::io::stdin();
+    let mut input = String::new();
+    stdin
+        .lock()
+        .read_line(&mut input)
+        .context("read apply confirmation reply from stdin")?;
+    let answer = input.trim().to_lowercase();
+    Ok(matches!(answer.as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    #[test]
+    fn replace_markdown_section_basic_swap() {
+        let content = "# Title\n\n## System Prompt\nold prompt\n\n## Tools\n- read_file\n";
+        let out = replace_markdown_section(content, "## System Prompt", "new prompt body")
+            .expect("section swap");
+        assert!(out.contains("# Title"));
+        assert!(out.contains("new prompt body"));
+        assert!(out.contains("## Tools"));
+        assert!(!out.contains("old prompt"));
+    }
+
+    #[test]
+    fn replace_markdown_section_last_section() {
+        // No following heading — replacement extends through EOF.
+        let content = "# A\n\n## Last\nold body\nmore old\n";
+        let out = replace_markdown_section(content, "## Last", "fresh content").unwrap();
+        assert!(out.contains("fresh content"));
+        assert!(!out.contains("old body"));
+    }
+
+    #[test]
+    fn replace_markdown_section_missing_marker_bails() {
+        let content = "# A\n\n## Tools\n";
+        let err = replace_markdown_section(content, "## Nonexistent", "x").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn replace_markdown_section_respects_heading_level() {
+        // Marker is `##`; a `###` inside should NOT terminate the section.
+        let content = "## Outer\n### Inner heading\ninner body\n## Next outer\n";
+        let out = replace_markdown_section(content, "## Outer", "replaced").unwrap();
+        // The ### Inner heading should be gone (was inside Outer's section).
+        assert!(!out.contains("### Inner heading"));
+        assert!(out.contains("replaced"));
+        assert!(out.contains("## Next outer"));
+    }
+
+    #[test]
+    fn apply_change_replace_file_replaces_everything() {
+        let out = apply_change(
+            "original whole-file content",
+            &ProposedChange {
+                target_file: "agents/x.md".to_string(),
+                operation: ProposedOperation::ReplaceFile,
+                section_marker: None,
+                content: "new whole-file content".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "new whole-file content");
+    }
+
+    #[test]
+    fn apply_change_append_adds_trailing_newline_if_missing() {
+        let out = apply_change(
+            "first line",
+            &ProposedChange {
+                target_file: "agents/x.md".to_string(),
+                operation: ProposedOperation::Append,
+                section_marker: None,
+                content: "appended".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "first line\nappended");
+    }
+
+    #[test]
+    fn apply_change_prepend_inserts_at_start() {
+        let out = apply_change(
+            "rest of file",
+            &ProposedChange {
+                target_file: "agents/x.md".to_string(),
+                operation: ProposedOperation::Prepend,
+                section_marker: None,
+                content: "prepended".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(out.starts_with("prepended"));
+        assert!(out.contains("rest of file"));
+    }
+
+    #[test]
+    fn apply_change_replace_section_requires_section_marker() {
+        let err = apply_change(
+            "## A\nbody\n",
+            &ProposedChange {
+                target_file: "agents/x.md".to_string(),
+                operation: ProposedOperation::ReplaceSection,
+                section_marker: None,
+                content: "x".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("requires a section_marker"));
+    }
+
+    #[test]
+    fn resolve_claude_agent_path_matches_known_convention() {
+        let p = resolve_claude_agent_path("my-reviewer");
+        let s = p.display().to_string();
+        assert!(s.ends_with("/.claude/agents/my-reviewer.md"));
+    }
+}

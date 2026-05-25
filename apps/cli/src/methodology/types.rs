@@ -26,6 +26,14 @@ pub struct Methodology {
     pub created_at: String,
     #[serde(default)]
     pub created_by: Option<String>,
+    /// v2.11 PR-12.4 — the agent this methodology evaluates. When set,
+    /// the diagnose pipeline reads the actual agent definition file
+    /// (resolved per-runtime) and `--apply` will write the variant to
+    /// the same runtime's agent directory. When None, the methodology
+    /// is a cold-dispatch eval (like part5-real-150-eval) and
+    /// `--apply` refuses to run.
+    #[serde(default)]
+    pub agent_slug: Option<String>,
 }
 
 /// Variant matrix definition — the fan-out shape for one methodology.
