@@ -701,7 +701,17 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     enriched.extend(war_rooms);
     enriched.extend(chats);
     enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
-    enriched.truncate(limit as usize);
+    // v2.10.0 PR-1 (UI fix, 2026-05-25) — DO NOT truncate the combined
+    // list. Each kind is already individually capped at `limit` in its
+    // own SELECT. The previous `enriched.truncate(limit)` applied a
+    // SECOND truncate to the merged-and-sorted list, which silently
+    // hid every non-single-run row when the user had a burst of recent
+    // single-runs (e.g. the Part 5 n=150 methodology eval landed 150
+    // single-runs newer than every session → all 87 sessions + 6
+    // war-rooms got truncated off the merged list).
+    // Will reported 2026-05-25: "the app only shows now the evals,
+    // all other sessions and runs we made are where?".
+    // Total bound is now 4 × limit = up to 200 rows (50 of each kind).
     Ok(enriched)
 }
 
@@ -772,7 +782,17 @@ fn list_sessions_narrow_chat_fallback(
     enriched.extend(war_rooms);
     enriched.extend(chats);
     enriched.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
-    enriched.truncate(limit as usize);
+    // v2.10.0 PR-1 (UI fix, 2026-05-25) — DO NOT truncate the combined
+    // list. Each kind is already individually capped at `limit` in its
+    // own SELECT. The previous `enriched.truncate(limit)` applied a
+    // SECOND truncate to the merged-and-sorted list, which silently
+    // hid every non-single-run row when the user had a burst of recent
+    // single-runs (e.g. the Part 5 n=150 methodology eval landed 150
+    // single-runs newer than every session → all 87 sessions + 6
+    // war-rooms got truncated off the merged list).
+    // Will reported 2026-05-25: "the app only shows now the evals,
+    // all other sessions and runs we made are where?".
+    // Total bound is now 4 × limit = up to 200 rows (50 of each kind).
     Ok(enriched)
 }
 
