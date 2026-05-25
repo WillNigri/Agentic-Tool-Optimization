@@ -14,6 +14,7 @@ import { registerOperationsTools } from "./tools/operations.js";
 import { registerAuthoringTools } from "./tools/authoring.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { registerPostsTools } from "./tools/posts.js";
+import { registerMethodologyTools } from "./tools/methodology.js";
 
 const server = new McpServer({
   name: "ato",
@@ -39,6 +40,10 @@ registerAuthoringTools(server);
 // MCP-only agent harnesses can call.
 registerSessionTools(server);
 registerPostsTools(server);
+// v2.10 — methodology runner MCP surface. Ten tools that mirror the
+// `ato evaluations methodology` CLI so an AI agent can list /
+// adopt / score / fan-out / inspect methodologies through MCP.
+registerMethodologyTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
