@@ -43,6 +43,8 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::db;
+use crate::methodology::compose;
+use crate::methodology::runner::{self, RunOptions};
 use crate::methodology::{
     cost_estimate_for_matrix, Archetype, BillingMode, CostRateCard, VariantMatrix,
 };
@@ -136,6 +138,64 @@ pub enum MethodologySub {
         #[arg(long, default_value_t = 0)]
         judge_calls: u32,
     },
+    /// v2.10 PR-3 — run a methodology. Fans out the variant matrix
+    /// sequentially via `ato dispatch`, captures the resulting
+    /// execution_logs rows into methodology_run_dispatches, and updates
+    /// methodology_runs with dual cost accounting. The rubric scoring
+    /// loop lands in PR-4. Use `--max-dispatches N` for smoke tests
+    /// before burning the full matrix.
+    Run {
+        /// Methodology slug to execute.
+        slug: String,
+        /// Billing mode for THIS run. `byok` (default): customer's API
+        /// keys pay. `pool`: our shared Pro pool key pays — fills
+        /// `provider_llm_cost_usd` with the burn.
+        #[arg(long, default_value = "byok")]
+        billing: String,
+        /// Cap the run at the first N dispatches (smoke testing).
+        /// Default: no cap (run the full matrix).
+        #[arg(long)]
+        max_dispatches: Option<u32>,
+        /// Abort the run on the first failed dispatch.
+        /// Default: continue and record the failure.
+        #[arg(long, default_value_t = false)]
+        stop_on_error: bool,
+        /// Emit one JSON line per completed dispatch to stdout so callers
+        /// can stream progress. Default off — only the final summary.
+        #[arg(long, default_value_t = false)]
+        progress_jsonl: bool,
+    },
+    /// v2.10 PR-3 — inspect methodology runs. Default lists recent runs;
+    /// pass `--run-id` (or a positional run id) to drill into one run's
+    /// composition (per-cell stats + pairwise Welch t).
+    Runs(RunsArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RunsArgs {
+    #[command(subcommand)]
+    pub sub: RunsSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RunsSub {
+    /// List recent methodology runs. Newest first.
+    List {
+        /// Filter to runs of one methodology (by slug).
+        #[arg(long)]
+        methodology: Option<String>,
+        /// Limit number of rows returned. Default 50.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Print one run's full composition: per-cell stats and pairwise
+    /// Welch t over the cost metric. Until PR-4 lands rubric scoring,
+    /// composition operates over receipt-native fields (cost, tokens,
+    /// duration) + grounding-verdict mix.
+    Show {
+        /// Run id (UUID returned by `ato evaluations methodology run`).
+        run_id: String,
+    },
 }
 
 /// Config file shape — what a customer writes when they run `create`.
@@ -162,6 +222,27 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 billing,
                 judge_calls,
             } => handle_cost_estimate(slug, billing, judge_calls, db_path, opts),
+            MethodologySub::Run {
+                slug,
+                billing,
+                max_dispatches,
+                stop_on_error,
+                progress_jsonl,
+            } => handle_run(
+                slug,
+                billing,
+                max_dispatches,
+                stop_on_error,
+                progress_jsonl,
+                db_path,
+                opts,
+            ),
+            MethodologySub::Runs(runs_args) => match runs_args.sub {
+                RunsSub::List { methodology, limit } => {
+                    handle_runs_list(methodology, limit, db_path, opts)
+                }
+                RunsSub::Show { run_id } => handle_runs_show(run_id, db_path, opts),
+            },
         },
     }
 }
@@ -529,6 +610,311 @@ fn handle_cost_estimate(
         ));
     } else {
         let _ = emit_json(&estimate);
+    }
+    Ok(())
+}
+
+fn handle_run(
+    slug: String,
+    billing: String,
+    max_dispatches: Option<u32>,
+    stop_on_error: bool,
+    progress_jsonl: bool,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let billing_mode = BillingMode::parse(&billing).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown billing mode '{}'. Valid values: byok | pool",
+            billing
+        )
+    })?;
+    let run_opts = RunOptions {
+        billing_mode,
+        max_dispatches,
+        stop_on_error,
+        progress_jsonl,
+    };
+    if opts.human {
+        emit_human(&format!(
+            "Starting methodology run for '{}' (billing={}{}){}",
+            slug,
+            billing_mode.as_str(),
+            max_dispatches
+                .map(|n| format!(", cap={}", n))
+                .unwrap_or_default(),
+            if progress_jsonl {
+                " — progress streaming on"
+            } else {
+                ""
+            },
+        ));
+    }
+    let summary = runner::run_by_slug(&slug, db_path, &run_opts)?;
+    if opts.human {
+        emit_human(&format!(
+            "\nRun {} {}\n  planned:        {}\n  completed:      {}\n  failed:         {}\n  duration:       {:.1}s\n  YOUR cost:      ${:.4}\n  OUR cost:       ${:.4}\n  margin (est):   ${:.4}",
+            summary.run_id,
+            summary.status,
+            summary.planned,
+            summary.completed,
+            summary.failed,
+            summary.duration_seconds,
+            summary.customer_cost_usd,
+            summary.provider_total_cost_usd,
+            summary.margin_usd,
+        ));
+        emit_human(&format!(
+            "\nNext: `ato evaluations methodology runs show {}` for the per-cell composition.",
+            summary.run_id
+        ));
+    } else {
+        let _ = emit_json(&summary);
+    }
+    Ok(())
+}
+
+fn handle_runs_list(
+    methodology_filter: Option<String>,
+    limit: u32,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readonly(db_path)?;
+    // Join in methodology slug so the list is human-readable without
+    // a second query per row.
+    let (sql, has_filter) = if methodology_filter.is_some() {
+        (
+            "SELECT r.id, m.slug, r.started_at, r.ended_at, r.status,
+                    r.total_dispatches_planned, r.total_dispatches_completed,
+                    r.customer_cost_usd, r.provider_total_cost_usd, r.margin_usd
+             FROM methodology_runs r
+             JOIN methodologies m ON m.id = r.methodology_id
+             WHERE m.slug = ?1
+             ORDER BY r.started_at DESC
+             LIMIT ?2",
+            true,
+        )
+    } else {
+        (
+            "SELECT r.id, m.slug, r.started_at, r.ended_at, r.status,
+                    r.total_dispatches_planned, r.total_dispatches_completed,
+                    r.customer_cost_usd, r.provider_total_cost_usd, r.margin_usd
+             FROM methodology_runs r
+             JOIN methodologies m ON m.id = r.methodology_id
+             ORDER BY r.started_at DESC
+             LIMIT ?1",
+            false,
+        )
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "run_id": r.get::<_, String>(0)?,
+            "methodology_slug": r.get::<_, String>(1)?,
+            "started_at": r.get::<_, String>(2)?,
+            "ended_at": r.get::<_, Option<String>>(3)?,
+            "status": r.get::<_, String>(4)?,
+            "planned": r.get::<_, i64>(5)?,
+            "completed": r.get::<_, i64>(6)?,
+            "customer_cost_usd": r.get::<_, f64>(7)?,
+            "provider_total_cost_usd": r.get::<_, f64>(8)?,
+            "margin_usd": r.get::<_, f64>(9)?,
+        }))
+    };
+    let rows: Vec<serde_json::Value> = if has_filter {
+        let m = methodology_filter.unwrap();
+        stmt.query_map(params![&m, limit as i64], map_row)?
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        stmt.query_map(params![limit as i64], map_row)?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+    if opts.human {
+        if rows.is_empty() {
+            emit_human("(no methodology runs yet — `ato evaluations methodology run <slug>` to start one)");
+        } else {
+            emit_human(&format!("{} runs:", rows.len()));
+            for r in &rows {
+                emit_human(&format!(
+                    "  {}  [{}]  {}  {}/{} dispatches  ${:.4} customer / ${:.4} ours",
+                    r["run_id"].as_str().unwrap_or(""),
+                    r["methodology_slug"].as_str().unwrap_or(""),
+                    r["status"].as_str().unwrap_or(""),
+                    r["completed"].as_i64().unwrap_or(0),
+                    r["planned"].as_i64().unwrap_or(0),
+                    r["customer_cost_usd"].as_f64().unwrap_or(0.0),
+                    r["provider_total_cost_usd"].as_f64().unwrap_or(0.0),
+                ));
+            }
+        }
+    } else {
+        let _ = emit_json(&rows);
+    }
+    Ok(())
+}
+
+fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let conn = db::open_readonly(db_path)?;
+    let (methodology_slug, started_at, ended_at, status, planned, completed,
+         customer_cost_usd, customer_tokens_in, customer_tokens_out,
+         provider_total_cost_usd, margin_usd, billing_mode): (
+        String, String, Option<String>, String, i64, i64, f64, i64, i64, f64, f64, String,
+    ) = conn
+        .query_row(
+            "SELECT m.slug, r.started_at, r.ended_at, r.status,
+                    r.total_dispatches_planned, r.total_dispatches_completed,
+                    r.customer_cost_usd, r.customer_tokens_in, r.customer_tokens_out,
+                    r.provider_total_cost_usd, r.margin_usd, r.customer_billing_mode
+             FROM methodology_runs r
+             JOIN methodologies m ON m.id = r.methodology_id
+             WHERE r.id = ?1",
+            params![&run_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                ))
+            },
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "no methodology run with id '{}'. `ato evaluations methodology runs list` to see what's there.",
+                run_id
+            )
+        })?;
+
+    // Pull every dispatch this run composed + the execution_logs metrics
+    // we need for composition. One join keeps the round-trip count to 1.
+    let mut stmt = conn.prepare(
+        "SELECT mrd.variant_cell,
+                e.cost_usd_estimated, e.tokens_in, e.tokens_out,
+                e.duration_ms, e.status, e.grounding_verdict
+         FROM methodology_run_dispatches mrd
+         JOIN execution_logs e ON e.id = mrd.execution_log_id
+         WHERE mrd.methodology_run_id = ?1",
+    )?;
+    let observations: Vec<compose::CellObservation> = stmt
+        .query_map(params![&run_id], |r| {
+            let vc_json: String = r.get(0)?;
+            let cost: Option<f64> = r.get(1)?;
+            let tokens_in: Option<i64> = r.get(2)?;
+            let tokens_out: Option<i64> = r.get(3)?;
+            let duration_ms: Option<i64> = r.get(4)?;
+            let status: Option<String> = r.get(5)?;
+            let verdict: Option<String> = r.get(6)?;
+            let cell: serde_json::Value =
+                serde_json::from_str(&vc_json).unwrap_or(serde_json::Value::Null);
+            let prompt_idx = cell.get("prompt_idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let model = cell
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)")
+                .to_string();
+            let condition = cell
+                .get("condition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let _ = tokens_in; // unused; PR-4/5 may compose over it
+            Ok(compose::CellObservation {
+                prompt_idx,
+                model,
+                condition,
+                cost_usd: cost.unwrap_or(0.0),
+                tokens_out: tokens_out.unwrap_or(0) as f64,
+                duration_ms: duration_ms.unwrap_or(0) as f64,
+                grounding_verdict: verdict,
+                status: status.unwrap_or_else(|| "unknown".to_string()),
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let composition = compose::compose(&observations);
+
+    if opts.human {
+        emit_human(&format!(
+            "Methodology run: {}\n  methodology:    {}\n  billing:        {}\n  status:         {}\n  started:        {}\n  ended:          {}\n  planned:        {}\n  completed:      {}\n  YOUR cost:      ${:.4}\n  YOUR tokens:    {} in / {} out\n  OUR cost:       ${:.4}\n  margin (est):   ${:.4}",
+            run_id,
+            methodology_slug,
+            billing_mode,
+            status,
+            started_at,
+            ended_at.as_deref().unwrap_or("(not finished)"),
+            planned,
+            completed,
+            customer_cost_usd,
+            customer_tokens_in,
+            customer_tokens_out,
+            provider_total_cost_usd,
+            margin_usd,
+        ));
+        if composition.cells.is_empty() {
+            emit_human("\n(no dispatches composed yet — run did not complete any cells)");
+        } else {
+            emit_human(&format!("\nPer-cell composition ({} cells):", composition.cells.len()));
+            for c in &composition.cells {
+                emit_human(&format!(
+                    "  prompt[{}] · {} · {}  n={} (success={}, error={})\n    cost:     mean ${:.4}  sd ${:.4}  95% CI [${:.4}, ${:.4}]\n    tok_out:  mean {:.0}  sd {:.0}  95% CI [{:.0}, {:.0}]\n    duration: mean {:.0}ms  sd {:.0}ms  95% CI [{:.0}, {:.0}]ms",
+                    c.prompt_idx, c.condition, c.model, c.n, c.success_n, c.error_n,
+                    c.cost_usd.mean, c.cost_usd.sd, c.cost_usd.ci_lo, c.cost_usd.ci_hi,
+                    c.tokens_out.mean, c.tokens_out.sd, c.tokens_out.ci_lo, c.tokens_out.ci_hi,
+                    c.duration_ms.mean, c.duration_ms.sd, c.duration_ms.ci_lo, c.duration_ms.ci_hi,
+                ));
+                if !c.grounding_verdicts.is_empty() {
+                    let vs: Vec<String> = c
+                        .grounding_verdicts
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect();
+                    emit_human(&format!("    grounding: {}", vs.join(" · ")));
+                }
+            }
+            if !composition.model_pairs_cost_t.is_empty() {
+                emit_human(&format!(
+                    "\nPairwise cost comparisons (Welch t):\n  CI-disjoint pairs (heuristic 'real difference'): {}",
+                    composition.model_pairs_cost_t.iter().filter(|p| p.ci_disjoint).count(),
+                ));
+                for p in &composition.model_pairs_cost_t {
+                    emit_human(&format!(
+                        "  prompt[{}] · {}: {} vs {}  t={:.2} df={:.1}  CI {}",
+                        p.prompt_idx, p.condition, p.model_a, p.model_b,
+                        p.t_statistic, p.welch_df,
+                        if p.ci_disjoint { "disjoint" } else { "overlapping" },
+                    ));
+                }
+            }
+        }
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "run_id": run_id,
+            "methodology_slug": methodology_slug,
+            "billing_mode": billing_mode,
+            "status": status,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "planned": planned,
+            "completed": completed,
+            "customer_cost_usd": customer_cost_usd,
+            "customer_tokens_in": customer_tokens_in,
+            "customer_tokens_out": customer_tokens_out,
+            "provider_total_cost_usd": provider_total_cost_usd,
+            "margin_usd": margin_usd,
+            "composition": composition,
+        }));
     }
     Ok(())
 }

@@ -19,7 +19,9 @@
 // wires dual cost accounting + admin margin reports.
 
 pub mod archetypes;
+pub mod compose;
 pub mod cost;
+pub mod runner;
 pub mod types;
 
 #[allow(unused_imports)] // re-exports for consumers (CLI commands, future Pro)
