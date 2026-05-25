@@ -225,6 +225,74 @@ export function registerMethodologyTools(server: McpServer) {
   );
 
   server.tool(
+    "diagnose_methodology_run",
+    "v2.11 — Read a completed methodology run's failing cells + propose a structured change to the agent definition that would have raised the rubric score. The codified learning-loop button: failure → diagnose → propose. Returns a JSON change-proposal (variant_slug + strict 4-operation enum + expected_improvements + risks_flagged). PRO-only — customer pays for the packaged automation. They can build the same loop themselves with `dispatch_agent` + their own LLM prompts. BURNS LLM TOKENS: one diagnose call ≈ $0.02 with claude-sonnet-4-6, ~$0.04 with claude-opus-4-7 (the default).",
+    {
+      run_id: z.string().describe("Methodology run id to diagnose"),
+      diagnose_model: z
+        .string()
+        .optional()
+        .describe(
+          "Override the diagnose model (default claude-opus-4-7 per docs/v2.11-learning-loop.md §Q3)",
+        ),
+      diagnose_runtime: z
+        .string()
+        .optional()
+        .describe(
+          "Override the runtime used to reach the diagnose model. When unset, derives from the model name.",
+        ),
+      worst_k: z
+        .number()
+        .optional()
+        .describe("Worst-K dispatches per failing cell (default 3)"),
+      best_k: z
+        .number()
+        .optional()
+        .describe("Best-K dispatches per passing cell (default 2)"),
+      max_dispatches: z
+        .number()
+        .optional()
+        .describe(
+          "Total cap on dispatches sent to the diagnose agent (token budget guard; default 30)",
+        ),
+    },
+    async ({ run_id, diagnose_model, diagnose_runtime, worst_k, best_k, max_dispatches }) => {
+      const args = ["evaluations", "methodology", "diagnose", run_id];
+      if (diagnose_model) args.push("--diagnose-model", diagnose_model);
+      if (diagnose_runtime) args.push("--diagnose-runtime", diagnose_runtime);
+      if (worst_k !== undefined) args.push("--worst-k", String(worst_k));
+      if (best_k !== undefined) args.push("--best-k", String(best_k));
+      if (max_dispatches !== undefined)
+        args.push("--max-dispatches", String(max_dispatches));
+      return toolText(await runAtoCli(args));
+    },
+  );
+
+  server.tool(
+    "compare_methodology_runs",
+    "v2.11 — Compare a variant methodology run against a baseline. Returns cell-by-cell verdicts (score delta, Welch t, p-value or CI-disjoint at small samples, cost delta %) + the three win-condition predicates locked in docs/v2.11-learning-loop.md §Q4: any_significant_improvement, any_significant_regression, cost_inflation_unjustified. Final `variant_should_ship` is true ONLY when at least one cell improves significantly AND no cell regresses AND no cell inflates cost >10% without a ≥0.2 score jump. Free — pure read, no LLM call.",
+    {
+      baseline_run_id: z.string().describe("Baseline run id"),
+      variant_run_id: z
+        .string()
+        .describe(
+          "Variant run id (typically a child of the baseline via methodology_runs.parent_run_id)",
+        ),
+    },
+    async ({ baseline_run_id, variant_run_id }) => {
+      return toolText(
+        await runAtoCli([
+          "evaluations",
+          "methodology",
+          "compare",
+          baseline_run_id,
+          variant_run_id,
+        ]),
+      );
+    },
+  );
+
+  server.tool(
     "methodology_margin_report",
     "Aggregate dual-cost-ledger margin report across methodology_runs. Shows customer-side LLM spend vs our-side delivery cost (storage + bandwidth + compute + judge), with the rate card constants printed verbatim. Useful for: 'what was my eval budget last month' (customer) and 'what's our unit economics' (admin).",
     {
