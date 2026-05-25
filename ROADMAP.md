@@ -4,7 +4,87 @@
 
 **ATO is your local war room for humans and LLMs: decide together, call tools, and verify every outcome.** Drive it from a GUI, a CLI, or your coding agent over MCP — same data, same operations, same audit trail.
 
-See [`README.md`](./README.md) for the full pitch and [`AGENTS.md`](./AGENTS.md) for the surface a coding agent reads.
+See [`README.md`](./README.md) for the full pitch, [`AGENTS.md`](./AGENTS.md) for the surface a coding agent reads, and [`docs/tiers.md`](./docs/tiers.md) for the open-core tiering principle (what's Free, what's Pro, and why).
+
+## Latest (May 2026 — current sprint)
+
+### v2.10.0 — Methodology runner (Released 2026-05-25)
+
+The Pro-tier headline ATO sells: a methodology = a reusable test recipe (N prompts × M models × R reps, scored with a rubric). Run it, get per-cell mean / SD / 95% CI / pairwise Welch t with p-values, dual-cost ledger (your LLM bill vs our delivery cost). Real-data validated against the n=150 corpus from Part 5 of the v2.9 build log; blog Part 6 published with the receipts.
+
+**Shipped (PR sequence committed to `main`):**
+- ✅ PR-1 — schema (`methodologies`, `methodology_runs`, `methodology_run_dispatches` with dual-cost accounting) + Rust types + cost estimator + open-source `pricing.json` rate card
+- ✅ PR-2 — CLI surface (`create / list / get / archetypes / cost-estimate`)
+- ✅ PR-3 — fan-out runner + composer (per-cell stats + Welch t)
+- ✅ PR-3.1 — `adopt` subcommand (compose methodologies over existing `execution_logs` without re-dispatching) + `VariantMatrix.runtime` override for CLI-vs-API head-to-heads
+- ✅ PR-4 — rubric library (regex / structural / llm_judge / composite) + `score` subcommand
+- ✅ PR-5 — `margin` report CLI (admin view of the dual cost ledger)
+- ✅ PR-6 — 10 MCP tools mirroring the CLI surface (closes the Agentic Usage Interface plan item)
+- ✅ PR-7 — scheduled methodology runs (`schedule create / list / delete / trigger`) backed by the existing launchd/systemd/schtasks cron infra
+- ✅ PR-8 — Tauri Insights → Methodologies panel (read-only views, per-cell stats with 95% CI computed in TS to match the CLI verbatim)
+- ✅ PR-9 — Welch t p-values via Abramowitz-Stegun normal-CDF approximation (df≥30; CI-disjoint heuristic below)
+- ✅ PR-10 — rate-card override shell (`calibrate show / set / reset`) for Railway calibration drop-in
+- ✅ PR-10.1 — 5-of-7 code-review fixes from a multi-LLM `ato review` (the p-value df cutoff tightening was the load-bearing one)
+- ✅ PR-11 — workspaces foundation (Team-tier primitive; schema + CLI + auto-seeded Personal workspace)
+
+**Headline numbers from the real-data validation (committed receipts in `~/.ato/local.db`):**
+- 157 claude-sonnet-4-6 receipts adopted: $6.20 customer / $0.05 ours / **124× margin per run**
+- prompt[18] advisory: 0/10 rubric pass (real regression surfaced)
+- prompt[16] advisory 0.300 vs default 0.600 — grounded mode rubric-WORSE on this prompt
+- LLM-judge rubric over 13 gemini receipts: $0.07 total judge cost, differentiated 0.05..0.85 scores
+- Margin across 3 runs / 183 dispatches: **84.6% margin** at the $0.29/run allocation
+
+### v2.11.0 — Learning loop + open-core tier gate (In progress)
+
+Closes YC's "self-improving company" loop YC's framework calls out: failure detection (v2.10) → diagnose → propose change → A/B → ship. Plus the open-core tier-gate that locks Will's principle ("we charge for the codified automation we package, not for the underlying primitives") into code.
+
+**Shipped (committed to `main` 2026-05-25):**
+- ✅ PR-12.0 — schema deltas for v2.11 (`parent_run_id` on methodology_runs, new tables `agent_variant_lineage` + `production_signals`) + `VariantMatrix.holdout_prompts` field (Q7 overfitting defense #1)
+- ✅ PR-12.05 — open-core tier gate (`apps/cli/src/tier.rs` with cached `/auth/me` resolution + structured upgrade prompt). Re-tiers `methodology.schedule create` to Pro (existing schedules grandfathered). Pre-registers `methodology.diagnose` Pro flag for PR-12.1.
+
+**Planned (next PRs):**
+- 🟡 PR-12.1 — `ato evaluations methodology diagnose <run-id>` CLI (read failing cells + propose structured agent-definition change). Pure diagnose; no `--apply` yet. ~250 LOC. Pro from day one.
+- 🟡 PR-12.2 — `--apply` (write variant file with `require --yes` confirmation) + `--ab` (run variant methodology + compare against baseline) + the three win-condition predicates (`any_significant_improvement`, `any_significant_regression`, `cost_inflation_unjustified`). ~300 LOC.
+- 🟡 PR-12.3 — MCP tool `diagnose_methodology_run` + "Propose improvement" button on MethodologiesPanel. ~150 LOC.
+- 🟡 PR-12.3a — Interactive approval card in the desktop activity feed (currently read-only; needs Approve / Reject / View-diff buttons). ~200 LOC.
+- 🟡 PR-12.4 — `agent_variant_lineage` writes + the depth-≥3-in-14-days warning. ~100 LOC.
+- 🟡 PR-12.5 — Langfuse/Helicone Mode A ingestion → `production_signals` table → `production_signal:` block in diagnose prompt. Plus 7-day auto-revert watch on shipped variants. Cloud-side dependency, lands in v2.11.x.
+
+**Design lock**: [`docs/v2.11-learning-loop.md`](./docs/v2.11-learning-loop.md) (war-room verdict from claude + gemini synthesized; both reviewers converged on every architectural question; both flagged the Q7 overfitting risk independently). Three defenses baked in **before** shipping:
+1. Holdout prompts — diagnose agent never sees them; A/B win condition must hold on holdout cells too.
+2. Variant lineage tracker — warns at depth ≥3 in 14 days.
+3. Auto-revert window — 7-day Langfuse watch; auto-rollback on >2σ prod regression.
+
+**Validation dogfood (Part 7 — committed receipts)**: Single $0.02 diagnose call against the n=150 corpus. The diagnose agent correctly identified the rubric/prompt mismatch on prompts 18/19 (test-coverage questions scored by a security-keyword regex) and explicitly flagged the gaming risk in its `risks_flagged` field. **Validates both that the learning loop is real AND that Q7 overfitting concern is real, in the same call.** Total v2.11 design cost so far: $0.086 (war-room $0.067 + diagnose $0.019).
+
+### v2.11.x — Langfuse + Helicone Mode A ingestion (Planned)
+
+Brings production observability data into the local cockpit *without* embedding their SDK in the customer's runtime (preserves the complementary positioning with both products). Customer runs Langfuse/Helicone in prod as today; ATO pulls trace data on a schedule into the new `production_signals` table; the v2.11 diagnose pipeline reads it as an additional signal alongside dev rubric scores.
+
+- 🟡 `ato cloud ingest langfuse --project-id <id>` — pull traces matching a filter into local SQLite. ~150 LOC + auth flow.
+- 🟡 `ato cloud ingest helicone` — same pattern, Helicone-specific schema. ~120 LOC.
+- 🟡 Schema for `production_signals` shipped in PR-12.0 (target writes land in v2.11.x).
+- 🟡 Pro gate on the ingest commands (`production-signals.ingest` feature flag).
+
+Strategic positioning: see [`docs/tiers.md`](./docs/tiers.md) on what "open-core" means here. ATO is the **dev cockpit + quality-gate layer**; Langfuse/Helicone are the **production observability layer**. They're complementary, and Mode A is the integration that makes the customer see both in one view without ATO competing for their core moat (long-term trace storage). Will's read: *"keeps us as the cockpit where the AI runs."*
+
+### v2.12+ — Strategic direction (Planned, based on YC self-improving-company framing)
+
+Map ATO onto YC's loop architecture (sensor → policy → tools → quality-gate → learning):
+- Sensor — NOT us (upstream data infra).
+- Policy — us (v2.9 grounded mode).
+- Tools — us (skills, MCPs, agent permissions).
+- Quality gate — us (v2.10 methodology runner).
+- Learning — us, starting v2.11 (diagnose + A/B).
+
+v2.12+ candidates queued for product decision:
+- **Cross-runtime diagnose** — diagnose itself runs as a methodology cell (N proposals from N models, pick the variant whose A/B wins).
+- **Methodology auto-extension** — when a holdout cell regresses, add it to the visible methodology automatically so the next diagnose pass has to satisfy it.
+- **Production signal types beyond Langfuse** — Helicone, custom telemetry endpoints, application logs.
+- **Multi-tenant agent registries** — Enterprise feature. Inventory of every agent across an org, with cross-team eval coverage.
+- **Agent-recursive dispatches** — Mode 4 from the original v2.9 plan; an ATO agent dispatching further ATO agents with bounded depth + budget.
+
+Strategic notes from the 2026-05-25 YC discussion saved at `memory/project_yc_self_improving_company.md`.
 
 ## Released
 
