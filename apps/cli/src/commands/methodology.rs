@@ -170,6 +170,23 @@ pub enum MethodologySub {
     /// pass `--run-id` (or a positional run id) to drill into one run's
     /// composition (per-cell stats + pairwise Welch t).
     Runs(RunsArgs),
+    /// v2.10 PR-5 — admin margin report. Aggregates dual-cost ledger
+    /// across all methodology_runs in a time window. Customer-side:
+    /// sum of YOUR LLM spend. Our-side: storage + bandwidth + compute +
+    /// judge + (in pool mode) the LLM-pool burn. Margin per run vs
+    /// rate-card allocation. Open by design — same numbers we use
+    /// internally for pricing decisions land here for the customer.
+    Margin {
+        /// Lower bound on started_at (ISO-8601 or YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Upper bound on started_at.
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter to one methodology by slug.
+        #[arg(long)]
+        methodology: Option<String>,
+    },
     /// v2.10 PR-4 — score every dispatch in an existing run using the
     /// methodology's rubric. Idempotent — re-running re-scores. Costs
     /// of LLM-judge calls land in `provider_judge_cost_usd`. Use this
@@ -306,6 +323,11 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 slug, since, until, runtime, model, status, agent, limit, billing, db_path, opts,
             ),
             MethodologySub::Score { run_id, force } => handle_score(run_id, force, db_path, opts),
+            MethodologySub::Margin {
+                since,
+                until,
+                methodology,
+            } => handle_margin(since, until, methodology, db_path, opts),
         },
     }
 }
@@ -1365,6 +1387,174 @@ fn handle_score(run_id: String, force: bool, db_path: &PathBuf, opts: &Opts) -> 
         }));
     }
     Ok(())
+}
+
+fn handle_margin(
+    since: Option<String>,
+    until: Option<String>,
+    methodology: Option<String>,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readonly(db_path)?;
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut bind: Vec<String> = Vec::new();
+    if let Some(s) = &since {
+        where_clauses.push(format!("r.started_at >= ?{}", bind.len() + 1));
+        bind.push(s.clone());
+    }
+    if let Some(u) = &until {
+        where_clauses.push(format!("r.started_at <= ?{}", bind.len() + 1));
+        bind.push(u.clone());
+    }
+    if let Some(slug) = &methodology {
+        where_clauses.push(format!("m.slug = ?{}", bind.len() + 1));
+        bind.push(slug.clone());
+    }
+    let where_sql = if where_clauses.is_empty() {
+        "1=1".to_string()
+    } else {
+        where_clauses.join(" AND ")
+    };
+    let sql = format!(
+        "SELECT
+            COUNT(*) AS n_runs,
+            COALESCE(SUM(r.total_dispatches_completed), 0) AS n_dispatches,
+            COALESCE(SUM(r.customer_cost_usd), 0) AS customer_cost,
+            COALESCE(SUM(r.provider_llm_cost_usd), 0) AS provider_llm,
+            COALESCE(SUM(r.provider_judge_cost_usd), 0) AS provider_judge,
+            COALESCE(SUM(r.provider_compute_seconds * 0.000005), 0) AS provider_compute,
+            COALESCE(SUM(r.provider_storage_bytes), 0) AS storage_bytes,
+            COALESCE(SUM(r.provider_bandwidth_bytes), 0) AS bandwidth_bytes,
+            COALESCE(SUM(r.provider_total_cost_usd), 0) AS provider_total,
+            COALESCE(SUM(r.margin_usd), 0) AS margin
+         FROM methodology_runs r
+         JOIN methodologies m ON m.id = r.methodology_id
+         WHERE {}",
+        where_sql
+    );
+    let params_iter: Vec<&dyn rusqlite::ToSql> =
+        bind.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let (
+        n_runs,
+        n_dispatches,
+        customer_cost,
+        provider_llm,
+        provider_judge,
+        provider_compute,
+        storage_bytes,
+        bandwidth_bytes,
+        provider_total,
+        margin,
+    ): (i64, i64, f64, f64, f64, f64, i64, i64, f64, f64) = conn.query_row(
+        &sql,
+        params_iter.as_slice(),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        },
+    )?;
+
+    let rates = CostRateCard::defaults_v1();
+    if opts.human {
+        emit_human(&format!(
+            "Methodology margin report\
+             \n  window:           {}\
+             \n  runs:             {}\
+             \n  dispatches:       {}\
+             \n\
+             \nCustomer side (their LLM bill):\
+             \n  customer cost:    ${:.4}\
+             \n\
+             \nOur side (what we pay to deliver):\
+             \n  LLM (pool mode):  ${:.4}\
+             \n  LLM-judge:        ${:.4}\
+             \n  Compute:          ${:.4}\
+             \n  Storage:          {} bytes\
+             \n  Bandwidth:        {} bytes\
+             \n  ─────────────────────────────\
+             \n  OUR total:        ${:.4}\
+             \n\
+             \nRate card (rate-card-v1, also in pricing.json):\
+             \n  llm_judge / call:        ${:.5}\
+             \n  compute / second:        ${:.6}\
+             \n  storage / byte-month:    ${:.10}\
+             \n  bandwidth / byte:        ${:.10}\
+             \n\
+             \nMargin (positive = profitable at $0.29/run allocation):\
+             \n  total margin:     ${:.4}\
+             \n  margin / run:     ${:.4}\
+             \n  margin %:         {:.1}%",
+            window_label(since.as_deref(), until.as_deref()),
+            n_runs,
+            n_dispatches,
+            customer_cost,
+            provider_llm,
+            provider_judge,
+            provider_compute,
+            storage_bytes,
+            bandwidth_bytes,
+            provider_total,
+            rates.llm_judge_cost_per_call_usd,
+            rates.compute_per_second_usd,
+            rates.storage_per_byte_month_usd,
+            rates.bandwidth_per_byte_usd,
+            margin,
+            if n_runs > 0 { margin / n_runs as f64 } else { 0.0 },
+            if provider_total > 0.0 { 100.0 * margin / (margin + provider_total) } else { 0.0 },
+        ));
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "window": {
+                "since": since,
+                "until": until,
+                "methodology": methodology,
+            },
+            "n_runs": n_runs,
+            "n_dispatches": n_dispatches,
+            "customer_cost_usd": customer_cost,
+            "provider": {
+                "llm_cost_usd": provider_llm,
+                "judge_cost_usd": provider_judge,
+                "compute_cost_usd": provider_compute,
+                "storage_bytes": storage_bytes,
+                "bandwidth_bytes": bandwidth_bytes,
+                "total_usd": provider_total,
+            },
+            "margin": {
+                "total_usd": margin,
+                "per_run_usd": if n_runs > 0 { margin / n_runs as f64 } else { 0.0 },
+                "pct": if provider_total > 0.0 { 100.0 * margin / (margin + provider_total) } else { 0.0 },
+            },
+            "rate_card_v1": {
+                "llm_judge_per_call_usd": rates.llm_judge_cost_per_call_usd,
+                "compute_per_second_usd": rates.compute_per_second_usd,
+                "storage_per_byte_month_usd": rates.storage_per_byte_month_usd,
+                "bandwidth_per_byte_usd": rates.bandwidth_per_byte_usd,
+                "source": "packages/ato-pricing/pricing.json",
+            },
+        }));
+    }
+    Ok(())
+}
+
+fn window_label(since: Option<&str>, until: Option<&str>) -> String {
+    match (since, until) {
+        (Some(s), Some(u)) => format!("{} → {}", s, u),
+        (Some(s), None) => format!("{} → now", s),
+        (None, Some(u)) => format!("(all) → {}", u),
+        (None, None) => "(all runs)".to_string(),
+    }
 }
 
 #[cfg(test)]
