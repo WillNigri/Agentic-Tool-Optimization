@@ -16,6 +16,8 @@ ATO serves three audiences with one product, via two front-doors that share the 
 
 **Business Model**: Open-core. MIT-licensed desktop app + optional Pro subscription for real-time monitoring, cloud sync, hosted suggestions, and team features (closed source, separate repo `ato-cloud`).
 
+**The locked principle (2026-05-25)**: *customers can run primitives free; we charge for the codified automation we package on top.* Same model as GitLab, Sentry, Supabase. You can write your own bash loop calling `ato dispatch`, set up your own launchd plist, hand-prompt your own diagnose LLM — we don't lock that path. We charge for the one-click button that codifies our methodology + the safety net we wrap around it (holdouts, statistical guarantees, automatic rollback, cross-device sync). See [`docs/tiers.md`](./docs/tiers.md) for the full Free / Pro / Team / Enterprise inventory.
+
 > Note: "ATO" is the short name; "Agentic Tool Optimization" is the full name.
 
 ---

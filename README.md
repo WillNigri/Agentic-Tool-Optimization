@@ -161,27 +161,38 @@ This is **chapter 2** — what happens once the cockpit has data on YOUR work. T
 
 ## Free vs Pro
 
-| | Free | Pro ($29/mo) |
-|---|:---:|:---:|
-| `ato review` with `read_file` / `grep` / `git_log` | ✓ | ✓ |
-| War-rooms · sessions · cross-runtime bridge | ✓ | ✓ |
-| Tool-call passthrough + permission rules | ✓ | ✓ |
-| Replay · file attribution · live runs · kill | ✓ | ✓ |
-| Receipts (local SQLite, AES-256 at rest) | ✓ | ✓ |
-| MCP server (17 tools) | ✓ | ✓ |
-| Cost optimizer (`optimize recommend`) | ✓ | ✓ |
-| Tauri desktop · embedded terminal · skills marketplace | ✓ | ✓ |
-| LAN mesh (mDNS peer discovery) | coming v2.9 | coming v2.9 |
-| Quality scoring | heuristic pass/fail (regex + status-exit checks on the response) | **LLM judge — a second model rates each reply on our API key, not yours** |
-| Cloud trace retention + regression alerts | — | 30-day cross-device |
-| Scheduled evaluators | — | hourly / daily / weekly |
-| Cloud-relay mesh (NAT traversal) | — | ✓ |
-| Team sessions + shared war-rooms | — | ✓ |
-| Priority support | — | ✓ |
+**The principle**: you can run every primitive yourself for free. We charge for the codified automation we package on top. Same model as GitLab, Sentry, Supabase. Full mapping in [`docs/tiers.md`](./docs/tiers.md).
 
-**Free**: you fly the cockpit. **Pro**: ATO replays your prompts overnight, scores quality, and tells you what to switch.
+| | Free | Pro ($29/mo) | Team ($49/mo) |
+|---|:---:|:---:|:---:|
+| `ato review` with `read_file` / `grep` / `git_log` | ✓ | ✓ | ✓ |
+| War-rooms · sessions · cross-runtime bridge | ✓ | ✓ | ✓ |
+| Tool-call passthrough + permission rules | ✓ | ✓ | ✓ |
+| Replay · file attribution · live runs · kill | ✓ | ✓ | ✓ |
+| Receipts (local SQLite, AES-256 at rest) | ✓ | ✓ | ✓ |
+| MCP server (27 tools incl. 10 methodology) | ✓ | ✓ | ✓ |
+| Cost optimizer (`optimize recommend`) | ✓ | ✓ | ✓ |
+| Tauri desktop · embedded terminal · skills marketplace | ✓ | ✓ | ✓ |
+| **Methodology runner** (`create / run / adopt / score / runs / margin / calibrate`) | ✓ | ✓ | ✓ |
+| Methodology Insights panel (per-cell stats + Welch t + p-values + 95% CI) | ✓ | ✓ | ✓ |
+| Workspaces (local, multi-namespace) | ✓ | ✓ | ✓ |
+| LAN mesh (mDNS peer discovery) | ✓ | ✓ | ✓ |
+| Quality scoring | regex / structural / your own LLM-judge with your key | **`methodology diagnose`: codified learning loop** | (Pro features) |
+| **`methodology schedule create`** (auto-rerun on cron) | — *(DIY with crontab)* | ✓ | ✓ |
+| **`methodology diagnose`** (read failing cells → propose agent change → A/B test) | — *(DIY with `ato dispatch`)* | ✓ | ✓ |
+| Cloud trace retention + regression alerts | — | 30-day cross-device | ✓ |
+| Scheduled evaluators (cron-driven cloud evals) | — | ✓ | ✓ |
+| Cloud sync of methodologies + runs across devices | — | ✓ | ✓ |
+| Cloud-relay mesh (NAT traversal) | — | ✓ | ✓ |
+| Auto-revert watch (7-day Langfuse trace monitor) | — | ✓ | ✓ |
+| Auto-PR after A/B wins | — | ✓ | ✓ |
+| Team workspaces (multi-user shared agents + skills) | — | — | ✓ |
+| Encrypted provider key store (cron usage-poller) | — | — | ✓ |
+| Priority support | — | ✓ | ✓ |
 
-**[Start free →](https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest)** · **[ATO Pro →](https://agentictool.ai/pro)**
+**Why this split**: every Pro row is automation we built on top of the free primitives. You can build the same loop with `ato dispatch` + bash + your own LLM prompts — you just don't get OUR button. The principle is *we charge for the codified workflow, not the underlying capability.*
+
+**[Start free →](https://github.com/WillNigri/Agentic-Tool-Optimization/releases/latest)** · **[ATO Pro →](https://agentictool.ai/pro)** · **[Full tier mapping](./docs/tiers.md)**
 
 ---
 
