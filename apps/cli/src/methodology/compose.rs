@@ -99,9 +99,49 @@ pub struct PairwiseT {
     pub t_statistic: f64,
     pub welch_df: f64,
     /// Heuristic flag — true when the two 95% CIs do not overlap.
-    /// Until the rubric library ships, this is the customer-facing
-    /// "this difference looks real" signal.
+    /// Stable signal for small samples where p-value approximation
+    /// is unreliable. Always populated.
     pub ci_disjoint: bool,
+    /// Two-sided p-value approximation. None when df < 10 — at small
+    /// df the normal-CDF approximation under-states tail mass enough
+    /// that we'd rather show "—" than a misleading number; trust the
+    /// `ci_disjoint` flag at low n.
+    #[serde(default)]
+    pub p_value_approx: Option<f64>,
+}
+
+/// Abramowitz & Stegun 7.1.26 — erf approximation, accurate to ~1.5e-7.
+/// Standard reference implementation. Used by `normal_cdf` below.
+pub fn erf_approx(x: f64) -> f64 {
+    // Constants from A&S 7.1.26.
+    let a1 = 0.254_829_592;
+    let a2 = -0.284_496_736;
+    let a3 = 1.421_413_741;
+    let a4 = -1.453_152_027;
+    let a5 = 1.061_405_429;
+    let p = 0.327_591_1;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let xa = x.abs();
+    let t = 1.0 / (1.0 + p * xa);
+    let y = 1.0
+        - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-xa * xa).exp();
+    sign * y
+}
+
+/// Standard normal CDF Φ(z) via erf. Returns P(Z ≤ z).
+pub fn normal_cdf(z: f64) -> f64 {
+    0.5 * (1.0 + erf_approx(z / std::f64::consts::SQRT_2))
+}
+
+/// Two-sided p-value for Welch's t under the normal approximation.
+/// Returns None when df < 10 — the approximation under-states tail
+/// mass at small df enough that we'd rather show nothing than mislead.
+pub fn welch_p_value_approx(t: f64, df: f64) -> Option<f64> {
+    if df < 10.0 || !t.is_finite() {
+        return None;
+    }
+    let p = 2.0 * (1.0 - normal_cdf(t.abs()));
+    Some(p.clamp(0.0, 1.0))
 }
 
 pub fn mean(xs: &[f64]) -> f64 {
@@ -288,6 +328,7 @@ fn pairwise_cost_t(observations: &[CellObservation], cells: &[CellSummary]) -> V
                 if let Some((t, df)) = welch_t(&xs_a, &xs_b) {
                     let ci_disjoint = a.cost_usd.ci_hi < b.cost_usd.ci_lo
                         || b.cost_usd.ci_hi < a.cost_usd.ci_lo;
+                    let p_value_approx = welch_p_value_approx(t, df);
                     pairs.push(PairwiseT {
                         prompt_idx,
                         condition: condition.clone(),
@@ -300,6 +341,7 @@ fn pairwise_cost_t(observations: &[CellObservation], cells: &[CellSummary]) -> V
                         t_statistic: t,
                         welch_df: df,
                         ci_disjoint,
+                        p_value_approx,
                     });
                 }
             }
@@ -383,6 +425,42 @@ mod tests {
     #[test]
     fn welch_t_none_when_n_too_small() {
         assert!(welch_t(&[1.0], &[2.0, 3.0]).is_none());
+    }
+
+    #[test]
+    fn normal_cdf_at_zero_is_half() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normal_cdf_matches_published_z_values() {
+        // Standard normal table reference points.
+        assert!((normal_cdf(1.0) - 0.8413).abs() < 1e-3);
+        assert!((normal_cdf(1.96) - 0.9750).abs() < 1e-3);
+        assert!((normal_cdf(-1.96) - 0.0250).abs() < 1e-3);
+        assert!((normal_cdf(2.58) - 0.9951).abs() < 1e-3);
+    }
+
+    #[test]
+    fn welch_p_value_returns_none_at_small_df() {
+        // df < 10 → we deliberately return None so callers fall back to
+        // the CI-disjoint heuristic instead of an under-estimated p.
+        assert!(welch_p_value_approx(2.0, 5.0).is_none());
+        assert!(welch_p_value_approx(2.0, 9.99).is_none());
+    }
+
+    #[test]
+    fn welch_p_value_matches_known_z_to_p_translation() {
+        // Two-sided p for |z|=1.96 should be ~0.05 (the classic 95% line).
+        let p = welch_p_value_approx(1.96, 30.0).unwrap();
+        assert!((p - 0.05).abs() < 0.01, "expected p ≈ 0.05; got {}", p);
+    }
+
+    #[test]
+    fn welch_p_value_clamps_to_zero_at_large_t() {
+        // At |t|=10 (df=30) p is essentially 0.
+        let p = welch_p_value_approx(10.0, 30.0).unwrap();
+        assert!(p < 1e-6, "expected near-zero p; got {}", p);
     }
 
     #[test]

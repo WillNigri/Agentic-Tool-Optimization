@@ -75,6 +75,38 @@ export function sampleSd(xs: number[]): number {
   return Math.sqrt(sumSq / (xs.length - 1));
 }
 
+// Abramowitz & Stegun 7.1.26 erf approximation (~1.5e-7 accuracy).
+// Mirrors apps/cli/src/methodology/compose.rs::erf_approx so UI numbers
+// match the CLI verbatim.
+export function erfApprox(x: number): number {
+  const a1 = 0.254_829_592;
+  const a2 = -0.284_496_736;
+  const a3 = 1.421_413_741;
+  const a4 = -1.453_152_027;
+  const a5 = 1.061_405_429;
+  const p = 0.327_591_1;
+  const sign = x < 0 ? -1 : 1;
+  const xa = Math.abs(x);
+  const t = 1 / (1 + p * xa);
+  const y =
+    1 -
+    (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t) *
+      Math.exp(-xa * xa);
+  return sign * y;
+}
+
+/** Standard normal CDF Φ(z). */
+export function normalCdf(z: number): number {
+  return 0.5 * (1 + erfApprox(z / Math.SQRT2));
+}
+
+/** Two-sided p approximation for Welch t. Returns null when df < 10. */
+export function welchPValueApprox(t: number, df: number): number | null {
+  if (df < 10 || !Number.isFinite(t)) return null;
+  const p = 2 * (1 - normalCdf(Math.abs(t)));
+  return Math.max(0, Math.min(1, p));
+}
+
 export function stats(xs: number[]): Stats {
   const n = xs.length;
   const m = mean(xs);

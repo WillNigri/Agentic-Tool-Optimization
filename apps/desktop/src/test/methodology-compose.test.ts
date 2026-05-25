@@ -5,10 +5,13 @@
 import { describe, expect, it } from "vitest";
 import {
   composeCells,
+  erfApprox,
   mean,
+  normalCdf,
   sampleSd,
   stats,
   tCritical95,
+  welchPValueApprox,
 } from "@/components/MethodologiesPanel/compose";
 
 function dispatch(
@@ -50,6 +53,31 @@ describe("sampleSd", () => {
   it("matches textbook value", () => {
     // SD of [2,4,4,4,5,5,7,9] ≈ 2.138 (sample, n-1 denominator)
     expect(sampleSd([2, 4, 4, 4, 5, 5, 7, 9])).toBeCloseTo(2.138, 3);
+  });
+});
+
+describe("erfApprox + normalCdf + welchPValueApprox", () => {
+  it("erf at 0 is 0", () => {
+    expect(erfApprox(0)).toBeCloseTo(0, 6);
+  });
+  it("normalCdf at 0 is 0.5", () => {
+    expect(normalCdf(0)).toBeCloseTo(0.5, 5);
+  });
+  it("matches published z→p table values", () => {
+    expect(normalCdf(1.96)).toBeCloseTo(0.975, 3);
+    expect(normalCdf(-1.96)).toBeCloseTo(0.025, 3);
+  });
+  it("returns null for df < 10", () => {
+    expect(welchPValueApprox(2.0, 5)).toBeNull();
+    expect(welchPValueApprox(2.0, 9.99)).toBeNull();
+  });
+  it("translates t=1.96 / df=30 to p ≈ 0.05", () => {
+    const p = welchPValueApprox(1.96, 30);
+    expect(p).not.toBeNull();
+    expect(Math.abs((p as number) - 0.05)).toBeLessThan(0.01);
+  });
+  it("clamps to near-zero at large |t|", () => {
+    expect(welchPValueApprox(10, 30)).toBeLessThan(1e-6);
   });
 });
 
