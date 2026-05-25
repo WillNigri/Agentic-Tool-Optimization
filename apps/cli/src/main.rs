@@ -97,6 +97,11 @@ enum Commands {
     /// cost before fan-out. The runner that actually fans out + composes the
     /// receipts lands in v2.10 PR-3. See docs/methodology-runner.md.
     Evaluations(commands::methodology::EvaluationsArgs),
+    /// v2.11 PR-11 — workspaces. Local-first namespace primitive for
+    /// organizing agents + methodologies + runs. Free tier ships a single
+    /// "Personal" workspace; Team tier (ato-cloud) adds multi-user
+    /// membership + cross-device sync over the same tables.
+    Workspaces(commands::workspaces::WorkspacesArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1127,6 +1132,10 @@ fn main() -> Result<()> {
         }
         Commands::Evaluations(args) => {
             commands::methodology::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Workspaces(args) => {
+            commands::workspaces::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

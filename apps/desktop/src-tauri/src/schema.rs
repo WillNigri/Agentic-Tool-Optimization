@@ -1427,6 +1427,81 @@ pub fn init_database(conn: &Connection) {
             ON methodology_run_dispatches(methodology_run_id)",
         [],
     );
+
+    // v2.11 PR-11 — workspaces foundation.
+    //
+    // A workspace is a local-only namespace for organizing agents +
+    // methodologies + runs. Sits at the OSS / Team boundary:
+    //   * Free tier: 1 implicit "personal" workspace. The primitive
+    //     exists so the schema is forward-compatible.
+    //   * Team tier (ato-cloud): N workspaces with multi-user
+    //     membership, RBAC, and cross-device sync. That logic lives
+    //     in ato-cloud; OSS just persists the data structure so it
+    //     can be replicated when the user signs in.
+    //
+    // The `tier_hint` column records what the workspace MIGHT become
+    // (`personal` vs `team`) without ATO needing to know the user's
+    // actual subscription — useful for the UI to show a "Team" badge
+    // when relevant.
+    //
+    // Note: agents / methodologies / methodology_runs do NOT yet take
+    // a workspace_id FK column. That migration is deferred to a later
+    // PR once the multi-workspace UX is validated — adding it now
+    // would force every existing row into a default workspace before
+    // we know how users want them organized.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS workspaces (
+            id           TEXT PRIMARY KEY,
+            slug         TEXT NOT NULL UNIQUE,
+            name         TEXT NOT NULL,
+            tier_hint    TEXT NOT NULL DEFAULT 'personal',
+            created_at   TEXT NOT NULL,
+            archived_at  TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_tier_hint
+            ON workspaces(tier_hint, archived_at)",
+        [],
+    );
+
+    // Members table — populated by ato-cloud when a workspace is
+    // shared with collaborators. Free / Personal workspaces never
+    // have rows here; Team workspaces do (one row per teammate).
+    // role: owner | admin | editor | viewer (no enforcement at the
+    // SQLite layer — the cloud is the authority for RBAC).
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS workspace_members (
+            workspace_id  TEXT NOT NULL,
+            user_id       TEXT NOT NULL,
+            role          TEXT NOT NULL DEFAULT 'viewer',
+            joined_at     TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, user_id)
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workspace_members_user
+            ON workspace_members(user_id)",
+        [],
+    );
+
+    // Seed the personal workspace if no workspace exists yet — keeps
+    // a fresh install with a sensible default that doesn't require
+    // the user to run a CLI command before creating their first
+    // agent.
+    let workspace_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0))
+        .unwrap_or(0);
+    if workspace_count == 0 {
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "INSERT INTO workspaces (id, slug, name, tier_hint, created_at)
+             VALUES (?1, 'personal', 'Personal', 'personal', ?2)",
+            rusqlite::params![&uuid::Uuid::new_v4().to_string(), &now],
+        );
+    }
 }
 
 #[cfg(test)]

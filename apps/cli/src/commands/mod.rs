@@ -37,3 +37,7 @@ pub mod traces;
 // Local-first CRUD over the methodology tables shipped in v2.10 PR-1.
 // Fan-out runner + composer + rubric library land in PR-3+.
 pub mod methodology;
+// v2.11 PR-11 — workspaces (local-first namespace primitive). Free tier
+// gets a single auto-seeded "Personal" workspace; Team tier (ato-cloud)
+// layers multi-user membership + sync on top of the same tables.
+pub mod workspaces;
