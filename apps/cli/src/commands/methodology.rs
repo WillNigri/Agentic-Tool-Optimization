@@ -1670,7 +1670,19 @@ fn handle_margin(
 
 // ── v2.10 PR-10: rate-card override ─────────────────────────────────────
 
-fn rate_card_override_file() -> PathBuf {
+/// Read-only path resolution — does NOT create `~/.ato/`. Code-review
+/// finding #5: prior single helper created state as a side effect of
+/// inspection. Use this for `calibrate show` / `calibrate reset`.
+fn rate_card_override_path_readonly() -> PathBuf {
+    let mut p = db::home_dir();
+    p.push(".ato");
+    p.push("rate-card-override.json");
+    p
+}
+
+/// Writer path — creates `~/.ato/` if missing so the write succeeds.
+/// Used only by `calibrate set`.
+fn rate_card_override_path_writable() -> PathBuf {
     let mut p = db::home_dir();
     p.push(".ato");
     let _ = std::fs::create_dir_all(&p);
@@ -1681,7 +1693,7 @@ fn rate_card_override_file() -> PathBuf {
 fn handle_calibrate_show(opts: &Opts) -> Result<()> {
     let defaults = CostRateCard::defaults_v1();
     let active = CostRateCard::load_with_override();
-    let path = rate_card_override_file();
+    let path = rate_card_override_path_readonly();
     let raw_override: Option<serde_json::Value> = if path.exists() {
         std::fs::read_to_string(&path)
             .ok()
@@ -1764,13 +1776,28 @@ fn handle_calibrate_set(
     if !value.is_finite() || value < 0.0 {
         anyhow::bail!("rate-card value must be a finite non-negative number; got {}", value);
     }
-    let path = rate_card_override_file();
+    let path = rate_card_override_path_writable();
+    // Code-review finding #3: prior code silently fell back to an empty
+    // map when the file existed but failed to parse — which would
+    // clobber existing overrides. Bail with a clear error instead so
+    // the operator decides whether to delete the file by hand or fix it.
     let mut data: serde_json::Map<String, serde_json::Value> = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default()
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("read rate-card override at {}", path.display()))?;
+        let parsed: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+            anyhow::anyhow!(
+                "rate-card override at {} is malformed JSON ({}). Inspect or delete the file before re-running `calibrate set`.",
+                path.display(),
+                e
+            )
+        })?;
+        match parsed.as_object() {
+            Some(obj) => obj.clone(),
+            None => anyhow::bail!(
+                "rate-card override at {} is not a JSON object. Inspect or delete the file.",
+                path.display()
+            ),
+        }
     } else {
         serde_json::Map::new()
     };
@@ -1802,7 +1829,7 @@ fn handle_calibrate_set(
 }
 
 fn handle_calibrate_reset(opts: &Opts) -> Result<()> {
-    let path = rate_card_override_file();
+    let path = rate_card_override_path_readonly();
     if path.exists() {
         std::fs::remove_file(&path).context("remove rate-card override file")?;
         if opts.human {

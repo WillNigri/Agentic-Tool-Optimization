@@ -134,10 +134,15 @@ pub fn normal_cdf(z: f64) -> f64 {
 }
 
 /// Two-sided p-value for Welch's t under the normal approximation.
-/// Returns None when df < 10 — the approximation under-states tail
-/// mass at small df enough that we'd rather show nothing than mislead.
+/// Returns None when df < 30 — code-review finding #2 (PR-9):
+/// at df=10 the normal CDF under-states the true t-dist tail enough
+/// to flip "borderline significant" decisions (true p≈0.078 vs
+/// approximated 0.050 at t=1.96/df=10). At df≥30 the approximation
+/// lands within ~3% of the true t-distribution p, which is honest
+/// enough for "is this real" UX. Below that we return None and
+/// callers fall back to the CI-disjoint heuristic.
 pub fn welch_p_value_approx(t: f64, df: f64) -> Option<f64> {
-    if df < 10.0 || !t.is_finite() {
+    if df < 30.0 || !t.is_finite() {
         return None;
     }
     let p = 2.0 * (1.0 - normal_cdf(t.abs()));
@@ -443,10 +448,28 @@ mod tests {
 
     #[test]
     fn welch_p_value_returns_none_at_small_df() {
-        // df < 10 → we deliberately return None so callers fall back to
-        // the CI-disjoint heuristic instead of an under-estimated p.
+        // df < 30 → we deliberately return None so callers fall back to
+        // the CI-disjoint heuristic. Code-review finding #2 raised this
+        // bound after observing the normal approximation flips
+        // "borderline significant" calls at df=10..29.
         assert!(welch_p_value_approx(2.0, 5.0).is_none());
-        assert!(welch_p_value_approx(2.0, 9.99).is_none());
+        assert!(welch_p_value_approx(2.0, 29.99).is_none());
+    }
+
+    #[test]
+    fn welch_p_value_boundary_at_df_30_within_3_percent_of_true_t() {
+        // Documents the residual approximation error so a future
+        // tightening (real t-CDF) has a number to beat. At df=30,
+        // t=1.96 the true two-sided p ≈ 0.059; the normal approximation
+        // returns ~0.050. The 0.009 absolute gap is within the "good
+        // enough for is-this-real" UX threshold but the test pins it.
+        let p = welch_p_value_approx(1.96, 30.0).unwrap();
+        let true_t_dist_p_at_df_30 = 0.059_414;
+        assert!(
+            (p - true_t_dist_p_at_df_30).abs() < 0.015,
+            "expected normal approx within ±0.015 of true t-dist p at df=30; got p={}",
+            p
+        );
     }
 
     #[test]

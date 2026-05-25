@@ -79,30 +79,53 @@ impl CostRateCard {
         let mut card = Self::defaults_v1();
         if let Some(path) = rate_card_override_path() {
             if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(x) = v
-                            .get("llm_judge_cost_per_call_usd")
-                            .and_then(|x| x.as_f64())
-                        {
-                            card.llm_judge_cost_per_call_usd = x;
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<serde_json::Value>(&content) {
+                            Ok(v) => {
+                                if let Some(x) = v
+                                    .get("llm_judge_cost_per_call_usd")
+                                    .and_then(|x| x.as_f64())
+                                {
+                                    card.llm_judge_cost_per_call_usd = x;
+                                }
+                                if let Some(x) =
+                                    v.get("compute_per_second_usd").and_then(|x| x.as_f64())
+                                {
+                                    card.compute_per_second_usd = x;
+                                }
+                                if let Some(x) = v
+                                    .get("storage_per_byte_month_usd")
+                                    .and_then(|x| x.as_f64())
+                                {
+                                    card.storage_per_byte_month_usd = x;
+                                }
+                                if let Some(x) =
+                                    v.get("bandwidth_per_byte_usd").and_then(|x| x.as_f64())
+                                {
+                                    card.bandwidth_per_byte_usd = x;
+                                }
+                            }
+                            Err(e) => {
+                                // Code-review finding #4: warn instead of
+                                // silently falling back to defaults. An
+                                // operator who just calibrated against a
+                                // Railway invoice needs to know their
+                                // override wasn't applied.
+                                eprintln!(
+                                    "warning: rate-card override at {} is unparsable ({}); using published defaults",
+                                    path.display(),
+                                    e
+                                );
+                            }
                         }
-                        if let Some(x) =
-                            v.get("compute_per_second_usd").and_then(|x| x.as_f64())
-                        {
-                            card.compute_per_second_usd = x;
-                        }
-                        if let Some(x) = v
-                            .get("storage_per_byte_month_usd")
-                            .and_then(|x| x.as_f64())
-                        {
-                            card.storage_per_byte_month_usd = x;
-                        }
-                        if let Some(x) =
-                            v.get("bandwidth_per_byte_usd").and_then(|x| x.as_f64())
-                        {
-                            card.bandwidth_per_byte_usd = x;
-                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: rate-card override at {} could not be read ({}); using published defaults",
+                            path.display(),
+                            e
+                        );
                     }
                 }
             }

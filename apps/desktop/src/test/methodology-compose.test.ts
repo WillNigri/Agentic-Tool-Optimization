@@ -67,14 +67,18 @@ describe("erfApprox + normalCdf + welchPValueApprox", () => {
     expect(normalCdf(1.96)).toBeCloseTo(0.975, 3);
     expect(normalCdf(-1.96)).toBeCloseTo(0.025, 3);
   });
-  it("returns null for df < 10", () => {
+  it("returns null for df < 30 (code-review fix)", () => {
     expect(welchPValueApprox(2.0, 5)).toBeNull();
-    expect(welchPValueApprox(2.0, 9.99)).toBeNull();
+    expect(welchPValueApprox(2.0, 10)).toBeNull();
+    expect(welchPValueApprox(2.0, 29.99)).toBeNull();
   });
-  it("translates t=1.96 / df=30 to p ≈ 0.05", () => {
+  it("returns a finite p at df=30+ (boundary of usable regime)", () => {
     const p = welchPValueApprox(1.96, 30);
     expect(p).not.toBeNull();
-    expect(Math.abs((p as number) - 0.05)).toBeLessThan(0.01);
+    // Approximation underestimates the true t-dist tail at df=30 (true
+    // p ≈ 0.059 here; normal approx returns ~0.050). Within ±0.015 of
+    // truth is the documented bound — finding #2 documents this gap.
+    expect(Math.abs((p as number) - 0.059)).toBeLessThan(0.015);
   });
   it("clamps to near-zero at large |t|", () => {
     expect(welchPValueApprox(10, 30)).toBeLessThan(1e-6);

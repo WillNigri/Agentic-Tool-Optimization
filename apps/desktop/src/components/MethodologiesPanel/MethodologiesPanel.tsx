@@ -502,12 +502,13 @@ function RunDetailView({
 
   const { run, dispatches } = detail.data;
   const cells: CellSummary[] = composeCells(dispatches);
+  // Code-review finding #1 (claude): falsy-0 mistaken for a real zero
+  // score. We must return null when no cell has a rubric score, not 0.
+  const scoredCells = cells.filter((c) => c.score !== null);
   const overallMeanScore =
-    cells.length > 0
-      ? cells
-          .filter((c) => c.score !== null)
-          .reduce((acc, c) => acc + (c.score?.mean ?? 0), 0) /
-        Math.max(1, cells.filter((c) => c.score !== null).length)
+    scoredCells.length > 0
+      ? scoredCells.reduce((acc, c) => acc + (c.score?.mean ?? 0), 0) /
+        scoredCells.length
       : null;
 
   return (

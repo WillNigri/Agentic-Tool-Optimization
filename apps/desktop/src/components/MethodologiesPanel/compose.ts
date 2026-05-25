@@ -100,9 +100,13 @@ export function normalCdf(z: number): number {
   return 0.5 * (1 + erfApprox(z / Math.SQRT2));
 }
 
-/** Two-sided p approximation for Welch t. Returns null when df < 10. */
+/** Two-sided p approximation for Welch t. Returns null when df < 30.
+ *  Code-review finding #2 (PR-9): the normal-CDF approximation
+ *  under-states t-distribution tail mass below df=30 enough to flip
+ *  "borderline significant" calls. Tight cutoff at 30 so callers
+ *  fall back to the CI-disjoint heuristic at smaller samples. */
 export function welchPValueApprox(t: number, df: number): number | null {
-  if (df < 10 || !Number.isFinite(t)) return null;
+  if (df < 30 || !Number.isFinite(t)) return null;
   const p = 2 * (1 - normalCdf(Math.abs(t)));
   return Math.max(0, Math.min(1, p));
 }
