@@ -79,6 +79,18 @@ pub struct VariantMatrix {
     /// subscription vs. an Anthropic API key on the same prompt.
     #[serde(default)]
     pub runtime: Option<String>,
+
+    /// v2.11 PR-12.0 — holdout prompts (Q7 overfitting defense #1 per
+    /// `docs/v2.11-learning-loop.md`). These prompts are kept OUT of
+    /// the standard fan-out so the diagnose agent never sees them. The
+    /// A/B win condition that follows a learning-loop diagnose must
+    /// hold on holdout cells too, not just on visible cells. Without
+    /// this, applying a diagnose proposal that games the visible
+    /// rubric ships agents that regress in production on the cases
+    /// nobody measured. Empty by default — methodologies without a
+    /// learning loop don't pay any cost for this field.
+    #[serde(default)]
+    pub holdout_prompts: Vec<String>,
 }
 
 impl VariantMatrix {
@@ -147,6 +159,14 @@ pub struct MethodologyRun {
     pub verdict_json: Option<String>,
     #[serde(default)]
     pub receipt_url: Option<String>,
+
+    /// v2.11 PR-12.0 — variant A/B linkage. NULL on baseline runs;
+    /// set to the baseline run's id when this row is a variant A/B
+    /// being compared against its parent. The diagnose pipeline
+    /// populates this on `--ab` runs so `runs show` can present the
+    /// before/after composition side by side.
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
 }
 
 fn default_billing_mode() -> BillingMode {
@@ -241,6 +261,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn variant_matrix_default_holdout_prompts_is_empty() {
+        // v2.11 PR-12.0 — methodologies without a learning loop must
+        // deserialize cleanly from JSON that doesn't mention the new
+        // field (existing methodology rows in the DB).
+        let json = r#"{
+            "prompts": ["p1"],
+            "models": ["claude-sonnet-4-6"],
+            "conditions": ["soft"],
+            "reps_per_cell": 30
+        }"#;
+        let m: VariantMatrix = serde_json::from_str(json).expect("back-compat deserialize");
+        assert_eq!(m.holdout_prompts.len(), 0);
+        assert_eq!(m.runtime, None);
+    }
+
+    #[test]
+    fn variant_matrix_holdout_prompts_round_trip() {
+        let m = VariantMatrix {
+            prompts: vec!["visible".to_string()],
+            models: vec!["claude-sonnet-4-6".to_string()],
+            conditions: vec!["soft".to_string()],
+            reps_per_cell: 30,
+            runtime: None,
+            holdout_prompts: vec![
+                "this prompt is NEVER shown to the diagnose agent".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&m).expect("serialize");
+        let round: VariantMatrix =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round.holdout_prompts, m.holdout_prompts);
+        // Holdouts don't count toward total_dispatches — they're
+        // evaluated separately by the A/B step.
+        assert_eq!(round.total_dispatches(), 30);
+    }
+
+    #[test]
+    fn methodology_run_parent_run_id_default_is_none() {
+        // v2.11 PR-12.0 — back-compat: existing methodology_runs rows
+        // don't have parent_run_id (NULL), and the deserialize path
+        // must accept that.
+        let json = r#"{
+            "id": "r-baseline",
+            "methodology_id": "m-1",
+            "started_at": "2026-05-25T00:00:00Z",
+            "status": "complete",
+            "total_dispatches_planned": 30
+        }"#;
+        let r: MethodologyRun =
+            serde_json::from_str(json).expect("deserialize without parent_run_id");
+        assert!(r.parent_run_id.is_none());
+    }
+
+    #[test]
     fn variant_matrix_total_dispatches_multiplies_all_axes() {
         let m = VariantMatrix {
             prompts: vec!["p1".to_string(), "p2".to_string(), "p3".to_string()],
@@ -248,6 +322,7 @@ mod tests {
             conditions: vec!["cold".to_string(), "soft".to_string(), "strict".to_string()],
             reps_per_cell: 10,
             runtime: None,
+            holdout_prompts: Vec::new(),
         };
         // 3 × 2 × 3 × 10 = 180
         assert_eq!(m.total_dispatches(), 180);
@@ -265,6 +340,7 @@ mod tests {
             conditions: vec![],
             reps_per_cell: 5,
             runtime: None,
+            holdout_prompts: Vec::new(),
         };
         assert_eq!(m.total_dispatches(), 10);
     }

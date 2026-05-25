@@ -1428,6 +1428,63 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.11 PR-12.0 — learning-loop foundation.
+    //
+    // Three additive schema deltas locked by `docs/v2.11-learning-loop.md`.
+    // All non-destructive; the diagnose pipeline + variant lineage live
+    // in PR-12.1+; this PR ships only the storage shape.
+    //
+    // 1) parent_run_id on methodology_runs — links a variant A/B run
+    //    back to the baseline run it's competing against.
+    // 2) agent_variant_lineage — depth tracker for the Q7 overfitting
+    //    defense (warns at depth ≥3 within 14 days).
+    // 3) production_signals — ingest target for the Langfuse/Helicone
+    //    Mode A pipeline. The ingester itself ships in ato-cloud; OSS
+    //    just persists what cloud writes so the diagnose pipeline can
+    //    read it.
+    let _ = conn.execute(
+        "ALTER TABLE methodology_runs ADD COLUMN parent_run_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_methodology_runs_parent
+            ON methodology_runs(parent_run_id)",
+        [],
+    );
+
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_variant_lineage (
+            variant_slug    TEXT PRIMARY KEY,
+            parent_slug     TEXT NOT NULL,
+            generation      INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL,
+            birthed_by_run  TEXT NOT NULL,
+            diagnose_model  TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_variant_lineage_parent
+            ON agent_variant_lineage(parent_slug, generation)",
+        [],
+    );
+
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS production_signals (
+            id           TEXT PRIMARY KEY,
+            agent_slug   TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            signal_json  TEXT NOT NULL,
+            captured_at  TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_production_signals_agent
+            ON production_signals(agent_slug, captured_at DESC)",
+        [],
+    );
+
     // v2.11 PR-11 — workspaces foundation.
     //
     // A workspace is a local-only namespace for organizing agents +

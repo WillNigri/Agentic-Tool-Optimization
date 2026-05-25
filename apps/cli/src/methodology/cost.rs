@@ -406,6 +406,7 @@ mod tests {
             conditions: vec!["cold".to_string()],
             reps_per_cell: 5,
             runtime: None,
+            holdout_prompts: Vec::new(),
         }
     }
 
@@ -526,6 +527,7 @@ mod tests {
             conditions: vec!["strict".to_string()],
             reps_per_cell: 100,
             runtime: None,
+            holdout_prompts: Vec::new(),
         };
         let est = cost_estimate_for_matrix(
             &big,
@@ -558,6 +560,7 @@ mod tests {
             conditions: vec!["soft".to_string()],
             reps_per_cell: 10,
             runtime: None,
+            holdout_prompts: Vec::new(),
         };
         let est = cost_estimate_for_matrix(
             &multi,

@@ -517,6 +517,7 @@ mod tests {
             conditions: vec!["soft".to_string(), "strict".to_string()],
             reps_per_cell: 3,
             runtime: None,
+            holdout_prompts: Vec::new(),
         }
     }
 
@@ -536,6 +537,7 @@ mod tests {
             conditions: vec![],
             reps_per_cell: 5,
             runtime: None,
+            holdout_prompts: Vec::new(),
         };
         let cells = expand_cells(&m);
         assert_eq!(cells.len(), 5);
@@ -550,6 +552,7 @@ mod tests {
             conditions: vec!["soft".to_string()],
             reps_per_cell: 3,
             runtime: None,
+            holdout_prompts: Vec::new(),
         };
         let cells = expand_cells(&m);
         assert_eq!(cells[0].rep, 0);
