@@ -49,6 +49,8 @@ const COPY: Record<Feature, string> = {
     "LLM-as-judge scoring catches regressions before they reach production",
   "evaluators.scheduled":
     "Run your eval suite hourly / daily / weekly — automated regression detection",
+  "methodology.cloud-sync":
+    "Sync methodology runs across your devices + your team's eval history (Pro). Local execution stays free.",
 
   // Cloud sync
   "cloud-sync":

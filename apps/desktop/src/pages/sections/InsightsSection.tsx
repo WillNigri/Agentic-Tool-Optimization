@@ -1,6 +1,6 @@
 import { lazy } from "react";
 import { useTranslation } from "react-i18next";
-import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign, Sparkles, ArrowLeftRight, Lock } from "lucide-react";
+import { Activity, BarChart3, Layers, Shield, Bot, Globe, Zap, GitCommit, DollarSign, Sparkles, ArrowLeftRight, Lock, Beaker } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
 const AgentObservability = lazy(() => import("@/components/AgentObservability/Dashboard"));
@@ -18,6 +18,9 @@ const ContextVisualizer = lazy(() => import("@/components/ContextVisualizer"));
 const AuditLog = lazy(() => import("@/components/AuditLog/AuditLog"));
 // v2.3.45 — Phase 6.x-K eval-score ratchet visualization.
 const RatchetPanel = lazy(() => import("@/components/RatchetPanel"));
+// v2.10 PR-8 — Methodology runner panel (read-only views over local
+// methodologies + runs; cloud-backed actions are Pro-gated separately).
+const MethodologiesPanel = lazy(() => import("@/components/MethodologiesPanel"));
 
 export default function InsightsSection() {
   const { t } = useTranslation();
@@ -85,6 +88,18 @@ export default function InsightsSection() {
       label: t("subnav.insightsRatchet", "Ratchet"),
       icon: Lock,
       Component: RatchetPanel,
+    },
+    {
+      // v2.10 PR-8 — Methodology runner.
+      // Per-cell composition over your own methodology_runs: mean cost,
+      // mean rubric score, 95% CIs computed via the same Student's t
+      // table the CLI uses. Cloud-backed actions (sync, scheduled
+      // alerts) live separately behind their own Pro gate; this panel
+      // is read-only and reads strictly local SQLite.
+      id: "methodologies",
+      label: t("subnav.insightsMethodologies", "Methodologies"),
+      icon: Beaker,
+      Component: MethodologiesPanel,
     },
     {
       // v2.1.0 Phase 8 — Usage benchmarks. Always-shown calls + p50 +

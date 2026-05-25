@@ -60,6 +60,13 @@ export type Feature =
   // F7 — Evaluators
   | "evaluators"                  // ad-hoc evaluator runs (Free; local-only)
   | "evaluators.scheduled"        // cron-driven batch evals (Pro; cloud cron)
+  // v2.10 PR-8 — Methodology runner. Local execution (CLI `ato evaluations
+  // methodology run`, local cron `schedule create`) stays FREE per the
+  // "scarcity in cloud, not in BYOK/local" doctrine. Pro gate covers
+  // cloud sync of methodology runs (cross-device history, team sharing,
+  // hosted scheduled runs with email alerts). The OSS Insights panel
+  // never calls cloud endpoints — it reads local SQLite only.
+  | "methodology.cloud-sync"
   // Cloud sync of agents
   | "cloud-sync"
   // v2.6 — Encrypted provider-key store for the cron usage-poller
@@ -87,6 +94,7 @@ export const FEATURE_MIN_TIER: Record<Feature, Tier> = {
   "role-models": "free",          // local per-task model selection
   "evaluators": "free",           // AD-HOC ONLY — single-shot, local
   "evaluators.scheduled": "pro",  // CRON-DRIVEN — requires cloud cron worker
+  "methodology.cloud-sync": "pro", // CLOUD ONLY — local runs/UI stay free
 
   // ─── PRO $29/seat/mo (cloud infra, real cost-of-goods) ─────────
   // These features REQUIRE ato-cloud infrastructure (storage,

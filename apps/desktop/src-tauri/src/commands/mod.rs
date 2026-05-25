@@ -34,6 +34,8 @@ pub mod secrets;
 pub mod env_vars;
 pub mod llm_api_keys;
 pub mod cron;
+// v2.10 PR-8 — methodology runner UI read APIs (Insights → Methodologies tab).
+pub mod methodology_views;
 pub mod skills_validate;
 pub mod skills;
 pub mod skills_mutate;
@@ -65,6 +67,7 @@ pub use secrets::*;
 pub use env_vars::*;
 pub use llm_api_keys::*;
 pub use cron::*;
+pub use methodology_views::*;
 pub use skills_validate::*;
 pub use skills::*;
 pub use skills_mutate::*;

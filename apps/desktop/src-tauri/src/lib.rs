@@ -279,6 +279,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             identity_probe::get_identity_probe_status,
             rekey::rekey_master_key,
+            // v2.10 PR-8 — Methodology Insights tab read APIs
+            list_methodology_definitions,
+            list_methodology_runs,
+            get_methodology_run_detail,
             get_local_skills,
             get_skill_detail,
             toggle_local_skill,
