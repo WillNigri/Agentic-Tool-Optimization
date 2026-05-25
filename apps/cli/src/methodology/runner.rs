@@ -424,7 +424,11 @@ fn dispatch_cell(
         Some(r) => r.to_string(),
         None => runtime_for_model(&cell.model),
     };
-    let exe = std::env::current_exe().context("locate current ato binary for shell-out")?;
+    // v2.11 PR-12.6 — Use the shared CLI-path resolver. Lets a dev
+    // binary delegate to the prod binary via $ATO_CLI_PATH so the
+    // runner can hit API providers without re-encrypting the keychain.
+    let exe = crate::cli_path::resolve_ato_binary()
+        .context("locate ato binary for runner shell-out")?;
     let mut cmd = Command::new(&exe);
     cmd.arg("dispatch")
         .arg(&runtime)

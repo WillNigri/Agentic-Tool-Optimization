@@ -334,7 +334,11 @@ fn score_llm_judge(
         .context("read execution_logs MAX(rowid) before judge dispatch")?;
     drop(conn);
 
-    let exe = std::env::current_exe().context("locate current ato binary for judge")?;
+    // v2.11 PR-12.6 — Shared CLI-path resolver (ATO_CLI_PATH override).
+    // Lets a dev binary delegate the judge dispatch to the prod binary
+    // for keychain-bound API providers.
+    let exe = crate::cli_path::resolve_ato_binary()
+        .context("locate ato binary for judge dispatch")?;
     let output = Command::new(&exe)
         .arg("dispatch")
         .arg(&runtime)

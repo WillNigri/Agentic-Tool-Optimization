@@ -29,6 +29,11 @@ mod methodology;
 // automations we package on top of the primitives. See module header
 // for the resolution chain.
 mod tier;
+// v2.11 PR-12.6 — shared `ato` binary discovery (ATO_CLI_PATH override +
+// homebrew/app-bundle fallback). Used by the methodology runner +
+// diagnose dispatch paths so a dev build can delegate to the prod
+// binary for keychain-bound API providers.
+mod cli_path;
 mod review_tools;
 mod daemon;
 mod db;

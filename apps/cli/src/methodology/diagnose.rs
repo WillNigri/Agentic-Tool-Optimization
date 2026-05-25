@@ -623,7 +623,11 @@ pub fn diagnose_run(
         .context("read execution_logs MAX(rowid) before diagnose dispatch")?;
     drop(conn);
 
-    let exe = std::env::current_exe().context("locate current ato binary for diagnose")?;
+    // v2.11 PR-12.6 — Use the shared CLI-path resolver. Lets a dev
+    // binary delegate to the prod binary for keychain-bound API
+    // providers (the diagnose call may target gemini / openai / etc).
+    let exe = crate::cli_path::resolve_ato_binary()
+        .context("locate ato binary for diagnose dispatch")?;
     // The shell-out needs --db so the diagnose dispatch lands in the
     // same SQLite the runner is reading from.
     let output = Command::new(&exe)
