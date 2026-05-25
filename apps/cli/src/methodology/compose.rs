@@ -149,6 +149,261 @@ pub fn welch_p_value_approx(t: f64, df: f64) -> Option<f64> {
     Some(p.clamp(0.0, 1.0))
 }
 
+// ── v2.11 PR-12.2: A/B win-condition predicates ──────────────────────────
+//
+// Compares a variant `Composition` to a baseline `Composition` cell-by-cell
+// and returns the three predicates locked in docs/v2.11-learning-loop.md
+// §Q4 ("Statistically Significant Pareto Improvement"):
+//
+//   1. any_significant_improvement — ≥1 cell shows variant's mean SCORE
+//      strictly higher than baseline AND a Welch t between the two
+//      sample distributions is significant (df ≥ 30 → p < 0.05; df < 30
+//      → 95% CIs disjoint, the fallback for small samples).
+//   2. any_significant_regression — ≥1 cell shows variant's mean SCORE
+//      strictly lower than baseline under the same significance bar.
+//      A variant FAILS the win condition if any regression is present.
+//   3. cost_inflation_unjustified — ≥1 cell where variant's mean cost
+//      exceeds baseline by >10% UNLESS that same cell ALSO hit predicate
+//      (1) with a score delta ≥ 0.2 (i.e. cost OK if quality jump is
+//      large). A variant FAILS if any cell inflates cost without a
+//      defensible quality justification.
+//
+// A variant SHIPS only when (1) is true AND (2) is false AND (3) is
+// false. These predicates do NOT make that decision — they expose
+// individual cell verdicts so the caller can render a transparent diff.
+
+/// One cell's verdict in the A/B comparison.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CellComparison {
+    pub prompt_idx: usize,
+    pub model: String,
+    pub condition: String,
+    pub baseline_n: usize,
+    pub variant_n: usize,
+    pub baseline_mean_score: Option<f64>,
+    pub variant_mean_score: Option<f64>,
+    /// Change in mean score (variant - baseline). None when either side
+    /// has no scored observations.
+    pub score_delta: Option<f64>,
+    /// Welch t between the two SCORE distributions when both sides have
+    /// at least one scored observation. Otherwise None.
+    pub welch_t: Option<f64>,
+    /// Welch df (Satterthwaite). None alongside welch_t.
+    pub welch_df: Option<f64>,
+    /// Two-sided p-value approximation; None when df < 30 — caller
+    /// falls back to ci_disjoint at small samples.
+    pub p_value_approx: Option<f64>,
+    /// True when baseline.ci and variant.ci do not overlap.
+    pub ci_disjoint: bool,
+    pub baseline_mean_cost: f64,
+    pub variant_mean_cost: f64,
+    /// (variant_cost - baseline_cost) / baseline_cost; None when baseline cost is 0.
+    pub cost_delta_pct: Option<f64>,
+}
+
+impl CellComparison {
+    /// Returns true if the variant beat the baseline with statistical
+    /// significance — either p<0.05 at df≥30 OR (when p approx isn't
+    /// computable at df<30) the 95% CIs are disjoint AND the variant's
+    /// mean score is strictly higher.
+    pub fn is_significant_improvement(&self) -> bool {
+        let delta = match self.score_delta {
+            Some(d) => d,
+            None => return false,
+        };
+        if delta <= 0.0 {
+            return false;
+        }
+        match self.p_value_approx {
+            Some(p) if p < 0.05 => true,
+            Some(_) => false,
+            None => self.ci_disjoint,
+        }
+    }
+
+    /// Returns true if the variant LOST against the baseline under the
+    /// same significance bar. Used to detect any cell that ships
+    /// regressed — a variant with even one regressed cell FAILS the
+    /// win condition.
+    pub fn is_significant_regression(&self) -> bool {
+        let delta = match self.score_delta {
+            Some(d) => d,
+            None => return false,
+        };
+        if delta >= 0.0 {
+            return false;
+        }
+        match self.p_value_approx {
+            Some(p) if p < 0.05 => true,
+            Some(_) => false,
+            None => self.ci_disjoint,
+        }
+    }
+
+    /// Returns true if variant inflated mean cost by >10% AND the cost
+    /// inflation is NOT justified by a quality jump (score delta ≥ 0.2).
+    pub fn is_cost_inflation_unjustified(&self) -> bool {
+        let pct = match self.cost_delta_pct {
+            Some(p) => p,
+            None => return false,
+        };
+        if pct <= 0.10 {
+            return false;
+        }
+        // Variant is >10% more expensive — is the cost justified by a
+        // significant score improvement of ≥ 0.2?
+        match self.score_delta {
+            Some(d) if d >= 0.2 && self.is_significant_improvement() => false,
+            _ => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbVerdict {
+    pub cells: Vec<CellComparison>,
+    pub any_significant_improvement: bool,
+    pub any_significant_regression: bool,
+    pub cost_inflation_unjustified: bool,
+    /// Convenience: variant ships if (1) AND NOT (2) AND NOT (3).
+    pub variant_should_ship: bool,
+}
+
+/// Compare a variant composition against a baseline composition,
+/// cell-by-cell. Cells absent from either side appear with the missing
+/// side's n=0 and no delta computed. Cells present on both sides get
+/// the full CellComparison treatment.
+///
+/// The caller's responsibility: pass the SAME methodology run on both
+/// sides (same variant_matrix). This function does NOT validate that —
+/// it just compares whatever cells it finds.
+pub fn compare_runs(baseline: &Composition, variant: &Composition) -> AbVerdict {
+    let mut by_key_baseline: std::collections::HashMap<
+        (usize, String, String),
+        &CellSummary,
+    > = std::collections::HashMap::new();
+    for c in &baseline.cells {
+        by_key_baseline.insert((c.prompt_idx, c.model.clone(), c.condition.clone()), c);
+    }
+    let mut by_key_variant: std::collections::HashMap<
+        (usize, String, String),
+        &CellSummary,
+    > = std::collections::HashMap::new();
+    for c in &variant.cells {
+        by_key_variant.insert((c.prompt_idx, c.model.clone(), c.condition.clone()), c);
+    }
+    // Union of keys → one CellComparison per (prompt, model, condition).
+    let mut keys: Vec<(usize, String, String)> = by_key_baseline.keys().cloned().collect();
+    for k in by_key_variant.keys() {
+        if !keys.contains(k) {
+            keys.push(k.clone());
+        }
+    }
+    keys.sort();
+    let mut cells: Vec<CellComparison> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let b = by_key_baseline.get(&key).copied();
+        let v = by_key_variant.get(&key).copied();
+        cells.push(compare_one_cell(&key, b, v));
+    }
+    let any_imp = cells.iter().any(|c| c.is_significant_improvement());
+    let any_reg = cells.iter().any(|c| c.is_significant_regression());
+    let any_cost = cells.iter().any(|c| c.is_cost_inflation_unjustified());
+    let ship = any_imp && !any_reg && !any_cost;
+    AbVerdict {
+        cells,
+        any_significant_improvement: any_imp,
+        any_significant_regression: any_reg,
+        cost_inflation_unjustified: any_cost,
+        variant_should_ship: ship,
+    }
+}
+
+fn compare_one_cell(
+    key: &(usize, String, String),
+    baseline: Option<&CellSummary>,
+    variant: Option<&CellSummary>,
+) -> CellComparison {
+    let (prompt_idx, model, condition) = key;
+    let baseline_n = baseline.map(|c| c.n).unwrap_or(0);
+    let variant_n = variant.map(|c| c.n).unwrap_or(0);
+    let baseline_mean_score = baseline.and_then(|c| c.score.as_ref().map(|s| s.mean));
+    let variant_mean_score = variant.and_then(|c| c.score.as_ref().map(|s| s.mean));
+    let score_delta = match (baseline_mean_score, variant_mean_score) {
+        (Some(b), Some(v)) => Some(v - b),
+        _ => None,
+    };
+
+    // Welch t against the two SCORE distributions. We don't keep raw
+    // sample arrays on CellSummary (we only keep Stats); reconstructing
+    // them isn't possible from this side, so we approximate by treating
+    // the score stats as the sample summary. This isn't quite a real
+    // Welch t — it's a Welch t over the two distributions' SUMMARY
+    // STATISTICS, which equals the real t when the underlying sample
+    // SDs are taken at face value. For PR-12.2 that's the right
+    // trade-off; richer A/B (full re-construction from
+    // methodology_run_dispatches) lives in PR-12.3.
+    let (welch_t, welch_df, p) = match (baseline, variant) {
+        (Some(b), Some(v)) => {
+            let bs = b.score.as_ref();
+            let vs = v.score.as_ref();
+            match (bs, vs) {
+                (Some(bsc), Some(vsc)) if bsc.n >= 2 && vsc.n >= 2 => {
+                    let n_b = bsc.n as f64;
+                    let n_v = vsc.n as f64;
+                    let var_b_over_n = (bsc.sd * bsc.sd) / n_b;
+                    let var_v_over_n = (vsc.sd * vsc.sd) / n_v;
+                    let denom = (var_b_over_n + var_v_over_n).sqrt();
+                    if denom > 0.0 {
+                        let t = (vsc.mean - bsc.mean) / denom;
+                        let df_num = (var_b_over_n + var_v_over_n).powi(2);
+                        let df_den = var_b_over_n.powi(2) / (n_b - 1.0)
+                            + var_v_over_n.powi(2) / (n_v - 1.0);
+                        let df = if df_den == 0.0 { f64::INFINITY } else { df_num / df_den };
+                        let p = welch_p_value_approx(t, df);
+                        (Some(t), Some(df), p)
+                    } else {
+                        (None, None, None)
+                    }
+                }
+                _ => (None, None, None),
+            }
+        }
+        _ => (None, None, None),
+    };
+
+    let ci_disjoint = match (baseline.and_then(|c| c.score.as_ref()), variant.and_then(|c| c.score.as_ref())) {
+        (Some(b), Some(v)) => b.ci_hi < v.ci_lo || v.ci_hi < b.ci_lo,
+        _ => false,
+    };
+
+    let baseline_mean_cost = baseline.map(|c| c.cost_usd.mean).unwrap_or(0.0);
+    let variant_mean_cost = variant.map(|c| c.cost_usd.mean).unwrap_or(0.0);
+    let cost_delta_pct = if baseline_mean_cost > 0.0 {
+        Some((variant_mean_cost - baseline_mean_cost) / baseline_mean_cost)
+    } else {
+        None
+    };
+
+    CellComparison {
+        prompt_idx: *prompt_idx,
+        model: model.clone(),
+        condition: condition.clone(),
+        baseline_n,
+        variant_n,
+        baseline_mean_score,
+        variant_mean_score,
+        score_delta,
+        welch_t,
+        welch_df,
+        p_value_approx: p,
+        ci_disjoint,
+        baseline_mean_cost,
+        variant_mean_cost,
+        cost_delta_pct,
+    }
+}
+
 pub fn mean(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return 0.0;
@@ -533,6 +788,215 @@ mod tests {
             pair.t_statistic
         );
         assert!(pair.ci_disjoint, "CI on $0.10 mean should not overlap CI on $0.01 mean");
+    }
+
+    // ── v2.11 PR-12.2: A/B win-condition predicate tests ──────────────
+
+    fn cell_summary(
+        prompt_idx: usize,
+        condition: &str,
+        n: usize,
+        mean_score: f64,
+        score_sd: f64,
+        mean_cost: f64,
+    ) -> CellSummary {
+        CellSummary {
+            prompt_idx,
+            model: "claude-sonnet-4-6".to_string(),
+            condition: condition.to_string(),
+            n,
+            success_n: n,
+            error_n: 0,
+            cost_usd: Stats {
+                n,
+                mean: mean_cost,
+                sd: 0.0,
+                ci_lo: mean_cost,
+                ci_hi: mean_cost,
+            },
+            tokens_out: Stats {
+                n,
+                mean: 100.0,
+                sd: 0.0,
+                ci_lo: 100.0,
+                ci_hi: 100.0,
+            },
+            duration_ms: Stats {
+                n,
+                mean: 1000.0,
+                sd: 0.0,
+                ci_lo: 1000.0,
+                ci_hi: 1000.0,
+            },
+            grounding_verdicts: BTreeMap::new(),
+            score: Some(Stats {
+                n,
+                mean: mean_score,
+                sd: score_sd,
+                // Crude CI from sd; tests below pick parameters where
+                // CIs are clearly disjoint or clearly overlapping.
+                ci_lo: mean_score - 2.0 * score_sd,
+                ci_hi: mean_score + 2.0 * score_sd,
+            }),
+            passed_at_0_5: Some(if mean_score >= 0.5 { n } else { 0 }),
+        }
+    }
+
+    fn comp_with_cells(cells: Vec<CellSummary>) -> Composition {
+        Composition {
+            cells,
+            model_pairs_cost_t: Vec::new(),
+            total_dispatches: 0,
+            total_cost_usd: 0.0,
+        }
+    }
+
+    #[test]
+    fn variant_with_clear_improvement_passes_ship_condition() {
+        // baseline: score 0.3 ± 0.05; variant: score 0.8 ± 0.05; both n=30.
+        // CIs are disjoint, variant strictly better, no cost change.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 30, 0.3, 0.05, 0.01)]);
+        let variant = comp_with_cells(vec![cell_summary(0, "default", 30, 0.8, 0.05, 0.01)]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(v.any_significant_improvement);
+        assert!(!v.any_significant_regression);
+        assert!(!v.cost_inflation_unjustified);
+        assert!(v.variant_should_ship, "clear improvement must ship");
+    }
+
+    #[test]
+    fn variant_with_any_regression_fails_ship_even_with_other_wins() {
+        // Two cells: cell 0 variant improves; cell 1 variant regresses.
+        // Even one significant regression blocks ship.
+        let baseline = comp_with_cells(vec![
+            cell_summary(0, "default", 30, 0.3, 0.05, 0.01),
+            cell_summary(1, "default", 30, 0.8, 0.05, 0.01),
+        ]);
+        let variant = comp_with_cells(vec![
+            cell_summary(0, "default", 30, 0.8, 0.05, 0.01),
+            cell_summary(1, "default", 30, 0.3, 0.05, 0.01),
+        ]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(v.any_significant_improvement);
+        assert!(v.any_significant_regression);
+        assert!(!v.variant_should_ship, "regression must block ship even when other cell improves");
+    }
+
+    #[test]
+    fn variant_with_cost_inflation_no_quality_jump_fails_ship() {
+        // No score change but variant is 20% more expensive.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 30, 0.5, 0.05, 0.01)]);
+        let variant = comp_with_cells(vec![cell_summary(0, "default", 30, 0.5, 0.05, 0.012)]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(!v.any_significant_improvement);
+        assert!(v.cost_inflation_unjustified);
+        assert!(!v.variant_should_ship);
+    }
+
+    #[test]
+    fn variant_with_cost_inflation_but_big_quality_jump_is_allowed() {
+        // Score 0.2 → 0.8 (delta 0.6 ≥ 0.2 threshold) + cost up 20% → defensible.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 30, 0.2, 0.05, 0.01)]);
+        let variant = comp_with_cells(vec![cell_summary(0, "default", 30, 0.8, 0.05, 0.012)]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(v.any_significant_improvement);
+        assert!(!v.cost_inflation_unjustified, "20% cost inflation is OK when score jumped ≥0.2");
+        assert!(v.variant_should_ship);
+    }
+
+    #[test]
+    fn small_sample_falls_back_to_ci_disjoint_heuristic() {
+        // n=5 → df<30 → p None; CIs are clearly disjoint (0.3±0.04 vs
+        // 0.9±0.04). Should still be flagged as significant improvement.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 5, 0.3, 0.04, 0.01)]);
+        let variant = comp_with_cells(vec![cell_summary(0, "default", 5, 0.9, 0.04, 0.01)]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(v.any_significant_improvement, "CI-disjoint must drive a positive verdict at small n");
+        assert!(v.variant_should_ship);
+    }
+
+    #[test]
+    fn noisy_small_sample_does_not_fire_significance() {
+        // n=5, SDs are wide enough that CIs overlap and df<30.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 5, 0.5, 0.2, 0.01)]);
+        let variant = comp_with_cells(vec![cell_summary(0, "default", 5, 0.6, 0.2, 0.01)]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(!v.any_significant_improvement, "noisy small sample with overlap must NOT fire");
+        assert!(!v.variant_should_ship);
+    }
+
+    #[test]
+    fn cells_only_in_one_side_appear_with_zero_n_on_the_missing_side() {
+        // baseline has cell 0; variant has cell 0 + cell 1.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 30, 0.5, 0.05, 0.01)]);
+        let variant = comp_with_cells(vec![
+            cell_summary(0, "default", 30, 0.5, 0.05, 0.01),
+            cell_summary(1, "default", 30, 0.9, 0.05, 0.01),
+        ]);
+        let v = compare_runs(&baseline, &variant);
+        assert_eq!(v.cells.len(), 2);
+        let new_cell = v.cells.iter().find(|c| c.prompt_idx == 1).unwrap();
+        assert_eq!(new_cell.baseline_n, 0);
+        assert_eq!(new_cell.variant_n, 30);
+        assert!(new_cell.score_delta.is_none(), "cell only on variant side has no delta");
+    }
+
+    #[test]
+    fn ship_decision_requires_at_least_one_improvement() {
+        // No cell improves, no cell regresses, no cost issue → don't ship.
+        // Variant is identical to baseline.
+        let baseline = comp_with_cells(vec![cell_summary(0, "default", 30, 0.5, 0.05, 0.01)]);
+        let variant = comp_with_cells(vec![cell_summary(0, "default", 30, 0.5, 0.05, 0.01)]);
+        let v = compare_runs(&baseline, &variant);
+        assert!(!v.any_significant_improvement);
+        assert!(!v.any_significant_regression);
+        assert!(!v.cost_inflation_unjustified);
+        assert!(!v.variant_should_ship, "identical variant must NOT ship — no improvement to justify deployment");
+    }
+
+    #[test]
+    fn cell_comparison_handles_unscored_cells() {
+        // A cell with no rubric score → comparison still emits the
+        // structural fields but score_delta is None.
+        let bcell = CellSummary {
+            prompt_idx: 0,
+            model: "claude-sonnet-4-6".to_string(),
+            condition: "default".to_string(),
+            n: 5,
+            success_n: 5,
+            error_n: 0,
+            cost_usd: Stats {
+                n: 5,
+                mean: 0.01,
+                sd: 0.0,
+                ci_lo: 0.01,
+                ci_hi: 0.01,
+            },
+            tokens_out: Stats {
+                n: 5,
+                mean: 100.0,
+                sd: 0.0,
+                ci_lo: 100.0,
+                ci_hi: 100.0,
+            },
+            duration_ms: Stats {
+                n: 5,
+                mean: 1000.0,
+                sd: 0.0,
+                ci_lo: 1000.0,
+                ci_hi: 1000.0,
+            },
+            grounding_verdicts: BTreeMap::new(),
+            score: None,
+            passed_at_0_5: None,
+        };
+        let baseline = comp_with_cells(vec![bcell.clone()]);
+        let variant = comp_with_cells(vec![bcell]);
+        let v = compare_runs(&baseline, &variant);
+        assert_eq!(v.cells.len(), 1);
+        assert!(v.cells[0].score_delta.is_none());
+        assert!(!v.any_significant_improvement);
+        assert!(!v.any_significant_regression);
     }
 
     #[test]

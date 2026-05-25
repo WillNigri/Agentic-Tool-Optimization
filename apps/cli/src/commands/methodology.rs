@@ -170,6 +170,24 @@ pub enum MethodologySub {
     /// pass `--run-id` (or a positional run id) to drill into one run's
     /// composition (per-cell stats + pairwise Welch t).
     Runs(RunsArgs),
+    /// v2.11 PR-12.2 — compare a variant methodology run against a
+    /// baseline. Renders the three win-condition predicates from
+    /// docs/v2.11-learning-loop.md §Q4 (Statistically Significant
+    /// Pareto Improvement) cell-by-cell. Variant ships only when
+    /// (1) at least one cell shows significant improvement AND
+    /// (2) NO cell shows significant regression AND
+    /// (3) NO cell shows cost inflation > 10% without a quality
+    /// jump ≥ 0.2 to justify it.
+    ///
+    /// Free — pure read against existing methodology_runs data.
+    /// No LLM call, no Pro gate.
+    Compare {
+        /// Baseline run id.
+        baseline_run_id: String,
+        /// Variant run id (typically a child of the baseline via
+        /// methodology_runs.parent_run_id).
+        variant_run_id: String,
+    },
     /// v2.11 PR-12.1 — diagnose a completed methodology run. Reads the
     /// run's per-cell stats + worst/best dispatches, dispatches the
     /// diagnose LLM (default claude-opus-4-7), and prints the
@@ -449,6 +467,10 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 until,
                 methodology,
             } => handle_margin(since, until, methodology, db_path, opts),
+            MethodologySub::Compare {
+                baseline_run_id,
+                variant_run_id,
+            } => handle_compare(baseline_run_id, variant_run_id, db_path, opts),
             MethodologySub::Diagnose {
                 run_id,
                 diagnose_model,
@@ -1715,6 +1737,161 @@ fn handle_margin(
         }));
     }
     Ok(())
+}
+
+// ── v2.11 PR-12.2: methodology compare (A/B verdict) ───────────────────
+
+fn handle_compare(
+    baseline_run_id: String,
+    variant_run_id: String,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    // Load both compositions (re-uses the existing JOIN over
+    // methodology_run_dispatches + execution_logs).
+    let baseline_obs = load_run_observations(db_path, &baseline_run_id)?;
+    let variant_obs = load_run_observations(db_path, &variant_run_id)?;
+    if baseline_obs.is_empty() {
+        anyhow::bail!(
+            "baseline run '{}' has no completed dispatches — nothing to compare",
+            baseline_run_id
+        );
+    }
+    if variant_obs.is_empty() {
+        anyhow::bail!(
+            "variant run '{}' has no completed dispatches — nothing to compare",
+            variant_run_id
+        );
+    }
+    let baseline_comp = compose::compose(&baseline_obs);
+    let variant_comp = compose::compose(&variant_obs);
+    let verdict = compose::compare_runs(&baseline_comp, &variant_comp);
+
+    if opts.human {
+        emit_human(&format!(
+            "Comparing baseline={} vs variant={}\n",
+            baseline_run_id, variant_run_id
+        ));
+        emit_human(&format!("Cell-by-cell verdict ({} cells):", verdict.cells.len()));
+        for c in &verdict.cells {
+            let delta_str = c
+                .score_delta
+                .map(|d| format!("{:+.3}", d))
+                .unwrap_or_else(|| "—".to_string());
+            let p_str = match c.p_value_approx {
+                Some(p) if p < 0.001 => "p<0.001".to_string(),
+                Some(p) => format!("p={:.3}", p),
+                None => "p=— (df<30)".to_string(),
+            };
+            let imp = if c.is_significant_improvement() { " ✓IMP" } else { "" };
+            let reg = if c.is_significant_regression() { " ✗REG" } else { "" };
+            let costflag = if c.is_cost_inflation_unjustified() { " ⚠COST" } else { "" };
+            emit_human(&format!(
+                "  prompt[{}] · {} · {}  n={}/{}  Δscore={}  {}  CI{}  cost {:+.1}%{}{}{}",
+                c.prompt_idx,
+                c.condition,
+                c.model,
+                c.baseline_n,
+                c.variant_n,
+                delta_str,
+                p_str,
+                if c.ci_disjoint { " disjoint" } else { " overlap" },
+                c.cost_delta_pct.map(|p| p * 100.0).unwrap_or(0.0),
+                imp,
+                reg,
+                costflag,
+            ));
+        }
+        emit_human("");
+        emit_human(&format!(
+            "Verdict: any_improvement={} · any_regression={} · cost_inflation={} → ship={}",
+            verdict.any_significant_improvement,
+            verdict.any_significant_regression,
+            verdict.cost_inflation_unjustified,
+            verdict.variant_should_ship
+        ));
+        if verdict.variant_should_ship {
+            emit_human(
+                "→ Variant meets the Pareto-improvement-with-significance bar. PR-12.3 will add an `--apply` button that promotes it.",
+            );
+        } else {
+            let mut reasons: Vec<&str> = Vec::new();
+            if !verdict.any_significant_improvement {
+                reasons.push("no cell shows significant improvement");
+            }
+            if verdict.any_significant_regression {
+                reasons.push("at least one cell regresses with statistical significance");
+            }
+            if verdict.cost_inflation_unjustified {
+                reasons.push("at least one cell inflates cost >10% without a ≥0.2 score jump");
+            }
+            emit_human(&format!(
+                "→ Variant does NOT meet the ship bar: {}",
+                reasons.join("; ")
+            ));
+        }
+    } else {
+        let _ = emit_json(&verdict);
+    }
+    Ok(())
+}
+
+/// Same JOIN as `handle_runs_show` — pulled here so `compare` can
+/// build two `Composition`s without duplicating the SQL. Returns the
+/// `CellObservation`s the composer expects.
+fn load_run_observations(
+    db_path: &PathBuf,
+    run_id: &str,
+) -> Result<Vec<compose::CellObservation>> {
+    let conn = db::open_readonly(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT mrd.variant_cell, mrd.score,
+                e.cost_usd_estimated, e.tokens_in, e.tokens_out,
+                e.duration_ms, e.status, e.grounding_verdict
+         FROM methodology_run_dispatches mrd
+         JOIN execution_logs e ON e.id = mrd.execution_log_id
+         WHERE mrd.methodology_run_id = ?1",
+    )?;
+    let rows: Vec<compose::CellObservation> = stmt
+        .query_map(params![run_id], |r| {
+            let vc_json: String = r.get(0)?;
+            let score_opt: Option<f64> = r.get(1)?;
+            let cost: Option<f64> = r.get(2)?;
+            let tokens_in: Option<i64> = r.get(3)?;
+            let tokens_out: Option<i64> = r.get(4)?;
+            let duration_ms: Option<i64> = r.get(5)?;
+            let status: Option<String> = r.get(6)?;
+            let verdict: Option<String> = r.get(7)?;
+            let cell: serde_json::Value =
+                serde_json::from_str(&vc_json).unwrap_or(serde_json::Value::Null);
+            let prompt_idx =
+                cell.get("prompt_idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let model = cell
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)")
+                .to_string();
+            let condition = cell
+                .get("condition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let _ = tokens_in;
+            Ok(compose::CellObservation {
+                prompt_idx,
+                model,
+                condition,
+                cost_usd: cost.unwrap_or(0.0),
+                tokens_out: tokens_out.unwrap_or(0) as f64,
+                duration_ms: duration_ms.unwrap_or(0) as f64,
+                grounding_verdict: verdict,
+                status: status.unwrap_or_else(|| "unknown".to_string()),
+                score: score_opt,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 // ── v2.11 PR-12.1: methodology diagnose ────────────────────────────────
