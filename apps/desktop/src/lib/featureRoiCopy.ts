@@ -51,6 +51,10 @@ const COPY: Record<Feature, string> = {
     "Run your eval suite hourly / daily / weekly — automated regression detection",
   "methodology.cloud-sync":
     "Sync methodology runs across your devices + your team's eval history (Pro). Local execution stays free.",
+  "methodology.schedule":
+    "Re-run any methodology automatically on cron — the regression-watch loop only closes with automation we provide. DIY with your own launchd / systemd / crontab is always free.",
+  "methodology.diagnose":
+    "Codified learning loop: read failing methodology cells, propose a structured agent change, A/B test it, ship only if Pareto-better with statistical significance.",
 
   // Cloud sync
   "cloud-sync":

@@ -67,6 +67,21 @@ export type Feature =
   // hosted scheduled runs with email alerts). The OSS Insights panel
   // never calls cloud endpoints — it reads local SQLite only.
   | "methodology.cloud-sync"
+  // v2.11 PR-12.05 — open-core re-tier. The PRINCIPLE Will locked
+  // 2026-05-25: customers can run primitives free; we charge for the
+  // codified automation we package on top. Schedule was shipped free
+  // in v2.10 PR-7; under the open-core principle it's automation we
+  // provide (customer could write their own launchd plist by hand)
+  // and it's gated Pro for new creates from PR-12.05 onward.
+  // Existing schedules are grandfathered: list / delete / trigger /
+  // unarchive remain free so customers can manage what they already
+  // set up. See docs/v2.11-learning-loop.md and docs/tiers.md.
+  | "methodology.schedule"
+  // v2.11 PR-12 (in progress) — methodology diagnose pipeline. The
+  // codified learning-loop button (reads failing methodology cells,
+  // proposes a structured agent-definition change, A/B tests it,
+  // ships if Pareto-better). Pro from day one.
+  | "methodology.diagnose"
   // Cloud sync of agents
   | "cloud-sync"
   // v2.6 — Encrypted provider-key store for the cron usage-poller
@@ -95,6 +110,8 @@ export const FEATURE_MIN_TIER: Record<Feature, Tier> = {
   "evaluators": "free",           // AD-HOC ONLY — single-shot, local
   "evaluators.scheduled": "pro",  // CRON-DRIVEN — requires cloud cron worker
   "methodology.cloud-sync": "pro", // CLOUD ONLY — local runs/UI stay free
+  "methodology.schedule": "pro",   // AUTOMATION — re-tiered from free (v2.11 PR-12.05)
+  "methodology.diagnose": "pro",   // AUTOMATION — codified learning loop
 
   // ─── PRO $29/seat/mo (cloud infra, real cost-of-goods) ─────────
   // These features REQUIRE ato-cloud infrastructure (storage,

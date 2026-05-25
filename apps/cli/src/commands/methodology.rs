@@ -1893,6 +1893,16 @@ fn handle_schedule_create(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // v2.11 PR-12.05 — schedule creation is the codified automation we
+    // package; gating it Pro is consistent with the open-core principle
+    // (the customer can write their own launchd plist by hand if they
+    // want to skip our automation). Existing schedules keep firing —
+    // we don't touch what's already in ~/.ato/cron-jobs.json or what
+    // the OS scheduler has registered. Only `create` is gated; list /
+    // delete / trigger remain free so customers can manage what they
+    // already set up.
+    crate::tier::require_feature("methodology.schedule")?;
+
     // Validate the methodology exists before scheduling it — saves a
     // confused-customer email at 9:01am Monday when the scheduled run
     // fails because the slug was a typo.

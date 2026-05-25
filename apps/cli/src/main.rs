@@ -25,6 +25,10 @@ mod grounding;
 // spend + our margin). Spec at docs/methodology-runner.md; empirical
 // motivation in Part 5 of the v2.9 build log series.
 mod methodology;
+// v2.11 PR-12.05 — open-core tier gate. Free = run primitives. Pro =
+// automations we package on top of the primitives. See module header
+// for the resolution chain.
+mod tier;
 mod review_tools;
 mod daemon;
 mod db;
