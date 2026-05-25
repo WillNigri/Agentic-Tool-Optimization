@@ -44,6 +44,7 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::methodology::compose;
+use crate::methodology::rubric::Rubric;
 use crate::methodology::runner::{self, RunOptions};
 use crate::methodology::{
     cost_estimate_for_matrix, Archetype, BillingMode, CostRateCard, VariantMatrix,
@@ -169,6 +170,19 @@ pub enum MethodologySub {
     /// pass `--run-id` (or a positional run id) to drill into one run's
     /// composition (per-cell stats + pairwise Welch t).
     Runs(RunsArgs),
+    /// v2.10 PR-4 — score every dispatch in an existing run using the
+    /// methodology's rubric. Idempotent — re-running re-scores. Costs
+    /// of LLM-judge calls land in `provider_judge_cost_usd`. Use this
+    /// after `adopt` (which intentionally skips scoring to avoid
+    /// surprise judge spend).
+    Score {
+        /// Run id (UUID).
+        run_id: String,
+        /// Re-score dispatches that already have a non-NULL score. Off
+        /// by default — the typical loop is adopt → score once.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
     /// v2.10 PR-3 (Pro angle) — adopt EXISTING execution_logs into a
     /// methodology_run without re-dispatching. Lets a customer compose
     /// + (PR-4) score receipts they already paid for. Variant cell is
@@ -291,6 +305,7 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
             } => handle_adopt(
                 slug, since, until, runtime, model, status, agent, limit, billing, db_path, opts,
             ),
+            MethodologySub::Score { run_id, force } => handle_score(run_id, force, db_path, opts),
         },
     }
 }
@@ -847,7 +862,7 @@ fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()
     // Pull every dispatch this run composed + the execution_logs metrics
     // we need for composition. One join keeps the round-trip count to 1.
     let mut stmt = conn.prepare(
-        "SELECT mrd.variant_cell,
+        "SELECT mrd.variant_cell, mrd.score,
                 e.cost_usd_estimated, e.tokens_in, e.tokens_out,
                 e.duration_ms, e.status, e.grounding_verdict
          FROM methodology_run_dispatches mrd
@@ -857,12 +872,13 @@ fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()
     let observations: Vec<compose::CellObservation> = stmt
         .query_map(params![&run_id], |r| {
             let vc_json: String = r.get(0)?;
-            let cost: Option<f64> = r.get(1)?;
-            let tokens_in: Option<i64> = r.get(2)?;
-            let tokens_out: Option<i64> = r.get(3)?;
-            let duration_ms: Option<i64> = r.get(4)?;
-            let status: Option<String> = r.get(5)?;
-            let verdict: Option<String> = r.get(6)?;
+            let score_opt: Option<f64> = r.get(1)?;
+            let cost: Option<f64> = r.get(2)?;
+            let tokens_in: Option<i64> = r.get(3)?;
+            let tokens_out: Option<i64> = r.get(4)?;
+            let duration_ms: Option<i64> = r.get(5)?;
+            let status: Option<String> = r.get(6)?;
+            let verdict: Option<String> = r.get(7)?;
             let cell: serde_json::Value =
                 serde_json::from_str(&vc_json).unwrap_or(serde_json::Value::Null);
             let prompt_idx = cell.get("prompt_idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -876,7 +892,7 @@ fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()
                 .and_then(|v| v.as_str())
                 .unwrap_or("default")
                 .to_string();
-            let _ = tokens_in; // unused; PR-4/5 may compose over it
+            let _ = tokens_in;
             Ok(compose::CellObservation {
                 prompt_idx,
                 model,
@@ -886,6 +902,7 @@ fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()
                 duration_ms: duration_ms.unwrap_or(0) as f64,
                 grounding_verdict: verdict,
                 status: status.unwrap_or_else(|| "unknown".to_string()),
+                score: score_opt,
             })
         })?
         .filter_map(|r| r.ok())
@@ -922,6 +939,12 @@ fn handle_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()
                     c.tokens_out.mean, c.tokens_out.sd, c.tokens_out.ci_lo, c.tokens_out.ci_hi,
                     c.duration_ms.mean, c.duration_ms.sd, c.duration_ms.ci_lo, c.duration_ms.ci_hi,
                 ));
+                if let (Some(score), Some(passed)) = (&c.score, c.passed_at_0_5) {
+                    emit_human(&format!(
+                        "    score:    mean {:.3}  sd {:.3}  95% CI [{:.3}, {:.3}]  passed ≥0.5: {}/{}",
+                        score.mean, score.sd, score.ci_lo, score.ci_hi, passed, score.n
+                    ));
+                }
                 if !c.grounding_verdicts.is_empty() {
                     let vs: Vec<String> = c
                         .grounding_verdicts
@@ -1220,6 +1243,125 @@ fn handle_adopt(
             "customer_tokens_out": customer_tokens_out,
             "provider_total_cost_usd": provider_total,
             "margin_usd": margin_usd,
+        }));
+    }
+    Ok(())
+}
+
+fn handle_score(run_id: String, force: bool, db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+    // Pull the methodology's rubric from the run's methodology row.
+    let rubric_json: String = conn
+        .query_row(
+            "SELECT m.rubric FROM methodologies m
+             JOIN methodology_runs r ON r.methodology_id = m.id
+             WHERE r.id = ?1",
+            params![&run_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "no methodology run with id '{}'. `ato evaluations methodology runs list` to see what's there.",
+                run_id
+            )
+        })?;
+    let rubric_value: serde_json::Value =
+        serde_json::from_str(&rubric_json).unwrap_or(serde_json::Value::Null);
+    let rubric: Rubric = Rubric::parse(&rubric_value).unwrap_or(Rubric::Pending);
+    if matches!(rubric, Rubric::Pending) {
+        anyhow::bail!(
+            "methodology's rubric is `pending` — define a real rubric on the methodology before scoring. See `docs/methodology-runner.md` rubric section.",
+        );
+    }
+
+    // Pull all (or only un-scored) dispatches + the prompt + response from execution_logs.
+    let sql = if force {
+        "SELECT mrd.execution_log_id, e.prompt, e.response
+         FROM methodology_run_dispatches mrd
+         JOIN execution_logs e ON e.id = mrd.execution_log_id
+         WHERE mrd.methodology_run_id = ?1"
+    } else {
+        "SELECT mrd.execution_log_id, e.prompt, e.response
+         FROM methodology_run_dispatches mrd
+         JOIN execution_logs e ON e.id = mrd.execution_log_id
+         WHERE mrd.methodology_run_id = ?1 AND mrd.score IS NULL"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows: Vec<(String, String, Option<String>)> = stmt
+        .query_map(params![&run_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        if opts.human {
+            emit_human(&format!(
+                "Nothing to score for run {}. {}",
+                run_id,
+                if force { "Run is empty." } else { "All dispatches already scored — pass --force to re-score." }
+            ));
+        } else {
+            let _ = emit_json(&serde_json::json!({
+                "run_id": run_id,
+                "scored": 0_u32,
+                "force": force,
+            }));
+        }
+        return Ok(());
+    }
+
+    let mut scored: u32 = 0;
+    let mut total_score: f64 = 0.0;
+    let mut total_judge_cost: f64 = 0.0;
+    let mut sum_passed: u32 = 0;
+    for (eid, prompt, response_opt) in &rows {
+        let response = response_opt.clone().unwrap_or_default();
+        let result = rubric.score(prompt, &response, db_path);
+        let s = match result {
+            Ok(s) => s,
+            Err(e) => crate::methodology::rubric::RubricScore::fail(format!(
+                "rubric error: {}",
+                e
+            )),
+        };
+        let _ = conn.execute(
+            "UPDATE methodology_run_dispatches SET score = ?1
+             WHERE methodology_run_id = ?2 AND execution_log_id = ?3",
+            params![s.score, &run_id, eid],
+        );
+        scored += 1;
+        total_score += s.score;
+        total_judge_cost += s.judge_cost_usd;
+        if s.score >= 0.5 {
+            sum_passed += 1;
+        }
+    }
+    // Bump provider_judge_cost_usd + provider_total_cost_usd if any
+    // judge calls landed here. Margin recomputes from the same per-run
+    // allocation as the runner.
+    let _ = conn.execute(
+        "UPDATE methodology_runs SET
+            provider_judge_cost_usd = provider_judge_cost_usd + ?1,
+            provider_total_cost_usd = provider_total_cost_usd + ?1,
+            margin_usd = margin_usd - ?1
+         WHERE id = ?2",
+        params![total_judge_cost, &run_id],
+    );
+
+    let mean = total_score / (scored as f64);
+    if opts.human {
+        emit_human(&format!(
+            "Scored {} dispatches in run {}.\n  mean score:    {:.3}\n  passed (≥0.5): {}/{}\n  judge cost:    ${:.4}\n\nRun `runs show {}` for the per-cell breakdown.",
+            scored, run_id, mean, sum_passed, scored, total_judge_cost, run_id
+        ));
+    } else {
+        let _ = emit_json(&serde_json::json!({
+            "run_id": run_id,
+            "scored": scored,
+            "mean_score": mean,
+            "passed_at_threshold_0_5": sum_passed,
+            "judge_cost_usd": total_judge_cost,
         }));
     }
     Ok(())

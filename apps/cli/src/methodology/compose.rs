@@ -36,6 +36,9 @@ pub struct CellObservation {
     pub duration_ms: f64,
     pub grounding_verdict: Option<String>,
     pub status: String, // success / error / refused
+    /// Rubric score (PR-4). Some(0.0..1.0) when scored; None when the
+    /// rubric is Pending or scoring hasn't run yet.
+    pub score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -59,6 +62,16 @@ pub struct CellSummary {
     pub tokens_out: Stats,
     pub duration_ms: Stats,
     pub grounding_verdicts: BTreeMap<String, usize>,
+    /// Rubric score statistics over the cell's scored observations.
+    /// None when no observation in the cell has a score (PR-4 may not
+    /// have run yet).
+    #[serde(default)]
+    pub score: Option<Stats>,
+    /// Number of observations in the cell that scored at or above 0.5
+    /// (the canonical "pass" threshold for binary rubrics). None when
+    /// score is None.
+    #[serde(default)]
+    pub passed_at_0_5: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +213,14 @@ pub fn compose(observations: &[CellObservation]) -> Composition {
                     .unwrap_or_else(|| "not_enforced".to_string());
                 *verdicts.entry(key).or_insert(0) += 1;
             }
+            let scores: Vec<f64> =
+                obs_vec.iter().filter_map(|o| o.score).collect();
+            let (score, passed_at_0_5) = if scores.is_empty() {
+                (None, None)
+            } else {
+                let passed = scores.iter().filter(|s| **s >= 0.5).count();
+                (Some(stats(&scores)), Some(passed))
+            };
             CellSummary {
                 prompt_idx,
                 model,
@@ -211,6 +232,8 @@ pub fn compose(observations: &[CellObservation]) -> Composition {
                 tokens_out: stats(&tokens),
                 duration_ms: stats(&durations),
                 grounding_verdicts: verdicts,
+                score,
+                passed_at_0_5,
             }
         })
         .collect();
@@ -299,6 +322,7 @@ mod tests {
             duration_ms: cost * 10000.0,
             grounding_verdict: None,
             status: "success".to_string(),
+            score: None,
         }
     }
 

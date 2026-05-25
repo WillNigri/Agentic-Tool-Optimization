@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::methodology::cost::CostRateCard;
+use crate::methodology::rubric::Rubric;
 use crate::methodology::types::{BillingMode, VariantMatrix};
 
 #[derive(Debug, Clone)]
@@ -91,11 +92,15 @@ pub fn run_by_slug(
     run_opts: &RunOptions,
 ) -> Result<RunSummary> {
     let conn = db::open_readwrite(db_path)?;
-    let (methodology_id, variant_matrix_json) = conn
+    let (methodology_id, variant_matrix_json, rubric_json) = conn
         .query_row(
-            "SELECT id, variant_matrix FROM methodologies WHERE slug = ?1",
+            "SELECT id, variant_matrix, rubric FROM methodologies WHERE slug = ?1",
             params![methodology_slug],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            )),
         )
         .with_context(|| {
             format!(
@@ -106,12 +111,19 @@ pub fn run_by_slug(
 
     let matrix: VariantMatrix = serde_json::from_str(&variant_matrix_json)
         .context("parse variant_matrix from DB — methodology may be corrupted")?;
+    // Parse rubric tolerantly: a methodology that pre-dates PR-4 (or has
+    // a non-rubric JSON blob like `{"kind":"pending-pr4"}`) falls back to
+    // Rubric::Pending so the runner can still execute without scoring.
+    let rubric_value: serde_json::Value =
+        serde_json::from_str(&rubric_json).unwrap_or(serde_json::Value::Null);
+    let rubric: Rubric = Rubric::parse(&rubric_value).unwrap_or(Rubric::Pending);
 
     run_with_matrix(
         &conn,
         &methodology_id,
         methodology_slug,
         &matrix,
+        &rubric,
         db_path,
         run_opts,
     )
@@ -122,6 +134,7 @@ fn run_with_matrix(
     methodology_id: &str,
     methodology_slug: &str,
     matrix: &VariantMatrix,
+    rubric: &Rubric,
     db_path: &Path,
     run_opts: &RunOptions,
 ) -> Result<RunSummary> {
@@ -156,6 +169,7 @@ fn run_with_matrix(
     let mut customer_tokens_out: i64 = 0;
     let mut compute_seconds: f64 = 0.0;
     let mut bandwidth_bytes: i64 = 0;
+    let mut judge_cost_usd: f64 = 0.0;
     let rates = CostRateCard::defaults_v1();
 
     for cell in cells.iter().take(planned_capped as usize) {
@@ -177,13 +191,30 @@ fn run_with_matrix(
                 customer_tokens_out += record.tokens_out;
                 bandwidth_bytes += record.response_bytes;
 
+                // PR-4: score this dispatch through the methodology's rubric.
+                // Failures here never abort the run — a score of 0 lands
+                // alongside the reason; the customer sees both.
+                let response_text = record.response_text.clone().unwrap_or_default();
+                let rubric_score = match rubric.score(&prompt, &response_text, db_path) {
+                    Ok(s) => s,
+                    Err(e) => crate::methodology::rubric::RubricScore::fail(format!(
+                        "rubric scoring error: {}",
+                        e
+                    )),
+                };
+                judge_cost_usd += rubric_score.judge_cost_usd;
                 let variant_cell_json =
                     serde_json::to_string(cell).unwrap_or_else(|_| "{}".to_string());
                 let _ = conn.execute(
                     "INSERT OR REPLACE INTO methodology_run_dispatches
                         (methodology_run_id, execution_log_id, variant_cell, score)
-                     VALUES (?1, ?2, ?3, NULL)",
-                    params![&run_id, &record.execution_log_id, &variant_cell_json],
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        &run_id,
+                        &record.execution_log_id,
+                        &variant_cell_json,
+                        rubric_score.score,
+                    ],
                 );
                 if run_opts.progress_jsonl {
                     let _ = serde_json::to_string(&serde_json::json!({
@@ -197,6 +228,9 @@ fn run_with_matrix(
                         "duration_ms": record.duration_ms,
                         "grounding_verdict": record.grounding_verdict,
                         "status": record.status,
+                        "rubric_score": rubric_score.score,
+                        "rubric_reason": rubric_score.reason,
+                        "judge_cost_usd": rubric_score.judge_cost_usd,
                         "completed_so_far": completed,
                         "planned": planned_capped,
                     }))
@@ -245,7 +279,7 @@ fn run_with_matrix(
         * retention_months;
     let bandwidth_cost = (bandwidth_bytes as f64) * rates.bandwidth_per_byte_usd;
     let provider_total =
-        provider_llm_cost_usd + provider_compute_cost + storage_cost + bandwidth_cost;
+        provider_llm_cost_usd + judge_cost_usd + provider_compute_cost + storage_cost + bandwidth_cost;
 
     // Margin = what the customer's tier slot brought in minus our cost.
     // Pro tier monthly is $29 split across an estimated 100 runs/mo for
@@ -278,12 +312,13 @@ fn run_with_matrix(
             customer_tokens_out = ?6,
             customer_dispatches = ?7,
             provider_llm_cost_usd = ?8,
-            provider_compute_seconds = ?9,
-            provider_storage_bytes = ?10,
-            provider_bandwidth_bytes = ?11,
-            provider_total_cost_usd = ?12,
-            margin_usd = ?13
-         WHERE id = ?14",
+            provider_judge_cost_usd = ?9,
+            provider_compute_seconds = ?10,
+            provider_storage_bytes = ?11,
+            provider_bandwidth_bytes = ?12,
+            provider_total_cost_usd = ?13,
+            margin_usd = ?14
+         WHERE id = ?15",
         params![
             &ended_at,
             final_status,
@@ -293,6 +328,7 @@ fn run_with_matrix(
             customer_tokens_out,
             completed as i64,
             provider_llm_cost_usd,
+            judge_cost_usd,
             compute_seconds,
             storage_bytes_estimate,
             bandwidth_bytes,
@@ -352,8 +388,10 @@ struct DispatchRecord {
     cost_usd: f64,
     tokens_in: i64,
     tokens_out: i64,
+    #[allow(dead_code)]
     duration_ms: i64,
     response_bytes: i64,
+    response_text: Option<String>,
     grounding_verdict: Option<String>,
     status: String,
 }
@@ -451,6 +489,7 @@ fn dispatch_cell(
         tokens_out: row.3.unwrap_or(0),
         duration_ms: row.4.unwrap_or(0),
         response_bytes,
+        response_text: row.5,
         status: row.6.unwrap_or_else(|| "unknown".to_string()),
         grounding_verdict: row.7,
     })

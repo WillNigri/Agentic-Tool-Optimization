@@ -22,6 +22,7 @@ pub mod archetypes;
 pub mod compose;
 pub mod cost;
 pub mod runner;
+pub mod rubric;
 pub mod types;
 
 #[allow(unused_imports)] // re-exports for consumers (CLI commands, future Pro)

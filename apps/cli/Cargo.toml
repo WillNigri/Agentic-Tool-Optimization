@@ -23,6 +23,8 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 which = "6"
+# v2.10 PR-4 — regex rubric for methodology scoring
+regex = "1"
 # Color-aware output for --human mode
 colored = "2.1"
 ato-recipes = { path = "../../packages/ato-recipes" }
