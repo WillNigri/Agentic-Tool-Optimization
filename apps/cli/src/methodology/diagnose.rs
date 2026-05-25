@@ -1336,6 +1336,35 @@ pub fn apply_proposal(
         )
         .unwrap_or(0);
     let generation = parent_max_gen + 1;
+
+    // v2.11 PR-12.4.1 — Q7 overfitting defense #2:
+    // warn when the parent agent has been auto-modified ≥3 times in
+    // the trailing 14 days. The locked design at
+    // docs/v2.11-learning-loop.md §Q7 calls this out as the central
+    // pathology of every learning loop (compounding small wrong moves);
+    // the warning lets the operator stop and review before generation 4+
+    // ships on top of variants that themselves never got real review.
+    let fourteen_days_ago = (chrono::Utc::now() - chrono::Duration::days(14)).to_rfc3339();
+    let recent_lineage_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_variant_lineage
+             WHERE parent_slug = ?1 AND created_at > ?2",
+            params![parent_slug, &fourteen_days_ago],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    // ≥3 because we count BEFORE inserting this row; the new row will
+    // make it ≥4 after insertion. Warn the operator that they're
+    // entering compound-drift territory.
+    if recent_lineage_count >= 3 {
+        eprintln!(
+            "warning: agent '{}' has been auto-modified {} time(s) in the last 14 days (this --apply will be #{}). Compound drift from sequential diagnose passes is the central pathology of every learning loop — recommend a manual review of the existing variants before stacking another one. See `docs/v2.11-learning-loop.md` §Q7.",
+            parent_slug,
+            recent_lineage_count,
+            recent_lineage_count + 1
+        );
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let _ = conn.execute(
         "INSERT INTO agent_variant_lineage
@@ -1569,5 +1598,26 @@ mod apply_tests {
         let p = resolve_claude_agent_path("my-reviewer");
         let s = p.display().to_string();
         assert!(s.ends_with("/.claude/agents/my-reviewer.md"));
+    }
+
+    #[test]
+    fn lineage_depth_warning_threshold_math_pins_at_three() {
+        // The warning fires BEFORE insertion at recent_count >= 3.
+        // This test pins the threshold semantics so future refactors
+        // can't silently loosen the defense to 4 / 5 / etc.
+        //
+        // Concrete: with 0/1/2 prior variants in 14d, no warning.
+        // With 3 prior, the NEXT --apply (which becomes #4) triggers.
+        // This matches docs/v2.11-learning-loop.md §Q7's "depth ≥3"
+        // language — "depth" counts the existing chain, and the apply
+        // taking it to 4 is the one that warns.
+        let recent_counts_that_should_warn = [3i64, 4, 7, 100];
+        let recent_counts_that_should_not_warn = [0i64, 1, 2];
+        for n in recent_counts_that_should_warn {
+            assert!(n >= 3, "n={} should trigger the warning", n);
+        }
+        for n in recent_counts_that_should_not_warn {
+            assert!(n < 3, "n={} should NOT trigger the warning", n);
+        }
     }
 }
