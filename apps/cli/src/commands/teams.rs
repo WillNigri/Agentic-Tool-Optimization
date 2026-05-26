@@ -318,15 +318,25 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
 
     // Unwrap envelope before either emit path. `data` is expected to be an
     // array for list endpoints; fall back to the full body if the response is
-    // bare. Move (not clone) `body` into the fallback — review #L1 noted the
-    // clone was redundant.
+    // bare. `unwrap_or_else` makes the fallback lazy so the clone only runs
+    // when `data` is missing.
     let payload = body.get("data").cloned().unwrap_or_else(|| body.clone());
-    // Empty-vs-malformed distinction: only impersonate "no shared X" when the
-    // payload is an explicit empty array (or an empty data field). A non-array
-    // response shape is treated as a hard error so the user isn't lied to.
-    let rows_or_err = match payload.as_array() {
-        Some(arr) => Ok(arr),
-        None => Err("Unexpected response shape — expected an array under `data`"),
+
+    // Validate shape FIRST so both --json and --human paths fail the same way
+    // on a malformed response. Without this, an `ato … --json | jq` pipeline
+    // would silently receive garbage. Dump the body to stderr (not stdout) so
+    // it doesn't corrupt the JSON consumer's input; truncate to keep logs sane
+    // and avoid leaking large response payloads.
+    let arr = match payload.as_array() {
+        Some(a) => a,
+        None => {
+            let preview: String = payload.to_string().chars().take(256).collect();
+            eprintln!(
+                "[malformed-response] expected an array under `data`; body: {}",
+                preview
+            );
+            std::process::exit(1);
+        }
     };
 
     if !opts.human {
@@ -334,30 +344,25 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
         return Ok(());
     }
 
-    match rows_or_err {
-        Ok(arr) if !arr.is_empty() => {
-            emit_human(&format!("Shared {}s ({}):", kind, arr.len()));
-            for row in arr {
-                let slug = row.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
-                let name = row
-                    .get("display_name")
-                    .or_else(|| row.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(slug);
-                let by = row
-                    .get("shared_by_email")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let at = row.get("shared_at").and_then(|v| v.as_str()).unwrap_or("?");
-                emit_human(&format!("  • {} ({}) — by {} at {}", name, slug, by, at));
-            }
-        }
-        Ok(_) => emit_human(&format!("No shared {}s in this team yet.", kind)),
-        Err(msg) => {
-            emit_human(&format!("[malformed-response] {}", msg));
-            emit_human(&format!("body: {}", payload));
-            std::process::exit(1);
-        }
+    if arr.is_empty() {
+        emit_human(&format!("No shared {}s in this team yet.", kind));
+        return Ok(());
+    }
+
+    emit_human(&format!("Shared {}s ({}):", kind, arr.len()));
+    for row in arr {
+        let slug = row.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
+        let name = row
+            .get("display_name")
+            .or_else(|| row.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(slug);
+        let by = row
+            .get("shared_by_email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let at = row.get("shared_at").and_then(|v| v.as_str()).unwrap_or("?");
+        emit_human(&format!("  • {} ({}) — by {} at {}", name, slug, by, at));
     }
     Ok(())
 }

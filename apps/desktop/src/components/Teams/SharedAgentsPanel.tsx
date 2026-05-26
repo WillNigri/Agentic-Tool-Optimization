@@ -48,9 +48,10 @@ export default function SharedAgentsPanel({ teamId, ownedAgents = [] }: SharedAg
     onError: () => setConfirmAgentId(null),
   });
 
-  // Auto-dismiss the confirm-armed state after 10s of inactivity so a user
-  // who clicked Unshare and walked away can't trip a destructive second click
-  // when they come back. (review L5)
+  // Auto-dismiss the confirm-armed state 10s after the user clicks Unshare.
+  // The timer starts when confirmAgentId is set, not on any subsequent
+  // activity — a stale armed state past 10s clears so a careless return-click
+  // can't trip a destructive second click. (review L5)
   useEffect(() => {
     if (!confirmAgentId) return;
     const timer = setTimeout(() => setConfirmAgentId(null), 10_000);
