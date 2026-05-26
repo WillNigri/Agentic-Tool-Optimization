@@ -120,6 +120,9 @@ enum Commands {
     /// production-signals add --agent-slug X -f -`).
     #[command(name = "production-signals")]
     ProductionSignals(commands::production_signals::ProductionSignalsArgs),
+    /// v2.13 — Team workspaces. Share agents + methodologies with
+    /// teammates (Team tier; persistence + tier gating in ato-cloud).
+    Teams(commands::teams::TeamsArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1181,6 +1184,10 @@ fn main() -> Result<()> {
         }
         Commands::ProductionSignals(args) => {
             commands::production_signals::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Teams(args) => {
+            commands::teams::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

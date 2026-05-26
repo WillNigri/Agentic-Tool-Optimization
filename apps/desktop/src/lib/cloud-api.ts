@@ -345,6 +345,71 @@ export async function deleteTeamSkill(teamId: string, skillId: string): Promise<
 }
 
 // ============================================================
+// v2.13 — Team Shared Agents / Methodologies API (Team tier)
+// ============================================================
+
+export interface SharedTeamAgent {
+  team_id: string;
+  agent_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  slug: string;
+  display_name: string;
+  description: string | null;
+  runtime: string;
+  model: string | null;
+  shared_by_email: string | null;
+  shared_by_name: string | null;
+}
+
+export interface SharedTeamMethodology {
+  team_id: string;
+  methodology_id: string;
+  shared_by_user_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  config: unknown;
+  shared_at: string;
+  updated_at: string;
+  shared_by_email: string | null;
+  shared_by_name: string | null;
+}
+
+export async function getTeamSharedAgents(teamId: string): Promise<SharedTeamAgent[]> {
+  return apiRequest<SharedTeamAgent[]>(`/api/teams/${teamId}/agents`);
+}
+
+export async function shareAgentWithTeam(teamId: string, agentId: string): Promise<{ team_id: string; agent_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/agents/share`, {
+    method: 'POST',
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+}
+
+export async function unshareAgentFromTeam(teamId: string, agentId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/agents/${agentId}/share`, { method: 'DELETE' });
+}
+
+export async function getTeamSharedMethodologies(teamId: string): Promise<SharedTeamMethodology[]> {
+  return apiRequest<SharedTeamMethodology[]>(`/api/teams/${teamId}/methodologies`);
+}
+
+export async function shareMethodologyWithTeam(
+  teamId: string,
+  payload: { methodology_id: string; slug: string; name: string; description?: string; config: unknown }
+): Promise<{ team_id: string; methodology_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/methodologies/share`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function unshareMethodologyFromTeam(teamId: string, methodologyId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/methodologies/${methodologyId}/share`, { method: 'DELETE' });
+}
+
+// ============================================================
 // Sync API
 // ============================================================
 
