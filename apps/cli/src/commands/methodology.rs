@@ -919,55 +919,25 @@ fn handle_run(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    let billing_mode = BillingMode::parse(&billing).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown billing mode '{}'. Valid values: byok | pool",
-            billing
-        )
-    })?;
-    let run_opts = RunOptions {
-        billing_mode,
-        max_dispatches,
-        stop_on_error,
-        progress_jsonl,
-    };
-    if opts.human {
-        emit_human(&format!(
-            "Starting methodology run for '{}' (billing={}{}){}",
-            slug,
-            billing_mode.as_str(),
-            max_dispatches
-                .map(|n| format!(", cap={}", n))
-                .unwrap_or_default(),
-            if progress_jsonl {
-                " — progress streaming on"
-            } else {
-                ""
-            },
-        ));
+    // STAGE 6 (2026-05-26) — `methodology run` migrated to the private
+    // ato-pro binary per docs/tiers.md. Free customers can replicate
+    // by hand with a bash loop around `ato dispatch` + their own JSON
+    // parser; that's the documented DIY path.
+    let mut args: Vec<String> = vec![
+        "--slug".into(), slug,
+        "--billing".into(), billing,
+    ];
+    if let Some(n) = max_dispatches {
+        args.push("--max-dispatches".into());
+        args.push(n.to_string());
     }
-    let summary = runner::run_by_slug(&slug, db_path, &run_opts)?;
-    if opts.human {
-        emit_human(&format!(
-            "\nRun {} {}\n  planned:        {}\n  completed:      {}\n  failed:         {}\n  duration:       {:.1}s\n  YOUR cost:      ${:.4}\n  OUR cost:       ${:.4}\n  margin (est):   ${:.4}",
-            summary.run_id,
-            summary.status,
-            summary.planned,
-            summary.completed,
-            summary.failed,
-            summary.duration_seconds,
-            summary.customer_cost_usd,
-            summary.provider_total_cost_usd,
-            summary.margin_usd,
-        ));
-        emit_human(&format!(
-            "\nNext: `ato evaluations methodology runs show {}` for the per-cell composition.",
-            summary.run_id
-        ));
-    } else {
-        let _ = emit_json(&summary);
+    if stop_on_error {
+        args.push("--stop-on-error".into());
     }
-    Ok(())
+    if progress_jsonl {
+        args.push("--progress-jsonl".into());
+    }
+    crate::pro_client::delegate("run", &args, db_path, opts.human, opts.quiet)
 }
 
 fn handle_runs_list(
@@ -1236,369 +1206,22 @@ fn handle_adopt(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    let billing_mode = BillingMode::parse(&billing).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown billing mode '{}'. Valid values: byok | pool",
-            billing
-        )
-    })?;
-    let conn = db::open_readwrite(db_path)?;
-    let methodology_id: String = conn
-        .query_row(
-            "SELECT id FROM methodologies WHERE slug = ?1",
-            params![&slug],
-            |r| r.get(0),
-        )
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "no methodology with slug '{}'. `ato evaluations methodology create` first.",
-                slug
-            )
-        })?;
-
-    // Build the WHERE clause dynamically — keep params() positional + safe.
-    // Status special-cases: `all` skips the filter entirely.
-    let mut where_clauses: Vec<String> = Vec::new();
-    let mut bind: Vec<String> = Vec::new();
-    if let Some(s) = &since {
-        where_clauses.push(format!("created_at >= ?{}", bind.len() + 1));
-        bind.push(s.clone());
-    }
-    if let Some(u) = &until {
-        where_clauses.push(format!("created_at <= ?{}", bind.len() + 1));
-        bind.push(u.clone());
-    }
-    if let Some(r) = &runtime {
-        where_clauses.push(format!("runtime = ?{}", bind.len() + 1));
-        bind.push(r.clone());
-    }
-    if let Some(m) = &model {
-        where_clauses.push(format!("model = ?{}", bind.len() + 1));
-        bind.push(m.clone());
-    }
-    if status != "all" {
-        where_clauses.push(format!("status = ?{}", bind.len() + 1));
-        bind.push(status.clone());
-    }
-    if let Some(a) = &agent {
-        where_clauses.push(format!("agent_slug = ?{}", bind.len() + 1));
-        bind.push(a.clone());
-    }
-    let where_sql = if where_clauses.is_empty() {
-        "1=1".to_string()
-    } else {
-        where_clauses.join(" AND ")
-    };
-
-    let sql = format!(
-        "SELECT id, prompt, model, runtime, cost_usd_estimated, tokens_in, tokens_out,
-                duration_ms, status, grounding_verdict, response
-         FROM execution_logs
-         WHERE {}
-         ORDER BY created_at ASC
-         LIMIT {}",
-        where_sql, limit
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let params_iter: Vec<&dyn rusqlite::ToSql> =
-        bind.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-
-    type AdoptRow = (
-        String,
-        String,
-        Option<String>,
-        String,
-        Option<f64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let rows: Vec<AdoptRow> = stmt
-        .query_map(params_iter.as_slice(), |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<f64>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, Option<i64>>(6)?,
-                r.get::<_, Option<i64>>(7)?,
-                r.get::<_, Option<String>>(8)?,
-                r.get::<_, Option<String>>(9)?,
-                r.get::<_, Option<String>>(10)?,
-            ))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    if rows.is_empty() {
-        anyhow::bail!(
-            "no execution_logs rows matched the filter. Widen --since / --status or check `ato evaluations methodology list`."
-        );
-    }
-
-    // Distinct prompts → prompt_idx, in first-seen order so the index
-    // matches what a human would expect when re-reading the corpus.
-    let mut prompt_index: Vec<String> = Vec::new();
-    let prompt_idx_of = |p: &str, idx: &mut Vec<String>| -> usize {
-        if let Some(i) = idx.iter().position(|x| x == p) {
-            i
-        } else {
-            idx.push(p.to_string());
-            idx.len() - 1
-        }
-    };
-
-    let run_id = Uuid::new_v4().to_string();
-    let started_at = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "INSERT INTO methodology_runs
-            (id, methodology_id, customer_user_id, started_at, status,
-             total_dispatches_planned, total_dispatches_completed,
-             customer_billing_mode)
-         VALUES (?1, ?2, NULL, ?3, 'running', ?4, 0, ?5)",
-        params![
-            &run_id,
-            &methodology_id,
-            &started_at,
-            rows.len() as i64,
-            billing_mode.as_str(),
-        ],
-    )
-    .context("insert methodology_runs row for adopt")?;
-
-    let mut customer_cost_usd: f64 = 0.0;
-    let mut customer_tokens_in: i64 = 0;
-    let mut customer_tokens_out: i64 = 0;
-    let mut response_bytes: i64 = 0;
-    let mut adopted: u32 = 0;
-    for row in &rows {
-        let (id, prompt, model_opt, _runtime_v, cost, tok_in, tok_out, dur_ms, status_v, verdict, response) =
-            (&row.0, &row.1, &row.2, &row.3, &row.4, &row.5, &row.6, &row.7, &row.8, &row.9, &row.10);
-        let pidx = prompt_idx_of(prompt, &mut prompt_index);
-        let cell_model = model_opt
-            .clone()
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let cell_condition = verdict
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-        let cell = serde_json::json!({
-            "prompt_idx": pidx,
-            "model": cell_model,
-            "condition": cell_condition,
-            "rep": 0_u32,
-            "adopted_from": id,
-            "status": status_v,
-        });
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO methodology_run_dispatches
-                (methodology_run_id, execution_log_id, variant_cell, score)
-             VALUES (?1, ?2, ?3, NULL)",
-            params![&run_id, id, &cell.to_string()],
-        );
-        customer_cost_usd += cost.unwrap_or(0.0);
-        customer_tokens_in += tok_in.unwrap_or(0);
-        customer_tokens_out += tok_out.unwrap_or(0);
-        response_bytes += response.as_ref().map(|s| s.len() as i64).unwrap_or(0);
-        adopted += 1;
-    }
-
-    let rates = CostRateCard::load_with_override();
-    let storage_bytes_estimate = (customer_tokens_in + customer_tokens_out) * 4;
-    let retention_months = 28.0 / 30.0;
-    let storage_cost = (storage_bytes_estimate as f64)
-        * rates.storage_per_byte_month_usd
-        * retention_months;
-    let bandwidth_cost = (response_bytes as f64) * rates.bandwidth_per_byte_usd;
-    let provider_llm_cost_usd = match billing_mode {
-        BillingMode::Byok => 0.0,
-        BillingMode::Pool => customer_cost_usd,
-    };
-    // Adopt has zero orchestrator compute cost (we re-read the receipts;
-    // we don't re-dispatch). Storage + bandwidth still apply because
-    // composition + show queries hit those bytes.
-    let provider_total = provider_llm_cost_usd + storage_cost + bandwidth_cost;
-    let per_run_pro_allocation = 0.29;
-    let margin_usd = per_run_pro_allocation - provider_total;
-    let ended_at = chrono::Utc::now().to_rfc3339();
-
-    conn.execute(
-        "UPDATE methodology_runs SET
-            ended_at = ?1,
-            status = 'complete',
-            total_dispatches_completed = ?2,
-            customer_cost_usd = ?3,
-            customer_tokens_in = ?4,
-            customer_tokens_out = ?5,
-            customer_dispatches = ?6,
-            provider_llm_cost_usd = ?7,
-            provider_storage_bytes = ?8,
-            provider_bandwidth_bytes = ?9,
-            provider_total_cost_usd = ?10,
-            margin_usd = ?11
-         WHERE id = ?12",
-        params![
-            &ended_at,
-            adopted as i64,
-            customer_cost_usd,
-            customer_tokens_in,
-            customer_tokens_out,
-            adopted as i64,
-            provider_llm_cost_usd,
-            storage_bytes_estimate,
-            response_bytes,
-            provider_total,
-            margin_usd,
-            &run_id,
-        ],
-    )
-    .context("finalize adopted methodology_runs row")?;
-
-    if opts.human {
-        emit_human(&format!(
-            "Adopted {} execution_logs rows into methodology run {}.\n  methodology:     {}\n  distinct prompts: {}\n  YOUR cost:        ${:.4}\n  YOUR tokens:      {} in / {} out\n  OUR cost:         ${:.4}\n  margin (est):     ${:.4}\n\nNext: `ato evaluations methodology runs show {}` for the composition.",
-            adopted, run_id, slug, prompt_index.len(),
-            customer_cost_usd, customer_tokens_in, customer_tokens_out,
-            provider_total, margin_usd, run_id
-        ));
-    } else {
-        let _ = emit_json(&serde_json::json!({
-            "run_id": run_id,
-            "methodology_slug": slug,
-            "adopted": adopted,
-            "distinct_prompts": prompt_index.len(),
-            "customer_cost_usd": customer_cost_usd,
-            "customer_tokens_in": customer_tokens_in,
-            "customer_tokens_out": customer_tokens_out,
-            "provider_total_cost_usd": provider_total,
-            "margin_usd": margin_usd,
-        }));
-    }
-    Ok(())
+    let mut args: Vec<String> = vec!["--slug".into(), slug, "--billing".into(), billing, "--status".into(), status, "--limit".into(), limit.to_string()];
+    if let Some(s) = since { args.push("--since".into()); args.push(s); }
+    if let Some(u) = until { args.push("--until".into()); args.push(u); }
+    if let Some(r) = runtime { args.push("--runtime".into()); args.push(r); }
+    if let Some(m) = model { args.push("--model".into()); args.push(m); }
+    if let Some(a) = agent { args.push("--agent".into()); args.push(a); }
+    crate::pro_client::delegate("adopt", &args, db_path, opts.human, opts.quiet)
 }
+
 
 fn handle_score(run_id: String, force: bool, db_path: &PathBuf, opts: &Opts) -> Result<()> {
-    let conn = db::open_readwrite(db_path)?;
-    // Pull the methodology's rubric from the run's methodology row.
-    let rubric_json: String = conn
-        .query_row(
-            "SELECT m.rubric FROM methodologies m
-             JOIN methodology_runs r ON r.methodology_id = m.id
-             WHERE r.id = ?1",
-            params![&run_id],
-            |r| r.get(0),
-        )
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "no methodology run with id '{}'. `ato evaluations methodology runs list` to see what's there.",
-                run_id
-            )
-        })?;
-    let rubric_value: serde_json::Value =
-        serde_json::from_str(&rubric_json).unwrap_or(serde_json::Value::Null);
-    let rubric: Rubric = Rubric::parse(&rubric_value).unwrap_or(Rubric::Pending);
-    if matches!(rubric, Rubric::Pending) {
-        anyhow::bail!(
-            "methodology's rubric is `pending` — define a real rubric on the methodology before scoring. See `docs/methodology-runner.md` rubric section.",
-        );
-    }
-
-    // Pull all (or only un-scored) dispatches + the prompt + response from execution_logs.
-    let sql = if force {
-        "SELECT mrd.execution_log_id, e.prompt, e.response
-         FROM methodology_run_dispatches mrd
-         JOIN execution_logs e ON e.id = mrd.execution_log_id
-         WHERE mrd.methodology_run_id = ?1"
-    } else {
-        "SELECT mrd.execution_log_id, e.prompt, e.response
-         FROM methodology_run_dispatches mrd
-         JOIN execution_logs e ON e.id = mrd.execution_log_id
-         WHERE mrd.methodology_run_id = ?1 AND mrd.score IS NULL"
-    };
-    let mut stmt = conn.prepare(sql)?;
-    let rows: Vec<(String, String, Option<String>)> = stmt
-        .query_map(params![&run_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    if rows.is_empty() {
-        if opts.human {
-            emit_human(&format!(
-                "Nothing to score for run {}. {}",
-                run_id,
-                if force { "Run is empty." } else { "All dispatches already scored — pass --force to re-score." }
-            ));
-        } else {
-            let _ = emit_json(&serde_json::json!({
-                "run_id": run_id,
-                "scored": 0_u32,
-                "force": force,
-            }));
-        }
-        return Ok(());
-    }
-
-    let mut scored: u32 = 0;
-    let mut total_score: f64 = 0.0;
-    let mut total_judge_cost: f64 = 0.0;
-    let mut sum_passed: u32 = 0;
-    for (eid, prompt, response_opt) in &rows {
-        let response = response_opt.clone().unwrap_or_default();
-        let result = rubric.score(prompt, &response, db_path);
-        let s = match result {
-            Ok(s) => s,
-            Err(e) => crate::methodology::rubric::RubricScore::fail(format!(
-                "rubric error: {}",
-                e
-            )),
-        };
-        let _ = conn.execute(
-            "UPDATE methodology_run_dispatches SET score = ?1
-             WHERE methodology_run_id = ?2 AND execution_log_id = ?3",
-            params![s.score, &run_id, eid],
-        );
-        scored += 1;
-        total_score += s.score;
-        total_judge_cost += s.judge_cost_usd;
-        if s.score >= 0.5 {
-            sum_passed += 1;
-        }
-    }
-    // Bump provider_judge_cost_usd + provider_total_cost_usd if any
-    // judge calls landed here. Margin recomputes from the same per-run
-    // allocation as the runner.
-    let _ = conn.execute(
-        "UPDATE methodology_runs SET
-            provider_judge_cost_usd = provider_judge_cost_usd + ?1,
-            provider_total_cost_usd = provider_total_cost_usd + ?1,
-            margin_usd = margin_usd - ?1
-         WHERE id = ?2",
-        params![total_judge_cost, &run_id],
-    );
-
-    let mean = total_score / (scored as f64);
-    if opts.human {
-        emit_human(&format!(
-            "Scored {} dispatches in run {}.\n  mean score:    {:.3}\n  passed (≥0.5): {}/{}\n  judge cost:    ${:.4}\n\nRun `runs show {}` for the per-cell breakdown.",
-            scored, run_id, mean, sum_passed, scored, total_judge_cost, run_id
-        ));
-    } else {
-        let _ = emit_json(&serde_json::json!({
-            "run_id": run_id,
-            "scored": scored,
-            "mean_score": mean,
-            "passed_at_threshold_0_5": sum_passed,
-            "judge_cost_usd": total_judge_cost,
-        }));
-    }
-    Ok(())
+    let mut args: Vec<String> = vec!["--run-id".into(), run_id];
+    if force { args.push("--force".into()); }
+    crate::pro_client::delegate("score", &args, db_path, opts.human, opts.quiet)
 }
+
 
 fn handle_margin(
     since: Option<String>,
@@ -1607,157 +1230,13 @@ fn handle_margin(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    let conn = db::open_readonly(db_path)?;
-    let mut where_clauses: Vec<String> = Vec::new();
-    let mut bind: Vec<String> = Vec::new();
-    if let Some(s) = &since {
-        where_clauses.push(format!("r.started_at >= ?{}", bind.len() + 1));
-        bind.push(s.clone());
-    }
-    if let Some(u) = &until {
-        where_clauses.push(format!("r.started_at <= ?{}", bind.len() + 1));
-        bind.push(u.clone());
-    }
-    if let Some(slug) = &methodology {
-        where_clauses.push(format!("m.slug = ?{}", bind.len() + 1));
-        bind.push(slug.clone());
-    }
-    let where_sql = if where_clauses.is_empty() {
-        "1=1".to_string()
-    } else {
-        where_clauses.join(" AND ")
-    };
-    let sql = format!(
-        "SELECT
-            COUNT(*) AS n_runs,
-            COALESCE(SUM(r.total_dispatches_completed), 0) AS n_dispatches,
-            COALESCE(SUM(r.customer_cost_usd), 0) AS customer_cost,
-            COALESCE(SUM(r.provider_llm_cost_usd), 0) AS provider_llm,
-            COALESCE(SUM(r.provider_judge_cost_usd), 0) AS provider_judge,
-            COALESCE(SUM(r.provider_compute_seconds * 0.000005), 0) AS provider_compute,
-            COALESCE(SUM(r.provider_storage_bytes), 0) AS storage_bytes,
-            COALESCE(SUM(r.provider_bandwidth_bytes), 0) AS bandwidth_bytes,
-            COALESCE(SUM(r.provider_total_cost_usd), 0) AS provider_total,
-            COALESCE(SUM(r.margin_usd), 0) AS margin
-         FROM methodology_runs r
-         JOIN methodologies m ON m.id = r.methodology_id
-         WHERE {}",
-        where_sql
-    );
-    let params_iter: Vec<&dyn rusqlite::ToSql> =
-        bind.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    let (
-        n_runs,
-        n_dispatches,
-        customer_cost,
-        provider_llm,
-        provider_judge,
-        provider_compute,
-        storage_bytes,
-        bandwidth_bytes,
-        provider_total,
-        margin,
-    ): (i64, i64, f64, f64, f64, f64, i64, i64, f64, f64) = conn.query_row(
-        &sql,
-        params_iter.as_slice(),
-        |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-                r.get(9)?,
-            ))
-        },
-    )?;
-
-    let rates = CostRateCard::load_with_override();
-    if opts.human {
-        emit_human(&format!(
-            "Methodology margin report\
-             \n  window:           {}\
-             \n  runs:             {}\
-             \n  dispatches:       {}\
-             \n\
-             \nCustomer side (their LLM bill):\
-             \n  customer cost:    ${:.4}\
-             \n\
-             \nOur side (what we pay to deliver):\
-             \n  LLM (pool mode):  ${:.4}\
-             \n  LLM-judge:        ${:.4}\
-             \n  Compute:          ${:.4}\
-             \n  Storage:          {} bytes\
-             \n  Bandwidth:        {} bytes\
-             \n  ─────────────────────────────\
-             \n  OUR total:        ${:.4}\
-             \n\
-             \nRate card (rate-card-v1, also in pricing.json):\
-             \n  llm_judge / call:        ${:.5}\
-             \n  compute / second:        ${:.6}\
-             \n  storage / byte-month:    ${:.10}\
-             \n  bandwidth / byte:        ${:.10}\
-             \n\
-             \nMargin (positive = profitable at $0.29/run allocation):\
-             \n  total margin:     ${:.4}\
-             \n  margin / run:     ${:.4}\
-             \n  margin %:         {:.1}%",
-            window_label(since.as_deref(), until.as_deref()),
-            n_runs,
-            n_dispatches,
-            customer_cost,
-            provider_llm,
-            provider_judge,
-            provider_compute,
-            storage_bytes,
-            bandwidth_bytes,
-            provider_total,
-            rates.llm_judge_cost_per_call_usd,
-            rates.compute_per_second_usd,
-            rates.storage_per_byte_month_usd,
-            rates.bandwidth_per_byte_usd,
-            margin,
-            if n_runs > 0 { margin / n_runs as f64 } else { 0.0 },
-            if provider_total > 0.0 { 100.0 * margin / (margin + provider_total) } else { 0.0 },
-        ));
-    } else {
-        let _ = emit_json(&serde_json::json!({
-            "window": {
-                "since": since,
-                "until": until,
-                "methodology": methodology,
-            },
-            "n_runs": n_runs,
-            "n_dispatches": n_dispatches,
-            "customer_cost_usd": customer_cost,
-            "provider": {
-                "llm_cost_usd": provider_llm,
-                "judge_cost_usd": provider_judge,
-                "compute_cost_usd": provider_compute,
-                "storage_bytes": storage_bytes,
-                "bandwidth_bytes": bandwidth_bytes,
-                "total_usd": provider_total,
-            },
-            "margin": {
-                "total_usd": margin,
-                "per_run_usd": if n_runs > 0 { margin / n_runs as f64 } else { 0.0 },
-                "pct": if provider_total > 0.0 { 100.0 * margin / (margin + provider_total) } else { 0.0 },
-            },
-            "rate_card_v1": {
-                "llm_judge_per_call_usd": rates.llm_judge_cost_per_call_usd,
-                "compute_per_second_usd": rates.compute_per_second_usd,
-                "storage_per_byte_month_usd": rates.storage_per_byte_month_usd,
-                "bandwidth_per_byte_usd": rates.bandwidth_per_byte_usd,
-                "source": "packages/ato-pricing/pricing.json",
-            },
-        }));
-    }
-    Ok(())
+    let mut args: Vec<String> = Vec::new();
+    if let Some(s) = since { args.push("--since".into()); args.push(s); }
+    if let Some(u) = until { args.push("--until".into()); args.push(u); }
+    if let Some(m) = methodology { args.push("--methodology".into()); args.push(m); }
+    crate::pro_client::delegate("margin", &args, db_path, opts.human, opts.quiet)
 }
+
 
 // ── v2.11 PR-12.4: methodology diagnose --apply ────────────────────────
 
@@ -2410,86 +1889,17 @@ fn handle_schedule_create(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    // v2.11 PR-12.05 — schedule creation is the codified automation we
-    // package; gating it Pro is consistent with the open-core principle
-    // (the customer can write their own launchd plist by hand if they
-    // want to skip our automation). Existing schedules keep firing —
-    // we don't touch what's already in ~/.ato/cron-jobs.json or what
-    // the OS scheduler has registered. Only `create` is gated; list /
-    // delete / trigger remain free so customers can manage what they
-    // already set up.
-    crate::tier::require_feature("methodology.schedule")?;
-
-    // Validate the methodology exists before scheduling it — saves a
-    // confused-customer email at 9:01am Monday when the scheduled run
-    // fails because the slug was a typo.
-    let conn = db::open_readonly(db_path)?;
-    conn.query_row::<String, _, _>(
-        "SELECT slug FROM methodologies WHERE slug = ?1",
-        params![&methodology_slug],
-        |r| r.get(0),
-    )
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "no methodology with slug '{}'. `ato evaluations methodology list` to see what's defined.",
-            methodology_slug
-        )
-    })?;
-
-    let _ = BillingMode::parse(&billing).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown billing mode '{}'. Valid values: byok | pool",
-            billing
-        )
-    })?;
-
-    let mut jobs = load_cron_jobs();
-    let now = chrono::Utc::now().to_rfc3339();
-    let job = serde_json::json!({
-        "id": id,
-        "name": name.clone().unwrap_or_else(|| format!("Methodology: {}", methodology_slug)),
-        "type": "methodology",
-        "cron": cron,
-        "enabled": true,
-        "createdAt": now,
-        "methodologySlug": methodology_slug,
-        "methodologyBilling": billing,
-        "methodologyMaxDispatches": max_dispatches,
-        // ATO desktop cron expects a `runtime` and `prompt` even when
-        // they don't drive the dispatch path; set sentinels so the
-        // existing list_cron_jobs UI doesn't error reading them.
-        "runtime": "methodology",
-        "prompt": format!("(methodology run: {})", methodology_slug),
-    });
-
-    if let Some(idx) = jobs
-        .iter()
-        .position(|j| j.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-    {
-        jobs[idx] = job;
-    } else {
-        jobs.push(job);
-    }
-    save_cron_jobs(&jobs)?;
-
-    if opts.human {
-        emit_human(&format!(
-            "Scheduled methodology '{}' as cron job '{}' on `{}`. \
-             Next: register with the OS scheduler from the ATO desktop app \
-             (Settings → Cron → Register) so the schedule actually fires. \
-             To smoke-test now, run: `ato evaluations methodology schedule trigger {}`",
-            methodology_slug, id, cron, id,
-        ));
-    } else {
-        let _ = emit_json(&serde_json::json!({
-            "id": id,
-            "methodologySlug": methodology_slug,
-            "cron": cron,
-            "enabled": true,
-        }));
-    }
-    Ok(())
+    let mut args: Vec<String> = vec![
+        "--id".into(), id,
+        "--methodology".into(), methodology_slug,
+        "--cron".into(), cron,
+        "--billing".into(), billing,
+    ];
+    if let Some(n) = name { args.push("--name".into()); args.push(n); }
+    if let Some(m) = max_dispatches { args.push("--max-dispatches".into()); args.push(m.to_string()); }
+    crate::pro_client::delegate("schedule-create", &args, db_path, opts.human, opts.quiet)
 }
+
 
 fn handle_schedule_list(opts: &Opts) -> Result<()> {
     let jobs = load_cron_jobs();
