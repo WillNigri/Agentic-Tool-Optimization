@@ -1800,16 +1800,42 @@ fn handle_apply(
         )
     })?;
 
+    // PR-12.4.2 — look up the agent's runtime from the agents table so
+    // we use the right path convention (claude / codex / openclaw /
+    // hermes). Default to claude if the agent isn't in the table
+    // (preserves PR-12.4 behavior for hand-created smoke methodologies).
+    let conn = db::open_readonly(db_path)?;
+    let agent_runtime: String = conn
+        .query_row(
+            "SELECT runtime FROM agents WHERE slug = ?1 ORDER BY last_used_at DESC LIMIT 1",
+            params![&agent_slug],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "claude".to_string());
+    drop(conn);
+
     // Interactive y/N gate (skipped if --yes).
     if !yes {
         let parent_path =
-            crate::methodology::diagnose::resolve_claude_agent_path(&agent_slug);
+            crate::methodology::diagnose::resolve_agent_path(&agent_slug, &agent_runtime)
+                .with_context(|| {
+                    format!(
+                        "resolve agent path for slug='{}' runtime='{}'",
+                        agent_slug, agent_runtime
+                    )
+                })?;
+        let variant_path =
+            crate::methodology::diagnose::resolve_agent_path(
+                &proposal.variant_slug,
+                &agent_runtime,
+            )?;
         let question = format!(
-            "Apply proposed variant '{}' as a copy of agent '{}' (file: {} → ~/.claude/agents/{}.md)?",
+            "Apply proposed variant '{}' as a copy of agent '{}' (runtime={})?\n  parent: {}\n  variant: {}",
             proposal.variant_slug,
             agent_slug,
+            agent_runtime,
             parent_path.display(),
-            proposal.variant_slug
+            variant_path.display()
         );
         let confirmed = crate::methodology::diagnose::prompt_confirm(&question)?;
         if !confirmed {
@@ -1828,6 +1854,7 @@ fn handle_apply(
     let outcome = crate::methodology::diagnose::apply_proposal(
         proposal,
         &agent_slug,
+        &agent_runtime,
         db_path,
         &result.diagnose_model,
         run_id,

@@ -578,30 +578,48 @@ pub fn diagnose_run(
 
     // Agent definition: read the real file when the methodology has
     // an agent_slug binding; fall back to the synthetic stand-in for
-    // cold-dispatch runs (already warned above). Per PR-12.4 scope we
-    // resolve the claude-runtime path only — other runtimes land in
-    // PR-12.4.x.
+    // cold-dispatch runs (already warned above). PR-12.4.2 looks up
+    // the agent's runtime from the agents table so the right path
+    // convention is used (claude / codex / openclaw / hermes).
     let agent_definition = match &agent_slug {
         Some(slug) => {
-            let path = resolve_claude_agent_path(slug);
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => {
-                    if contents.is_empty() {
+            // Look up runtime via the agents table; fall back to
+            // claude if no row matches (preserves PR-12.4 behavior
+            // for legacy methodologies + bare claude smoke runs).
+            let conn = db::open_readonly(db_path)?;
+            let runtime: String = conn
+                .query_row(
+                    "SELECT runtime FROM agents WHERE slug = ?1 ORDER BY last_used_at DESC LIMIT 1",
+                    params![slug],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| "claude".to_string());
+            drop(conn);
+            match resolve_agent_path(slug, &runtime) {
+                Ok(path) => match std::fs::read_to_string(&path) {
+                    Ok(contents) if !contents.is_empty() => contents,
+                    Ok(_) => {
                         eprintln!(
                             "warning: agent file at {} is empty; falling back to synthetic definition",
                             path.display()
                         );
                         synthetic_agent_definition(&cells)
-                    } else {
-                        contents
                     }
-                }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: agent_slug '{}' (runtime={}) has no file at {} ({}); falling back to synthetic definition",
+                            slug,
+                            runtime,
+                            path.display(),
+                            e
+                        );
+                        synthetic_agent_definition(&cells)
+                    }
+                },
                 Err(e) => {
                     eprintln!(
-                        "warning: agent_slug '{}' is set but no file found at {} ({}); falling back to synthetic definition",
-                        slug,
-                        path.display(),
-                        e
+                        "warning: cannot resolve agent path for slug='{}' runtime='{}': {}; falling back to synthetic definition",
+                        slug, runtime, e
                     );
                     synthetic_agent_definition(&cells)
                 }
@@ -1363,37 +1381,95 @@ pub struct ApplyOutcome {
     pub bytes_written: usize,
 }
 
-/// Resolve the on-disk path for `<slug>.md` under the claude runtime.
-/// PR-12.4.x will add codex/gemini/openclaw/hermes paths per CLAUDE.md
-/// "File-writing contract per runtime" — for now we hardcode the
-/// claude convention since all v2.11 dogfood methodologies target it.
-pub fn resolve_claude_agent_path(slug: &str) -> PathBuf {
+/// Resolve the on-disk path for an agent slug under a specific runtime.
+/// Mirrors the "File-writing contract per runtime" table in CLAUDE.md.
+///
+/// Path conventions (PR-12.4 shipped claude only; PR-12.4.2 adds the rest):
+///   - claude   : `~/.claude/agents/<slug>.md`           (flat file)
+///   - codex    : `~/.codex/agents/<slug>/AGENTS.md`     (directory + AGENTS.md)
+///   - openclaw : `~/.openclaw/agents/<slug>/SOUL.md`    (directory + SOUL.md)
+///   - hermes   : `~/.hermes/agents/<slug>/SOUL.md`      (directory + SOUL.md;
+///                                                        Hermes mirrors OpenClaw)
+///   - gemini   : NOT SUPPORTED YET — gemini paths are project-local
+///                (`<project>/.gemini/agents/<slug>.yaml`) and we
+///                don't have project resolution wired here yet.
+///
+/// Returns `Err` for unsupported runtimes so the caller surfaces a
+/// clear refusal instead of silently writing somewhere wrong.
+pub fn resolve_agent_path(slug: &str, runtime: &str) -> Result<PathBuf> {
     let mut p = crate::db::home_dir();
-    p.push(".claude");
-    p.push("agents");
-    p.push(format!("{}.md", slug));
-    p
+    match runtime.to_lowercase().as_str() {
+        "claude" => {
+            p.push(".claude");
+            p.push("agents");
+            p.push(format!("{}.md", slug));
+            Ok(p)
+        }
+        "codex" => {
+            p.push(".codex");
+            p.push("agents");
+            p.push(slug);
+            p.push("AGENTS.md");
+            Ok(p)
+        }
+        "openclaw" => {
+            p.push(".openclaw");
+            p.push("agents");
+            p.push(slug);
+            p.push("SOUL.md");
+            Ok(p)
+        }
+        "hermes" => {
+            p.push(".hermes");
+            p.push("agents");
+            p.push(slug);
+            p.push("SOUL.md");
+            Ok(p)
+        }
+        "gemini" => anyhow::bail!(
+            "gemini runtime uses project-local agent paths (`<project>/.gemini/agents/{}.yaml`) which aren't supported by `--apply` yet. Ship the variant manually for now, or open a tracking issue for project-resolution.",
+            slug
+        ),
+        other => anyhow::bail!(
+            "unknown runtime '{}' — cannot resolve agent path for slug '{}'. Supported: claude / codex / openclaw / hermes",
+            other,
+            slug
+        ),
+    }
 }
 
-/// Apply a validated proposal to disk. Variant lives at
-/// `~/.claude/agents/<variant_slug>.md` (claude-only for PR-12.4).
+/// Back-compat shim. PR-12.4 callers pass slug only; under the hood
+/// we still default to the claude convention. Kept so existing
+/// integration tests + scripts don't break.
+#[allow(dead_code)]
+pub fn resolve_claude_agent_path(slug: &str) -> PathBuf {
+    // .unwrap() is safe — claude is always supported.
+    resolve_agent_path(slug, "claude").unwrap()
+}
+
+/// Apply a validated proposal to disk. Variant location is determined
+/// by the runtime convention (PR-12.4.2 multi-runtime: claude flat,
+/// codex+openclaw+hermes directory-style). Gemini's project-local
+/// path is not yet supported and is rejected with a clear error.
+///
 /// Lineage row goes into agent_variant_lineage with auto-incremented
 /// generation (parent's max generation + 1, default 1).
 pub fn apply_proposal(
     proposal: &DiagnoseProposal,
     parent_slug: &str,
+    parent_runtime: &str,
     db_path: &Path,
     diagnose_model: &str,
     run_id: &str,
 ) -> Result<ApplyOutcome> {
     validate_proposal(proposal)?;
 
-    // Read the parent agent file. PR-12.4 = claude path only.
-    let parent_path = resolve_claude_agent_path(parent_slug);
+    let parent_path = resolve_agent_path(parent_slug, parent_runtime)?;
     if !parent_path.exists() {
         anyhow::bail!(
-            "parent agent file not found at {}. The methodology's agent_slug must point to an existing claude-runtime agent (~/.claude/agents/<slug>.md). Multi-runtime path resolution lands in PR-12.4.x.",
-            parent_path.display()
+            "parent agent file not found at {}. The methodology's agent_slug must point to an existing {} agent.",
+            parent_path.display(),
+            parent_runtime
         );
     }
     let parent_content = std::fs::read_to_string(&parent_path)
@@ -1406,7 +1482,7 @@ pub fn apply_proposal(
     }
 
     // Variant path. No-overwrite guard — fresh slug per --apply.
-    let variant_path = resolve_claude_agent_path(&proposal.variant_slug);
+    let variant_path = resolve_agent_path(&proposal.variant_slug, parent_runtime)?;
     if variant_path.exists() {
         anyhow::bail!(
             "variant file already exists at {}. Pick a different variant_slug or delete the existing file first.",
@@ -1692,6 +1768,59 @@ mod apply_tests {
         let p = resolve_claude_agent_path("my-reviewer");
         let s = p.display().to_string();
         assert!(s.ends_with("/.claude/agents/my-reviewer.md"));
+    }
+
+    // PR-12.4.2 — per-runtime path resolution tests.
+    #[test]
+    fn resolve_agent_path_handles_all_supported_runtimes() {
+        let claude = resolve_agent_path("rev", "claude").unwrap();
+        assert!(claude.display().to_string().ends_with("/.claude/agents/rev.md"));
+
+        let codex = resolve_agent_path("rev", "codex").unwrap();
+        assert!(codex
+            .display()
+            .to_string()
+            .ends_with("/.codex/agents/rev/AGENTS.md"));
+
+        let openclaw = resolve_agent_path("rev", "openclaw").unwrap();
+        assert!(openclaw
+            .display()
+            .to_string()
+            .ends_with("/.openclaw/agents/rev/SOUL.md"));
+
+        let hermes = resolve_agent_path("rev", "hermes").unwrap();
+        assert!(hermes
+            .display()
+            .to_string()
+            .ends_with("/.hermes/agents/rev/SOUL.md"));
+    }
+
+    #[test]
+    fn resolve_agent_path_rejects_gemini_with_clear_message() {
+        // Gemini paths are project-local; we deliberately bail rather
+        // than guess a project root + write somewhere wrong.
+        let err = resolve_agent_path("rev", "gemini").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("project-local"));
+        assert!(msg.contains("gemini"));
+    }
+
+    #[test]
+    fn resolve_agent_path_rejects_unknown_runtime() {
+        let err = resolve_agent_path("rev", "neuralink").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown runtime"));
+        assert!(msg.contains("neuralink"));
+    }
+
+    #[test]
+    fn resolve_agent_path_is_case_insensitive_on_runtime() {
+        // Runtime names normally come from the agents table verbatim
+        // (lowercase), but defensive normalization protects against
+        // any future caller passing "Claude" / "OPENCLAW" / etc.
+        assert!(resolve_agent_path("x", "Claude").is_ok());
+        assert!(resolve_agent_path("x", "CODEX").is_ok());
+        assert!(resolve_agent_path("x", "OpenClaw").is_ok());
     }
 
     #[test]
