@@ -611,17 +611,17 @@ pub fn diagnose_run(
             None => "claude".to_string(),
         });
 
-    // Snapshot the execution_logs rowid so we can capture the diagnose
-    // dispatch row deterministically (same rowid > before idiom the
-    // runner + rubric llm_judge use).
-    let before_max: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM execution_logs",
-            [],
-            |r| r.get(0),
-        )
-        .context("read execution_logs MAX(rowid) before diagnose dispatch")?;
     drop(conn);
+    // v2.11 PR-12.7 — Unique per-call sentinel UUID, stamped onto
+    // execution_logs.war_room_id via the dispatch CLI's
+    // --war-room-id flag. Replaces the prior "rowid > before" capture
+    // which raced under any concurrent writer (observed 2026-05-25:
+    // a parallel runner grabbed an in-flight diagnose dispatch's row
+    // by mistake — half the n=30 cells captured the diagnose prompt
+    // as their "cell response"). --war-room-id accepts any UUID
+    // without requiring a pre-existing sessions row, which --session
+    // would. The semantic stretch is intentional + documented.
+    let diagnose_war_room_id = uuid::Uuid::new_v4().to_string();
 
     // v2.11 PR-12.6 — Use the shared CLI-path resolver. Lets a dev
     // binary delegate to the prod binary for keychain-bound API
@@ -637,6 +637,8 @@ pub fn diagnose_run(
         .arg("--model")
         .arg(&diagnose_model)
         .arg("--quiet")
+        .arg("--war-room-id")
+        .arg(&diagnose_war_room_id)
         .arg("--db")
         .arg(db_path)
         .output()
@@ -655,7 +657,8 @@ pub fn diagnose_run(
         );
     }
 
-    // Capture the new execution_logs row.
+    // Capture the new execution_logs row by sentinel war_room_id.
+    // Bulletproof under concurrent writers.
     let conn = db::open_readonly(db_path)?;
     let row: (
         Option<String>,
@@ -668,13 +671,18 @@ pub fn diagnose_run(
         .query_row(
             "SELECT id, response, cost_usd_estimated, tokens_in, tokens_out, status
              FROM execution_logs
-             WHERE rowid > ?1
-             ORDER BY rowid ASC
+             WHERE war_room_id = ?1
+             ORDER BY rowid DESC
              LIMIT 1",
-            params![before_max],
+            params![&diagnose_war_room_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
-        .context("read diagnose dispatch's execution_logs row")?;
+        .with_context(|| {
+            format!(
+                "read diagnose dispatch's execution_logs row for war_room_id={}",
+                diagnose_war_room_id
+            )
+        })?;
 
     let execution_log_id = row.0.clone();
     let raw_response = row.1.unwrap_or_default();

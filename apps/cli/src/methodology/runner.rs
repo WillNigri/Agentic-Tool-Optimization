@@ -397,8 +397,15 @@ struct DispatchRecord {
 }
 
 /// Shell out to `ato dispatch` for one cell. Captures the resulting
-/// execution_logs row via a rowid > before idiom so we don't depend on
-/// dispatch::run returning the inserted id (it doesn't).
+/// execution_logs row via a unique per-call `session_id` UUID passed
+/// through `--session <id>` and queried back. Code-review finding #1
+/// from PR-12.7 (concurrency bug): the previous "rowid > before"
+/// pattern raced under any concurrent writer — observed during the
+/// n=30 background run when a parallel `ato evaluations methodology
+/// diagnose` dispatch got captured as one of the runner's cells.
+/// The session_id capture is bulletproof: even with N concurrent
+/// runners writing simultaneously, each `SELECT WHERE session_id = ?`
+/// returns the unique row that bears the runner's chosen UUID.
 ///
 /// `runtime_override`: when `Some("claude" | "codex" | "gemini")`, use
 /// the CLI runtime instead of auto-deriving the API provider from the
@@ -410,15 +417,13 @@ fn dispatch_cell(
     cell: &VariantCell,
     runtime_override: Option<&str>,
 ) -> Result<DispatchRecord> {
-    let conn = db::open_readonly(db_path)?;
-    let before_max: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM execution_logs",
-            [],
-            |r| r.get(0),
-        )
-        .context("read execution_logs MAX(rowid) before dispatch")?;
-    drop(conn);
+    // Per-dispatch sentinel UUID, stamped onto execution_logs via
+    // `--war-room-id`. We use `--war-room-id` rather than `--session`
+    // because the latter requires a pre-existing sessions row;
+    // `--war-room-id` accepts any UUID-shaped string and lands on the
+    // indexed `execution_logs.war_room_id` column. The semantic
+    // stretch is intentional and documented at the read site below.
+    let dispatch_war_room_id = Uuid::new_v4().to_string();
 
     let runtime = match runtime_override {
         Some(r) => r.to_string(),
@@ -435,7 +440,9 @@ fn dispatch_cell(
         .arg(prompt)
         .arg("--model")
         .arg(&cell.model)
-        .arg("--quiet");
+        .arg("--quiet")
+        .arg("--war-room-id")
+        .arg(&dispatch_war_room_id);
     if cell.condition == "soft" || cell.condition == "strict" {
         cmd.arg("--mode-override").arg(&cell.condition);
     }
@@ -457,19 +464,22 @@ fn dispatch_cell(
         );
     }
 
-    // Now read the newly-inserted execution_logs row. The "rowid > before"
-    // guard handles the case where parallel writers might add rows we
-    // didn't initiate — PR-3 fan-out is sequential, but the guard
-    // costs nothing and forward-protects PR-future parallel mode.
+    // PR-12.7 fix: query by the unique --war-room-id sentinel we
+    // stamped on the outbound dispatch. Bulletproof under concurrency
+    // — N parallel runners / diagnoses / judges hitting the same DB
+    // each get back exactly the row they wrote. The semantic stretch
+    // (we're not really running a war room) is the price we pay for
+    // a sentinel field that's BOTH accepted on the dispatch CLI AND
+    // queryable on execution_logs without inventing a new column.
     let conn = db::open_readonly(db_path)?;
     let row = conn
         .query_row(
             "SELECT id, cost_usd_estimated, tokens_in, tokens_out, duration_ms, response, status, grounding_verdict
              FROM execution_logs
-             WHERE rowid > ?1
-             ORDER BY rowid ASC
+             WHERE war_room_id = ?1
+             ORDER BY rowid DESC
              LIMIT 1",
-            params![before_max],
+            params![&dispatch_war_room_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -483,7 +493,7 @@ fn dispatch_cell(
                 ))
             },
         )
-        .context("read execution_logs row inserted by dispatch")?;
+        .with_context(|| format!("read execution_logs row for war_room_id={}", dispatch_war_room_id))?;
 
     let response_bytes = row.5.as_ref().map(|s| s.len() as i64).unwrap_or(0);
     Ok(DispatchRecord {

@@ -322,17 +322,13 @@ fn score_llm_judge(
         .replace("{{prompt}}", prompt)
         .replace("{{response}}", response);
 
-    // Capture the new execution_logs row via the same rowid-before idiom
-    // the runner uses for fan-out cells.
-    let conn = crate::db::open_readonly(db_path)?;
-    let before_max: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM execution_logs",
-            [],
-            |r| r.get(0),
-        )
-        .context("read execution_logs MAX(rowid) before judge dispatch")?;
-    drop(conn);
+    // v2.11 PR-12.7 — Unique per-call sentinel UUID stamped on
+    // execution_logs.war_room_id via dispatch's --war-room-id flag.
+    // Replaces the prior race-vulnerable "rowid > before" capture.
+    // Using --war-room-id (not --session) because the latter requires
+    // a pre-existing sessions row; war_room_id accepts any UUID + is
+    // indexed for fast lookup.
+    let judge_war_room_id = uuid::Uuid::new_v4().to_string();
 
     // v2.11 PR-12.6 — Shared CLI-path resolver (ATO_CLI_PATH override).
     // Lets a dev binary delegate the judge dispatch to the prod binary
@@ -346,6 +342,8 @@ fn score_llm_judge(
         .arg("--model")
         .arg(judge_model)
         .arg("--quiet")
+        .arg("--war-room-id")
+        .arg(&judge_war_room_id)
         .arg("--db")
         .arg(db_path)
         .output()
@@ -365,13 +363,18 @@ fn score_llm_judge(
         .query_row(
             "SELECT response, cost_usd_estimated, status
              FROM execution_logs
-             WHERE rowid > ?1
-             ORDER BY rowid ASC
+             WHERE war_room_id = ?1
+             ORDER BY rowid DESC
              LIMIT 1",
-            rusqlite::params![before_max],
+            rusqlite::params![&judge_war_room_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .context("read judge dispatch's execution_logs row")?;
+        .with_context(|| {
+            format!(
+                "read judge dispatch's execution_logs row for war_room_id={}",
+                judge_war_room_id
+            )
+        })?;
 
     let judge_response = row.0.unwrap_or_default();
     let judge_cost = row.1.unwrap_or(0.0);
