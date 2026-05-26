@@ -24,6 +24,15 @@ const SUCCESS_URL =
 const CANCEL_URL =
   "https://agentictool.ai/billing/cancel?session_id={CHECKOUT_SESSION_ID}";
 
+// Stripe-Checkout-hosted page is the only host we expect from
+// POST /api/billing/checkout's `data.url`. Pinning it as an exact
+// match is the cheap defense-in-depth check the coordinator review
+// asked for: a future cloud bug, response-shape change, or compromise
+// that returns an attacker-controlled URL would land users on a
+// phishing page that looks like Stripe. The host is fixed by Stripe;
+// hardcoding it costs nothing.
+const STRIPE_CHECKOUT_HOST = "checkout.stripe.com";
+
 // Only "pro" has a wired call site today. Team self-serve requires a
 // 5-seat minimum on the cloud side (services/billing/src/checkout.ts:139)
 // and a Team-pricing UI that hasn't shipped — keep this union honest.
@@ -99,12 +108,14 @@ async function postCheckoutWithRefresh(
   // access token has expired (common when the trial banner sits idle
   // for >access-token-TTL before the user clicks Upgrade), the cloud
   // returns 401; we ask the auth store to refresh and retry once with
-  // the fresh token from the store.
+  // the fresh token from the store. Note: useAuth's refreshAccessToken
+  // currently always resolves to true (silent failure on network
+  // errors), so the real safeguard against an unchanged token is
+  // `next === jwt` below — only retry when the store actually rotated.
   const initial = await postCheckout(jwt, tier);
   if (initial.status !== 401) return initial;
 
-  const refreshed = await useAuthStore.getState().refreshAccessToken();
-  if (!refreshed) return initial;
+  await useAuthStore.getState().refreshAccessToken();
   const next = useAuthStore.getState().accessToken;
   if (!next || next === jwt) return initial;
   return postCheckout(next, tier);
@@ -185,6 +196,18 @@ export async function startCheckout(
     }
   }
 
+  if (response.status === 401) {
+    // Reached only when the refresh-and-retry path in
+    // postCheckoutWithRefresh also returned 401 (refresh failed silently
+    // or the new token is also stale). Surface a specific code so the
+    // UI can render a "session expired — sign in again" notice instead
+    // of an opaque HTTP_401.
+    throw new CheckoutError(
+      "SESSION_EXPIRED",
+      "Your session expired. Sign in again and retry the upgrade.",
+    );
+  }
+
   if (!response.ok || !body?.success || !body.data?.url) {
     const code = body?.error?.code || `HTTP_${response.status}`;
     const message =
@@ -192,6 +215,22 @@ export async function startCheckout(
     throw new CheckoutError(code, message);
   }
 
-  await openExternal(body.data.url);
+  let target: URL;
+  try {
+    target = new URL(body.data.url);
+  } catch {
+    throw new CheckoutError(
+      "INVALID_REDIRECT",
+      "Billing service returned a malformed checkout URL.",
+    );
+  }
+  if (target.protocol !== "https:" || target.hostname !== STRIPE_CHECKOUT_HOST) {
+    throw new CheckoutError(
+      "INVALID_REDIRECT",
+      `Refusing to open unexpected checkout host: ${target.hostname || "<empty>"}.`,
+    );
+  }
+
+  await openExternal(target.href);
   return { kind: "stripe-opened" };
 }

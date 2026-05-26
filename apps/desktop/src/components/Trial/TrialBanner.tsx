@@ -67,6 +67,7 @@ export default function TrialBanner() {
         <button
           type="button"
           disabled={checkoutPending}
+          aria-busy={checkoutPending}
           onClick={async () => {
             setCheckoutPending(true);
             setCheckoutNotice(null);
@@ -102,6 +103,7 @@ export default function TrialBanner() {
       {checkoutNotice && (
         <span
           role="alert"
+          aria-live="polite"
           className="text-[11px] text-cs-muted max-w-[40ch] truncate"
           title={checkoutNotice}
         >

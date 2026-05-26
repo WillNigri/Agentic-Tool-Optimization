@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Clock, X, ExternalLink } from "lucide-react";
 
 import { useTrialStatus } from "@/lib/tier";
@@ -28,6 +28,11 @@ export default function TrialExpiredModal({ open, onClose }: Props) {
   const accessToken = useAuthStore((s) => s.accessToken);
   const [checkoutPending, setCheckoutPending] = useState(false);
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
+  // Clear stale notices when the modal closes so the user doesn't see
+  // a previous attempt's error on the next reopen.
+  useEffect(() => {
+    if (!open) setCheckoutNotice(null);
+  }, [open]);
   if (!open) return null;
   // Defensive: callers should only open this when expired, but if
   // they don't, render nothing rather than confuse the user.
@@ -76,7 +81,11 @@ export default function TrialExpiredModal({ open, onClose }: Props) {
           Your local-only features keep working. Pro features become available
           again the moment you upgrade.
           {checkoutNotice && (
-            <p role="alert" className="mt-3 text-[11px] text-cs-accent">
+            <p
+              role="alert"
+              aria-live="polite"
+              className="mt-3 text-[11px] text-cs-accent break-words"
+            >
               {checkoutNotice}
             </p>
           )}
@@ -94,6 +103,7 @@ export default function TrialExpiredModal({ open, onClose }: Props) {
             <button
               type="button"
               disabled={checkoutPending}
+              aria-busy={checkoutPending}
               onClick={async () => {
                 setCheckoutPending(true);
                 setCheckoutNotice(null);

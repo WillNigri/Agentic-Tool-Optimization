@@ -172,6 +172,57 @@ describe("startCheckout", () => {
     expect(windowOpen).not.toHaveBeenCalled();
   });
 
+  it("throws SESSION_EXPIRED when both the initial 401 and the refreshed retry return 401", async () => {
+    useAuthStore.getState().setAuth(
+      { id: "u1", email: "u@example.com", name: "U" },
+      "stale-token",
+      "refresh-token-value",
+      "free",
+    );
+    vi.spyOn(useAuthStore.getState(), "refreshAccessToken").mockImplementation(async () => {
+      // Simulate refresh succeeding but token still stale (e.g. backend
+      // rejected the refresh JWT, useAuth swallows the error and returns
+      // true). The store's accessToken doesn't actually change.
+      return true;
+    });
+
+    fetchMock.mockResolvedValue(
+      jsonResponse({ success: false, error: { code: "UNAUTHORIZED" } }, { status: 401 }),
+    );
+
+    await expect(startCheckout("pro", "stale-token")).rejects.toMatchObject({
+      code: "SESSION_EXPIRED",
+    });
+  });
+
+  it("throws INVALID_REDIRECT when the cloud returns a non-Stripe URL", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        data: { url: "https://attacker.example.com/phish" },
+      }),
+    );
+
+    await expect(startCheckout("pro", "jwt-token")).rejects.toMatchObject({
+      code: "INVALID_REDIRECT",
+    });
+    expect(windowOpen).not.toHaveBeenCalled();
+    expect(tauriOpen).not.toHaveBeenCalled();
+  });
+
+  it("throws INVALID_REDIRECT when the cloud returns an http (non-https) Stripe-host URL", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        data: { url: "http://checkout.stripe.com/c/cs_test_downgrade" },
+      }),
+    );
+
+    await expect(startCheckout("pro", "jwt-token")).rejects.toMatchObject({
+      code: "INVALID_REDIRECT",
+    });
+  });
+
   it("throws MALFORMED_RESPONSE when a 200 returns a body that isn't JSON", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response("not-json-at-all", {
