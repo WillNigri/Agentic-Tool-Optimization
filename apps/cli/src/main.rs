@@ -728,6 +728,12 @@ enum RuntimesSub {
         /// quota state file (e.g. ~/.claude/usage.json) and include
         /// the parsed messages-used / messages-limit / period-reset
         /// in the JSON output. Read-only filesystem probe; no network.
+        ///
+        /// JSON SHAPE NOTE: this flag does NOT change the JSON envelope
+        /// shape — `Status` always emits `{ quotas: [...],
+        /// runtime_quota_probes: [...] | null }`. Without the flag,
+        /// `runtime_quota_probes` is null; with it, the array is
+        /// populated.
         #[arg(long = "with-quota")]
         with_quota: bool,
     },
@@ -1907,6 +1913,12 @@ fn main() -> Result<()> {
         Commands::Runtimes { sub } => match sub {
             RuntimesSub::Status { with_quota } => {
                 let rows = quota::list_all(&db_path)?;
+                // Review LOW #5 (SQLite read wasted when desktop only
+                // consumes probes) deferred: the always-on envelope from
+                // MEDIUM #2 requires the `quotas` field to be accurate
+                // regardless of --with-quota, so the read is now needed
+                // on every path. A `--quota-only` flag would let the
+                // desktop skip the SELECT — punt to a follow-up.
                 // v2.13 Phase 6.x — when --with-quota is set, also surface
                 // each runtime's local quota state. Probe results are
                 // independent of the rate-limit rows (the latter come from
@@ -1981,14 +1993,15 @@ fn main() -> Result<()> {
                             }
                         }
                     }
-                } else if let Some(probes) = quota_probes {
-                    // Structured payload — agents can read both pieces.
+                } else {
+                    // v2.13 Phase 6.x review MEDIUM #2: always emit the
+                    // envelope under JSON mode regardless of --with-quota,
+                    // so external scripts don't break when the flag flips.
+                    // `runtime_quota_probes` is null when the flag is off.
                     output::emit_json(&serde_json::json!({
                         "quotas": rows,
-                        "runtime_quota_probes": probes,
+                        "runtime_quota_probes": quota_probes,
                     }))?;
-                } else {
-                    output::emit_json(&rows)?;
                 }
                 Ok(())
             }

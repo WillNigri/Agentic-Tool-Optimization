@@ -31,8 +31,10 @@ pub struct RuntimeQuotaProbe {
     pub found: bool,
     pub messages_used: Option<u64>,
     pub messages_limit: Option<u64>,
-    /// RFC3339 timestamp when the period resets. None when unknown or
-    /// the file doesn't carry a reset.
+    /// RFC3339 timestamp when the period resets. None when unknown,
+    /// the file doesn't carry a reset, or the value didn't parse as
+    /// RFC3339 — we'd rather drop a malformed string than let the UI
+    /// render `<time dateTime="next Tuesday">`. Reviewer INFO #6.
     pub period_reset_at: Option<String>,
     /// Free-form note for the UI — explains what we tried when
     /// `found = false`. Stays None on success.
@@ -135,10 +137,16 @@ struct Parsed {
 fn parse_known_shape(v: &Value) -> Option<Parsed> {
     let used = pick_u64(v, &["messages_used", "used", "requests_used", "count"]);
     let limit = pick_u64(v, &["messages_limit", "limit", "requests_limit", "max"]);
-    let reset_at = pick_string(
+    let raw_reset = pick_string(
         v,
         &["period_reset", "period_reset_at", "reset_at", "resets_at", "reset_time"],
     );
+    // INFO #6: validate the reset string parses as RFC3339 before
+    // accepting it. Drop unparseable strings to None — we'd rather
+    // surface "no reset known" than render a `<time>` with a localized
+    // string or epoch-seconds.
+    let reset_at = raw_reset
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|_| s));
     if used.is_none() && limit.is_none() && reset_at.is_none() {
         return None;
     }
@@ -182,17 +190,11 @@ mod tests {
         assert!(probe.note.as_deref().unwrap().contains("no candidate path"));
     }
 
-    #[test]
-    fn missing_file_returns_not_found_with_attempted_path() {
-        // We can't easily redirect $HOME inside the test, but we can
-        // exercise the parse_known_shape branch directly.
-        let probe = probe("claude");
-        // On a clean dev machine the file doesn't exist; assert the
-        // probe surfaces an attempted path so the UI has something to
-        // show.
-        assert!(probe.source_path.is_some());
-        assert_eq!(probe.found, false);
-    }
+    // Reviewer LOW #3: previous "missing file returns not found"
+    // host-dependent test removed — it would flake on any machine that
+    // happened to have a real ~/.claude/usage.json (the v2.6 passive
+    // observer dogfood path can create one). The parse_known_shape
+    // branches below cover the parsing logic without touching $HOME.
 
     #[test]
     fn parses_messages_used_limit_shape() {
@@ -229,5 +231,31 @@ mod tests {
     fn rejects_non_quota_json() {
         let v: Value = serde_json::from_str(r#"{"foo": "bar"}"#).unwrap();
         assert!(parse_known_shape(&v).is_none());
+    }
+
+    #[test]
+    fn drops_non_rfc3339_reset_to_none() {
+        // INFO #6: a runtime that ships epoch-seconds or a localized
+        // string in `period_reset` should NOT leak through to the
+        // frontend's <time> tag. We accept the row (used + limit are
+        // still useful) but drop the unparseable reset.
+        let v: Value = serde_json::from_str(
+            r#"{"messages_used": 5, "messages_limit": 100, "period_reset": "next Tuesday"}"#,
+        )
+        .unwrap();
+        let parsed = parse_known_shape(&v).unwrap();
+        assert_eq!(parsed.used, Some(5));
+        assert_eq!(parsed.limit, Some(100));
+        assert!(parsed.reset_at.is_none());
+    }
+
+    #[test]
+    fn keeps_rfc3339_reset() {
+        let v: Value = serde_json::from_str(
+            r#"{"messages_used": 5, "period_reset": "2026-06-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let parsed = parse_known_shape(&v).unwrap();
+        assert_eq!(parsed.reset_at.as_deref(), Some("2026-06-01T00:00:00Z"));
     }
 }

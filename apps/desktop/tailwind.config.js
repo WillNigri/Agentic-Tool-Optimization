@@ -17,6 +17,11 @@ export default {
           "accent-dim": "#00FFB2",
           success: "#00FFB2",
           warning: "#FFB800",
+          // v2.13 Phase 6.x review: alias for `warning` because nine
+          // existing components use `cs-warn` (LiveRuns, DeployTab, etc.)
+          // and Tailwind JIT was silently dropping the utility. Both
+          // names render the same color now.
+          warn: "#FFB800",
           danger: "#FF4466",
         },
       },
