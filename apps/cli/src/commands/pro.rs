@@ -416,9 +416,18 @@ pub fn run(args: ProArgs, human: bool) {
 }
 
 fn detect_platform() -> String {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    let arch_norm = match arch {
+    // Normalize to the platform identifiers the ato-cloud manifest
+    // endpoint allowlists (Rust tier-2 target naming):
+    //   - darwin-arm64 / darwin-x64
+    //   - linux-x64 / linux-arm64
+    // std::env::consts::OS returns "macos" on Darwin, not "darwin" —
+    // direct format produced "macos-arm64" which the endpoint
+    // rejected. Caught by Will 2026-05-26.
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch_norm = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         "x86_64" => "x64",
         other => other,
