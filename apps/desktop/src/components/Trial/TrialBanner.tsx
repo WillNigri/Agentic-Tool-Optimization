@@ -4,6 +4,8 @@ import { Clock, X, ExternalLink } from "lucide-react";
 import { useTrialStatus } from "@/lib/tier";
 import { TRIAL_BANNER_DISMISSED_KEY } from "@/lib/trial";
 import { UPGRADE_URL } from "@/lib/constants";
+import { startCheckout } from "@/lib/billing";
+import { useAuthStore } from "@/hooks/useAuth";
 
 // Phase 1 PR-A — persistent trial countdown banner.
 //
@@ -19,7 +21,9 @@ import { UPGRADE_URL } from "@/lib/constants";
 
 export default function TrialBanner() {
   const trial = useTrialStatus();
+  const accessToken = useAuthStore((s) => s.accessToken);
   const [dismissed, setDismissed] = useState(false);
+  const [checkoutPending, setCheckoutPending] = useState(false);
 
   // Re-read the sessionStorage marker on mount so a previous tab's
   // dismissal isn't ignored if the user opens a second window.
@@ -58,14 +62,32 @@ export default function TrialBanner() {
         <strong>{trial.daysRemaining} day{trial.daysRemaining === 1 ? "" : "s"} left</strong>
         . After that, ATO Pro is <strong>$29/month</strong>.
       </span>
-      <a
-        href={UPGRADE_URL}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="ml-auto inline-flex items-center gap-1 text-cs-accent hover:underline"
-      >
-        Upgrade <ExternalLink size={11} aria-hidden />
-      </a>
+      {accessToken ? (
+        <button
+          type="button"
+          disabled={checkoutPending}
+          onClick={async () => {
+            setCheckoutPending(true);
+            try {
+              await startCheckout("pro", accessToken);
+            } finally {
+              setCheckoutPending(false);
+            }
+          }}
+          className="ml-auto inline-flex items-center gap-1 text-cs-accent hover:underline disabled:opacity-60"
+        >
+          {checkoutPending ? "Opening…" : "Upgrade"} <ExternalLink size={11} aria-hidden />
+        </button>
+      ) : (
+        <a
+          href={UPGRADE_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="ml-auto inline-flex items-center gap-1 text-cs-accent hover:underline"
+        >
+          Upgrade <ExternalLink size={11} aria-hidden />
+        </a>
+      )}
       <button
         type="button"
         aria-label="Dismiss trial banner"

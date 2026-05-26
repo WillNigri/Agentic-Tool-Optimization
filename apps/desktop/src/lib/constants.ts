@@ -9,7 +9,10 @@
 // Only UPGRADE_URL lives here today (YAGNI). When the next constant has
 // a real caller, add it alongside.
 
-/** Founder-led onboarding call. The only upgrade path during the
- *  Phase-1 beta — no Stripe checkout yet. Pricing is "free during
- *  beta" with founding-user grandfathering when paid tiers switch on. */
+/** Founder-led onboarding call. No-JWT fallback only — when a user is
+ *  signed in, `lib/billing.ts#startCheckout` opens a real Stripe Checkout
+ *  session instead. Local-only users (no cloud account) still need
+ *  somewhere to land, and the Calendly path stays as the conversion
+ *  surface for them. Also used as the safety net on 402 PRO_REQUIRED
+ *  (account isn't eligible for self-serve). */
 export const UPGRADE_URL = "https://cal.com/willnigri/ato-onboarding";
