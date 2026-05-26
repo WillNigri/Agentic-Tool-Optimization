@@ -7,6 +7,7 @@ import ErrorBoundary from "@/components/ErrorBoundary";
 import DemoOverlay from "@/components/DemoOverlay";
 import WelcomeTour from "@/components/WelcomeTour";
 import TrialBanner from "@/components/Trial/TrialBanner";
+import VerifyEmailBanner from "@/components/Trial/VerifyEmailBanner";
 import { useUiStore } from "@/stores/useUiStore";
 
 const CreateAgentWizard = lazy(() => import("@/components/CreateAgentWizard"));
@@ -57,11 +58,17 @@ export default function Dashboard() {
     <div className="flex h-screen overflow-hidden">
       <Sidebar active={section} onNavigate={setSection} />
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* PR-B (Phase 1) — full-width trial countdown strip. Self-gates
-            to render only from day 7 of the trial onward (TrialBanner
-            internally checks showBanner), so this is a no-op for paid
-            users and the first week of a fresh trial. Mounted ABOVE the
-            scroll container so it stays pinned across section scrolls. */}
+        {/* 2026-05-26 (Will): two stacked banners, each self-gating.
+            VerifyEmailBanner: shows when /auth/me returns
+              email_verified === false. Hidden for verified users +
+              local-only mode.
+            TrialBanner: shows for the entire active trial window
+              (Phase 1 PR-A threshold flipped from day 7+ to day 1+ in
+              this PR so users see the $29/mo price-after-trial from
+              day one). Hidden for paid users + before trial start.
+            Both mounted ABOVE the scroll container so they stay pinned
+            across section scrolls. */}
+        <VerifyEmailBanner />
         <TrialBanner />
         <main className="flex-1 overflow-y-auto p-6">
           <ErrorBoundary key={section}>

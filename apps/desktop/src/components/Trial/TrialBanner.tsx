@@ -54,7 +54,9 @@ export default function TrialBanner() {
     >
       <Clock size={14} className="text-cs-accent shrink-0" aria-hidden />
       <span className="text-cs-text">
-        Trial Pro: <strong>{trial.daysRemaining} day{trial.daysRemaining === 1 ? "" : "s"}</strong> remaining.
+        Free trial of ATO Pro:{" "}
+        <strong>{trial.daysRemaining} day{trial.daysRemaining === 1 ? "" : "s"} left</strong>
+        . After that, ATO Pro is <strong>$29/month</strong>.
       </span>
       <a
         href={UPGRADE_URL}

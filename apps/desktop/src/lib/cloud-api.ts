@@ -26,6 +26,12 @@ export interface CloudUser {
   /** From users.subscription_tier — drives TierGate. May be missing on
    *  older backends that haven't shipped the migration yet; treat as 'free'. */
   subscription_tier?: CloudSubscriptionTier;
+  /** v2.12 (2026-05-26) — From users.email_verified. False on fresh
+   *  signups until the user clicks the verification link. Drives the
+   *  email-verification banner in the desktop. Optional for back-compat
+   *  with older /auth/me responses; treat absence as "verified" so
+   *  pre-migration users don't see a stale banner. */
+  email_verified?: boolean;
   created_at: string;
   updated_at: string;
 }
