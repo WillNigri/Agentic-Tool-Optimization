@@ -40,6 +40,7 @@ mod db;
 mod events_publisher;
 mod live_runs;
 mod output;
+mod pro_client;
 mod quota;
 mod remote_runtime;
 mod runtime;

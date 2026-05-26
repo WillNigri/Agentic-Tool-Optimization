@@ -2050,12 +2050,43 @@ fn handle_diagnose(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    // Pro-gated per the open-core tiering principle locked
-    // 2026-05-25: customers can build the same loop themselves with
-    // ato dispatch + their own LLM prompts. We charge for OUR codified
-    // diagnose button.
-    crate::tier::require_feature("methodology.diagnose")?;
+    // v2.11 PR-12.8 (2026-05-25) — methodology diagnose moved to the
+    // private `ato-pro` binary. The implementation now lives in
+    // ato-cloud/services/pro-runner/; this surface forwards the user's
+    // flags verbatim. If the customer isn't on Pro (binary not present)
+    // they see a single sentence pointing at the subscribe page.
+    let mut args: Vec<String> = Vec::new();
+    args.push("--run-id".to_string());
+    args.push(run_id);
+    if let Some(m) = diagnose_model {
+        args.push("--diagnose-model".to_string());
+        args.push(m);
+    }
+    if let Some(r) = diagnose_runtime {
+        args.push("--diagnose-runtime".to_string());
+        args.push(r);
+    }
+    args.push("--worst-k".to_string());
+    args.push(worst_k.to_string());
+    args.push("--best-k".to_string());
+    args.push(best_k.to_string());
+    args.push("--max-dispatches".to_string());
+    args.push(max_dispatches.to_string());
+    args.push("--max-chars-per-dispatch".to_string());
+    args.push(max_chars_per_dispatch.to_string());
+    if apply {
+        args.push("--apply".to_string());
+    }
+    if yes {
+        args.push("--yes".to_string());
+    }
+    return crate::pro_client::delegate("diagnose", &args, db_path, opts.human, opts.quiet);
 
+    // Unreachable code retained for one release cycle so STAGE 5 deletion
+    // is a single audit-able change (the heavy implementation gone +
+    // these dead branches gone). Suppress dead-code warnings here.
+    #[allow(unreachable_code, dead_code)]
+    {
     let dopts = crate::methodology::diagnose::DiagnoseOptions {
         worst_k_per_cell: worst_k,
         best_k_per_cell: best_k,
@@ -2151,6 +2182,7 @@ fn handle_diagnose(
         let _ = emit_json(&result);
     }
     Ok(())
+    }
 }
 
 // ── v2.10 PR-10: rate-card override ─────────────────────────────────────

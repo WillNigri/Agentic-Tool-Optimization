@@ -387,6 +387,16 @@ pub enum ProCommand {
     Features,
     /// Smoke-test Pro cloud endpoints (auth, billing, traces, embed key).
     Test,
+    /// Download + install the ato-pro binary that implements
+    /// methodology diagnose, --apply, and scheduled re-runs.
+    Install {
+        /// Force re-download even if the local sha256 already matches the current release.
+        #[arg(long)]
+        force: bool,
+        /// Platform identifier. Auto-detected from the host when omitted.
+        #[arg(long)]
+        platform: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -401,5 +411,169 @@ pub fn run(args: ProArgs, human: bool) {
         ProCommand::Status => handle_status(),
         ProCommand::Features => handle_features(human),
         ProCommand::Test => handle_test(human),
+        ProCommand::Install { force, platform } => handle_install(force, platform, human),
+    }
+}
+
+fn detect_platform() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let arch_norm = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    format!("{}-{}", os, arch_norm)
+}
+
+fn handle_install(force: bool, platform: Option<String>, human: bool) {
+    let platform = platform.unwrap_or_else(detect_platform);
+    let token = match read_token() {
+        Some(t) => t,
+        None => {
+            eprintln!("Not signed in. Run `ato login` first.");
+            std::process::exit(1);
+        }
+    };
+    let client = http_client().unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
+
+    let manifest_url = format!("{}/pro/binary/manifest?platform={}", api_base(), platform);
+    if human {
+        println!("Checking ato-pro manifest at {} ...", manifest_url);
+    }
+    let resp = client
+        .get(&manifest_url)
+        .bearer_auth(&token)
+        .send();
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Network error fetching manifest: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if resp.status().as_u16() == 402 {
+        eprintln!(
+            "ato-pro requires a Pro subscription. Upgrade: {}",
+            format!("{}/#pricing", cloud_base())
+        );
+        std::process::exit(2);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        eprintln!("Manifest fetch failed ({}): {}", status, body);
+        std::process::exit(1);
+    }
+    let manifest: serde_json::Value = match resp.json() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Manifest decode error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let version = manifest.pointer("/data/version").and_then(|v| v.as_str()).unwrap_or("?");
+    let sha256_expected = manifest
+        .pointer("/data/sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let size = manifest.pointer("/data/size").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let install_dir = crate::db::home_dir().join(".ato").join("bin");
+    if let Err(e) = fs::create_dir_all(&install_dir) {
+        eprintln!("Cannot create {}: {}", install_dir.display(), e);
+        std::process::exit(1);
+    }
+    let install_path = install_dir.join("ato-pro");
+
+    if !force && install_path.exists() {
+        let existing = std::fs::read(&install_path).unwrap_or_default();
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&existing);
+        let local_sha = format!("{:x}", hasher.finalize());
+        if local_sha == sha256_expected {
+            if human {
+                println!(
+                    "ato-pro {} already installed and verified ({} bytes). Use --force to redownload.",
+                    version, size
+                );
+            }
+            return;
+        }
+    }
+
+    let download_url = format!(
+        "{}/pro/binary/download?platform={}&version={}",
+        api_base(),
+        platform,
+        version
+    );
+    if human {
+        println!("Downloading ato-pro {} for {} ({} bytes)...", version, platform, size);
+    }
+    let resp = match client.get(&download_url).bearer_auth(&token).send() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Download error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if !resp.status().is_success() {
+        eprintln!("Download failed (HTTP {}).", resp.status().as_u16());
+        std::process::exit(1);
+    }
+    let bytes = match resp.bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Download read error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = format!("{:x}", hasher.finalize());
+    if !sha256_expected.is_empty() && actual != sha256_expected {
+        eprintln!(
+            "sha256 mismatch — expected {}, got {}. Refusing to install.",
+            sha256_expected, actual
+        );
+        std::process::exit(1);
+    }
+
+    if let Err(e) = fs::write(&install_path, &bytes) {
+        eprintln!("Write {} failed: {}", install_path.display(), e);
+        std::process::exit(1);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = fs::metadata(&install_path).unwrap().permissions();
+        perm.set_mode(0o755);
+        let _ = fs::set_permissions(&install_path, perm);
+    }
+    if human {
+        println!(
+            "Installed ato-pro {} → {} (sha256 {}). Verify with `ato-pro health`.",
+            version,
+            install_path.display(),
+            actual
+        );
+    } else {
+        let _ = println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "installed": true,
+                "version": version,
+                "path": install_path.display().to_string(),
+                "sha256": actual,
+            }))
+            .unwrap()
+        );
     }
 }
