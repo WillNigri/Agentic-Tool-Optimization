@@ -36,11 +36,72 @@ fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
 
 const MAX_LOG_BYTES: usize = 64 * 1024;
 
+/// Truncate to MAX_LOG_BYTES without panicking on multi-byte UTF-8
+/// codepoints (per review HIGH-3). `&s[..MAX]` would split a curly
+/// quote / emoji / non-Latin glyph mid-byte and panic the watcher
+/// worker thread — fatal in the CLI case where no Tauri restart
+/// surface exists. Walk backwards from the cap until we hit a char
+/// boundary, then slice.
 fn truncate_for_log(s: &str) -> String {
     if s.len() <= MAX_LOG_BYTES {
-        s.to_string()
-    } else {
-        format!("{}…[truncated]", &s[..MAX_LOG_BYTES])
+        return s.to_string();
+    }
+    let mut cut = MAX_LOG_BYTES;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…[truncated]", &s[..cut])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_is_pass_through() {
+        assert_eq!(truncate_for_log("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_at_ascii_boundary() {
+        let s = "a".repeat(MAX_LOG_BYTES + 100);
+        let out = truncate_for_log(&s);
+        assert!(out.starts_with(&"a".repeat(MAX_LOG_BYTES)));
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn truncate_at_multibyte_boundary_no_panic() {
+        // Build a payload where the byte at MAX_LOG_BYTES falls
+        // INSIDE a 4-byte emoji (U+1F600). The naive `&s[..MAX]`
+        // would panic; ours walks back to the prior boundary.
+        let prefix = "a".repeat(MAX_LOG_BYTES - 2);
+        let mut s = String::with_capacity(MAX_LOG_BYTES + 8);
+        s.push_str(&prefix);
+        s.push('\u{1F600}'); // 4 bytes
+        s.push_str(&"a".repeat(8));
+        assert!(s.len() > MAX_LOG_BYTES);
+        let out = truncate_for_log(&s);
+        // No panic. Truncated; ends with the marker. Prefix preserved.
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.starts_with(&prefix));
+        // Output must itself be valid UTF-8 (we built it from a &str
+        // slice — but assert the round-trip explicitly).
+        assert_eq!(out, String::from_utf8(out.clone().into_bytes()).unwrap());
+    }
+
+    #[test]
+    fn truncate_at_nbsp_boundary() {
+        // U+00A0 (non-breaking space) is 2 bytes — the more common
+        // mid-byte panic in real LLM output that includes typographic
+        // whitespace.
+        let prefix = "x".repeat(MAX_LOG_BYTES - 1);
+        let mut s = prefix.clone();
+        s.push('\u{00A0}');
+        s.push_str("trailing");
+        let out = truncate_for_log(&s);
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.starts_with(&prefix));
     }
 }
 
@@ -162,4 +223,43 @@ pub fn mark_passive_in_progress(
 fn clear_passive_live_row(conn: &Connection, kind: SourceKind, session_id: &str) {
     let run_id = format!("passive:{}:{}", kind.id(), session_id);
     let _ = conn.execute("DELETE FROM live_runs WHERE run_id = ?1", [&run_id]);
+}
+
+/// Retroactively attach token counts to the most-recent passive
+/// observation for a given session (per review MEDIUM-5). Codex
+/// emits its `token_count` event AFTER the assistant message it
+/// applies to lands, so the row goes in with NULL tokens; this
+/// helper closes the loop when the count arrives.
+///
+/// Only updates the latest row whose tokens_* are still NULL — a
+/// retransmit of the same token_count is therefore idempotent and a
+/// hypothetical future Codex ordering change (token_count first,
+/// message second) wouldn't double-write.
+pub fn update_tokens_for_latest(
+    db_path: &std::path::Path,
+    kind: SourceKind,
+    session_id: &str,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
+) {
+    if tokens_in.is_none() && tokens_out.is_none() {
+        return;
+    }
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = conn.execute(
+        "UPDATE execution_logs \
+            SET tokens_in  = COALESCE(tokens_in,  ?1), \
+                tokens_out = COALESCE(tokens_out, ?2) \
+          WHERE id = ( \
+            SELECT id FROM execution_logs \
+             WHERE dispatch_kind = 'passive_observation' \
+               AND runtime = ?3 \
+               AND provider_session_id = ?4 \
+             ORDER BY sequence_within_session DESC \
+             LIMIT 1)",
+        rusqlite::params![tokens_in, tokens_out, kind.runtime(), session_id],
+    );
 }

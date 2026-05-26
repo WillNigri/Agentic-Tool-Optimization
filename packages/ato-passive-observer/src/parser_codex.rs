@@ -10,6 +10,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::persist::update_tokens_for_latest;
 use crate::sources::SourceKind;
 use crate::worker::{emit, mark_in_progress, SessionStateMap};
 
@@ -29,7 +30,7 @@ pub fn process(
 
     match ty {
         "session_meta" => handle_session_meta(payload, state),
-        "event_msg" => handle_event_msg(payload, state),
+        "event_msg" => handle_event_msg(db_path, payload, state),
         "response_item" => handle_response_item(
             db_path,
             payload,
@@ -57,7 +58,7 @@ fn handle_session_meta(payload: &Value, state: &mut SessionStateMap) {
     }
 }
 
-fn handle_event_msg(payload: &Value, state: &mut SessionStateMap) {
+fn handle_event_msg(db_path: &Path, payload: &Value, state: &mut SessionStateMap) {
     let inner = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if inner != "token_count" {
         return;
@@ -66,13 +67,18 @@ fn handle_event_msg(payload: &Value, state: &mut SessionStateMap) {
     let Some(u) = usage else { return };
     let t_in = u.get("input_tokens").and_then(|v| v.as_i64());
     let t_out = u.get("output_tokens").and_then(|v| v.as_i64());
-    // Codex doesn't repeat session id on event_msg lines — there's
-    // only ever one session per rollout file. Latch on the single
-    // pending session in the map.
-    if let Some(pair) = state.sessions.values_mut().next() {
-        pair.pending_tokens_in = t_in;
-        pair.pending_tokens_out = t_out;
-    }
+
+    // Codex's event order is `task_started → message → token_count`,
+    // so by the time we see this event the assistant row for the
+    // most recent turn has already been INSERTed with NULL tokens.
+    // Earlier drafts latched the counts to attach to the *next*
+    // assistant row — that attributed them to the wrong turn (review
+    // MEDIUM-5). Walk back and UPDATE the row this event applies to.
+    //
+    // Rollout files are 1-session-per-file so the single key in the
+    // map is the right session to attribute against.
+    let Some(sid) = state.sessions.keys().next().cloned() else { return };
+    update_tokens_for_latest(db_path, SourceKind::Codex, &sid, t_in, t_out);
 }
 
 fn handle_response_item(
@@ -163,8 +169,9 @@ fn handle_response_item(
                 .user_started_at
                 .take()
                 .or_else(|| timestamp.map(|s| s.to_string()));
-            let tokens_in = pair.pending_tokens_in.take();
-            let tokens_out = pair.pending_tokens_out.take();
+            // Tokens land via update_tokens_for_latest when the
+            // subsequent `token_count` event_msg arrives — emitting
+            // NULL here is the honest signal until then.
             let model_str = pair.last_model.clone();
             let seq = *last_seq + 1;
             emit(
@@ -174,8 +181,8 @@ fn handle_response_item(
                 seq,
                 &prompt,
                 &response,
-                tokens_in,
-                tokens_out,
+                None,
+                None,
                 model_str.as_deref(),
                 started_at.as_deref(),
             );

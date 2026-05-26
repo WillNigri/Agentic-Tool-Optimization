@@ -7,6 +7,14 @@ license = "MIT"
 
 [dependencies]
 notify = "6"
+# rusqlite is pinned at 0.31 — matches the desktop crate. A workspace
+# can only link to one libsqlite3-sys at a time (the `links = "sqlite3"`
+# manifest key enforces this). If this crate jumps to 0.32 while the
+# desktop stays on 0.31, every CLI/desktop build that pulls both
+# crates fails to link. Per review (gemini HIGH on the v2.13 review):
+# the right move is bumping both consumers to 0.32 in a follow-up PR
+# focused on the bump itself — too much regression surface to mix
+# into the observability sprint.
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = "1"
 chrono = "0.4"

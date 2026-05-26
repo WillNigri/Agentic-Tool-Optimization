@@ -36,12 +36,14 @@ pub mod parser_claude;
 pub mod parser_codex;
 pub mod parser_gemini;
 pub mod persist;
+pub mod schema;
 pub mod sources;
 pub mod worker;
 
+pub use schema::ensure_schema;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -112,14 +114,14 @@ pub fn start_observer(
         let _ = tx.send(ScanRequest { kind, path });
     }
 
+    // mpsc::Receiver has exactly one consumer; move it into the
+    // worker thread directly. (Earlier draft wrapped it in
+    // Arc<Mutex<>> — removed per review LOW-9; the wrapping added a
+    // runtime lock that could never be observed by anyone else.)
     let db = db_path;
-    let rx_arc = Arc::new(std::sync::Mutex::new(rx));
     std::thread::Builder::new()
         .name("ato-passive-observer".to_string())
-        .spawn(move || {
-            let rx = rx_arc.lock().expect("worker rx mutex poisoned");
-            worker::worker_loop(db, &rx);
-        })
+        .spawn(move || worker::worker_loop(db, &rx))
         .map_err(|e| format!("failed to spawn watcher worker: {}", e))?;
 
     Ok(Some(ObserverHandle { _watchers: watchers, _tx: tx }))

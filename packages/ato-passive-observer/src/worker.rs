@@ -30,14 +30,22 @@ pub struct ScanRequest {
 
 pub fn worker_loop(db_path: PathBuf, rx: &Receiver<ScanRequest>) {
     let mut pending: HashMap<PathBuf, SourceKind> = HashMap::new();
+    // Per-file pair state lives across scans (per review HIGH-1).
+    // A user-message line landing in scan N and the assistant
+    // response landing in scan N+1 must still produce one row — the
+    // SessionStateMap can't be recreated per scan or we'd lose every
+    // live pair, since notify fires within ~250ms of the upstream
+    // write and LLM responses commonly take 5-30s.
+    let mut per_file_state: HashMap<(SourceKind, PathBuf), SessionStateMap> =
+        HashMap::new();
     loop {
         let first = match rx.recv() {
             Ok(req) => req,
             Err(_) => return, // channel closed, exit cleanly
         };
         pending.insert(first.path, first.kind);
-        // Drain anything that lands within 250ms — coalesce notify
-        // bursts to one scan per file per quarter-second.
+        // Coalesce notify bursts to one scan per file per quarter-
+        // second.
         let deadline = std::time::Instant::now() + Duration::from_millis(250);
         while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
             match rx.recv_timeout(remaining) {
@@ -50,14 +58,30 @@ pub fn worker_loop(db_path: PathBuf, rx: &Receiver<ScanRequest>) {
         let batch: Vec<(SourceKind, PathBuf)> =
             pending.drain().map(|(p, k)| (k, p)).collect();
         for (kind, path) in batch {
-            if let Err(e) = scan_file(&db_path, kind, &path) {
+            let key = (kind, path.clone());
+            let state = per_file_state
+                .entry(key)
+                .or_insert_with(SessionStateMap::new);
+            if let Err(e) = scan_file(&db_path, kind, &path, state) {
                 eprintln!("passive_observer: scan {:?} failed: {}", path, e);
             }
         }
     }
 }
 
-pub fn scan_file(db_path: &Path, kind: SourceKind, path: &Path) -> Result<(), String> {
+/// Maximum bytes read per scan invocation. Caps memory growth on a
+/// single-shot append from a runaway tool dump (per review MEDIUM-8).
+/// When a file grew by more than this between scans, we read this
+/// much, persist the offset, and let the next FS event pick up the
+/// rest — bounded latency, bounded memory.
+pub const MAX_READ_BYTES_PER_SCAN: u64 = 4 * 1024 * 1024;
+
+pub fn scan_file(
+    db_path: &Path,
+    kind: SourceKind,
+    path: &Path,
+    session_state: &mut SessionStateMap,
+) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     let path_str = path.to_string_lossy().to_string();
     let (mut offset, mut last_seq) = load_state(&conn, kind, &path_str);
@@ -95,11 +119,12 @@ pub fn scan_file(db_path: &Path, kind: SourceKind, path: &Path) -> Result<(), St
         return Ok(());
     }
     file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-    let mut buf = Vec::with_capacity((size - offset) as usize);
-    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let read_cap = (size - offset).min(MAX_READ_BYTES_PER_SCAN);
+    let mut buf = vec![0u8; read_cap as usize];
+    let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(n);
 
     let mut consumed: usize = 0;
-    let mut session_state = SessionStateMap::new();
     for line_end in line_iter(&buf) {
         let line = &buf[consumed..line_end];
         let trimmed = trim_newline(line);
@@ -109,7 +134,7 @@ pub fn scan_file(db_path: &Path, kind: SourceKind, path: &Path) -> Result<(), St
                     db_path,
                     kind,
                     &value,
-                    &mut session_state,
+                    session_state,
                     &mut last_seq,
                     is_fresh,
                 );
@@ -288,6 +313,8 @@ pub fn mark_in_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::SourceKind;
+    use std::io::Write;
 
     #[test]
     fn trim_newline_handles_crlf() {
@@ -303,5 +330,92 @@ mod tests {
         let ends: Vec<usize> = line_iter(buf).collect();
         // "a\n" ends at 2, "bb\n" ends at 5; "ccc" is partial and skipped.
         assert_eq!(ends, vec![2, 5]);
+    }
+
+    /// Regression for review HIGH-1: user line lands in scan N,
+    /// assistant lands in scan N+1, the pair must still emit.
+    /// Before the fix, SessionStateMap was scan-local — the user
+    /// turn was lost between scans and no row was emitted.
+    #[test]
+    fn pair_survives_split_across_two_scans() {
+        let tmp_db = tempfile::NamedTempFile::new().unwrap();
+        crate::schema::ensure_schema(tmp_db.path()).unwrap();
+
+        let tmp_jsonl = tempfile::NamedTempFile::new().unwrap();
+        // Write only the user turn first.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(tmp_jsonl.path())
+                .unwrap();
+            let user_line = serde_json::json!({
+                "type": "user",
+                "sessionId": "split-test-session",
+                "timestamp": "2026-05-26T12:00:00Z",
+                "message": { "role": "user", "content": "first prompt" }
+            });
+            writeln!(f, "{}", user_line).unwrap();
+        }
+        // Scan #1 — user turn alone. Nothing emitted yet.
+        let mut state = SessionStateMap::new();
+        scan_file(tmp_db.path(), SourceKind::ClaudeCode, tmp_jsonl.path(), &mut state)
+            .unwrap();
+
+        let conn = Connection::open(tmp_db.path()).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_logs WHERE dispatch_kind='passive_observation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "no row emitted yet (assistant turn still pending)");
+
+        // Append the assistant turn.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(tmp_jsonl.path())
+                .unwrap();
+            let assistant_line = serde_json::json!({
+                "type": "assistant",
+                "sessionId": "split-test-session",
+                "timestamp": "2026-05-26T12:00:05Z",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "content": [{ "type": "text", "text": "first answer" }],
+                    "usage": { "input_tokens": 8, "output_tokens": 5 }
+                }
+            });
+            writeln!(f, "{}", assistant_line).unwrap();
+        }
+        // Scan #2 — reuses `state`, so the pending user turn pairs
+        // with the assistant turn and emits one row.
+        scan_file(tmp_db.path(), SourceKind::ClaudeCode, tmp_jsonl.path(), &mut state)
+            .unwrap();
+
+        let n2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_logs WHERE dispatch_kind='passive_observation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n2, 1, "pair emits exactly one row after second scan");
+
+        // Spot-check the row carries both prompt and response.
+        let (prompt, response, tokens_in, tokens_out): (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT prompt, response, tokens_in, tokens_out \
+                   FROM execution_logs WHERE dispatch_kind='passive_observation'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, "first prompt");
+        assert_eq!(response, "first answer");
+        assert_eq!(tokens_in, 8);
+        assert_eq!(tokens_out, 5);
     }
 }

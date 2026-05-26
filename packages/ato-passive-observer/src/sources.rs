@@ -85,6 +85,16 @@ pub fn discover_sources(home: &Path) -> Vec<Source> {
     out
 }
 
+// File-name patterns below are brittle: they encode the current
+// (2026-05-26) naming convention of three third-party CLIs we don't
+// control. If any of Claude Code, Codex, or Gemini changes its
+// session-log naming, the watcher will silently skip new files for
+// that runtime — per review MEDIUM-7 (gemini reviewer).
+//
+// Detection strategy: re-verify each release of the upstream CLIs
+// (smoke-test via `ato observe start` on a fresh session). When a
+// drift is detected, add the new pattern alongside the old (don't
+// replace) so installs that haven't upgraded keep working.
 pub fn is_session_file(kind: SourceKind, path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;

@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use ato_passive_observer::{start_observer, SourceKind};
-use serde::Serialize;
+use ato_passive_observer::{ensure_schema, start_observer, SourceKind};
+use serde::{Deserialize, Serialize};
 
 use crate::output::{emit_human, emit_json, Opts};
 
@@ -77,16 +77,63 @@ fn parse_runtime_filter(tokens: &[String]) -> Result<Vec<SourceKind>> {
     Ok(out)
 }
 
-fn write_pid(path: &Path, pid: u32) -> Result<()> {
+/// Pidfile carries identity so `stop` can verify the PID still
+/// belongs to *our* binary before sending SIGTERM (per review
+/// MEDIUM-6). Without this, a stale pidfile + PID reuse means
+/// `ato observe stop` could SIGTERM an unrelated shell or build
+/// process whose PID got recycled.
+#[derive(Debug, Serialize, Deserialize)]
+struct PidRecord {
+    pid: u32,
+    exe_path: String,
+    started_at_unix: u64,
+}
+
+fn current_pid_record() -> PidRecord {
+    PidRecord {
+        pid: std::process::id(),
+        exe_path: std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        started_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    }
+}
+
+fn write_pid(path: &Path, record: &PidRecord) -> Result<()> {
     let mut f = fs::File::create(path)
         .with_context(|| format!("write pidfile {}", path.display()))?;
-    writeln!(f, "{}", pid).context("write pid")?;
+    let line = serde_json::to_string(record).context("serialize pid record")?;
+    writeln!(f, "{}", line).context("write pid")?;
     Ok(())
 }
 
-fn read_pid(path: &Path) -> Option<u32> {
+fn read_pid_record(path: &Path) -> Option<PidRecord> {
     let raw = fs::read_to_string(path).ok()?;
-    raw.trim().parse::<u32>().ok()
+    let trimmed = raw.trim();
+    // Tolerate legacy bare-pid pidfiles from earlier dev builds —
+    // they exist on machines that ran the pre-MEDIUM-6 version and
+    // crashed without unlinking. A bare integer maps to a record
+    // with empty exe_path / started_at=0; stop() will fail the
+    // identity match and refuse to SIGTERM, which is the safe default.
+    if let Ok(rec) = serde_json::from_str::<PidRecord>(trimmed) {
+        return Some(rec);
+    }
+    if let Ok(pid) = trimmed.parse::<u32>() {
+        return Some(PidRecord {
+            pid,
+            exe_path: String::new(),
+            started_at_unix: 0,
+        });
+    }
+    None
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    read_pid_record(path).map(|r| r.pid)
 }
 
 #[cfg(unix)]
@@ -110,18 +157,38 @@ pub fn start(db_path: &Path, runtimes: &[String], opts: &Opts) -> Result<()> {
     let filter = parse_runtime_filter(runtimes)?;
     let pid_path = pid_file_path()?;
 
-    // Refuse to start a second observer on the same machine.
-    if let Some(existing) = read_pid(&pid_path) {
-        if pid_is_alive(existing) {
-            return Err(anyhow!(
-                "an observer is already running (pid {}). \
-                 Stop it first with `ato observe stop`.",
-                existing
-            ));
+    // Refuse to start a second observer ONLY if the recorded PID is
+    // alive AND that process is our own binary (per review MEDIUM-6).
+    // PID reuse could otherwise leave us stuck behind an unrelated
+    // shell that recycled the watcher's old PID.
+    if let Some(existing) = read_pid_record(&pid_path) {
+        if pid_is_alive(existing.pid) {
+            let our_exe = std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !existing.exe_path.is_empty() && existing.exe_path == our_exe {
+                return Err(anyhow!(
+                    "an observer is already running (pid {}). \
+                     Stop it first with `ato observe stop`.",
+                    existing.pid
+                ));
+            }
+            // Identity mismatch: the PID belongs to another process.
+            // Treat the pidfile as stale and replace it below.
         }
-        // Stale pidfile from a previous crash — clean up.
         let _ = fs::remove_file(&pid_path);
     }
+
+    // Bootstrap the tables the observer writes BEFORE starting the
+    // watcher. On a headless box the desktop's init_database hasn't
+    // run, so execution_logs / watcher_state / live_runs don't exist
+    // and every INSERT OR IGNORE would silently swallow a
+    // "no such table" error (per review HIGH-2). Idempotent against
+    // the desktop's own initializer — CREATE TABLE IF NOT EXISTS
+    // means a desktop box's existing schema is left untouched.
+    ensure_schema(db_path)
+        .map_err(|e| anyhow!("ensure_schema failed: {}", e))?;
 
     let handle = start_observer(db_path.to_path_buf(), &filter)
         .map_err(|e| anyhow!("start_observer failed: {}", e))?;
@@ -143,8 +210,9 @@ pub fn start(db_path: &Path, runtimes: &[String], opts: &Opts) -> Result<()> {
     }
     let _handle = handle; // keep alive for the lifetime of the call
 
-    let pid = std::process::id();
-    write_pid(&pid_path, pid)?;
+    let pid_record = current_pid_record();
+    let pid = pid_record.pid;
+    write_pid(&pid_path, &pid_record)?;
 
     let runtimes_label: Vec<&'static str> = if filter.is_empty() {
         vec!["claude", "codex", "gemini"]
@@ -236,17 +304,33 @@ fn install_signal_handlers(_shutdown: &Arc<AtomicBool>) {
 
 pub fn stop(opts: &Opts) -> Result<()> {
     let pid_path = pid_file_path()?;
-    let pid = read_pid(&pid_path);
+    let record = read_pid_record(&pid_path);
+    let pid = record.as_ref().map(|r| r.pid);
 
+    // Identity check (per review MEDIUM-6): only SIGTERM the PID if
+    // the recorded exe_path matches our own. PIDs get reused; a stale
+    // pidfile + a recycled PID owned by a shell or build process
+    // would otherwise kill an unrelated user process. When the
+    // pidfile is the legacy bare-int format the exe_path is "" and
+    // the match fails — we still clean up the file but skip the
+    // kill, which is the safe default.
     let mut signaled = false;
-    if let Some(p) = pid {
+    let mut skipped_due_to_identity_mismatch = false;
+    if let (Some(rec), Some(p)) = (&record, pid) {
         if pid_is_alive(p) {
-            #[cfg(unix)]
-            unsafe {
-                // SIGTERM = 15
-                if libc_kill(p as i32, 15) == 0 {
-                    signaled = true;
+            let our_exe = std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !rec.exe_path.is_empty() && rec.exe_path == our_exe {
+                #[cfg(unix)]
+                unsafe {
+                    if libc_kill(p as i32, 15) == 0 {
+                        signaled = true;
+                    }
                 }
+            } else {
+                skipped_due_to_identity_mismatch = true;
             }
         }
     }
@@ -257,6 +341,12 @@ pub fn stop(opts: &Opts) -> Result<()> {
         match pid {
             Some(p) if signaled => emit_human(&format!(
                 "Sent SIGTERM to pid {} and cleared {}.",
+                p,
+                pid_path.display()
+            )),
+            Some(p) if skipped_due_to_identity_mismatch => emit_human(&format!(
+                "Pid {} is alive but doesn't match our binary — refusing to SIGTERM \
+                 (PID reuse / stale legacy pidfile). Cleared {}.",
                 p,
                 pid_path.display()
             )),

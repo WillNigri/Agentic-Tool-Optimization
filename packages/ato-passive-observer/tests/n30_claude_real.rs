@@ -33,7 +33,7 @@
 use std::path::PathBuf;
 
 use ato_passive_observer::sources::SourceKind;
-use ato_passive_observer::worker::scan_file;
+use ato_passive_observer::worker::{scan_file, SessionStateMap};
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -251,7 +251,8 @@ fn n30_real_claude_corpus() {
         // sessionId on the JSONL lines), so the UNIQUE INDEX prevents
         // cross-file contamination naturally. We use a fresh DB per
         // run because state across files isn't what we're testing.
-        scan_file(&db_path, SourceKind::ClaudeCode, file)
+        let mut state = SessionStateMap::new();
+        scan_file(&db_path, SourceKind::ClaudeCode, file, &mut state)
             .expect("scan_file");
 
         let conn = Connection::open(&db_path).expect("open db");
@@ -366,7 +367,8 @@ fn n30_real_claude_multi_turn() {
     for file in &files {
         let gt = ground_truth_pairs(file);
         total_ground_truth += gt;
-        scan_file(&db_path, SourceKind::ClaudeCode, file).expect("scan_file");
+        let mut state = SessionStateMap::new();
+        scan_file(&db_path, SourceKind::ClaudeCode, file, &mut state).expect("scan_file");
         let conn = Connection::open(&db_path).expect("open db");
         let session_id = extract_first_session_id(file).unwrap_or_default();
         let observed: i64 = conn
