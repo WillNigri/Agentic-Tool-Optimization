@@ -103,6 +103,10 @@ pub enum MethodologiesSub {
         /// Team UUID.
         #[arg(long)]
         team: String,
+        /// Human-readable name teammates see in the shared list.
+        /// Defaults to the slug if omitted.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// List methodologies shared into a team.
     List {
@@ -191,7 +195,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
     let client = http_client()?;
 
     match sub {
-        MethodologiesSub::Share { slug, team } => {
+        MethodologiesSub::Share { slug, team, name } => {
             let row = load_local_methodology(&slug, db_path)?;
             let variant_matrix: Value = serde_json::from_str(&row.variant_matrix_json)
                 .with_context(|| format!("Bad variant_matrix JSON for slug={}", slug))?;
@@ -203,10 +207,13 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
                 "rubric": rubric,
             });
             let url = format!("{}/teams/{}/methodologies/share", api_base(), team);
+            // Teammates browsing the shared list see `display_name = name`; without
+            // --name they'd see the machine slug. Default to slug only as a fallback.
+            let display_name = name.as_deref().unwrap_or(&row.slug);
             let body = ShareMethodologyBody {
                 methodology_id: &row.id,
                 slug: &row.slug,
-                name: &row.slug,
+                name: display_name,
                 description: row.description.as_deref(),
                 config,
             };
@@ -268,9 +275,13 @@ fn load_local_methodology(slug: &str, db_path: &PathBuf) -> Result<LocalMethodol
     Ok(row)
 }
 
-/// Mirror the desktop client's success guard (apps/desktop/src/lib/cloud-api.ts:184) —
-/// a 200 OK that carries `{"success": false, "error": {...}}` is still a failure.
-/// Endpoints that don't envelope (no `success` field) fall through to HTTP status.
+/// Permissive variant of the desktop client's success guard
+/// (apps/desktop/src/lib/cloud-api.ts:184). The desktop treats a 200 OK with
+/// no `success` field as failure; this Rust version treats it as success, on
+/// purpose — bare (non-enveloped) endpoints exist and should still pass
+/// through. Only an explicit `{"success": false, ...}` routes to the error
+/// path. If/when the cloud regression-tests every team-tier endpoint to
+/// always envelope, tighten this to `Some(true)` only and re-mirror.
 fn is_success(status: reqwest::StatusCode, body: &Value) -> bool {
     if !status.is_success() {
         return false;
@@ -305,18 +316,26 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
         return handle_response_error(status, &body, opts);
     }
 
-    // Unwrap envelope before either emit path. `data` is expected to be an array
-    // for list endpoints; fall back to the full body if the response is bare.
-    let payload = body.get("data").cloned().unwrap_or(body.clone());
+    // Unwrap envelope before either emit path. `data` is expected to be an
+    // array for list endpoints; fall back to the full body if the response is
+    // bare. Move (not clone) `body` into the fallback — review #L1 noted the
+    // clone was redundant.
+    let payload = body.get("data").cloned().unwrap_or_else(|| body.clone());
+    // Empty-vs-malformed distinction: only impersonate "no shared X" when the
+    // payload is an explicit empty array (or an empty data field). A non-array
+    // response shape is treated as a hard error so the user isn't lied to.
+    let rows_or_err = match payload.as_array() {
+        Some(arr) => Ok(arr),
+        None => Err("Unexpected response shape — expected an array under `data`"),
+    };
 
     if !opts.human {
         emit_json(&payload)?;
         return Ok(());
     }
 
-    let rows = payload.as_array();
-    match rows {
-        Some(arr) if !arr.is_empty() => {
+    match rows_or_err {
+        Ok(arr) if !arr.is_empty() => {
             emit_human(&format!("Shared {}s ({}):", kind, arr.len()));
             for row in arr {
                 let slug = row.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
@@ -333,7 +352,12 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
                 emit_human(&format!("  • {} ({}) — by {} at {}", name, slug, by, at));
             }
         }
-        _ => emit_human(&format!("No shared {}s in this team yet.", kind)),
+        Ok(_) => emit_human(&format!("No shared {}s in this team yet.", kind)),
+        Err(msg) => {
+            emit_human(&format!("[malformed-response] {}", msg));
+            emit_human(&format!("body: {}", payload));
+            std::process::exit(1);
+        }
     }
     Ok(())
 }

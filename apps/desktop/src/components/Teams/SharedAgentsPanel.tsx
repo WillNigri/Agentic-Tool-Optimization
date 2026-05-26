@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Share2, Trash2, AlertCircle, Sparkles } from 'lucide-react';
 import {
@@ -47,6 +47,15 @@ export default function SharedAgentsPanel({ teamId, ownedAgents = [] }: SharedAg
     },
     onError: () => setConfirmAgentId(null),
   });
+
+  // Auto-dismiss the confirm-armed state after 10s of inactivity so a user
+  // who clicked Unshare and walked away can't trip a destructive second click
+  // when they come back. (review L5)
+  useEffect(() => {
+    if (!confirmAgentId) return;
+    const timer = setTimeout(() => setConfirmAgentId(null), 10_000);
+    return () => clearTimeout(timer);
+  }, [confirmAgentId]);
 
   const sharedIds = new Set(shared.map((s: SharedTeamAgent) => s.agent_id));
   const shareableAgents = ownedAgents.filter((a) => !sharedIds.has(a.id));
