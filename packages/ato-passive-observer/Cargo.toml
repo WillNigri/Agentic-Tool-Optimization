@@ -1,0 +1,18 @@
+[package]
+name = "ato-passive-observer"
+version = "0.1.0"
+edition = "2021"
+description = "Shared tail-watcher for Claude Code / Codex / Gemini CLI session JSONLs. Persists user-prompt + assistant-response pairs into the ATO execution_logs table as dispatch_kind='passive_observation'. Powers both the desktop auto-start and `ato observe` CLI."
+license = "MIT"
+
+[dependencies]
+notify = "6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+ato-pricing = { path = "../ato-pricing" }
+
+[dev-dependencies]
+tempfile = "3"

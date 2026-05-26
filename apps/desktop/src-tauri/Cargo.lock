@@ -319,6 +319,7 @@ dependencies = [
  "ato-agent-permissions",
  "ato-api-providers",
  "ato-db-views",
+ "ato-passive-observer",
  "ato-posts",
  "ato-pricing",
  "ato-recipes",
@@ -351,6 +352,19 @@ dependencies = [
  "toml 0.8.2",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "ato-passive-observer"
+version = "0.1.0"
+dependencies = [
+ "ato-pricing",
+ "chrono",
+ "dirs 5.0.1",
+ "notify",
+ "rusqlite",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

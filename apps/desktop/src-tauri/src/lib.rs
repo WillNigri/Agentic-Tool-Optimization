@@ -4,6 +4,10 @@ mod encryption;
 mod identity;
 mod log_watcher;
 mod passive_observer;
+// v2.13 — Tauri command surface for the Observability → PassiveFeed
+// React panel. Backed by the same execution_logs rows the
+// passive_observer crate writes.
+mod observe;
 mod health_poller;
 mod telemetry;
 mod file_attribution;
@@ -444,6 +448,9 @@ pub fn run() {
             record_local_config_change,
             // v2.6 PR-A — observatory summary
             compute_billing_surface_summary,
+            // v2.13 — universal observability passive feed surface
+            observe::list_passive_observations,
+            observe::get_observer_status,
             // v2.3.36 Phase 6.x-I.2 — runtime-binary health
             runtime_health::runtime_health_check,
             runtime_health::runtime_health_run_fix,

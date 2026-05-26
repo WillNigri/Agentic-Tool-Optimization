@@ -45,3 +45,8 @@ pub mod workspaces;
 // Langfuse/Helicone ingester lives in ato-cloud; this surface accepts
 // any structured trace export the customer can pipe in.
 pub mod production_signals;
+// v2.13 — `ato observe start/stop/status`. Thin foreground wrapper
+// around the shared `ato-passive-observer` crate so headless dev
+// boxes + CI runners get the same universal multi-LLM observability
+// the desktop auto-starts. See [[ato-live-billing-path]].
+pub mod observe;
