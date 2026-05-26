@@ -6,6 +6,42 @@
 
 See [`README.md`](./README.md) for the full pitch, [`AGENTS.md`](./AGENTS.md) for the surface a coding agent reads, and [`docs/tiers.md`](./docs/tiers.md) for the open-core tiering principle (what's Free, what's Pro, and why).
 
+---
+
+## ⚠️ Open-core boundary — read this before adding a row to the roadmap
+
+> **Pro / Team / Enterprise features must live in the CLOSED-SOURCE repo `ato-cloud`. Never in this OSS repo (Agentic-Tool-Optimization, MIT).**
+>
+> Runtime tier-gates (`tier::require_feature(...)`) are NOT enough — they're trivially removed by anyone who forks the MIT repo. The IMPLEMENTATION of any Pro automation belongs in `ato-cloud/services/pro-runner/` (Rust, distributed as the `ato-pro` paid binary) or `ato-cloud/services/*` (TypeScript, hosted on Railway).
+
+The boundary, restated in plain language:
+
+- **Free (OSS, this repo)** = the **building blocks** a customer can wire together by hand. Primitives, schemas, math, viewing surfaces, config formats. *"Capability without the harness."*
+- **Pro (ato-cloud, paid)** = the **codified one-button automations** on top of those building blocks. Orchestrators, safety harnesses, auto-loops, cloud-hosted services. *"Same capability, but we run it for you."*
+- **Team (ato-cloud, paid)** = multi-user state on top of Pro.
+- **Enterprise (ato-cloud, paid + contract)** = org-wide governance, SSO, audit, on-prem.
+
+### The three tests to run before any new commit to OSS
+
+1. **The fork test.** If a competitor forked this repo and removed every `tier::require_feature()` call, would they get the feature? If yes → wrong repo. Move it to ato-cloud.
+2. **The by-hand test.** Can a customer reproduce this feature with a bash script around `ato dispatch` + their own jq/awk? If yes, that bash recipe IS the free path; the codified one-button version goes to Pro.
+3. **The "split" test.** If a feature is part-primitive part-automation, **break it up**. The primitive stays free in OSS; the codified automation goes to ato-cloud. Document both paths in `docs/tiers.md`.
+
+When in doubt: **default to ato-cloud**. It's cheap to graduate something from Pro → Free if we change our mind; it's expensive (and sometimes impossible) to claw a feature back from MIT history.
+
+### Where everything lives today
+
+| Repo | Path | License | Who can see it |
+|---|---|---|---|
+| Agentic-Tool-Optimization | this repo | MIT | World — published on GitHub |
+| ato-cloud | private | UNLICENSED | Will + team only — cloned to `/Users/beatriznigri/ato-cloud` |
+| ato-pro binary | `services/pro-runner/` inside ato-cloud | UNLICENSED | Pro+ subscribers download via `ato pro install` |
+| Hosted services | `services/api-gateway` etc. inside ato-cloud | UNLICENSED | Customers hit `api.agentictool.ai` |
+
+If you're about to commit a Pro / Team / Enterprise feature, the destination is **NOT this repo** — open the editor on `/Users/beatriznigri/ato-cloud/` instead.
+
+---
+
 ## Latest (May 2026 — current sprint)
 
 ### v2.10.0 — Methodology runner (Released 2026-05-25)
@@ -77,14 +113,31 @@ Map ATO onto YC's loop architecture (sensor → policy → tools → quality-gat
 - Quality gate — us (v2.10 methodology runner).
 - Learning — us, starting v2.11 (diagnose + A/B).
 
-v2.12+ candidates queued for product decision:
-- **Cross-runtime diagnose** — diagnose itself runs as a methodology cell (N proposals from N models, pick the variant whose A/B wins).
-- **Methodology auto-extension** — when a holdout cell regresses, add it to the visible methodology automatically so the next diagnose pass has to satisfy it.
-- **Production signal types beyond Langfuse** — Helicone, custom telemetry endpoints, application logs.
-- **Multi-tenant agent registries** — Enterprise feature. Inventory of every agent across an org, with cross-team eval coverage.
-- **Agent-recursive dispatches** — Mode 4 from the original v2.9 plan; an ATO agent dispatching further ATO agents with bounded depth + budget.
+v2.12+ candidates queued for product decision. **Each row carries its classification + destination repo so we don't repeat the PR-12.8 leak.**
 
-Strategic notes from the 2026-05-25 YC discussion saved at `memory/project_yc_self_improving_company.md`.
+| Feature | Tier | Lives in | Free escape hatch (mandatory) |
+|---|---|---|---|
+| **Cross-runtime diagnose** — diagnose itself runs as a methodology cell (N proposals from N models, pick the variant whose A/B wins). ~200 LOC. | **Pro** | `ato-cloud/services/pro-runner/` (extends diagnose.rs) | Customer runs N `ato dispatch` calls by hand against the same diagnose prompt, picks whichever output looks best. |
+| **Methodology auto-extension** — when a holdout cell regresses, add it to the visible methodology automatically so the next diagnose pass has to satisfy it. | **Pro** | `ato-cloud/services/pro-runner/` (new module) | Customer manually appends the regressed cell to their methodology JSON and re-runs. |
+| **Production signal ingestion — Helicone / custom telemetry / logs.** SPLIT per the third test: the ingestion CONNECTORS (cloud-hosted Helicone webhook receiver, custom-endpoint poller, log-scraper service) are Pro, hosted infra. The OSS-side `ato production-signals add/list/delete` surface that writes to local SQLite stays free; it's the consumer endpoint. | **Pro (connectors)** + **Free (consumer)** | `ato-cloud/services/{helicone-poller,signals-ingest}/` for connectors; `apps/cli/src/commands/production_signals.rs` stays in OSS | Customer writes their own webhook handler that POSTs to `ato production-signals add` from any source they want. |
+| **Multi-tenant agent registries** — inventory of every agent across an org, cross-team eval coverage, role-based access. | **Enterprise** | `ato-cloud/services/teams/` + `ato-cloud/services/agent-registry/` (new) | None at this tier. Enterprise is by definition the multi-user / governed path. |
+| **Agent-recursive dispatches (Mode 4 from the v2.9 plan).** SPLIT per the third test: the basic CAPABILITY (an agent shells out to `ato dispatch` from within another dispatch) is already free — it's just the existing primitive used recursively. The codified SAFETY HARNESS — bounded depth, budget cap, cycle detection, parent→child receipt aggregation — is Pro. | **Pro (harness)** + **Free (capability)** | `ato-cloud/services/pro-runner/` for the harness; OSS `ato dispatch` already supports the bare capability | Customer passes `--depth $((PARENT_DEPTH + 1))` through env vars and checks budget themselves with their own counter. |
+
+Strategic notes from the 2026-05-25 YC discussion saved at `memory/project_yc_self_improving_company.md`. Boundary classifications above were confirmed with Will 2026-05-26 PM.
+
+### STAGE 7 — close out the PR-12.8 migration (next commit on the path)
+
+PR-12.8 STAGE 5 + STAGE 7 (deferred from the original 5-stage plan now that STAGE 6 expanded the scope):
+
+- Delete `apps/cli/src/methodology/diagnose.rs` from OSS (moved to `ato-cloud/services/pro-runner/src/diagnose.rs` in STAGE 1).
+- Delete `apps/cli/src/methodology/runner.rs` from OSS (moved in STAGE 6).
+- Delete `apps/cli/src/methodology/cost.rs` from OSS (moved in STAGE 6).
+- Strip the `diagnose_methodology_run` MCP tool from `services/mcp-server/` (Pro feature, leak-of-record from PR-12.3 commit `903d08d`).
+- Strip the inline OSS `handle_diagnose` + `handle_apply` bodies that are currently dead code behind `#[allow(unreachable_code, dead_code)]` (left in STAGE 4 commit `43c905b` for one-cycle reversibility).
+- Add a CHANGELOG entry: "v2.11.x: methodology run / adopt / score / margin / diagnose / schedule-create moved to the private `ato-pro` binary distributed via `ato pro install`. UX unchanged; implementation now private."
+- Cross-compile the `ato-pro` binary for `linux-x64`, `linux-arm64`, `darwin-x64`. Today only `darwin-arm64` customers get a working `ato pro install`; everyone else 404s on the manifest endpoint.
+
+Trigger condition for STAGE 7: Railway has stabilized on `ato-cloud@3437937` (the STAGE 6 commit) for a full week with no rollbacks. STAGE 5 deletions are irreversible from the customer's view; we don't ship them ahead of a verified rollout.
 
 ## Released
 
