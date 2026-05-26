@@ -366,7 +366,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Compose the diagnose prompt per docs/v2.11-learning-loop.md §Q1.
+/// Compose the diagnose prompt per docs/v2.11-learning-loop.md §Q1 + §Q6.
 /// Pure function — testable without DB or LLM access.
 pub fn build_diagnose_prompt(
     methodology_slug: &str,
@@ -376,6 +376,7 @@ pub fn build_diagnose_prompt(
     cells: &[CellAggregate],
     worst_k: &[RunDispatch],
     best_k: &[RunDispatch],
+    production_signals: &[crate::commands::production_signals::ProductionSignalRow],
     opts: &DiagnoseOptions,
 ) -> String {
     let mut s = String::with_capacity(8 * 1024);
@@ -453,6 +454,27 @@ pub fn build_diagnose_prompt(
             "**Response (truncated):**\n```\n{}\n```\n\n---\n\n",
             escape_for_fence(&truncate(&resp, opts.max_chars_per_dispatch))
         ));
+    }
+
+    // v2.11 PR-12.5 — Production signals block (§Q6). Injected only
+    // when the methodology is bound to an agent + signals exist.
+    // Telling the diagnose agent to weight production above dev evals
+    // is the load-bearing instruction here; without it, the diagnose
+    // can hill-climb on rubric scores while users actively churn.
+    if !production_signals.is_empty() {
+        s.push_str(&format!(
+            "# Production signals ({} recent — Langfuse/Helicone or manual export)\n\n",
+            production_signals.len()
+        ));
+        s.push_str("**When dev rubric scores and production signals conflict, production wins.** Rubric scores measure what we thought to ask; production measures what users actually experience. Propose changes that resolve real production failures over hill-climbing on the methodology's rubric.\n\n");
+        for sig in production_signals {
+            s.push_str(&format!(
+                "## source={} · captured_at={}\n```json\n{}\n```\n\n",
+                sig.source,
+                sig.captured_at,
+                sig.signal_json.trim()
+            ));
+        }
     }
 
     s.push_str("# Your task\n\nReply with at most one short paragraph of reasoning, then a JSON object on the LAST line. Schema (strict -- operations enum may not be extended):\n\n");
@@ -588,6 +610,19 @@ pub fn diagnose_run(
         None => synthetic_agent_definition(&cells),
     };
 
+    // v2.11 PR-12.5 — production-signal consumer. When the methodology
+    // is bound to an agent, fetch up to 5 recent production signals
+    // and include them in the diagnose prompt per
+    // docs/v2.11-learning-loop.md §Q6. The diagnose agent's system
+    // prompt instructs: "when dev rubric scores and production signals
+    // conflict, production wins; rubric scores measure what we thought
+    // to ask, production measures what users actually experience."
+    let production_signals = match &agent_slug {
+        Some(slug) => crate::commands::production_signals::signals_for_agent(db_path, slug, 5)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
     let prompt = build_diagnose_prompt(
         &methodology_slug,
         &rubric_json,
@@ -596,6 +631,7 @@ pub fn diagnose_run(
         &cells,
         &worst_k,
         &best_k,
+        &production_signals,
         opts,
     );
 
@@ -1032,6 +1068,49 @@ mod tests {
     }
 
     #[test]
+    fn build_diagnose_prompt_injects_production_signals_when_present() {
+        // PR-12.5 — §Q6 lock: production signals are injected as a
+        // dedicated section with the "production wins over rubric"
+        // instruction. This test pins the structural promise.
+        let cells = vec![CellAggregate {
+            prompt_idx: 0,
+            model: "claude-sonnet-4-6".to_string(),
+            condition: "default".to_string(),
+            n: 10,
+            mean_score: Some(0.5),
+            mean_cost: 0.001,
+            mean_tokens_out: 100.0,
+        }];
+        let ds = vec![mk_dispatch(0, Some(0.0), "a")];
+        let opts = DiagnoseOptions::default();
+        let signals = vec![crate::commands::production_signals::ProductionSignalRow {
+            id: "s1".into(),
+            agent_slug: "code-reviewer".into(),
+            source: "langfuse".into(),
+            signal_json: r#"{"abandonment_after_3_turns": 0.34}"#.into(),
+            captured_at: "2026-05-25T12:00:00Z".into(),
+        }];
+        let p = build_diagnose_prompt(
+            "m-slug",
+            r#"{"kind":"regex"}"#,
+            "regression-watch",
+            "## agent\n",
+            &cells,
+            &ds,
+            &[],
+            &signals,
+            &opts,
+        );
+        assert!(p.contains("Production signals"));
+        assert!(p.contains("source=langfuse"));
+        assert!(p.contains("abandonment_after_3_turns"));
+        assert!(
+            p.contains("production wins"),
+            "the load-bearing instruction must appear verbatim"
+        );
+    }
+
+    #[test]
     fn build_diagnose_prompt_includes_all_sections() {
         let cells = vec![CellAggregate {
             prompt_idx: 0,
@@ -1052,10 +1131,13 @@ mod tests {
             &cells,
             &ds,
             &[],
+            &[],
             &opts,
         );
         assert!(p.contains("Methodology context"));
         assert!(p.contains("Per-cell aggregate stats"));
+        // PR-12.5: when production_signals is empty, the section is omitted entirely.
+        assert!(!p.contains("Production signals"), "empty signals must not produce a section");
         assert!(p.contains("Current agent definition"));
         assert!(p.contains("Worst-K dispatches"));
         assert!(p.contains("Best-K dispatches"));

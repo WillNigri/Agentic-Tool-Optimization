@@ -111,6 +111,14 @@ enum Commands {
     /// "Personal" workspace; Team tier (ato-cloud) adds multi-user
     /// membership + cross-device sync over the same tables.
     Workspaces(commands::workspaces::WorkspacesArgs),
+    /// v2.11 PR-12.5 — production_signals (OSS consumer side). Add /
+    /// list / delete signals the diagnose pipeline consumes when the
+    /// methodology is bound to an agent. The Langfuse/Helicone ingester
+    /// lives in ato-cloud; this CLI accepts any structured JSON the
+    /// customer can pipe in (`langfuse traces export --json | ato
+    /// production-signals add --agent-slug X -f -`).
+    #[command(name = "production-signals")]
+    ProductionSignals(commands::production_signals::ProductionSignalsArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1145,6 +1153,10 @@ fn main() -> Result<()> {
         }
         Commands::Workspaces(args) => {
             commands::workspaces::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::ProductionSignals(args) => {
+            commands::production_signals::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

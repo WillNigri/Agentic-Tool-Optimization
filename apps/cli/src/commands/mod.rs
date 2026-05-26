@@ -41,3 +41,7 @@ pub mod methodology;
 // gets a single auto-seeded "Personal" workspace; Team tier (ato-cloud)
 // layers multi-user membership + sync on top of the same tables.
 pub mod workspaces;
+// v2.11 PR-12.5 — production_signals CLI (OSS consumer side). The
+// Langfuse/Helicone ingester lives in ato-cloud; this surface accepts
+// any structured trace export the customer can pipe in.
+pub mod production_signals;
