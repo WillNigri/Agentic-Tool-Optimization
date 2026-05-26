@@ -18,16 +18,16 @@ The methodology runner is the headline Pro feature *positioning-wise*, but most 
 
 | Surface | Tier | Why |
 |---|---|---|
-| `ato evaluations methodology create / list / get` | Free | You're defining + viewing your own methodology. No automation. |
-| `ato evaluations methodology run` | Free | You're firing a fan-out yourself, your API keys, your terminal. The runner is a convenience over a script. |
-| `ato evaluations methodology adopt` | Free | You're composing your existing dispatches. We're explaining your own data to you. |
-| `ato evaluations methodology score` | Free | You wrote the rubric; we apply it. No new automation. |
+| `ato evaluations methodology create / list / get` | Free | You're defining + viewing your own methodology config. No automation. |
+| `ato evaluations methodology run` | **Pro** | The codified fan-out orchestrator. Customer can replicate by hand with a 100-line bash loop around `ato dispatch` + their own JSON parser — that's the free path. |
+| `ato evaluations methodology adopt` | **Pro** | The codified "ingest your existing dispatches into a structured run" automation. Customer can replicate by writing the same INSERT statements by hand. |
+| `ato evaluations methodology score` | **Pro** | The codified rubric-application loop. Customer can compose the same rubric against any dispatch by hand using the (free) rubric library schema. |
 | `ato evaluations methodology runs list / show` | Free | Read access to your own data. |
 | `ato evaluations methodology cost-estimate` | Free | Math against the published rate card. |
-| `ato evaluations methodology margin` | Free | Showing you your own cost ledger. |
+| `ato evaluations methodology margin` | **Pro** | The codified cost ledger view. Customer can read the same columns from SQLite by hand. |
 | `ato evaluations methodology calibrate show / set / reset` | Free | You're providing the calibration data; we just persist it. |
-| `ato evaluations methodology archetypes` | Free | Reading the registry. |
-| `ato evaluations methodology schedule create` | **Pro** | Automation we provide. You could write your own launchd plist by hand. |
+| `ato evaluations methodology archetypes` | Free | Reading the built-in archetype registry. |
+| `ato evaluations methodology schedule create` | **Pro** | Codified scheduling. Customer can write their own launchd plist or crontab line by hand. |
 | `ato evaluations methodology schedule list / delete / trigger` | Free | Managing what you (or your past Pro self) already set up. |
 | `ato evaluations methodology diagnose` (v2.11) | **Pro** | Codified learning-loop automation. You could write your own diagnose-prompt bash loop. |
 | Cloud sync of methodology runs across devices | **Pro** | Our infra runs it. |
@@ -62,7 +62,11 @@ The methodology runner is the headline Pro feature *positioning-wise*, but most 
 | **Cloud trace upload + retention** | Pro | 30-day cross-device retention; regression detection across devices. |
 | **Cloud sync (agents + skills + methodologies)** | Pro | Cross-device automation. |
 | **Embed key** (API key for trace upload) | Pro | Mint-on-first-read. |
-| **`ato evaluations methodology schedule create`** | Pro | Automation we provide (re-tiered 2026-05-25). |
+| **`ato evaluations methodology run`** | Pro | Codified fan-out orchestrator (re-tiered 2026-05-25). |
+| **`ato evaluations methodology adopt`** | Pro | Codified ingest-existing-dispatches automation. |
+| **`ato evaluations methodology score`** | Pro | Codified rubric-application loop. |
+| **`ato evaluations methodology margin`** | Pro | Codified cost-ledger view. |
+| **`ato evaluations methodology schedule create`** | Pro | Codified scheduling. |
 | **`ato evaluations methodology diagnose`** (v2.11) | Pro | Codified learning loop. |
 | **Provider keys (encrypted key store for cron usage-poller)** | Team | ATO holds user credentials → highest trust. |
 | **Team workspaces (multi-user)** | Team | Shared agents + skills across teammates. |
@@ -92,7 +96,8 @@ Three checkpoints in the stack — all read from the same FEATURES catalog so th
 
 Every Pro feature has a free-primitive equivalent the customer can compose by hand. This is the principle: we charge for the button, not for the capability. Documented examples:
 
-- **Replace `methodology.schedule`** with `crontab -e` + a shell script calling `ato evaluations methodology run`. Loses the per-job log file, status tracking, integration with the desktop app's Schedules tab.
+- **Replace `methodology.run`** with a bash loop around `ato dispatch` that fires the variant matrix yourself + parses JSON receipts + writes summary stats with `jq` + your own math. Loses the runner's structured state machine (resume on partial failure, atomic per-cell commits), the LLM-judge fan-out, the cost ledger integration, the per-dispatch cell tagging that lets `methodology runs show` reconstruct your matrix later.
+- **Replace `methodology.schedule`** with `crontab -e` + a shell script calling your own version of the above. Loses the per-job log file, status tracking, integration with the desktop app's Schedules tab.
 - **Replace `methodology.diagnose`** with `ato dispatch` calls that construct the diagnose prompt yourself + apply the JSON output to a copy of the agent definition + re-run the methodology + diff scores by hand. Loses the locked input shape, the structured operations enum, the Welch-t win condition, the lineage tracker, the auto-revert watch.
 - **Replace `cloud-sync`** with a personal git repo + a cron job to push `~/.claude/agents/` and `~/.ato/local.db`. Loses cross-device live sync; gains git history (some prefer this).
 
