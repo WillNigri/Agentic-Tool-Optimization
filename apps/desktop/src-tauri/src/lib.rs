@@ -10,6 +10,9 @@ mod file_attribution;
 mod active_runs;
 mod ratchet_view;
 mod remote_runtimes_view;
+// v2.13 Phase 6.x polish — shells out to `ato runtimes status --with-quota`
+// for the Settings → Runtimes → Monitoring quota progress bars.
+mod runtime_quota_view;
 mod runtime_health;
 mod sessions_view;
 // S4 Felipe P2 — Linux install-method detection so the updater UI
@@ -492,6 +495,9 @@ pub fn run() {
             remote_runtimes_view::add_remote_runtime,
             remote_runtimes_view::remove_remote_runtime,
             remote_runtimes_view::list_ssh_key_candidates,
+            // v2.13 Phase 6.x polish — Settings → Runtimes → Monitoring
+            // quota probes (reads each runtime's local usage.json).
+            runtime_quota_view::list_runtime_quota_probes,
             // BYOK per-runtime auth mode picker
             byok::get_runtime_auth_info,
             byok::set_runtime_auth_mode,
