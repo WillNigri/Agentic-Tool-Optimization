@@ -268,34 +268,31 @@ fn load_local_methodology(slug: &str, db_path: &PathBuf) -> Result<LocalMethodol
     Ok(row)
 }
 
+/// Mirror the desktop client's success guard (apps/desktop/src/lib/cloud-api.ts:184) —
+/// a 200 OK that carries `{"success": false, "error": {...}}` is still a failure.
+/// Endpoints that don't envelope (no `success` field) fall through to HTTP status.
+fn is_success(status: reqwest::StatusCode, body: &Value) -> bool {
+    if !status.is_success() {
+        return false;
+    }
+    !matches!(body.get("success").and_then(|v| v.as_bool()), Some(false))
+}
+
 fn handle_response(resp: reqwest::blocking::Response, opts: &Opts, human_msg: &str) -> Result<()> {
     let status = resp.status();
     let body: Value = resp.json().unwrap_or(serde_json::json!({}));
 
-    if !status.is_success() {
-        if opts.human {
-            let code = body
-                .pointer("/error/code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("UNKNOWN");
-            let msg = body
-                .pointer("/error/message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Request failed");
-            emit_human(&format!("[{}] {} ({})", status, msg, code));
-            if let Some(url) = body.pointer("/error/upgrade_url").and_then(|v| v.as_str()) {
-                emit_human(&format!("Upgrade: {}", url));
-            }
-        } else {
-            emit_json(&body)?;
-        }
-        std::process::exit(1);
+    if !is_success(status, &body) {
+        return handle_response_error(status, &body, opts);
     }
 
     if opts.human {
         emit_human(human_msg);
     } else {
-        emit_json(&body)?;
+        // Unwrap the cloud envelope so callers `jq '.team_id'` not `jq '.data.team_id'`,
+        // matching the convention in production_signals.rs (which emits unwrapped rows).
+        let payload = body.get("data").cloned().unwrap_or(body);
+        emit_json(&payload)?;
     }
     Ok(())
 }
@@ -304,16 +301,20 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
     let status = resp.status();
     let body: Value = resp.json().unwrap_or(serde_json::json!({}));
 
-    if !status.is_success() {
+    if !is_success(status, &body) {
         return handle_response_error(status, &body, opts);
     }
 
+    // Unwrap envelope before either emit path. `data` is expected to be an array
+    // for list endpoints; fall back to the full body if the response is bare.
+    let payload = body.get("data").cloned().unwrap_or(body.clone());
+
     if !opts.human {
-        emit_json(&body)?;
+        emit_json(&payload)?;
         return Ok(());
     }
 
-    let rows = body.get("data").and_then(|d| d.as_array());
+    let rows = payload.as_array();
     match rows {
         Some(arr) if !arr.is_empty() => {
             emit_human(&format!("Shared {}s ({}):", kind, arr.len()));

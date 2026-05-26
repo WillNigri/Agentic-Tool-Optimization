@@ -19,6 +19,11 @@ interface SharedAgentsPanelProps {
 export default function SharedAgentsPanel({ teamId, ownedAgents = [] }: SharedAgentsPanelProps) {
   const queryClient = useQueryClient();
   const [shareAgentId, setShareAgentId] = useState<string>('');
+  // Two-step confirm for destructive unshare. The first click on a row's
+  // trash button parks the row id here; only the second click (the explicit
+  // "Confirm" button) fires the mutation. Cleared on success, error, or
+  // explicit cancel. Prevents accidental audit-row loss (docs/tiers.md).
+  const [confirmAgentId, setConfirmAgentId] = useState<string | null>(null);
 
   const { data: shared = [], isLoading, error } = useQuery({
     queryKey: ['team-shared-agents', teamId],
@@ -38,7 +43,9 @@ export default function SharedAgentsPanel({ teamId, ownedAgents = [] }: SharedAg
     mutationFn: (agentId: string) => unshareAgentFromTeam(teamId, agentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['team-shared-agents', teamId] });
+      setConfirmAgentId(null);
     },
+    onError: () => setConfirmAgentId(null),
   });
 
   const sharedIds = new Set(shared.map((s: SharedTeamAgent) => s.agent_id));
@@ -126,19 +133,47 @@ export default function SharedAgentsPanel({ teamId, ownedAgents = [] }: SharedAg
                   {new Date(row.shared_at).toLocaleString()}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => unshareMutation.mutate(row.agent_id)}
-                disabled={unshareMutation.isPending}
-                className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40 disabled:opacity-50"
-              >
-                {unshareMutation.isPending ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
+              {confirmAgentId === row.agent_id ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => unshareMutation.mutate(row.agent_id)}
+                    disabled={
+                      unshareMutation.isPending &&
+                      unshareMutation.variables === row.agent_id
+                    }
+                    className="inline-flex items-center gap-1 rounded bg-destructive px-2 py-1 text-xs font-medium text-background hover:bg-destructive/90 disabled:opacity-50"
+                  >
+                    {unshareMutation.isPending &&
+                    unshareMutation.variables === row.agent_id ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3 w-3" />
+                    )}
+                    Confirm unshare
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmAgentId(null)}
+                    disabled={
+                      unshareMutation.isPending &&
+                      unshareMutation.variables === row.agent_id
+                    }
+                    className="rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-surface-2 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmAgentId(row.agent_id)}
+                  className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
+                >
                   <Trash2 className="h-3 w-3" />
-                )}
-                Unshare
-              </button>
+                  Unshare
+                </button>
+              )}
             </li>
           ))}
         </ul>
