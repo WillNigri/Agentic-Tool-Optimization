@@ -4,7 +4,7 @@ import { Clock, X, ExternalLink } from "lucide-react";
 import { useTrialStatus } from "@/lib/tier";
 import { TRIAL_BANNER_DISMISSED_KEY } from "@/lib/trial";
 import { UPGRADE_URL } from "@/lib/constants";
-import { startCheckout } from "@/lib/billing";
+import { startCheckout, CheckoutError } from "@/lib/billing";
 import { useAuthStore } from "@/hooks/useAuth";
 
 // Phase 1 PR-A — persistent trial countdown banner.
@@ -24,6 +24,7 @@ export default function TrialBanner() {
   const accessToken = useAuthStore((s) => s.accessToken);
   const [dismissed, setDismissed] = useState(false);
   const [checkoutPending, setCheckoutPending] = useState(false);
+  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
 
   // Re-read the sessionStorage marker on mount so a previous tab's
   // dismissal isn't ignored if the user opens a second window.
@@ -68,8 +69,18 @@ export default function TrialBanner() {
           disabled={checkoutPending}
           onClick={async () => {
             setCheckoutPending(true);
+            setCheckoutNotice(null);
             try {
-              await startCheckout("pro", accessToken);
+              const result = await startCheckout("pro", accessToken);
+              if (result.kind === "calendly-fallback") {
+                setCheckoutNotice(result.notice);
+              }
+            } catch (err) {
+              setCheckoutNotice(
+                err instanceof CheckoutError
+                  ? `${err.message} (${err.code})`
+                  : "Couldn't open checkout. Try again or use the onboarding link.",
+              );
             } finally {
               setCheckoutPending(false);
             }
@@ -87,6 +98,15 @@ export default function TrialBanner() {
         >
           Upgrade <ExternalLink size={11} aria-hidden />
         </a>
+      )}
+      {checkoutNotice && (
+        <span
+          role="alert"
+          className="text-[11px] text-cs-muted max-w-[40ch] truncate"
+          title={checkoutNotice}
+        >
+          {checkoutNotice}
+        </span>
       )}
       <button
         type="button"
