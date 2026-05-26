@@ -264,6 +264,29 @@ enum Commands {
         /// no execution_logs row written.
         #[arg(long = "dry-run", default_value_t = false)]
         grounding_dry_run: bool,
+        /// PR-14 (Pro) — recursive-safe dispatch with depth + budget +
+        /// cycle detection. When set, the dispatch delegates to the
+        /// private `ato-pro dispatch` binary which enforces caps before
+        /// each call. `depth_cap=1` = no recursion; `depth_cap=3` is
+        /// the default for sub-agent workflows. 0 is rejected as
+        /// ambiguous. Customers can replicate by hand: increment
+        /// `ATO_DISPATCH_DEPTH` env var + check before each call.
+        #[arg(long = "depth-cap")]
+        depth_cap: Option<u32>,
+        /// PR-14 (Pro) — total budget envelope in USD for the entire
+        /// recursive chain. Default unset (no budget enforcement).
+        /// When set, triggers --depth-cap forwarding to ato-pro.
+        #[arg(long = "budget")]
+        budget: Option<f64>,
+        /// PR-14 (Pro) — per-call cost estimate charged against the
+        /// budget. Default 0.05 (a sonnet-class call). Only meaningful
+        /// when --budget is set.
+        #[arg(long = "estimated-call-cost")]
+        estimated_call_cost: Option<f64>,
+        /// PR-14 (Pro) — disable cycle detection on the recursive
+        /// harness. Default off (cycle detection ON).
+        #[arg(long = "no-cycle-detect", default_value_t = false)]
+        no_cycle_detect: bool,
     },
     /// Replay an existing dispatch against a different runtime/model
     Replay {
@@ -1209,7 +1232,55 @@ fn main() -> Result<()> {
             skip_mandatory,
             skip_reason,
             grounding_dry_run,
+            depth_cap,
+            budget,
+            estimated_call_cost,
+            no_cycle_detect,
         } => {
+            // PR-14: when any recursive-harness flag is set, delegate
+            // the entire dispatch to the Pro binary. The harness owns
+            // depth + budget + cycle enforcement; OSS code never sees
+            // those caps so a fork that removes the delegation gets
+            // unbounded recursion (a foot-gun, not a feature) — exactly
+            // the open-core boundary the codified safety harness is
+            // selling.
+            if depth_cap.is_some() || budget.is_some() {
+                let mut args: Vec<String> = vec![
+                    "--runtime".into(), runtime.clone(),
+                    "--prompt".into(), prompt.clone(),
+                ];
+                if let Some(m) = &model {
+                    args.push("--model".into());
+                    args.push(m.clone());
+                }
+                if let Some(a) = &agent {
+                    args.push("--agent".into());
+                    args.push(a.clone());
+                }
+                if let Some(d) = depth_cap {
+                    args.push("--depth-cap".into());
+                    args.push(d.to_string());
+                }
+                if let Some(b) = budget {
+                    args.push("--budget".into());
+                    args.push(format!("{:.6}", b));
+                }
+                if let Some(e) = estimated_call_cost {
+                    args.push("--estimated-call-cost".into());
+                    args.push(format!("{:.6}", e));
+                }
+                if no_cycle_detect {
+                    args.push("--no-cycle-detect".into());
+                }
+                return pro_client::delegate(
+                    "dispatch",
+                    &args,
+                    &db_path,
+                    opts.human,
+                    opts.quiet,
+                );
+            }
+
             // stream-jsonl implies stream; a wrapper can set just
             // --stream-jsonl without needing to also pass --stream.
             let stream = stream || stream_jsonl;

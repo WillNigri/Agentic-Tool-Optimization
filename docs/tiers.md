@@ -31,6 +31,7 @@ The methodology runner is the headline Pro feature *positioning-wise*, but most 
 | `ato evaluations methodology schedule list / delete / trigger` | Free | Managing what you (or your past Pro self) already set up. |
 | `ato evaluations methodology diagnose` (v2.11) | **Pro** | Codified learning-loop automation. You could write your own diagnose-prompt bash loop. |
 | `ato evaluations methodology diagnose --cross-runtime` (v2.12) | **Pro** | Codified cross-model tournament: N models propose, picker policy picks the winner, audit log persists losing proposals. Free DIY: run `methodology diagnose --diagnose-model X` twice with two model names and compare the JSON output by hand. |
+| `ato dispatch ... --depth-cap N --budget X` (v2.12 PR-14) | **Pro** | Bounded recursive dispatch with depth cap + budget envelope (shared across siblings) + cycle detection (agent_slug or hash(runtime, prompt)). The capability of an agent calling `ato dispatch` from inside its own run is already free; the codified safety harness is what you pay for. Free DIY: customer increments `ATO_DISPATCH_DEPTH` env var before each call and bails on overflow in a 5-line bash check. |
 | Cloud sync of methodology runs across devices | **Pro** | Our infra runs it. |
 | Hosted scheduled diagnose with email alerts | **Pro** | Our infra runs it. |
 | Auto-revert watch from Langfuse traces (v2.11.5) | **Pro** | Our automation watches your prod + reverts on regression. |
