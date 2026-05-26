@@ -227,6 +227,19 @@ pub enum MethodologySub {
         /// normally fires. Use in CI scripts where stdin isn't a TTY.
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// PR-13 (Pro) — fan diagnose across N models, run a tournament,
+        /// auto-pick the winner. Default models when --cross-runtime is
+        /// set without --diagnose-models: claude-opus-4-7 + gemini-2.5-pro.
+        #[arg(long, default_value_t = false)]
+        cross_runtime: bool,
+        /// Comma-separated model list for --cross-runtime.
+        #[arg(long)]
+        diagnose_models: Option<String>,
+        /// Picker policy when --cross-runtime is set: best (default,
+        /// shape-scored, capped) | majority-vote (changes agreed on
+        /// across models win) | human (display all, pick none).
+        #[arg(long)]
+        picker: Option<String>,
     },
     /// v2.10 PR-7 — schedule a methodology to re-run automatically.
     /// Wraps the existing ATO cron infrastructure: the schedule lands
@@ -496,6 +509,9 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 max_chars_per_dispatch,
                 apply,
                 yes,
+                cross_runtime,
+                diagnose_models,
+                picker,
             } => handle_diagnose(
                 run_id,
                 diagnose_model,
@@ -506,6 +522,9 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                 max_chars_per_dispatch,
                 apply,
                 yes,
+                cross_runtime,
+                diagnose_models,
+                picker,
                 db_path,
                 opts,
             ),
@@ -1526,6 +1545,9 @@ fn handle_diagnose(
     max_chars_per_dispatch: usize,
     apply: bool,
     yes: bool,
+    cross_runtime: bool,
+    diagnose_models: Option<String>,
+    picker: Option<String>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -1534,6 +1556,13 @@ fn handle_diagnose(
     // ato-cloud/services/pro-runner/; this surface forwards the user's
     // flags verbatim. If the customer isn't on Pro (binary not present)
     // they see a single sentence pointing at the subscribe page.
+    //
+    // PR-13 (2026-05-26) — added cross-runtime forwarding. When
+    // --cross-runtime is set, ato-pro fans the diagnose call out across
+    // --diagnose-models, runs a tournament per --picker, persists the
+    // tournament to ~/.ato/cross-runtime-diagnoses/<run_id>-<ts>.json,
+    // and (with --apply) writes the winning variant if the score margin
+    // is decisive.
     let mut args: Vec<String> = Vec::new();
     args.push("--run-id".to_string());
     args.push(run_id);
@@ -1558,6 +1587,17 @@ fn handle_diagnose(
     }
     if yes {
         args.push("--yes".to_string());
+    }
+    if cross_runtime {
+        args.push("--cross-runtime".to_string());
+    }
+    if let Some(m) = diagnose_models {
+        args.push("--diagnose-models".to_string());
+        args.push(m);
+    }
+    if let Some(p) = picker {
+        args.push("--picker".to_string());
+        args.push(p);
     }
     return crate::pro_client::delegate("diagnose", &args, db_path, opts.human, opts.quiet);
 
