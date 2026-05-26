@@ -257,6 +257,30 @@ pub enum MethodologySub {
     /// underlying defaults are shown side by side so the customer sees
     /// exactly what's being applied.
     Calibrate(CalibrateArgs),
+    /// v2.12 PR-15 (Pro) — methodology auto-extension. Compare holdout
+    /// scores between a baseline run and a variant run; promote any
+    /// holdout prompt that regressed beyond --regression-margin into the
+    /// methodology's visible matrix so the next diagnose pass has to
+    /// satisfy it. Closes the Goodhart loop. Delegates to ato-pro;
+    /// free DIY recipe: customer manually edits the methodology config
+    /// JSON to copy a holdout prompt into `variant_matrix.prompts`.
+    AutoExtension {
+        /// Baseline run id (the run before --apply).
+        #[arg(long = "baseline-run-id")]
+        baseline_run_id: String,
+        /// Variant run id (the run after --apply against the variant
+        /// agent file).
+        #[arg(long = "variant-run-id")]
+        variant_run_id: String,
+        /// Score delta threshold for "regressed". variant_mean <
+        /// baseline_mean - margin = promote.
+        #[arg(long = "regression-margin", default_value_t = 0.05)]
+        regression_margin: f64,
+        /// Write the promoted prompts into methodologies.variant_matrix.
+        /// Default off — dry-run prints what would be promoted.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
     /// v2.10 PR-5 — admin margin report. Aggregates dual-cost ledger
     /// across all methodology_runs in a time window. Customer-side:
     /// sum of YOUR LLM spend. Our-side: storage + bandwidth + compute +
@@ -534,6 +558,25 @@ pub fn run(args: EvaluationsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> 
                     handle_calibrate_set(key, value, note, opts)
                 }
                 CalibrateSub::Reset => handle_calibrate_reset(opts),
+            },
+            MethodologySub::AutoExtension {
+                baseline_run_id,
+                variant_run_id,
+                regression_margin,
+                apply,
+            } => {
+                // PR-15 (Pro) — thin client delegates to ato-pro.
+                let mut args: Vec<String> = vec![
+                    "--baseline-run-id".into(), baseline_run_id,
+                    "--variant-run-id".into(), variant_run_id,
+                    "--regression-margin".into(), format!("{}", regression_margin),
+                ];
+                if apply {
+                    args.push("--apply".into());
+                }
+                crate::pro_client::delegate(
+                    "auto-extension", &args, db_path, opts.human, opts.quiet,
+                )
             },
             MethodologySub::Schedule(sched_args) => match sched_args.sub {
                 ScheduleSub::Create {
