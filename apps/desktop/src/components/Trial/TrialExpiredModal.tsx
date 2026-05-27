@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
 import { Clock, X, ExternalLink } from "lucide-react";
 
 import { useTrialStatus } from "@/lib/tier";
 import { UPGRADE_URL } from "@/lib/constants";
+import { startCheckout, CheckoutError } from "@/lib/billing";
+import { useAuthStore } from "@/hooks/useAuth";
 
 // Phase 1 PR-A — trial-expired block modal.
 //
@@ -22,6 +25,14 @@ type Props = {
 
 export default function TrialExpiredModal({ open, onClose }: Props) {
   const trial = useTrialStatus();
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const [checkoutPending, setCheckoutPending] = useState(false);
+  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
+  // Clear stale notices when the modal closes so the user doesn't see
+  // a previous attempt's error on the next reopen.
+  useEffect(() => {
+    if (!open) setCheckoutNotice(null);
+  }, [open]);
   if (!open) return null;
   // Defensive: callers should only open this when expired, but if
   // they don't, render nothing rather than confuse the user.
@@ -69,6 +80,15 @@ export default function TrialExpiredModal({ open, onClose }: Props) {
         <div className="p-5 text-xs text-cs-muted">
           Your local-only features keep working. Pro features become available
           again the moment you upgrade.
+          {checkoutNotice && (
+            <p
+              role="alert"
+              aria-live="polite"
+              className="mt-3 text-[11px] text-cs-accent break-words"
+            >
+              {checkoutNotice}
+            </p>
+          )}
         </div>
 
         <footer className="flex items-center justify-between gap-3 px-5 pb-5">
@@ -79,14 +99,43 @@ export default function TrialExpiredModal({ open, onClose }: Props) {
           >
             Not now
           </button>
-          <a
-            href={UPGRADE_URL}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent/90"
-          >
-            Upgrade <ExternalLink size={12} aria-hidden />
-          </a>
+          {accessToken ? (
+            <button
+              type="button"
+              disabled={checkoutPending}
+              aria-busy={checkoutPending}
+              onClick={async () => {
+                setCheckoutPending(true);
+                setCheckoutNotice(null);
+                try {
+                  const result = await startCheckout("pro", accessToken);
+                  if (result.kind === "calendly-fallback") {
+                    setCheckoutNotice(result.notice);
+                  }
+                } catch (err) {
+                  setCheckoutNotice(
+                    err instanceof CheckoutError
+                      ? `${err.message} (${err.code})`
+                      : "Couldn't open checkout. Try again or use the onboarding link.",
+                  );
+                } finally {
+                  setCheckoutPending(false);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent/90 disabled:opacity-60"
+            >
+              {checkoutPending ? "Opening…" : "Upgrade"} <ExternalLink size={12} aria-hidden />
+            </button>
+          ) : (
+            <a
+              href={UPGRADE_URL}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-cs-accent px-3 py-1.5 text-xs font-medium text-cs-bg hover:bg-cs-accent/90"
+            >
+              Upgrade <ExternalLink size={12} aria-hidden />
+            </a>
+          )}
         </footer>
       </div>
     </div>
