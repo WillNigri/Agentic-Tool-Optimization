@@ -39,6 +39,8 @@ The methodology runner is the headline Pro feature *positioning-wise*, but most 
 | Auto-revert watch from Langfuse traces (v2.11.5) | **Pro** | Our automation watches your prod + reverts on regression. |
 | Auto-PR after A/B wins | **Pro** | Our automation opens the PR. |
 | Methodology runs shared across team workspace | **Team** | Multi-user state. |
+| `ato teams agents share / list / unshare` (v2.13) | **Team** | Codified multi-user agent sharing. Free DIY: copy the agent file by hand into each teammate's `~/.claude/agents/`. |
+| `ato teams methodologies share / list / unshare` (v2.13) | **Team** | Codified multi-user methodology sharing. Free DIY: export the methodology config to a shared git repo. |
 
 ## What this means for the rest of the product
 
@@ -104,6 +106,8 @@ Every Pro feature has a free-primitive equivalent the customer can compose by ha
 - **Replace `methodology.schedule`** with `crontab -e` + a shell script calling your own version of the above. Loses the per-job log file, status tracking, integration with the desktop app's Schedules tab.
 - **Replace `methodology.diagnose`** with `ato dispatch` calls that construct the diagnose prompt yourself + apply the JSON output to a copy of the agent definition + re-run the methodology + diff scores by hand. Loses the locked input shape, the structured operations enum, the Welch-t win condition, the lineage tracker, the auto-revert watch.
 - **Replace `cloud-sync`** with a personal git repo + a cron job to push `~/.claude/agents/` and `~/.ato/local.db`. Loses cross-device live sync; gains git history (some prefer this).
+- **Replace `teams agents share`** with each teammate copying the agent file into their own `~/.claude/agents/<slug>.md` (or running `git pull` against a shared agents repo). Loses the per-share audit row (`shared_by_user_id`, `shared_at`), the desktop's Shared Agents panel, and the membership/tier-gated visibility.
+- **Replace `teams methodologies share`** with `ato evaluations methodology get <slug>` to dump the config + paste it into a shared doc / git repo for teammates to import via `ato evaluations methodology create -f`. Loses cloud-side snapshot + the in-app discovery surface.
 - **Replace the desktop's Upgrade button** with `curl -X POST https://api.agentictool.ai/api/billing/checkout -H "Authorization: Bearer <jwt>" -H "Content-Type: application/json" -d '{"tier":"pro","successUrl":"https://agentictool.ai/billing/success?session_id={CHECKOUT_SESSION_ID}","cancelUrl":"https://agentictool.ai/billing/cancel?session_id={CHECKOUT_SESSION_ID}"}'` and open the returned `data.url` in your browser. The desktop's `lib/billing.ts#startCheckout` codifies the JWT lookup, the redirect URL allow-list, the 401 access-token refresh + retry, the Stripe-host validation on the returned URL, and the 402 PRO_REQUIRED fallback to the founder-led onboarding call. The endpoint itself is in OSS-accessible cloud infra — the button is the convenience.
 
 Marketing this escape hatch is the point. Customers who DIY become customers who know exactly what value the Pro button adds, then buy when they're tired of maintaining their own.

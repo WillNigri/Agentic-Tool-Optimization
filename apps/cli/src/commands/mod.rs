@@ -45,3 +45,7 @@ pub mod workspaces;
 // Langfuse/Helicone ingester lives in ato-cloud; this surface accepts
 // any structured trace export the customer can pipe in.
 pub mod production_signals;
+// v2.13 — `ato teams` thin-client. Multi-user shared agents +
+// methodologies are a Team-tier feature; persistence + tier gating
+// live in ato-cloud. This module is HTTP-only — no local fallback.
+pub mod teams;
