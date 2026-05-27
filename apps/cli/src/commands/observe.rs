@@ -183,8 +183,27 @@ pub fn start(db_path: &Path, runtimes: &[String], opts: &Opts) -> Result<()> {
                     existing.pid
                 ));
             }
-            // Identity mismatch: the PID belongs to another process.
-            // Treat the pidfile as stale and replace it below.
+            // Coordinator re-review LOW-5: identity mismatch with a
+            // *live* PID is the post-upgrade scenario (old observer
+            // binary still running after `brew upgrade ato`). Two
+            // simultaneous observers double the I/O and orphan the
+            // old one (we'd overwrite its pidfile, leaving it
+            // unreachable via `ato observe stop`). Refuse rather
+            // than fall through; operator can SIGTERM the old PID
+            // by hand if they want to claim ownership.
+            if !existing.exe_path.is_empty() {
+                return Err(anyhow!(
+                    "another observer is running at {} (pid {}). \
+                     Stop it first (`kill {}`) before starting this one.",
+                    existing.exe_path,
+                    existing.pid,
+                    existing.pid
+                ));
+            }
+            // Legacy bare-int pidfile + live PID = we can't prove
+            // identity. Fall through and replace; the user upgraded
+            // through a buggy interim version and the old daemon
+            // (if any) is now unreachable anyway.
         }
         let _ = fs::remove_file(&pid_path);
     }
@@ -282,15 +301,30 @@ fn install_signal_handlers(shutdown: &Arc<AtomicBool>) {
     // (long-deprecated) signal() syscall has portable-but-vague
     // semantics that historically reset to SIG_DFL on first delivery
     // on some systems.
+    //
+    // Coordinator re-review HIGH-2 (gemini): include SA_RESETHAND so
+    // the handler fires once and reverts to default behaviour. A
+    // second SIGINT after we've already started the graceful-shutdown
+    // path then terminates the process immediately — the right
+    // ergonomics for "user mashed Ctrl-C because the daemon hung."
+    //
+    // Coordinator re-review INFO #7 (claude): surface sigaction
+    // install failures (sandbox restrictions etc.) via eprintln so
+    // an operator can see the handler didn't install rather than
+    // having the daemon silently ignore Ctrl-C.
     use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
     let action = SigAction::new(
         SigHandler::Handler(signal_handler_stub),
-        SaFlags::SA_RESTART,
+        SaFlags::SA_RESTART | SaFlags::SA_RESETHAND,
         SigSet::empty(),
     );
     unsafe {
-        let _ = sigaction(Signal::SIGINT, &action);
-        let _ = sigaction(Signal::SIGTERM, &action);
+        if let Err(e) = sigaction(Signal::SIGINT, &action) {
+            eprintln!("ato observe: failed to install SIGINT handler: {}", e);
+        }
+        if let Err(e) = sigaction(Signal::SIGTERM, &action) {
+            eprintln!("ato observe: failed to install SIGTERM handler: {}", e);
+        }
     }
 
     // Bridge thread: copies the static flag into the per-call

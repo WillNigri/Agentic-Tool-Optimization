@@ -42,12 +42,6 @@ ato-passive-observer = { path = "../../packages/ato-passive-observer" }
 # v2.13 — `notify` already pulled in transitively, but we depend on
 # `dirs` directly for ~/.ato/observe.pid resolution in the CLI.
 dirs = "5"
-# v2.13 coordinator review LOW-4 — sigaction() over the deprecated
-# signal() syscall for the `ato observe` SIGTERM/SIGINT handlers.
-# Already transitively pulled in by notify; promoting to a direct
-# dep so the API is stable. Unix-only by feature.
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.27", default-features = false, features = ["signal"] }
 # v2.3.21 Phase 6.x — API-key dispatch for non-CLI providers
 # (MiniMax, Grok, Qwen, DeepSeek, OpenRouter). Blocking client keeps
 # dispatch.rs synchronous like the existing shell-out path.
@@ -71,3 +65,17 @@ sha2 = "0.10"
 # v2.4.4 Phase 7.0 step 2 — mDNS discovery on _ato._tcp.local.
 mdns-sd = "0.11"
 hostname = "0.4"
+
+# v2.13 coordinator re-review HIGH-1 fix: target-cfg tables MUST sit
+# BELOW the [dependencies] table they don't belong to. An inline
+# `[target.'cfg(unix)'.dependencies]` header in the middle of
+# `[dependencies]` silently captures every subsequent key into the
+# target table — breaking Windows compilation when 10+ unconditional
+# crates (reqwest/tokio/keyring/etc.) get scoped to cfg(unix). Keep
+# all platform-specific deps at the bottom of this file going forward.
+[target.'cfg(unix)'.dependencies]
+# v2.13 coordinator review LOW-4 — sigaction() over the deprecated
+# signal() syscall for the `ato observe` SIGTERM/SIGINT handlers.
+# Already transitively pulled in by notify; promoting to a direct
+# dep so the API is stable. Unix-only by feature.
+nix = { version = "0.27", default-features = false, features = ["signal"] }

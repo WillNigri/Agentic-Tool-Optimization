@@ -119,12 +119,25 @@ pub fn get_observer_status(
     // discovered at boot" by intersecting the install-set with
     // what exists on disk now (the desktop's `start` is also
     // install-set-bounded today).
-    if let Some(rec) = read_observe_pidfile() {
-        if !rec.runtimes.is_empty() {
-            return Ok(ObserverStatus {
-                running: observer.is_started(),
-                sources: rec.runtimes,
-            });
+    //
+    // Coordinator re-review MEDIUM-2 (claude): the pidfile override
+    // is the source of truth ONLY when (a) the recorded PID is
+    // alive, AND (b) the desktop's own auto-started watcher isn't
+    // running. When the desktop watcher IS running (the common
+    // case), it tails the full install-set — reporting the CLI's
+    // narrower filter would understate what's actually observed.
+    // When the desktop watcher is OFF but the CLI is running, the
+    // pidfile is the authority. Stale pidfile (PID dead) → fall
+    // through to install-set probe.
+    let desktop_running = observer.is_started();
+    if !desktop_running {
+        if let Some(rec) = read_observe_pidfile() {
+            if !rec.runtimes.is_empty() && pid_is_alive_unix(rec.pid) {
+                return Ok(ObserverStatus {
+                    running: true,
+                    sources: rec.runtimes,
+                });
+            }
         }
     }
 
@@ -151,16 +164,36 @@ pub fn get_observer_status(
 #[derive(serde::Deserialize)]
 struct PidfileRecord {
     #[serde(default)]
+    pid: u32,
+    #[serde(default)]
     runtimes: Vec<String>,
 }
 
 /// Read the CLI watcher's pidfile (if present). The CLI surface
 /// (apps/cli/src/commands/observe.rs) writes JSON pidfiles with the
-/// runtime filter. Desktop-only auto-started watchers don't write
-/// one, so this returns None in the common GUI-only case.
+/// runtime filter + PID. Desktop-only auto-started watchers don't
+/// write one, so this returns None in the common GUI-only case.
 fn read_observe_pidfile() -> Option<PidfileRecord> {
     let home = dirs::home_dir()?;
     let path = home.join(".ato").join("observe.pid");
     let raw = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str::<PidfileRecord>(raw.trim()).ok()
+}
+
+/// signal 0 == liveness probe (no actual signal delivered). Returns
+/// false on PID 0 or any non-unix build.
+#[cfg(unix)]
+fn pid_is_alive_unix(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe { kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn pid_is_alive_unix(_pid: u32) -> bool {
+    false
 }

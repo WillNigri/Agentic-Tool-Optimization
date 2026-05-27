@@ -86,6 +86,15 @@ pub fn worker_loop(db_path: PathBuf, rx: &Receiver<ScanRequest>) {
 /// NotFound; this matches that cleanup in memory so a week-long
 /// daemon doesn't keep state for thousands of vanished sessions.
 ///
+/// Performance note (coordinator re-review gemini-#3): `path.exists()`
+/// is a `stat(2)` syscall per entry. On a local FS at the scale we
+/// care about (1k-10k entries) the GC pass is sub-millisecond. If
+/// the daemon is run against a slow NFS / SMB mount and the entry
+/// count grows into the tens of thousands, swap this for an
+/// ino/dev-tracking scheme that prunes inline when scan_file hits
+/// ENOENT. The 10-minute GC_INTERVAL means even a 1s pass would
+/// only stall the worker once every 10 minutes.
+///
 /// Exposed (pub(crate)) so the regression test can drive it directly
 /// without waiting GC_INTERVAL.
 pub(crate) fn gc_stale_state(
@@ -99,6 +108,16 @@ pub(crate) fn gc_stale_state(
 /// When a file grew by more than this between scans, we read this
 /// much, persist the offset, and let the next FS event pick up the
 /// rest — bounded latency, bounded memory.
+///
+/// Per coordinator re-review gemini-#4: 4MB is a pragmatic middle
+/// ground. Typical Claude/Codex session deltas are a few KB per
+/// event; embedded systems with <1GB RAM can absorb a single 4MB
+/// buf allocation comfortably; abundant-RAM systems lose little by
+/// breaking a 50MB append into thirteen 4MB scans, since notify
+/// fires continuously on the same file. Not exposed as
+/// configuration — a real performance constraint hitting this cap
+/// is a sign of an upstream-CLI behavioural change worth tracing,
+/// not a tuning opportunity.
 pub const MAX_READ_BYTES_PER_SCAN: u64 = 4 * 1024 * 1024;
 
 pub fn scan_file(
@@ -152,7 +171,13 @@ pub fn scan_file(
     // the first non-whitespace byte from byte 0 (NOT the offset) —
     // we need to see the leading `[` regardless of how far we've
     // already scanned.
-    if is_json_array_file(&mut file).unwrap_or(false) {
+    //
+    // Coordinator re-review LOW-6: gate on Gemini specifically.
+    // Claude and Codex don't have a documented array layout; a
+    // file in their tree starting with `[` is corruption or a
+    // stray fixture, and routing it into scan_json_array_file
+    // would leave byte_offset stuck at 0 and re-scan it forever.
+    if kind == SourceKind::Gemini && is_json_array_file(&mut file).unwrap_or(false) {
         return scan_json_array_file(db_path, kind, &mut file, &path_str, &conn, session_state);
     }
 
@@ -200,12 +225,29 @@ fn is_json_array_file(file: &mut std::fs::File) -> Result<bool, String> {
         .unwrap_or(false))
 }
 
+/// Per-array-file cap. Per coordinator re-review MEDIUM-3:
+/// Gemini's older `logs.json` is bounded by a single session, so
+/// the 4MB scan cap that protects the JSONL paths is unnecessarily
+/// restrictive here — a heavy Gemini chat session can easily clear
+/// 4MB and would otherwise become permanently invisible. Raise to
+/// 32MB; a session that exceeds this is genuinely pathological and
+/// worth surfacing (still log-once-per-file rather than thrashing
+/// stderr on every FS event).
+const MAX_ARRAY_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Re-read the whole file as one JSON document and process every
 /// element. Used for Gemini's older `logs.json` shape. Dedup is
 /// preserved by the UNIQUE INDEX on (provider_session_id,
 /// sequence_within_session) — re-processed events with the same
 /// (session, array-index)-derived sequence are silently dropped at
 /// INSERT.
+///
+/// Per coordinator re-review MEDIUM-4: we use `watcher_state.
+/// byte_offset` as "size of the file at last successful scan." If
+/// the current file size matches, the array hasn't grown and we
+/// skip all the re-read + re-parse + repeated-INSERT work. A 1MB
+/// logs.json updated 200 times now does one full pass + 199 fast
+/// no-ops, not 200 full passes.
 fn scan_json_array_file(
     db_path: &Path,
     kind: SourceKind,
@@ -214,23 +256,52 @@ fn scan_json_array_file(
     conn: &Connection,
     session_state: &mut SessionStateMap,
 ) -> Result<(), String> {
-    // Whole-file read with the same MAX_READ_BYTES_PER_SCAN cap so a
-    // pathologically large logs.json can't OOM the process. If the
-    // file is larger than the cap, we skip — the desktop's typical
-    // session file is well under that, and a 4MB+ logs.json is a
-    // sign of an upstream-CLI behavioural change worth investigating.
     let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if metadata.len() > MAX_READ_BYTES_PER_SCAN {
-        eprintln!(
-            "passive_observer: skipping JSON-array file {} ({} bytes > {} cap)",
-            path_str,
-            metadata.len(),
-            MAX_READ_BYTES_PER_SCAN
-        );
+    let size = metadata.len();
+
+    // Per-file dedup of the "skipped, too big" log. Without this,
+    // every FS event on the file thrashes stderr — once persisted
+    // is enough.
+    if size > MAX_ARRAY_FILE_BYTES {
+        let already_marked: i64 = conn
+            .query_row(
+                "SELECT byte_offset FROM watcher_state \
+                  WHERE source = ?1 AND file_path = ?2",
+                rusqlite::params![kind.id(), path_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+        if already_marked != i64::MAX {
+            eprintln!(
+                "passive_observer: skipping JSON-array file {} ({} bytes > {} cap)",
+                path_str, size, MAX_ARRAY_FILE_BYTES
+            );
+            // Sentinel: byte_offset=i64::MAX means "too big, don't
+            // bother re-checking." Cleared automatically when the
+            // file is deleted (scan_file's NotFound branch DELETEs
+            // the watcher_state row).
+            save_state(conn, kind, path_str, i64::MAX as u64, 0);
+        }
         return Ok(());
     }
+
+    // Coordinator MEDIUM-4: short-circuit if the file hasn't grown
+    // since the last successful scan. byte_offset stores the size
+    // at that point. Equal sizes → no new events → skip the parse.
+    let prior_size: u64 = conn
+        .query_row(
+            "SELECT byte_offset FROM watcher_state \
+              WHERE source = ?1 AND file_path = ?2",
+            rusqlite::params![kind.id(), path_str],
+            |r| r.get::<_, i64>(0).map(|v| v.max(0) as u64),
+        )
+        .unwrap_or(0);
+    if prior_size == size && size > 0 {
+        return Ok(());
+    }
+
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    let mut buf = Vec::with_capacity(metadata.len() as usize);
+    let mut buf = Vec::with_capacity(size as usize);
     file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     let value: Value = match serde_json::from_slice(&buf) {
         Ok(v) => v,
@@ -252,10 +323,9 @@ fn scan_json_array_file(
     // sequence assignments — INSERT OR IGNORE handles dedup.
     let mut last_seq: i64 = 0;
     process_line(db_path, kind, &value, session_state, &mut last_seq, is_fresh);
-    // Persist the new last_seq so other consumers see what we've
-    // emitted. byte_offset stays at 0 — the file is replayed from
-    // the start on every scan for this shape.
-    save_state(conn, kind, path_str, 0, last_seq);
+    // Persist the file size so the next FS event's short-circuit
+    // check can compare against it.
+    save_state(conn, kind, path_str, size, last_seq);
     Ok(())
 }
 
