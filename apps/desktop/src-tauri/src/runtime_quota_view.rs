@@ -23,10 +23,11 @@ pub struct RuntimeQuotaProbeRow {
 #[derive(Debug, Deserialize)]
 struct StatusEnvelope {
     // Option<Vec> + serde(default) tolerates the field being null or
-    // omitted. (Does NOT tolerate the CLI emitting the legacy bare
-    // array — that would only happen if `ato` on $PATH is too old to
-    // understand --with-quota, in which case the Err branch surfaces
-    // a clear parse error to the panel.)
+    // omitted. An older `ato` that doesn't recognize --with-quota
+    // would exit non-zero (clap rejects unknown flags); that case is
+    // caught earlier at the `out.status.success()` check, never here.
+    // This branch covers a CLI that ran but emitted malformed JSON
+    // (banner-on-stdout, partial write, etc.).
     #[serde(default)]
     runtime_quota_probes: Option<Vec<RawProbe>>,
 }
@@ -69,21 +70,11 @@ pub fn list_runtime_quota_probes() -> Result<Vec<RuntimeQuotaProbeRow>, String> 
         return Ok(Vec::new());
     }
     let env: StatusEnvelope = serde_json::from_str(stdout.trim()).map_err(|e| {
-        // Truncate raw stdout so a multi-MB malformed payload (or a
-        // non-JSON banner) doesn't blow up the panel's error toast.
-        // Walk char_indices to stay on a UTF-8 boundary.
-        let raw = stdout.trim();
-        let split = raw
-            .char_indices()
-            .nth(500)
-            .map(|(i, _)| i)
-            .unwrap_or(raw.len());
-        let truncated = if split < raw.len() {
-            format!("{}…[truncated, {} total bytes]", &raw[..split], raw.len())
-        } else {
-            raw.to_string()
-        };
-        format!("parse ato output: {} (raw: {})", e, truncated)
+        format!(
+            "parse ato output: {} (raw: {})",
+            e,
+            truncate_for_toast(stdout.trim(), 500)
+        )
     })?;
     Ok(env
         .runtime_quota_probes
@@ -99,4 +90,52 @@ pub fn list_runtime_quota_probes() -> Result<Vec<RuntimeQuotaProbeRow>, String> 
             note: p.note,
         })
         .collect())
+}
+
+/// Cap raw CLI stdout for inclusion in an error message that lands in
+/// the panel's toast. The bound is in *characters* (≤ ~2 KB in
+/// pathological UTF-8) — small enough for a toast, large enough to
+/// diagnose the parse error. char_indices keeps the cut on a UTF-8
+/// boundary so unicode payloads never panic the formatter.
+fn truncate_for_toast(raw: &str, max_chars: usize) -> String {
+    let split = raw
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(raw.len());
+    if split < raw.len() {
+        format!("{}…[truncated, {} total bytes]", &raw[..split], raw.len())
+    } else {
+        raw.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_under_cap_is_lossless() {
+        let s = "hello world";
+        assert_eq!(truncate_for_toast(s, 500), s);
+    }
+
+    #[test]
+    fn truncate_over_cap_appends_size_marker() {
+        let s = "a".repeat(1000);
+        let out = truncate_for_toast(&s, 500);
+        assert!(out.starts_with(&"a".repeat(500)));
+        assert!(out.contains("[truncated, 1000 total bytes]"));
+    }
+
+    #[test]
+    fn truncate_never_panics_on_multibyte_chars() {
+        // 1000 × "é" (2 bytes each in UTF-8) — byte-indexed slicing
+        // would land mid-char and panic. char_indices keeps us safe.
+        let s = "é".repeat(1000);
+        let out = truncate_for_toast(&s, 500);
+        // Round-trips as valid UTF-8 by virtue of being a String at all.
+        assert!(out.contains("é"));
+        assert!(out.contains("[truncated, 2000 total bytes]"));
+    }
 }
