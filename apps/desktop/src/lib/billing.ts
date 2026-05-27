@@ -19,6 +19,14 @@ import { useAuthStore } from "@/hooks/useAuth";
 const CLOUD_API_URL =
   import.meta.env.VITE_CLOUD_API_URL || "https://api.agentictool.ai";
 
+// Trust assumption: agentictool.ai is our own marketing/landing domain
+// and the only redirect target this client requests from Stripe. The
+// cloud-side allow-list (services/billing/src/checkout.ts) is the second
+// gate — it rejects any successUrl/cancelUrl whose host isn't in
+// ALLOWED_HTTPS_HOSTS, so swapping these constants for an attacker-
+// controlled host on this side alone wouldn't actually land. If staging
+// ever needs a different host, plumb it through VITE_BILLING_RETURN_HOST
+// and add the new host to the cloud allow-list in the same PR.
 const SUCCESS_URL =
   "https://agentictool.ai/billing/success?session_id={CHECKOUT_SESSION_ID}";
 const CANCEL_URL =
