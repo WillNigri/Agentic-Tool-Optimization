@@ -49,20 +49,24 @@ export default function VerifyEmailBanner() {
     }
   }, []);
 
-  // Fetch /auth/me on mount + whenever the access token changes.
+  // Fetch /auth/me on mount, on token change, AND on window focus —
+  // the focus trigger catches the case where the user clicks the
+  // verify-email link in a separate browser tab. Without it, the
+  // banner persists until the user logs out or the desktop process
+  // restarts. (Caught live by Will 2026-05-27 on willnigri+4.)
   useEffect(() => {
     if (!isCloudUser || !accessToken) {
       setEmailVerified(null);
       return;
     }
     let cancelled = false;
-    (async () => {
+    const fetchVerified = async () => {
       try {
         const resp = await fetch(`${CLOUD_API_URL}/api/auth/me`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (!resp.ok) {
-          setEmailVerified(null);
+          if (!cancelled) setEmailVerified(null);
           return;
         }
         const body = (await resp.json()) as {
@@ -77,9 +81,18 @@ export default function VerifyEmailBanner() {
       } catch {
         if (!cancelled) setEmailVerified(null);
       }
-    })();
+    };
+    fetchVerified();
+    const onFocus = () => {
+      // Re-fetch when the window regains focus. Customer clicked the
+      // email link in a separate tab → desktop refocus picks up the
+      // new email_verified=true on the next /auth/me poll.
+      fetchVerified();
+    };
+    window.addEventListener('focus', onFocus);
     return () => {
       cancelled = true;
+      window.removeEventListener('focus', onFocus);
     };
   }, [isCloudUser, accessToken]);
 

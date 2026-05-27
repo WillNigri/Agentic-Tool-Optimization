@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { refreshToken as refreshTokenApi } from "@/lib/api";
 import { getCurrentUser, storeTokens, clearTokens } from "@/lib/cloud-api";
-import { markEverPaid } from "@/lib/trial";
+import { markEverPaid, startTrialIfUnset, hasEverPaid } from "@/lib/trial";
 
 // Phase 1 PR-B (2026-05-21) — `latchEverPaidIfPaid` runs at every store
 // transition that can promote the user's tier (setAuth, setTier,
@@ -76,6 +76,15 @@ export const useAuthStore = create<AuthState>()(
           tier: resolvedTier,
         });
         latchEverPaidIfPaid(resolvedTier);
+        // 2026-05-27 — start the 14-day trial clock on cloud login if
+        // it hasn't started yet AND the user has never paid (paid
+        // users don't get a fresh trial after sign-out). Without this,
+        // a brand-new signup sees no trial banner until they first
+        // touch a Pro feature, which means no Stripe Subscribe button
+        // is visible either — caught live by Will on willnigri+4.
+        if (!hasEverPaid()) {
+          startTrialIfUnset();
+        }
         // Backfill local traces to cloud on login (non-blocking).
         // Gives day-1 analytics for new Pro users and fills gaps
         // from periods when the user was logged out.
