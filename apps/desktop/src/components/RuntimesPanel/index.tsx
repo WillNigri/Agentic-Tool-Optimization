@@ -7,6 +7,7 @@ import CreditBurnCard from "./CreditBurnCard";
 import RuntimeComparison from "./RuntimeComparison";
 import RemoteRuntimes from "./RemoteRuntimes";
 import MonitoringToggles from "./MonitoringToggles";
+import RuntimeQuotaPanel from "./RuntimeQuotaPanel";
 import PreTrustToggle from "@/components/Settings/PreTrustToggle";
 
 // Settings → Runtimes panel.
@@ -104,6 +105,11 @@ export default function RuntimesPanel({ onOpenApiKeys }: Props) {
       {active === "monitoring" && (
         <div className="space-y-4">
           <MonitoringToggles />
+          {/* v2.13 Phase 6.x polish — per-runtime quota progress bars,
+              read from each runtime's local usage.json. Customer data
+              stays on the machine; the panel renders "quota unknown"
+              when nothing's discoverable. */}
+          <RuntimeQuotaPanel />
           {/* F3 / S8 follow-up — claude pre-trust toggle. Self-contained
               card; lives here because dispatch-behavior settings cluster
               naturally with monitoring toggles. */}

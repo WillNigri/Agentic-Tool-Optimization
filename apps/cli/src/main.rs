@@ -44,6 +44,11 @@ mod pro_client;
 mod quota;
 mod remote_runtime;
 mod runtime;
+// v2.13 Phase 6.x polish — read-only filesystem probes for each
+// runtime's local quota state file (e.g. ~/.claude/usage.json). Pure
+// observability; no network. Powers `ato runtimes status --with-quota`
+// and the desktop's RuntimeQuotaPanel via the same JSON output.
+mod runtime_quota;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -717,8 +722,23 @@ enum MasterKeySub {
 #[derive(Subcommand, Debug)]
 enum RuntimesSub {
     /// Show known runtime quotas: which runtimes are rate-limited
-    /// and until when (parsed from previous dispatch errors).
-    Status,
+    /// and until when (parsed from previous dispatch errors). With
+    /// `--with-quota`, also reads each runtime's local usage file from
+    /// disk and returns parsed messages-used / messages-limit / reset.
+    Status {
+        /// Also probe each runtime's local quota state file
+        /// (~/.claude/usage.json etc.) and include the parsed
+        /// messages-used / messages-limit / period-reset alongside
+        /// the rate-limit rows. Read-only filesystem probe; no network.
+        ///
+        /// JSON SHAPE NOTE: opting into this flag switches the JSON
+        /// output from the legacy bare array `[QuotaRow, …]` (v2.12
+        /// shape; default) to an envelope
+        /// `{ quotas: [...], runtime_quota_probes: [...] }`. Existing
+        /// v2.12 consumers that don't pass the flag see no change.
+        #[arg(long = "with-quota")]
+        with_quota: bool,
+    },
     /// Phase 6.x-I — check whether each detected runtime binary is
     /// signed / non-quarantined / non-revoked. Surfaces the specific
     /// reason and a fix command when something is broken.
@@ -1893,8 +1913,19 @@ fn main() -> Result<()> {
             }
         },
         Commands::Runtimes { sub } => match sub {
-            RuntimesSub::Status => {
+            RuntimesSub::Status { with_quota } => {
                 let rows = quota::list_all(&db_path)?;
+                // v2.13 Phase 6.x — when --with-quota is set, also surface
+                // each runtime's local quota state. Probe results are
+                // independent of the rate-limit rows (the latter come from
+                // dispatch error parsing; the former come from the runtime's
+                // own usage.json), so they ride alongside in the JSON
+                // payload rather than being merged.
+                let quota_probes = if with_quota {
+                    Some(runtime_quota::probe_all())
+                } else {
+                    None
+                };
                 if opts.human {
                     if rows.is_empty() {
                         output::emit_human("No quota information captured yet.");
@@ -1912,6 +1943,60 @@ fn main() -> Result<()> {
                             ));
                         }
                     }
+                    if let Some(probes) = &quota_probes {
+                        output::emit_human(&format!(
+                            "Runtime quota probes ({} runtime{}):",
+                            probes.len(),
+                            if probes.len() == 1 { "" } else { "s" },
+                        ));
+                        for p in probes {
+                            if p.found {
+                                let used = p
+                                    .messages_used
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|| "?".into());
+                                let limit = p
+                                    .messages_limit
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|| "?".into());
+                                output::emit_human(&format!(
+                                    "  {:10} {} / {} messages{}{}",
+                                    p.runtime,
+                                    used,
+                                    limit,
+                                    p.period_reset_at
+                                        .as_deref()
+                                        .map(|r| format!("  resets {}", r))
+                                        .unwrap_or_default(),
+                                    p.source_path
+                                        .as_deref()
+                                        .map(|s| format!("  ({})", s))
+                                        .unwrap_or_default(),
+                                ));
+                            } else {
+                                output::emit_human(&format!(
+                                    "  {:10} quota unknown{}{}",
+                                    p.runtime,
+                                    p.source_path
+                                        .as_deref()
+                                        .map(|s| format!("  (tried {})", s))
+                                        .unwrap_or_default(),
+                                    p.note
+                                        .as_deref()
+                                        .map(|n| format!("  — {}", n))
+                                        .unwrap_or_default(),
+                                ));
+                            }
+                        }
+                    }
+                } else if let Some(probes) = quota_probes {
+                    // --with-quota opts into the envelope shape. Without
+                    // the flag we emit the legacy bare array so every
+                    // v2.12-era script keeps working unchanged.
+                    output::emit_json(&serde_json::json!({
+                        "quotas": rows,
+                        "runtime_quota_probes": probes,
+                    }))?;
                 } else {
                     output::emit_json(&rows)?;
                 }
