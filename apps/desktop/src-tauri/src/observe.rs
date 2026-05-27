@@ -139,12 +139,24 @@ pub fn get_observer_status(
                 });
             }
         }
+        // Re-review-2 (claude) MEDIUM-3: when nothing is observing
+        // (desktop off + no live CLI pidfile), do NOT populate
+        // sources from the install-set on disk. The ObserverStatus
+        // contract is "never report a runtime that isn't actually
+        // being watched" — sources must be empty when running=false.
+        return Ok(ObserverStatus {
+            running: false,
+            sources: Vec::new(),
+        });
     }
 
+    // Desktop watcher IS running — install-set probe is the right
+    // answer because the desktop's start path tails every CLI
+    // discovered on disk.
     let mut sources: Vec<String> = Vec::new();
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return Ok(ObserverStatus { running: false, sources }),
+        None => return Ok(ObserverStatus { running: true, sources }),
     };
     if home.join(".claude").join("projects").exists() {
         sources.push("claude_code".to_string());
@@ -156,7 +168,7 @@ pub fn get_observer_status(
         sources.push("gemini".to_string());
     }
     Ok(ObserverStatus {
-        running: observer.is_started(),
+        running: true,
         sources,
     })
 }
@@ -176,21 +188,45 @@ struct PidfileRecord {
 fn read_observe_pidfile() -> Option<PidfileRecord> {
     let home = dirs::home_dir()?;
     let path = home.join(".ato").join("observe.pid");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str::<PidfileRecord>(raw.trim()).ok()
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            // Re-review-2 (gemini) LOW-3: ENOENT is the common case
+            // (no CLI observer running); permissions / I/O errors
+            // surface so an operator can debug why the override
+            // path didn't fire.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("ato_desktop: read observe pidfile {}: {}", path.display(), e);
+            }
+            return None;
+        }
+    };
+    match serde_json::from_str::<PidfileRecord>(raw.trim()) {
+        Ok(rec) => Some(rec),
+        Err(e) => {
+            eprintln!("ato_desktop: malformed observe pidfile at {}: {}", path.display(), e);
+            None
+        }
+    }
 }
 
-/// signal 0 == liveness probe (no actual signal delivered). Returns
-/// false on PID 0 or any non-unix build.
+/// EPERM-aware liveness probe via nix. Per re-review-2 (claude)
+/// MEDIUM-2: a non-zero return from `kill(pid, 0)` is ambiguous —
+/// ESRCH means the PID is gone; EPERM means the process exists but
+/// we can't signal it (sudo-started, different UID, hardened
+/// runtime). Both `Ok` and `EPERM` mean alive.
 #[cfg(unix)]
 fn pid_is_alive_unix(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::unistd::Pid;
     if pid == 0 {
         return false;
     }
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
+    match nix::sys::signal::kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,
+        Err(Errno::EPERM) => true,
+        _ => false,
     }
-    unsafe { kill(pid as i32, 0) == 0 }
 }
 
 #[cfg(not(unix))]

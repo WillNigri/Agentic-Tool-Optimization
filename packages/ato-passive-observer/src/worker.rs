@@ -233,6 +233,14 @@ fn is_json_array_file(file: &mut std::fs::File) -> Result<bool, String> {
 /// 32MB; a session that exceeds this is genuinely pathological and
 /// worth surfacing (still log-once-per-file rather than thrashing
 /// stderr on every FS event).
+///
+/// Re-review-2 (gemini) HIGH-1: this is a documented hard skip.
+/// If a real customer hits it, the daemon eprintln's once per
+/// daemon-restart-per-file and the file's events are silently
+/// dropped above the cap. We don't write a persistent sentinel
+/// (re-review-2 LOW-5) — instead the in-memory `oversized_warned`
+/// flag in SessionStateMap dedups the log; restart re-logs once.
+/// A future move to incremental array parsing would lift this cap.
 const MAX_ARRAY_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Re-read the whole file as one JSON document and process every
@@ -245,9 +253,11 @@ const MAX_ARRAY_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// Per coordinator re-review MEDIUM-4: we use `watcher_state.
 /// byte_offset` as "size of the file at last successful scan." If
 /// the current file size matches, the array hasn't grown and we
-/// skip all the re-read + re-parse + repeated-INSERT work. A 1MB
-/// logs.json updated 200 times now does one full pass + 199 fast
-/// no-ops, not 200 full passes.
+/// skip all the re-read + re-parse + repeated-INSERT work — but
+/// that short-circuit lives at `scan_file`'s outer `size == offset`
+/// check (re-review-2 MEDIUM-1: deleting the inner duplicate that
+/// was unreachable). The same load_state/save_state column powers
+/// both, so they can't disagree.
 fn scan_json_array_file(
     db_path: &Path,
     kind: SourceKind,
@@ -259,44 +269,21 @@ fn scan_json_array_file(
     let metadata = file.metadata().map_err(|e| e.to_string())?;
     let size = metadata.len();
 
-    // Per-file dedup of the "skipped, too big" log. Without this,
-    // every FS event on the file thrashes stderr — once persisted
-    // is enough.
+    // Re-review-2 (gemini) HIGH-1 + (claude) LOW-5: log-once on
+    // oversize files using in-memory state, no persisted sentinel.
+    // The previous i64::MAX sentinel overloaded byte_offset's
+    // semantics; tracking the warning in SessionStateMap keeps the
+    // column meaning honest. The cost is one re-log per daemon
+    // restart per file — acceptable trade for unambiguous storage.
     if size > MAX_ARRAY_FILE_BYTES {
-        let already_marked: i64 = conn
-            .query_row(
-                "SELECT byte_offset FROM watcher_state \
-                  WHERE source = ?1 AND file_path = ?2",
-                rusqlite::params![kind.id(), path_str],
-                |r| r.get(0),
-            )
-            .unwrap_or(-1);
-        if already_marked != i64::MAX {
+        if !session_state.oversized_warned {
             eprintln!(
-                "passive_observer: skipping JSON-array file {} ({} bytes > {} cap)",
+                "passive_observer: skipping JSON-array file {} ({} bytes > {} cap). \
+                 Subsequent FS events on this file silently no-op until restart.",
                 path_str, size, MAX_ARRAY_FILE_BYTES
             );
-            // Sentinel: byte_offset=i64::MAX means "too big, don't
-            // bother re-checking." Cleared automatically when the
-            // file is deleted (scan_file's NotFound branch DELETEs
-            // the watcher_state row).
-            save_state(conn, kind, path_str, i64::MAX as u64, 0);
+            session_state.oversized_warned = true;
         }
-        return Ok(());
-    }
-
-    // Coordinator MEDIUM-4: short-circuit if the file hasn't grown
-    // since the last successful scan. byte_offset stores the size
-    // at that point. Equal sizes → no new events → skip the parse.
-    let prior_size: u64 = conn
-        .query_row(
-            "SELECT byte_offset FROM watcher_state \
-              WHERE source = ?1 AND file_path = ?2",
-            rusqlite::params![kind.id(), path_str],
-            |r| r.get::<_, i64>(0).map(|v| v.max(0) as u64),
-        )
-        .unwrap_or(0);
-    if prior_size == size && size > 0 {
         return Ok(());
     }
 
@@ -323,8 +310,11 @@ fn scan_json_array_file(
     // sequence assignments — INSERT OR IGNORE handles dedup.
     let mut last_seq: i64 = 0;
     process_line(db_path, kind, &value, session_state, &mut last_seq, is_fresh);
-    // Persist the file size so the next FS event's short-circuit
-    // check can compare against it.
+    // Persist the file size so the outer `size == offset` check at
+    // scan_file:162 short-circuits unchanged-size re-scans.
+    // Re-review-2 (claude) MEDIUM-1: the previous in-function copy
+    // of this short-circuit was dead code; the outer check fires
+    // first because load_state reads this same column.
     save_state(conn, kind, path_str, size, last_seq);
     Ok(())
 }
@@ -383,11 +373,19 @@ fn save_state(conn: &Connection, kind: SourceKind, path: &str, offset: u64, last
     );
 }
 
-/// Per-session pair-state held only for the lifetime of one scan.
-/// Persistence is keyed by (provider_session_id, sequence_within_session)
-/// so resumption across scans doesn't need to thread session-level state.
+/// Per-session pair-state held across scans (per coordinator review
+/// HIGH-1) so a user line in scan N and an assistant line in scan
+/// N+1 still produce one row. Per-file map lives in the worker_loop
+/// (see `per_file_state`); this struct is the per-file value.
+///
+/// `oversized_warned` (re-review-2 HIGH-1 / LOW-5): for Gemini
+/// array files whose size exceeds MAX_ARRAY_FILE_BYTES, we log
+/// once per file and silently no-op every subsequent FS event
+/// (an `i64::MAX` sentinel in `watcher_state.byte_offset` was the
+/// previous design, dropped because it overloaded the column).
 pub struct SessionStateMap {
     pub sessions: HashMap<String, PendingPair>,
+    pub oversized_warned: bool,
 }
 
 pub struct PendingPair {
@@ -404,7 +402,7 @@ pub struct PendingPair {
 
 impl SessionStateMap {
     pub fn new() -> Self {
-        Self { sessions: HashMap::new() }
+        Self { sessions: HashMap::new(), oversized_warned: false }
     }
     pub fn get_or_init(&mut self, sid: &str) -> &mut PendingPair {
         self.sessions.entry(sid.to_string()).or_insert_with(|| PendingPair {
@@ -607,8 +605,17 @@ mod tests {
         assert_eq!(ti, 6);
         assert_eq!(to, 11);
 
-        // Re-scan must be idempotent (whole-file replay relies on
-        // the UNIQUE INDEX for dedup).
+        // Re-review-2 (claude) INFO-8: drive the re-scan through
+        // the parser path (NOT the outer size==offset short-circuit
+        // that fires when watcher_state.byte_offset still equals
+        // file size). Force a size change by rewriting the file
+        // with the SAME logical events but slightly different
+        // serialization (extra whitespace). The UNIQUE INDEX on
+        // (provider_session_id, sequence_within_session) is now
+        // the active dedup signal, which is what we claim to test.
+        let reserialized = serde_json::to_string(&events).unwrap()
+            + "                "; // trailing whitespace shifts file size
+        std::fs::write(tmp_json.path(), reserialized).unwrap();
         scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state).unwrap();
         let n2: i64 = conn
             .query_row(
@@ -619,7 +626,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n2, 1, "re-scan does not duplicate via UNIQUE INDEX");
+        assert_eq!(n2, 1, "re-scan does not duplicate — UNIQUE INDEX exercised");
     }
 
     /// Regression for review HIGH-1: user line lands in scan N,

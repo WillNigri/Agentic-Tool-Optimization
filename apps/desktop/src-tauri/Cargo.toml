@@ -61,5 +61,12 @@ ato-review-tools = { path = "../../../packages/ato-review-tools" }
 # boxes and CI runners. See [[ato-live-billing-path]].
 ato-passive-observer = { path = "../../../packages/ato-passive-observer" }
 
+# v2.13 re-review-2 (claude) MEDIUM-2 — nix on unix for an
+# EPERM-aware PID liveness probe. kill(pid, 0) returning -1 with
+# EPERM means the process exists but we can't signal it (different
+# UID / hardened runtime); only ESRCH means actually dead.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 tempfile = "3"
