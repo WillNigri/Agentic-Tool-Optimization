@@ -28,6 +28,12 @@ pub struct ScanRequest {
     pub path: PathBuf,
 }
 
+/// How often to walk `per_file_state` and drop entries whose
+/// backing file has been deleted/rotated. Per coordinator MEDIUM-3.
+/// Long-running daemons (days of dogfood) would otherwise accumulate
+/// a state map proportional to every session file ever observed.
+const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
 pub fn worker_loop(db_path: PathBuf, rx: &Receiver<ScanRequest>) {
     let mut pending: HashMap<PathBuf, SourceKind> = HashMap::new();
     // Per-file pair state lives across scans (per review HIGH-1).
@@ -38,6 +44,7 @@ pub fn worker_loop(db_path: PathBuf, rx: &Receiver<ScanRequest>) {
     // write and LLM responses commonly take 5-30s.
     let mut per_file_state: HashMap<(SourceKind, PathBuf), SessionStateMap> =
         HashMap::new();
+    let mut last_gc_at = std::time::Instant::now();
     loop {
         let first = match rx.recv() {
             Ok(req) => req,
@@ -66,7 +73,25 @@ pub fn worker_loop(db_path: PathBuf, rx: &Receiver<ScanRequest>) {
                 eprintln!("passive_observer: scan {:?} failed: {}", path, e);
             }
         }
+        if last_gc_at.elapsed() >= GC_INTERVAL {
+            gc_stale_state(&mut per_file_state);
+            last_gc_at = std::time::Instant::now();
+        }
     }
+}
+
+/// Drop in-memory `SessionStateMap` entries whose backing file no
+/// longer exists on disk (deleted, rotated, moved). The watcher's
+/// scan_file already DELETEs the matching `watcher_state` row on a
+/// NotFound; this matches that cleanup in memory so a week-long
+/// daemon doesn't keep state for thousands of vanished sessions.
+///
+/// Exposed (pub(crate)) so the regression test can drive it directly
+/// without waiting GC_INTERVAL.
+pub(crate) fn gc_stale_state(
+    per_file_state: &mut HashMap<(SourceKind, PathBuf), SessionStateMap>,
+) {
+    per_file_state.retain(|(_, path), _| path.exists());
 }
 
 /// Maximum bytes read per scan invocation. Caps memory growth on a
@@ -118,6 +143,19 @@ pub fn scan_file(
     if size == offset {
         return Ok(());
     }
+
+    // Detect file shape. Per coordinator review MEDIUM-1, Gemini
+    // CLI's older `logs.json` is a top-level JSON array (one big
+    // `[ {...}, {...} ]` document). That format defeats line-
+    // delimited incremental scanning: appending an element shifts
+    // the closing `]` and emits no complete-line in between. Peek
+    // the first non-whitespace byte from byte 0 (NOT the offset) —
+    // we need to see the leading `[` regardless of how far we've
+    // already scanned.
+    if is_json_array_file(&mut file).unwrap_or(false) {
+        return scan_json_array_file(db_path, kind, &mut file, &path_str, &conn, session_state);
+    }
+
     file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
     let read_cap = (size - offset).min(MAX_READ_BYTES_PER_SCAN);
     let mut buf = vec![0u8; read_cap as usize];
@@ -144,6 +182,80 @@ pub fn scan_file(
     }
     let new_offset = offset + consumed as u64;
     save_state(&conn, kind, &path_str, new_offset, last_seq);
+    Ok(())
+}
+
+/// Sniff the first non-whitespace byte. `true` if the file is shaped
+/// like a top-level JSON array (`[...]`). Resets the seek position to
+/// the start before returning so the caller can re-read.
+fn is_json_array_file(file: &mut std::fs::File) -> Result<bool, String> {
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let mut peek = [0u8; 64];
+    let n = file.read(&mut peek).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    Ok(peek[..n]
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .map(|b| *b == b'[')
+        .unwrap_or(false))
+}
+
+/// Re-read the whole file as one JSON document and process every
+/// element. Used for Gemini's older `logs.json` shape. Dedup is
+/// preserved by the UNIQUE INDEX on (provider_session_id,
+/// sequence_within_session) — re-processed events with the same
+/// (session, array-index)-derived sequence are silently dropped at
+/// INSERT.
+fn scan_json_array_file(
+    db_path: &Path,
+    kind: SourceKind,
+    file: &mut std::fs::File,
+    path_str: &str,
+    conn: &Connection,
+    session_state: &mut SessionStateMap,
+) -> Result<(), String> {
+    // Whole-file read with the same MAX_READ_BYTES_PER_SCAN cap so a
+    // pathologically large logs.json can't OOM the process. If the
+    // file is larger than the cap, we skip — the desktop's typical
+    // session file is well under that, and a 4MB+ logs.json is a
+    // sign of an upstream-CLI behavioural change worth investigating.
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if metadata.len() > MAX_READ_BYTES_PER_SCAN {
+        eprintln!(
+            "passive_observer: skipping JSON-array file {} ({} bytes > {} cap)",
+            path_str,
+            metadata.len(),
+            MAX_READ_BYTES_PER_SCAN
+        );
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let mut buf = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let value: Value = match serde_json::from_slice(&buf) {
+        Ok(v) => v,
+        Err(_) => {
+            // Possibly still being written — leave for the next FS
+            // event. Don't update byte_offset; we want to retry.
+            return Ok(());
+        }
+    };
+    let is_fresh = metadata
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|e| e < Duration::from_secs(5 * 60))
+        .unwrap_or(false);
+    // Reset last_seq for the scan; parser increments from 0, so the
+    // first event emits sequence=1 deterministically. Re-scans of an
+    // appended array re-process from the start with the same
+    // sequence assignments — INSERT OR IGNORE handles dedup.
+    let mut last_seq: i64 = 0;
+    process_line(db_path, kind, &value, session_state, &mut last_seq, is_fresh);
+    // Persist the new last_seq so other consumers see what we've
+    // emitted. byte_offset stays at 0 — the file is replayed from
+    // the start on every scan for this shape.
+    save_state(conn, kind, path_str, 0, last_seq);
     Ok(())
 }
 
@@ -330,6 +442,114 @@ mod tests {
         let ends: Vec<usize> = line_iter(buf).collect();
         // "a\n" ends at 2, "bb\n" ends at 5; "ccc" is partial and skipped.
         assert_eq!(ends, vec![2, 5]);
+    }
+
+    /// Regression for coordinator MEDIUM-3: per_file_state must drop
+    /// entries whose backing file has been deleted. Simulates a
+    /// rotated session file and asserts the GC pass cleans the map.
+    #[test]
+    fn gc_drops_state_for_deleted_files() {
+        let alive = tempfile::NamedTempFile::new().unwrap();
+        let to_delete = tempfile::NamedTempFile::new().unwrap();
+        let alive_path = alive.path().to_path_buf();
+        let deleted_path = to_delete.path().to_path_buf();
+        // Drop the second file so its path resolves to nothing.
+        drop(to_delete);
+        assert!(alive_path.exists());
+        assert!(!deleted_path.exists());
+
+        let mut map: HashMap<(SourceKind, PathBuf), SessionStateMap> = HashMap::new();
+        map.insert(
+            (SourceKind::ClaudeCode, alive_path.clone()),
+            SessionStateMap::new(),
+        );
+        map.insert(
+            (SourceKind::ClaudeCode, deleted_path.clone()),
+            SessionStateMap::new(),
+        );
+        assert_eq!(map.len(), 2);
+
+        gc_stale_state(&mut map);
+
+        assert_eq!(map.len(), 1, "stale entry dropped");
+        assert!(map.contains_key(&(SourceKind::ClaudeCode, alive_path)));
+        assert!(!map.contains_key(&(SourceKind::ClaudeCode, deleted_path)));
+    }
+
+    /// Regression for coordinator MEDIUM-1: Gemini `logs.json`
+    /// (top-level JSON array, multi-line pretty-printed) must be
+    /// detected by shape sniffing and processed as a whole-file
+    /// re-read instead of being eaten by line-delimited scanning.
+    #[test]
+    fn gemini_top_level_array_logs_json() {
+        let tmp_db = tempfile::NamedTempFile::new().unwrap();
+        crate::schema::ensure_schema(tmp_db.path()).unwrap();
+
+        let tmp_json = tempfile::NamedTempFile::new().unwrap();
+        let events = serde_json::json!([
+            {
+                "type": "user",
+                "sessionId": "gem-array-1",
+                "message": "what's the weather?",
+                "timestamp": "2026-05-26T12:00:00Z"
+            },
+            {
+                "type": "model",
+                "sessionId": "gem-array-1",
+                "message": "I don't have realtime data, but…",
+                "model": "gemini-2.5-flash",
+                "timestamp": "2026-05-26T12:00:02Z",
+                "usage": { "promptTokenCount": 6, "candidatesTokenCount": 11 }
+            }
+        ]);
+        // Pretty-print on purpose — that's the case incremental
+        // line-scanning fails to handle, so we want the test asset
+        // to look exactly like real Gemini logs.json on disk.
+        let serialized = serde_json::to_string_pretty(&events).unwrap();
+        std::fs::write(tmp_json.path(), serialized).unwrap();
+
+        let mut state = SessionStateMap::new();
+        scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state).unwrap();
+
+        let conn = Connection::open(tmp_db.path()).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_logs \
+                  WHERE dispatch_kind='passive_observation' \
+                    AND runtime='gemini'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly one pair from a two-element user→model array");
+
+        let (prompt, response, model, ti, to): (String, String, String, i64, i64) = conn
+            .query_row(
+                "SELECT prompt, response, model, tokens_in, tokens_out \
+                   FROM execution_logs WHERE runtime='gemini'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, "what's the weather?");
+        assert_eq!(response, "I don't have realtime data, but…");
+        assert_eq!(model, "gemini-2.5-flash");
+        assert_eq!(ti, 6);
+        assert_eq!(to, 11);
+
+        // Re-scan must be idempotent (whole-file replay relies on
+        // the UNIQUE INDEX for dedup).
+        scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state).unwrap();
+        let n2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_logs \
+                  WHERE dispatch_kind='passive_observation' \
+                    AND runtime='gemini'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n2, 1, "re-scan does not duplicate via UNIQUE INDEX");
     }
 
     /// Regression for review HIGH-1: user line lands in scan N,

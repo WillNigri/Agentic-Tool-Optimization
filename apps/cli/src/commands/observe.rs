@@ -87,9 +87,16 @@ struct PidRecord {
     pid: u32,
     exe_path: String,
     started_at_unix: u64,
+    /// The actual runtime set the watcher is tracking. Empty means
+    /// "all known runtimes (claude, codex, gemini)". `ato observe
+    /// status` reads this and reports the truth, not the current
+    /// install-set on disk — those drift when the user installs a
+    /// new CLI after the daemon started (per coordinator MEDIUM-2).
+    #[serde(default)]
+    runtimes: Vec<String>,
 }
 
-fn current_pid_record() -> PidRecord {
+fn current_pid_record(runtimes: &[&'static str]) -> PidRecord {
     PidRecord {
         pid: std::process::id(),
         exe_path: std::env::current_exe()
@@ -100,6 +107,7 @@ fn current_pid_record() -> PidRecord {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        runtimes: runtimes.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -127,6 +135,7 @@ fn read_pid_record(path: &Path) -> Option<PidRecord> {
             pid,
             exe_path: String::new(),
             started_at_unix: 0,
+            runtimes: Vec::new(),
         });
     }
     None
@@ -210,15 +219,15 @@ pub fn start(db_path: &Path, runtimes: &[String], opts: &Opts) -> Result<()> {
     }
     let _handle = handle; // keep alive for the lifetime of the call
 
-    let pid_record = current_pid_record();
-    let pid = pid_record.pid;
-    write_pid(&pid_path, &pid_record)?;
-
     let runtimes_label: Vec<&'static str> = if filter.is_empty() {
         vec!["claude", "codex", "gemini"]
     } else {
         filter.iter().map(|k| k.runtime()).collect()
     };
+
+    let pid_record = current_pid_record(&runtimes_label);
+    let pid = pid_record.pid;
+    write_pid(&pid_path, &pid_record)?;
 
     if opts.human {
         emit_human(&format!(
@@ -267,13 +276,21 @@ extern "C" fn signal_handler_stub(_sig: i32) {
 
 #[cfg(unix)]
 fn install_signal_handlers(shutdown: &Arc<AtomicBool>) {
-    extern "C" {
-        fn signal(signum: i32, handler: usize) -> usize;
-    }
+    // Coordinator review LOW-4: sigaction() over the deprecated
+    // signal() syscall. sigaction gives predictable behaviour
+    // across re-entry + signal-during-handler edge cases; the
+    // (long-deprecated) signal() syscall has portable-but-vague
+    // semantics that historically reset to SIG_DFL on first delivery
+    // on some systems.
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(
+        SigHandler::Handler(signal_handler_stub),
+        SaFlags::SA_RESTART,
+        SigSet::empty(),
+    );
     unsafe {
-        // SIGINT = 2, SIGTERM = 15.
-        signal(2, signal_handler_stub as *const () as usize);
-        signal(15, signal_handler_stub as *const () as usize);
+        let _ = sigaction(Signal::SIGINT, &action);
+        let _ = sigaction(Signal::SIGTERM, &action);
     }
 
     // Bridge thread: copies the static flag into the per-call

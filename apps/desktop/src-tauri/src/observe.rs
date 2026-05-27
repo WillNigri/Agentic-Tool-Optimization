@@ -38,11 +38,14 @@ pub struct PassiveObservation {
 #[derive(Debug, Serialize)]
 pub struct ObserverStatus {
     pub running: bool,
-    /// Identifiers of the CLI source roots the observer would tail
-    /// (claude_code / codex / gemini). Returns the union of installed
-    /// CLIs on this machine, not a filter — the desktop watches every
-    /// one it discovers.
-    pub sources: Vec<&'static str>,
+    /// Identifiers of the CLI source roots the running watcher is
+    /// tracking. When the CLI started the daemon, this comes from the
+    /// pidfile's recorded `--runtime` set (the actual filter applied
+    /// at start). When the desktop's auto-start owns the watcher, it
+    /// falls back to the install-set on disk. Per coordinator
+    /// MEDIUM-2: never report a runtime that isn't actually being
+    /// watched.
+    pub sources: Vec<String>,
 }
 
 #[tauri::command]
@@ -108,22 +111,56 @@ pub fn get_observer_status(
     state: tauri::State<'_, PassiveObserverState>,
 ) -> Result<ObserverStatus, String> {
     let observer = state.0.lock().map_err(|_| "observer mutex poisoned".to_string())?;
-    let mut sources: Vec<&'static str> = Vec::new();
+
+    // Coordinator MEDIUM-2: report the watcher's ACTUAL source set,
+    // not "installed CLIs now" — those drift when the user installs
+    // a new CLI after the daemon started. Prefer the pidfile (CLI
+    // path); fall back to "what the desktop watcher would have
+    // discovered at boot" by intersecting the install-set with
+    // what exists on disk now (the desktop's `start` is also
+    // install-set-bounded today).
+    if let Some(rec) = read_observe_pidfile() {
+        if !rec.runtimes.is_empty() {
+            return Ok(ObserverStatus {
+                running: observer.is_started(),
+                sources: rec.runtimes,
+            });
+        }
+    }
+
+    let mut sources: Vec<String> = Vec::new();
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return Ok(ObserverStatus { running: false, sources }),
     };
     if home.join(".claude").join("projects").exists() {
-        sources.push("claude_code");
+        sources.push("claude_code".to_string());
     }
     if home.join(".codex").join("sessions").exists() {
-        sources.push("codex");
+        sources.push("codex".to_string());
     }
     if home.join(".gemini").exists() {
-        sources.push("gemini");
+        sources.push("gemini".to_string());
     }
     Ok(ObserverStatus {
         running: observer.is_started(),
         sources,
     })
+}
+
+#[derive(serde::Deserialize)]
+struct PidfileRecord {
+    #[serde(default)]
+    runtimes: Vec<String>,
+}
+
+/// Read the CLI watcher's pidfile (if present). The CLI surface
+/// (apps/cli/src/commands/observe.rs) writes JSON pidfiles with the
+/// runtime filter. Desktop-only auto-started watchers don't write
+/// one, so this returns None in the common GUI-only case.
+fn read_observe_pidfile() -> Option<PidfileRecord> {
+    let home = dirs::home_dir()?;
+    let path = home.join(".ato").join("observe.pid");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<PidfileRecord>(raw.trim()).ok()
 }

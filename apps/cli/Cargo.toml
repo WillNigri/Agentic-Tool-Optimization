@@ -42,6 +42,12 @@ ato-passive-observer = { path = "../../packages/ato-passive-observer" }
 # v2.13 — `notify` already pulled in transitively, but we depend on
 # `dirs` directly for ~/.ato/observe.pid resolution in the CLI.
 dirs = "5"
+# v2.13 coordinator review LOW-4 — sigaction() over the deprecated
+# signal() syscall for the `ato observe` SIGTERM/SIGINT handlers.
+# Already transitively pulled in by notify; promoting to a direct
+# dep so the API is stable. Unix-only by feature.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["signal"] }
 # v2.3.21 Phase 6.x — API-key dispatch for non-CLI providers
 # (MiniMax, Grok, Qwen, DeepSeek, OpenRouter). Blocking client keeps
 # dispatch.rs synchronous like the existing shell-out path.
