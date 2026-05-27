@@ -22,10 +22,11 @@ pub struct RuntimeQuotaProbeRow {
 
 #[derive(Debug, Deserialize)]
 struct StatusEnvelope {
-    // Option<Vec> + serde(default) so a CLI that emits `null` (or omits
-    // the field entirely) deserializes cleanly. Today the Tauri caller
-    // always passes --with-quota and the CLI always emits the array,
-    // but this is defensive against future shape tweaks.
+    // Option<Vec> + serde(default) tolerates the field being null or
+    // omitted. (Does NOT tolerate the CLI emitting the legacy bare
+    // array — that would only happen if `ato` on $PATH is too old to
+    // understand --with-quota, in which case the Err branch surfaces
+    // a clear parse error to the panel.)
     #[serde(default)]
     runtime_quota_probes: Option<Vec<RawProbe>>,
 }
@@ -67,8 +68,23 @@ pub fn list_runtime_quota_probes() -> Result<Vec<RuntimeQuotaProbeRow>, String> 
     if stdout.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let env: StatusEnvelope = serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("parse ato output: {} (raw: {})", e, stdout))?;
+    let env: StatusEnvelope = serde_json::from_str(stdout.trim()).map_err(|e| {
+        // Truncate raw stdout so a multi-MB malformed payload (or a
+        // non-JSON banner) doesn't blow up the panel's error toast.
+        // Walk char_indices to stay on a UTF-8 boundary.
+        let raw = stdout.trim();
+        let split = raw
+            .char_indices()
+            .nth(500)
+            .map(|(i, _)| i)
+            .unwrap_or(raw.len());
+        let truncated = if split < raw.len() {
+            format!("{}…[truncated, {} total bytes]", &raw[..split], raw.len())
+        } else {
+            raw.to_string()
+        };
+        format!("parse ato output: {} (raw: {})", e, truncated)
+    })?;
     Ok(env
         .runtime_quota_probes
         .unwrap_or_default()

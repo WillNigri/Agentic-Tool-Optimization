@@ -722,12 +722,14 @@ enum MasterKeySub {
 #[derive(Subcommand, Debug)]
 enum RuntimesSub {
     /// Show known runtime quotas: which runtimes are rate-limited
-    /// and until when (parsed from previous dispatch errors).
+    /// and until when (parsed from previous dispatch errors). With
+    /// `--with-quota`, also reads each runtime's local usage file from
+    /// disk and returns parsed messages-used / messages-limit / reset.
     Status {
-        /// v2.13 Phase 6.x polish — also probe each runtime's local
-        /// quota state file (e.g. ~/.claude/usage.json) and include
-        /// the parsed messages-used / messages-limit / period-reset
-        /// in the JSON output. Read-only filesystem probe; no network.
+        /// Also probe each runtime's local quota state file
+        /// (~/.claude/usage.json etc.) and include the parsed
+        /// messages-used / messages-limit / period-reset alongside
+        /// the rate-limit rows. Read-only filesystem probe; no network.
         ///
         /// JSON SHAPE NOTE: opting into this flag switches the JSON
         /// output from the legacy bare array `[QuotaRow, …]` (v2.12

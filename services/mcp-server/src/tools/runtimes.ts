@@ -546,4 +546,24 @@ export function registerRuntimeTools(server: McpServer): void {
     {},
     async () => jsonToolResult(await runAtoCli(["runtimes", "status"])),
   );
+
+  // Sibling of get_runtime_quotas. Opts into the envelope shape via
+  // --with-quota so MCP agents can also see each runtime's local usage
+  // state (claude / codex / gemini). Pure read-only filesystem probe of
+  // ~/.claude/usage.json etc. — returns "found:false" entries when
+  // nothing's on disk. Sibling rather than expanding get_runtime_quotas
+  // so the existing tool's bare-array shape stays stable for callers.
+  server.tool(
+    "get_runtime_quota_probes",
+    "Read each runtime's local quota state (claude / codex / gemini usage.json under ~/.<runtime>/). Pure filesystem read, no network. Returns the runtime_quota_probes array from `ato runtimes status --with-quota` — each entry says whether a parseable quota file was found and, if so, how many messages have been used against the limit + the next reset.",
+    {},
+    async () => {
+      const env = (await runAtoCli([
+        "runtimes",
+        "status",
+        "--with-quota",
+      ])) as { runtime_quota_probes?: unknown };
+      return jsonToolResult(env.runtime_quota_probes ?? []);
+    },
+  );
 }
