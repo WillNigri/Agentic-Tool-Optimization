@@ -138,34 +138,32 @@ fn read_pid_record(path: &Path) -> Option<PidRecord> {
     // crashed without unlinking. A bare integer maps to a record
     // with empty exe_path / started_at=0; stop() will fail the
     // identity match and refuse to SIGTERM, which is the safe default.
+    //
+    // Re-review-3 (claude) INFO-6: collapse the two-step match.
+    // Either it parses as JSON (modern pidfile) OR as a bare int
+    // (legacy) OR we eprintln + return None. The previous shape
+    // had a trailing dead fall-through that was unreachable but
+    // misleading to read.
     match serde_json::from_str::<PidRecord>(trimmed) {
-        Ok(rec) => return Some(rec),
-        Err(json_err) => {
-            // Re-review-2 (gemini) MEDIUM-2: surface JSON parse
-            // failures so a corrupted pidfile that ISN'T a legacy
-            // bare-int doesn't disappear silently. The bare-int
-            // legacy form is parseable as an integer below, so we
-            // only log when neither path works (see end of fn).
-            if trimmed.parse::<u32>().is_err() {
+        Ok(rec) => Some(rec),
+        Err(json_err) => match trimmed.parse::<u32>() {
+            Ok(pid) => Some(PidRecord {
+                pid,
+                exe_path: String::new(),
+                started_at_unix: 0,
+                runtimes: Vec::new(),
+            }),
+            Err(_) => {
                 eprintln!(
                     "ato observe: pidfile {} is neither valid JSON nor a bare PID ({}). \
                      Ignoring.",
                     path.display(),
                     json_err
                 );
-                return None;
+                None
             }
-        }
+        },
     }
-    if let Ok(pid) = trimmed.parse::<u32>() {
-        return Some(PidRecord {
-            pid,
-            exe_path: String::new(),
-            started_at_unix: 0,
-            runtimes: Vec::new(),
-        });
-    }
-    None
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
@@ -197,11 +195,11 @@ fn pid_is_alive(_pid: u32) -> bool {
     false
 }
 
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-}
+// Re-review-3 LOW (claude #5): the previous `extern "C" { fn kill }`
+// block was redundant — nix is already a direct cfg(unix) dep for
+// `pid_is_alive`, and exposes a safe wrapper for SIGTERM too.
+// Consolidated `stop`'s kill path onto nix so this file has one
+// FFI strategy, not two.
 
 pub fn start(db_path: &Path, runtimes: &[String], opts: &Opts) -> Result<()> {
     let filter = parse_runtime_filter(runtimes)?;
@@ -354,11 +352,17 @@ fn install_signal_handlers(shutdown: &Arc<AtomicBool>) {
     // Re-review-2 (claude) LOW-4: split the policies.
     //   SIGINT  — SA_RESETHAND so the "user mashed Ctrl-C because
     //             the daemon hung" path terminates on second hit.
-    //   SIGTERM — plain SA_RESTART, no SA_RESETHAND. launchd /
-    //             systemd may redeliver SIGTERM during their
-    //             escalation window; resetting to SIG_DFL would
-    //             skip our graceful-shutdown polling thread and
-    //             leave the SQLite WAL un-checkpointed.
+    //   SIGTERM — plain SA_RESTART, no SA_RESETHAND. SIGTERM stays
+    //             catchable so a second `kill <pid>` during our
+    //             ~500ms graceful-shutdown window still routes
+    //             through the polling thread and checkpoints the
+    //             SQLite WAL. The SA_RESETHAND escape hatch on
+    //             SIGINT exists because terminals make Ctrl-C
+    //             cheap to repeat; SIGTERM doesn't share that
+    //             concern, so we keep the graceful path catchable.
+    //             (Re-review-3 corrects an earlier misstatement:
+    //             launchd/systemd send one SIGTERM then escalate
+    //             to SIGKILL — they do NOT redeliver SIGTERM.)
     //
     // Coordinator re-review INFO #7 (claude): surface sigaction
     // install failures (sandbox restrictions etc.) via eprintln so
@@ -432,8 +436,10 @@ pub fn stop(opts: &Opts) -> Result<()> {
                 .unwrap_or_default();
             if !rec.exe_path.is_empty() && rec.exe_path == our_exe {
                 #[cfg(unix)]
-                unsafe {
-                    if libc_kill(p as i32, 15) == 0 {
+                {
+                    use nix::sys::signal::{kill, Signal};
+                    use nix::unistd::Pid;
+                    if kill(Pid::from_raw(p as i32), Signal::SIGTERM).is_ok() {
                         signaled = true;
                     }
                 }

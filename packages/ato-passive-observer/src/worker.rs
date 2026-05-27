@@ -147,12 +147,6 @@ pub fn scan_file(
     };
     let metadata = file.metadata().map_err(|e| e.to_string())?;
     let size = metadata.len();
-    let is_fresh = metadata
-        .modified()
-        .ok()
-        .and_then(|m| m.elapsed().ok())
-        .map(|e| e < Duration::from_secs(5 * 60))
-        .unwrap_or(false);
     if size < offset {
         // Truncate / rotation — reset and re-ingest from byte 0; the
         // UNIQUE INDEX drops rows we already emitted.
@@ -186,6 +180,18 @@ pub fn scan_file(
     let mut buf = vec![0u8; read_cap as usize];
     let n = file.read(&mut buf).map_err(|e| e.to_string())?;
     buf.truncate(n);
+
+    // Re-review-3 (gemini) LOW: is_fresh is only used by the JSONL
+    // path (it gates the `mark_in_progress` live_runs insert).
+    // scan_json_array_file computes its own copy. Hoisting the
+    // computation here avoids the wasted stat in the early-return
+    // and array-path cases.
+    let is_fresh = metadata
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|e| e < Duration::from_secs(5 * 60))
+        .unwrap_or(false);
 
     let mut consumed: usize = 0;
     for line_end in line_iter(&buf) {
@@ -512,6 +518,67 @@ mod tests {
         assert_eq!(ends, vec![2, 5]);
     }
 
+    /// Re-review-3 (claude) LOW-4: log-once flag for oversize
+    /// Gemini array files. Verify the flag flips on the first scan
+    /// and prevents further `oversized_warned` flips on the second
+    /// call with the same SessionStateMap; verify a fresh
+    /// SessionStateMap re-arms the warning.
+    #[test]
+    fn oversized_array_file_warns_once_per_state_instance() {
+        // Build a synthetic 33MB JSON array (1MB more than the
+        // 32MB cap). Doesn't need to be valid Gemini content —
+        // the size check fires before the parser does.
+        let tmp_db = tempfile::NamedTempFile::new().unwrap();
+        crate::schema::ensure_schema(tmp_db.path()).unwrap();
+
+        let tmp_json = tempfile::NamedTempFile::new().unwrap();
+        // 33MB of `[...]` JSON. Use a simple repeating shape so
+        // serde_json::from_slice succeeds (it'll just produce a
+        // big array of objects).
+        let element = serde_json::json!({"type":"user","sessionId":"x","message":"y"});
+        let element_str = serde_json::to_string(&element).unwrap();
+        let elements_needed = (33 * 1024 * 1024) / (element_str.len() + 1);
+        let body = (0..elements_needed)
+            .map(|_| element_str.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let payload = format!("[{}]", body);
+        std::fs::write(tmp_json.path(), &payload).unwrap();
+        assert!(
+            std::fs::metadata(tmp_json.path()).unwrap().len() > MAX_ARRAY_FILE_BYTES,
+            "fixture must exceed the cap"
+        );
+
+        let mut state = SessionStateMap::new();
+        assert!(!state.oversized_warned);
+        scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state).unwrap();
+        assert!(state.oversized_warned, "first scan must flip the flag");
+
+        // Second scan with the same state: still oversize, flag
+        // already set, no second eprintln expected (can't observe
+        // stderr from a test easily — assert via the flag value).
+        scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state).unwrap();
+        assert!(state.oversized_warned, "flag stays set on subsequent scans");
+
+        // Fresh state instance = daemon restart. Re-arms the warning.
+        let mut state2 = SessionStateMap::new();
+        assert!(!state2.oversized_warned, "new state instance re-arms");
+        scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state2).unwrap();
+        assert!(state2.oversized_warned, "fresh state still flips on first scan");
+
+        // The file is over-cap; no rows should land regardless.
+        let conn = Connection::open(tmp_db.path()).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_logs \
+                  WHERE dispatch_kind='passive_observation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "oversize file emits zero rows");
+    }
+
     /// Regression for coordinator MEDIUM-3: per_file_state must drop
     /// entries whose backing file has been deleted. Simulates a
     /// rotated session file and asserts the GC pass cleans the map.
@@ -613,9 +680,20 @@ mod tests {
         // serialization (extra whitespace). The UNIQUE INDEX on
         // (provider_session_id, sequence_within_session) is now
         // the active dedup signal, which is what we claim to test.
+        //
+        // Re-review-3 (claude) LOW-3: assert_ne on the size change
+        // so a future fixture expansion that accidentally makes
+        // compact+padding == pretty doesn't silently degrade the
+        // test back to a no-op via the outer short-circuit.
+        let prior_size = std::fs::metadata(tmp_json.path()).unwrap().len();
         let reserialized = serde_json::to_string(&events).unwrap()
-            + "                "; // trailing whitespace shifts file size
+            + &" ".repeat(512); // 512 bytes guarantees size delta vs. pretty form
         std::fs::write(tmp_json.path(), reserialized).unwrap();
+        let new_size = std::fs::metadata(tmp_json.path()).unwrap().len();
+        assert_ne!(
+            prior_size, new_size,
+            "test fixture must change file size to exercise parser path"
+        );
         scan_file(tmp_db.path(), SourceKind::Gemini, tmp_json.path(), &mut state).unwrap();
         let n2: i64 = conn
             .query_row(

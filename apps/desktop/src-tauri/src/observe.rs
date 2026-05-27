@@ -132,7 +132,16 @@ pub fn get_observer_status(
     let desktop_running = observer.is_started();
     if !desktop_running {
         if let Some(rec) = read_observe_pidfile() {
-            if !rec.runtimes.is_empty() && pid_is_alive_unix(rec.pid) {
+            // Re-review-3 MEDIUM: gate trust on (alive PID) AND
+            // (exe_path matches the ato binary). Without the
+            // identity check, a stale pidfile + PID reuse would
+            // mislead the dashboard. The CLI's own start/stop
+            // paths already enforce this; mirroring keeps the two
+            // surfaces consistent.
+            if !rec.runtimes.is_empty()
+                && pid_is_alive_unix(rec.pid)
+                && pidfile_has_trusted_identity(&rec)
+            {
                 return Ok(ObserverStatus {
                     running: true,
                     sources: rec.runtimes,
@@ -177,8 +186,36 @@ pub fn get_observer_status(
 struct PidfileRecord {
     #[serde(default)]
     pid: u32,
+    /// Path of the binary that wrote the pidfile. The desktop trusts
+    /// the recorded `runtimes` set ONLY when this matches the `ato`
+    /// CLI binary (per re-review-3 MEDIUM). Without this check, a
+    /// stale pidfile + PID reuse would have the desktop misreport
+    /// some unrelated process's PID as our running observer.
+    #[serde(default)]
+    exe_path: String,
     #[serde(default)]
     runtimes: Vec<String>,
+}
+
+/// Validate the pidfile record carries enough identity to be
+/// trustworthy. Empty exe_path = legacy bare-int pidfile or
+/// somehow-malformed JSON without the field — refuse those rather
+/// than trusting their `runtimes` list. The CLI always writes
+/// exe_path; only legacy or attack-shaped pidfiles miss it.
+fn pidfile_has_trusted_identity(rec: &PidfileRecord) -> bool {
+    if rec.exe_path.is_empty() {
+        return false;
+    }
+    // Must look like an ato binary — `…/ato` (with optional version
+    // suffix like `-2.13`). Heuristic, not a security boundary;
+    // PID reuse to a random process whose path happens to end in
+    // /ato is implausible and the worst case is "report wrong
+    // runtimes for one polling cycle until the user notices."
+    let last = std::path::Path::new(&rec.exe_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    last == "ato" || last.starts_with("ato-")
 }
 
 /// Read the CLI watcher's pidfile (if present). The CLI surface
