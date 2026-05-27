@@ -63,7 +63,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 sha2 = "0.10"
 # v2.4.4 Phase 7.0 step 2 — mDNS discovery on _ato._tcp.local.
-mdns-sd = "0.11"
+mdns-sd = "0.20"
 hostname = "0.4"
 
 # v2.13 coordinator re-review HIGH-1 fix: target-cfg tables MUST sit
