@@ -34,16 +34,17 @@ pub struct RuntimeQuotaProbe {
     /// RFC3339 timestamp when the period resets. None when unknown,
     /// the file doesn't carry a reset, or the value didn't parse as
     /// RFC3339 — we'd rather drop a malformed string than let the UI
-    /// render `<time dateTime="next Tuesday">`. Reviewer INFO #6.
+    /// render `<time dateTime="next Tuesday">`.
     pub period_reset_at: Option<String>,
     /// Free-form note for the UI — explains what we tried when
     /// `found = false`. Stays None on success.
     pub note: Option<String>,
 }
 
-/// Runtimes we know how to probe. Matches the `RUNTIMES` list in
-/// `commands::runtimes` so the human output stays in sync with the
-/// health check.
+/// Runtimes we know how to probe. Intentionally a subset of
+/// `commands::runtimes::RUNTIMES` — hermes and openclaw have no
+/// local quota state file (the OpenClaw SSH-relay runtime sits on
+/// top of remote shells, and Hermes ships no usage sidecar today).
 pub const KNOWN_RUNTIMES: &[&str] = &["claude", "codex", "gemini"];
 
 /// Probe every known runtime. Order matches `KNOWN_RUNTIMES`.
@@ -141,10 +142,9 @@ fn parse_known_shape(v: &Value) -> Option<Parsed> {
         v,
         &["period_reset", "period_reset_at", "reset_at", "resets_at", "reset_time"],
     );
-    // INFO #6: validate the reset string parses as RFC3339 before
-    // accepting it. Drop unparseable strings to None — we'd rather
-    // surface "no reset known" than render a `<time>` with a localized
-    // string or epoch-seconds.
+    // Validate the reset string parses as RFC3339 before accepting it.
+    // Drop unparseable strings to None — better than leaking epoch-
+    // seconds or a localized date into the frontend's <time> element.
     let reset_at = raw_reset
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|_| s));
     if used.is_none() && limit.is_none() && reset_at.is_none() {
@@ -190,11 +190,11 @@ mod tests {
         assert!(probe.note.as_deref().unwrap().contains("no candidate path"));
     }
 
-    // Reviewer LOW #3: previous "missing file returns not found"
-    // host-dependent test removed — it would flake on any machine that
-    // happened to have a real ~/.claude/usage.json (the v2.6 passive
-    // observer dogfood path can create one). The parse_known_shape
-    // branches below cover the parsing logic without touching $HOME.
+    // No `probe()` integration test against the live $HOME — it would
+    // flake on any machine that happens to have a real
+    // ~/.claude/usage.json (the v2.6 passive observer dogfood path can
+    // create one). The parse_known_shape branches below cover the
+    // logic that matters without touching $HOME.
 
     #[test]
     fn parses_messages_used_limit_shape() {
@@ -235,10 +235,10 @@ mod tests {
 
     #[test]
     fn drops_non_rfc3339_reset_to_none() {
-        // INFO #6: a runtime that ships epoch-seconds or a localized
-        // string in `period_reset` should NOT leak through to the
-        // frontend's <time> tag. We accept the row (used + limit are
-        // still useful) but drop the unparseable reset.
+        // A runtime that ships epoch-seconds or a localized string in
+        // `period_reset` should NOT leak through to the frontend's
+        // <time> tag. Accept the row (used + limit are still useful)
+        // but drop the unparseable reset.
         let v: Value = serde_json::from_str(
             r#"{"messages_used": 5, "messages_limit": 100, "period_reset": "next Tuesday"}"#,
         )

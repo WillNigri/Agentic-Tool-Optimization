@@ -22,7 +22,12 @@ pub struct RuntimeQuotaProbeRow {
 
 #[derive(Debug, Deserialize)]
 struct StatusEnvelope {
-    runtime_quota_probes: Vec<RawProbe>,
+    // Option<Vec> + serde(default) so a CLI that emits `null` (or omits
+    // the field entirely) deserializes cleanly. Today the Tauri caller
+    // always passes --with-quota and the CLI always emits the array,
+    // but this is defensive against future shape tweaks.
+    #[serde(default)]
+    runtime_quota_probes: Option<Vec<RawProbe>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +71,7 @@ pub fn list_runtime_quota_probes() -> Result<Vec<RuntimeQuotaProbeRow>, String> 
         .map_err(|e| format!("parse ato output: {} (raw: {})", e, stdout))?;
     Ok(env
         .runtime_quota_probes
+        .unwrap_or_default()
         .into_iter()
         .map(|p| RuntimeQuotaProbeRow {
             runtime: p.runtime,

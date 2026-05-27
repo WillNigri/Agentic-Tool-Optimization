@@ -83,6 +83,15 @@ export default function RuntimeQuotaPanel() {
   );
 }
 
+/** Render an RFC3339 reset timestamp as a locale-formatted string.
+ *  Keeps the raw ISO in the `dateTime` attr + title tooltip so power
+ *  users can still copy the machine-readable form. */
+function formatReset(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
+}
+
 function QuotaRow({ row }: { row: RuntimeQuotaProbeRow }) {
   const percent =
     row.found && row.messagesUsed != null && row.messagesLimit && row.messagesLimit > 0
@@ -122,7 +131,10 @@ function QuotaRow({ row }: { row: RuntimeQuotaProbeRow }) {
       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-cs-muted">
         {row.periodResetAt && (
           <span>
-            resets <time dateTime={row.periodResetAt}>{row.periodResetAt}</time>
+            resets{" "}
+            <time dateTime={row.periodResetAt} title={row.periodResetAt}>
+              {formatReset(row.periodResetAt)}
+            </time>
           </span>
         )}
         {row.sourcePath && (

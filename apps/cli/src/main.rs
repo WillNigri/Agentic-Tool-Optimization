@@ -729,11 +729,11 @@ enum RuntimesSub {
         /// the parsed messages-used / messages-limit / period-reset
         /// in the JSON output. Read-only filesystem probe; no network.
         ///
-        /// JSON SHAPE NOTE: this flag does NOT change the JSON envelope
-        /// shape — `Status` always emits `{ quotas: [...],
-        /// runtime_quota_probes: [...] | null }`. Without the flag,
-        /// `runtime_quota_probes` is null; with it, the array is
-        /// populated.
+        /// JSON SHAPE NOTE: opting into this flag switches the JSON
+        /// output from the legacy bare array `[QuotaRow, …]` (v2.12
+        /// shape; default) to an envelope
+        /// `{ quotas: [...], runtime_quota_probes: [...] }`. Existing
+        /// v2.12 consumers that don't pass the flag see no change.
         #[arg(long = "with-quota")]
         with_quota: bool,
     },
@@ -1913,12 +1913,6 @@ fn main() -> Result<()> {
         Commands::Runtimes { sub } => match sub {
             RuntimesSub::Status { with_quota } => {
                 let rows = quota::list_all(&db_path)?;
-                // Review LOW #5 (SQLite read wasted when desktop only
-                // consumes probes) deferred: the always-on envelope from
-                // MEDIUM #2 requires the `quotas` field to be accurate
-                // regardless of --with-quota, so the read is now needed
-                // on every path. A `--quota-only` flag would let the
-                // desktop skip the SELECT — punt to a follow-up.
                 // v2.13 Phase 6.x — when --with-quota is set, also surface
                 // each runtime's local quota state. Probe results are
                 // independent of the rate-limit rows (the latter come from
@@ -1993,15 +1987,16 @@ fn main() -> Result<()> {
                             }
                         }
                     }
-                } else {
-                    // v2.13 Phase 6.x review MEDIUM #2: always emit the
-                    // envelope under JSON mode regardless of --with-quota,
-                    // so external scripts don't break when the flag flips.
-                    // `runtime_quota_probes` is null when the flag is off.
+                } else if let Some(probes) = quota_probes {
+                    // --with-quota opts into the envelope shape. Without
+                    // the flag we emit the legacy bare array so every
+                    // v2.12-era script keeps working unchanged.
                     output::emit_json(&serde_json::json!({
                         "quotas": rows,
-                        "runtime_quota_probes": quota_probes,
+                        "runtime_quota_probes": probes,
                     }))?;
+                } else {
+                    output::emit_json(&rows)?;
                 }
                 Ok(())
             }
