@@ -49,3 +49,8 @@ pub mod production_signals;
 // methodologies are a Team-tier feature; persistence + tier gating
 // live in ato-cloud. This module is HTTP-only — no local fallback.
 pub mod teams;
+// v2.13 — `ato observe start/stop/status`. Thin foreground wrapper
+// around the shared `ato-passive-observer` crate so headless dev
+// boxes + CI runners get the same universal multi-LLM observability
+// the desktop auto-starts. See [[ato-live-billing-path]].
+pub mod observe;

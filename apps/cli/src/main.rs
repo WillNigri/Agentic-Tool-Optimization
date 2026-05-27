@@ -488,6 +488,36 @@ enum Commands {
         #[command(subcommand)]
         sub: MeshSub,
     },
+    /// v2.13 — universal multi-LLM passive observer. Tails
+    /// ~/.claude/projects, ~/.codex/sessions, and ~/.gemini for
+    /// session JSONLs and ingests each (user-prompt, assistant-
+    /// response) pair into execution_logs as
+    /// `dispatch_kind='passive_observation'`. The desktop app
+    /// auto-starts this on boot; the CLI surfaces it for headless
+    /// dev boxes, CI runners, and remote servers. See
+    /// [[ato-live-billing-path]].
+    Observe {
+        #[command(subcommand)]
+        sub: ObserveSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ObserveSub {
+    /// Start the watcher in the foreground. Ctrl-C to stop. Writes
+    /// ~/.ato/observe.pid for `ato observe status / stop`.
+    Start {
+        /// Restrict which runtimes to watch. Repeatable: --runtime
+        /// claude --runtime codex --runtime gemini. Omit for all.
+        #[arg(long = "runtime")]
+        runtimes: Vec<String>,
+    },
+    /// Signal the running observer (read from ~/.ato/observe.pid) to
+    /// stop. Best-effort: if the process is gone we clean up the
+    /// stale pidfile and report success.
+    Stop,
+    /// Print whether an observer is running and on which sources.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1890,6 +1920,13 @@ fn main() -> Result<()> {
                 }
                 Ok(())
             }
+        },
+        Commands::Observe { sub } => match sub {
+            ObserveSub::Start { runtimes } => {
+                commands::observe::start(&db_path, &runtimes, &opts)
+            }
+            ObserveSub::Stop => commands::observe::stop(&opts),
+            ObserveSub::Status => commands::observe::status(&opts),
         },
         Commands::Mesh { sub } => match sub {
             MeshSub::Discovered { limit } => {
