@@ -555,15 +555,15 @@ export function registerRuntimeTools(server: McpServer): void {
   // so the existing tool's bare-array shape stays stable for callers.
   server.tool(
     "get_runtime_quota_probes",
-    "Read each runtime's local quota state (claude / codex / gemini usage.json under ~/.<runtime>/). Pure filesystem read, no network. Returns the runtime_quota_probes array from `ato runtimes status --with-quota` — each entry says whether a parseable quota file was found and, if so, how many messages have been used against the limit + the next reset.",
+    "Read each runtime's local quota state (claude / codex / gemini usage.json under ~/.<runtime>/). Pure filesystem read, no network. Returns the runtime_quota_probes array from `ato runtimes status --with-quota` — each entry says whether a parseable quota file was found and, if so, how many messages have been used against the limit + the next reset. Always emits one entry per known-quota runtime (claude / codex / gemini today); hermes and openclaw are intentionally absent because they have no local usage sidecar.",
     {},
     async () => {
       const env = (await runAtoCli([
         "runtimes",
         "status",
         "--with-quota",
-      ])) as { runtime_quota_probes?: unknown };
-      return jsonToolResult(env.runtime_quota_probes ?? []);
+      ])) as { runtime_quota_probes?: unknown } | null;
+      return jsonToolResult(env?.runtime_quota_probes ?? []);
     },
   );
 }
