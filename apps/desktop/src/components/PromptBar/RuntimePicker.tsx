@@ -43,7 +43,19 @@ export function RuntimePicker({
   open,
   setOpen,
 }: Props) {
-  const currentRuntime = RUNTIME_OPTIONS.find((r) => r.id === runtime)!;
+  // v2.14.4 — defensive fallback. Same pattern as PromptBar/index.tsx:142.
+  // `runtime` can hold API provider slugs ("google" / "anthropic" / "openai")
+  // that don't match RUNTIME_OPTIONS ids ("gemini" / "claude" / "codex").
+  // Without the fallback, the bare `find(...)!.icon` access black-screened
+  // the entire chat the moment the picker chip rendered with a provider slug.
+  // (Will hit this on v2.14.3 dogfood; v2.14.2's index.tsx patch covered the
+  // PromptBar lookup but I missed this sibling site in RuntimePicker.)
+  const currentRuntime = RUNTIME_OPTIONS.find((r) => r.id === runtime) ?? {
+    id: runtime as AgentRuntime,
+    label: runtime,
+    icon: Globe,
+    color: "#888",
+  };
   const RuntimeIcon = currentRuntime.icon;
 
   return (
