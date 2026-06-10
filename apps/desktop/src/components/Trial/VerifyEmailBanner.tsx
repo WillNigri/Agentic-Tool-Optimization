@@ -54,12 +54,20 @@ export default function VerifyEmailBanner() {
   // verify-email link in a separate browser tab. Without it, the
   // banner persists until the user logs out or the desktop process
   // restarts. (Caught live by Will 2026-05-27 on willnigri+4.)
+  //
+  // v2.13.1 — Tauri's webview doesn't fire DOM `window.focus` reliably
+  // when the macOS app switches to foreground from another app. Subscribe
+  // to Tauri's native `onFocusChanged` instead (still keep the DOM
+  // listener as a browser-build fallback). Caught live by Will
+  // 2026-05-27 on willnigri+3 — Cmd+R cleared the banner; pure DOM
+  // focus did not.
   useEffect(() => {
     if (!isCloudUser || !accessToken) {
       setEmailVerified(null);
       return;
     }
     let cancelled = false;
+    let tauriUnlisten: (() => void) | null = null;
     const fetchVerified = async () => {
       try {
         const resp = await fetch(`${CLOUD_API_URL}/api/auth/me`, {
@@ -90,9 +98,31 @@ export default function VerifyEmailBanner() {
       fetchVerified();
     };
     window.addEventListener('focus', onFocus);
+    // Tauri-native focus subscription (load lazily so browser builds
+    // of the same component don't crash on the missing module).
+    if (typeof window !== 'undefined' && '__TAURI__' in window) {
+      import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) => {
+          if (cancelled) return;
+          return getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+            if (focused) fetchVerified();
+          });
+        })
+        .then((unlisten) => {
+          if (cancelled) {
+            unlisten?.();
+            return;
+          }
+          tauriUnlisten = unlisten ?? null;
+        })
+        .catch(() => {
+          /* not a Tauri context, or webview API missing — DOM fallback covers it */
+        });
+    }
     return () => {
       cancelled = true;
       window.removeEventListener('focus', onFocus);
+      tauriUnlisten?.();
     };
   }, [isCloudUser, accessToken]);
 

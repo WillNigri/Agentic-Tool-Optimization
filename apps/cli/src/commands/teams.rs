@@ -55,6 +55,47 @@ pub struct TeamsArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum TeamsSub {
+    /// Create a new team workspace. Team tier required.
+    Create {
+        /// Team display name.
+        #[arg(long)]
+        name: String,
+        /// Optional description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List all teams the current user belongs to.
+    List,
+    /// Delete a team (admin/owner only).
+    Delete {
+        #[arg(long)]
+        team: String,
+    },
+    /// Invite a teammate by email.
+    Invite {
+        /// Team UUID.
+        #[arg(long)]
+        team: String,
+        /// Email to invite.
+        #[arg(long)]
+        email: String,
+        /// Role for the invitee. Defaults to member.
+        #[arg(long, default_value = "member")]
+        role: String,
+    },
+    /// List members of a team.
+    Members {
+        #[arg(long)]
+        team: String,
+    },
+    /// Remove a member from a team (admin/owner only).
+    RemoveMember {
+        #[arg(long)]
+        team: String,
+        /// User UUID of the member to remove.
+        #[arg(long)]
+        user_id: String,
+    },
     /// Shared agents in a team workspace (Team tier).
     Agents {
         #[command(subcommand)]
@@ -149,9 +190,102 @@ struct LocalMethodologyRow {
 
 pub fn run(args: TeamsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
     match args.sub {
+        TeamsSub::Create { name, description } => run_create(name, description, opts),
+        TeamsSub::List => run_list(opts),
+        TeamsSub::Delete { team } => run_delete(team, opts),
+        TeamsSub::Invite { team, email, role } => run_invite(team, email, role, opts),
+        TeamsSub::Members { team } => run_members(team, opts),
+        TeamsSub::RemoveMember { team, user_id } => run_remove_member(team, user_id, opts),
         TeamsSub::Agents { sub } => run_agents(sub, opts),
         TeamsSub::Methodologies { sub } => run_methodologies(sub, db_path, opts),
     }
+}
+
+#[derive(Serialize)]
+struct CreateTeamBody<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct InviteBody<'a> {
+    email: &'a str,
+    role: &'a str,
+}
+
+fn run_create(name: String, description: Option<String>, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams", api_base());
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&CreateTeamBody { name: &name, description: description.as_deref() })
+        .send()
+        .context("Failed to call POST /api/teams")?;
+    handle_response(resp, opts, &format!("Created team '{}'", name))
+}
+
+fn run_list(opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams", api_base());
+    let resp = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .context("Failed to call GET /api/teams")?;
+    handle_list_response(resp, opts, "team")
+}
+
+fn run_delete(team: String, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams/{}", api_base(), team);
+    let resp = client
+        .delete(&url)
+        .bearer_auth(&token)
+        .send()
+        .context("Failed to call DELETE /api/teams/...")?;
+    handle_response(resp, opts, "Deleted team")
+}
+
+fn run_invite(team: String, email: String, role: String, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams/{}/members", api_base(), team);
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&InviteBody { email: &email, role: &role })
+        .send()
+        .context("Failed to call POST /api/teams/.../members")?;
+    handle_response(resp, opts, &format!("Invited {} as {}", email, role))
+}
+
+fn run_members(team: String, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams/{}/members", api_base(), team);
+    let resp = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .context("Failed to call GET /api/teams/.../members")?;
+    handle_list_response(resp, opts, "member")
+}
+
+fn run_remove_member(team: String, user_id: String, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams/{}/members/{}", api_base(), team, user_id);
+    let resp = client
+        .delete(&url)
+        .bearer_auth(&token)
+        .send()
+        .context("Failed to call DELETE /api/teams/.../members/...")?;
+    handle_response(resp, opts, "Removed member from team")
 }
 
 fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
