@@ -153,10 +153,15 @@ pub fn registry() -> &'static [ApiProvider] {
             // `{model}` token is the placeholder the dispatcher
             // substitutes.
             path: "/v1beta/models/{model}:generateContent",
-            // gemini-2.0-flash was deprecated for new users 2026-Q1.
-            // gemini-2.5-flash is the current low-latency default;
-            // users on Pro plans override with --model gemini-2.5-pro.
-            default_model: "gemini-2.5-flash",
+            // v2.14.5 (2026-06-10) — bumped default from gemini-2.5-flash
+            // to gemini-3-flash-preview. Caught dogfooding today: gemini-2.5-flash
+            // was returning 503 UNAVAILABLE ("high demand") consistently for
+            // hours while gemini-3-flash-preview returned in <1s for the same
+            // request. Google's playground UI also defaulted to the new model.
+            // The 2.5 family is still routable via `--model gemini-2.5-flash`
+            // or `--model gemini-2.5-pro` for callers that want it; only the
+            // default changes.
+            default_model: "gemini-3-flash-preview",
             env_var: "GEMINI_API_KEY",
             flavor: "gemini",
         },
