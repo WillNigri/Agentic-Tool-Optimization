@@ -154,6 +154,16 @@ export default function LlmApiKeys() {
     queryClient.invalidateQueries({ queryKey: ["enabled-runtimes"] });
   };
 
+  // v2.14.2 — surface backend failures from every key mutation. Pre-2.14.2
+  // these silently no-op'd on error (button re-enabled, no UI feedback) which
+  // hid keychain NoEntry, encryption, and CSP errors from the user. The alert
+  // is the minimum-viable surface — a styled banner is a v2.14.3 follow-up.
+  const surfaceError = (label: string) => (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    // eslint-disable-next-line no-alert
+    alert(`${label}:\n\n${msg}`);
+  };
+
   const saveMutation = useMutation({
     mutationFn: () => saveLlmApiKey(formProvider, formName || getProvider(formProvider).name, formKey, undefined, formRuntime || undefined),
     onSuccess: () => {
@@ -164,16 +174,19 @@ export default function LlmApiKeys() {
       setFormKey("");
       setFormRuntime("");
     },
+    onError: surfaceError("Save failed"),
   });
 
   const toggleMutation = useMutation({
     mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) => toggleLlmApiKey(id, isActive),
     onSuccess: invalidateKeyAndRuntimes,
+    onError: surfaceError("Toggle failed"),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteLlmApiKey(id),
     onSuccess: invalidateKeyAndRuntimes,
+    onError: surfaceError("Delete failed"),
   });
 
   const rotateMutation = useMutation({
@@ -183,6 +196,7 @@ export default function LlmApiKeys() {
       setRotatingId(null);
       setNewRotateKey("");
     },
+    onError: surfaceError("Rotate failed"),
   });
 
   const revealKey = async (id: string) => {

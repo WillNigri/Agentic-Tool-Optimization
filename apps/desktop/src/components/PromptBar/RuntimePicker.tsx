@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 
 import type { AvailableRuntimeRow } from "./_helpers";
 import { RUNTIME_META, RUNTIME_OPTIONS } from "./_helpers";
+import { PROVIDER_TO_RUNTIME } from "@/lib/runtimes";
 import type { AgentRuntime } from "@/components/cron/types";
 
 interface Props {
@@ -100,7 +101,13 @@ export function RuntimePicker({
                     key={r.slug}
                     type="button"
                     onClick={() => {
-                      setRuntime(r.slug as AgentRuntime);
+                      // v2.14.2 — API provider slugs ("google", "anthropic",
+                      // "openai") aren't direct RUNTIME_OPTIONS keys (those
+                      // are "gemini", "claude", "codex"). Alias before set
+                      // so downstream consumers (PromptBar's currentRuntime
+                      // lookup, chat history filters) get a known id.
+                      const aliased = PROVIDER_TO_RUNTIME[r.slug] ?? r.slug;
+                      setRuntime(aliased as AgentRuntime);
                       setOpen(false);
                     }}
                     title={

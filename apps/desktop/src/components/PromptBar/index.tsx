@@ -11,6 +11,7 @@ import {
   Cpu,
   Server,
   Paperclip,
+  Globe,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listAgents, type Agent } from "@/lib/agents";
@@ -139,7 +140,17 @@ export default function PromptBar() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const currentRuntime = RUNTIME_OPTIONS.find((r) => r.id === runtime)!;
+  // v2.14.2 — defensive fallback. RuntimePicker can pass through API provider
+  // slugs ("google", "anthropic", "openai") that aren't direct RUNTIME_OPTIONS
+  // keys (those are "gemini", "claude", "codex"). The picker now aliases them
+  // before setRuntime, but defending the lookup catches any other unknown id
+  // (legacy stored values, future providers) instead of black-screening.
+  const currentRuntime = RUNTIME_OPTIONS.find((r) => r.id === runtime) ?? {
+    id: runtime as AgentRuntime,
+    label: runtime,
+    icon: Globe,
+    color: "#888",
+  };
   const RuntimeIcon = currentRuntime.icon;
 
   // ── Threads ────────────────────────────────────────────────────────────
