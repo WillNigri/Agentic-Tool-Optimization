@@ -333,15 +333,36 @@ your dispatch + session primitives.
 
 **Pick a tool-capable runtime when the seat needs to walk the code.**
 This is the most-bitten failure mode in 2026-05-15 sessions. ATO's
-`dispatch` targets split into two classes:
+`dispatch` targets split into THREE classes (the second was added in
+v2.9 grounded mode — see `docs/agent-playbook.md` in the OSS repo for
+the full briefing, and blog Parts 1-7 for the build log):
 
-- **Tool-capable runtimes** (CLI binaries with their own Read / Grep /
-  Bash loop): `claude`, `codex`, `gemini`, `openclaw`, `hermes`.
-  Check live status with `ato runtimes health`. These walk files
-  themselves; you pass them a brief, they go fetch the artifacts.
-- **API-only providers** (one-shot HTTP request → text response): all
-  of `minimax`, `grok`, `deepseek`, `qwen`, `openrouter`. No tool loop;
-  they can only reason from what's in the prompt.
+- **CLI-native runtimes** (run their own tool loop unconditionally,
+  no flag needed): `claude`, `codex`, `gemini` (when CLI installed),
+  `openclaw`, `hermes`. Check live status with `ato runtimes health`.
+  Pass a brief, they walk the source themselves.
+- **API providers with function-calling tool loop available** (v2.9+
+  prod binary; engaged by passing `--require-tools <comma-list>` or
+  `--require-paths`): `openai`, `gemini` (when CLI absent → Google API
+  fallback), `minimax`, `anthropic` (API path). The check is
+  `provider_supports_tools()` at `apps/cli/src/api_dispatch_tools.rs:243`.
+  With the flag, the dispatch routes through `dispatch_with_tools()`
+  and the model can call `read_file`, `grep`, `git_log`; receipts land
+  in `execution_logs.tool_calls_summary`.
+- **API-only providers without a tool loop wired yet** (one-shot HTTP
+  request → text response): `grok`, `deepseek`, `qwen`, `openrouter`.
+  These can only reason from what's in the prompt. If you need a
+  cross-family voice from this class on a code-touching question,
+  inline the source bytes in the prompt (cap ~30 KB).
+
+**Today's prod-binary caveat (2026-06-10).** The shipped
+`/Applications/ATO.app/Contents/MacOS/ato` is v2.7.4, which predates
+the `--require-tools` flag (v2.9 PR-1). Until the next prod app
+build, gemini-via-API dispatches from the prod binary run text-only.
+For code-review war-rooms on the prod binary TODAY, prefer `codex`
+(CLI-native, tool loop always on). Gemini is still the right second
+cross-family voice for scope / strategy / positioning seats where
+file access isn't required.
 
 Match the seat to the question class:
 

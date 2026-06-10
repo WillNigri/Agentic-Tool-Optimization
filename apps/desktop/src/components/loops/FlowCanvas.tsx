@@ -5,7 +5,7 @@ import { ZoomIn, ZoomOut, Globe, Activity, Search, X } from "lucide-react";
 import { NODE_W, NODE_H, TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./constants";
 import { getConnectionPoints, buildBezierPath, screenToCanvas, wouldCreateCycle } from "./helpers";
 import FlowNodeCard from "./FlowNodeCard";
-import { useAutomationStore } from "@/stores/useAutomationStore";
+import { useAutomationStore } from "@/stores/useLoopStore";
 import type { FlowNode, NodeTemplate } from "./types";
 
 export default function FlowCanvas() {

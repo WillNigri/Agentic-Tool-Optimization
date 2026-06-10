@@ -7,7 +7,10 @@ import type { AgentRuntime } from "@/components/cron/types";
 export type { AgentRuntime } from "@/components/cron/types";
 
 // Extended node types for v0.8.0 Advanced Automation
-export type FlowNodeType =
+// Legacy IFTTT-style node types — kept for backwards compat with
+// workflows migrated from the v2.13 Automations tab (per task #15).
+// New designs should reach for `LoopStepKind` below instead.
+export type LegacyFlowNodeType =
   | "trigger"      // Start node (webhook, cron, manual, etc.)
   | "process"      // Generic processing step
   | "decision"     // Conditional branching
@@ -19,6 +22,28 @@ export type FlowNodeType =
   | "retry"        // Retry wrapper with backoff
   | "variable"     // Set/transform variables
   | "template";    // Reusable template reference
+
+// v2.14 — LLM-aware first-class kinds. Each one wraps a specific ATO
+// CLI primitive that the loop executor (#14) dispatches in-process.
+// Naming mirrors the CLI subcommand so the loop editor and the docs
+// stay grep-compatible: a user reading "diagnose" in the canvas can
+// reasonably guess `ato evaluations methodology diagnose` is what
+// runs under it.
+export type LoopStepKind =
+  | "dispatch"          // wraps `ato dispatch` — single LLM call
+  | "methodology_run"   // wraps `ato evaluations methodology run`
+  | "diagnose"          // wraps `ato evaluations methodology diagnose`
+  | "apply"             // wraps `... methodology diagnose --apply`
+  | "review"            // wraps `ato review` — multi-LLM diff review
+  | "war_room"          // wraps `ato war-rooms` — multi-seat debate
+  | "score"             // rubric application against a target output
+  | "input";            // markdown context bundle (new in v2.14)
+
+// Union — the palette UI lets the user drop EITHER an LLM-aware kind
+// or a legacy IFTTT-style node (e.g. for an external service call).
+// The runtime can tell which is which because `LoopStepKind` strings
+// don't overlap with `LegacyFlowNodeType` strings.
+export type FlowNodeType = LegacyFlowNodeType | LoopStepKind;
 
 export interface FlowNode {
   id: string;
@@ -162,7 +187,21 @@ export interface NodeTemplate {
   action?: string;
   label: string;
   description: string;
-  category: "triggers" | "services" | "actions" | "flow-control" | "variables";
+  /**
+   * Palette grouping. v2.14 added "llm" (the new LLM-aware first-class
+   * kinds) and "data" (input/output bundles + control flow that doesn't
+   * fit "flow-control" naming). Existing categories stay for migrated
+   * workflows: "triggers" / "services" / "actions" / "flow-control" /
+   * "variables".
+   */
+  category:
+    | "triggers"
+    | "services"
+    | "actions"
+    | "flow-control"
+    | "variables"
+    | "llm"    // v2.14 — Dispatch / MethodologyRun / Diagnose / Apply / Review / WarRoom / Score
+    | "data"; // v2.14 — Input / Output bundles
   // v0.8.0: Default config for new nodes
   defaultConfig?: Partial<NodeConfig>;
   defaultRetryConfig?: RetryConfig;

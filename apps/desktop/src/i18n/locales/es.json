@@ -43,7 +43,7 @@
     "runsLive": "En Vivo",
     "runsHistory": "Historial",
     "runsSchedules": "Programaciones",
-    "runsAutomations": "Automatizaciones",
+    "runsAutomations": "Compositor de Loops",
     "runsHooks": "Hooks",
     "insightsHealth": "Salud",
     "insightsAnalytics": "Analiticas",
@@ -619,6 +619,8 @@
     "search": "Buscar nodos...",
     "builder": {
       "palette": "Paleta de Nodos",
+      "llm": "LLM",
+      "data": "Datos",
       "triggers": "Disparadores",
       "services": "Servicios",
       "actions": "Acciones",

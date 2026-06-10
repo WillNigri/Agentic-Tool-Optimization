@@ -10,10 +10,17 @@ interface NodePaletteProps {
 }
 
 const CATEGORIES = [
+  // v2.14 — LLM-aware kinds surface FIRST so the palette tells the
+  // Loop Composer story before users encounter the legacy IFTTT-style
+  // entries. The LLM and Data groups map to LoopStepKind (types.ts);
+  // the rest are kept for backwards compat with workflows migrated
+  // from the v2.13 Automations tab.
+  { key: "llm" as const, labelKey: "automation.builder.llm" },
+  { key: "data" as const, labelKey: "automation.builder.data" },
   { key: "triggers" as const, labelKey: "automation.builder.triggers" },
   { key: "services" as const, labelKey: "automation.builder.services" },
   { key: "actions" as const, labelKey: "automation.builder.actions" },
-  // v0.8.0: New categories
+  // v0.8.0: Legacy categories — kept for migrated workflows
   { key: "flow-control" as const, labelKey: "automation.builder.flowControl" },
   { key: "variables" as const, labelKey: "automation.builder.variables" },
 ];

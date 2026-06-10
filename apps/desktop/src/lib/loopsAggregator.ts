@@ -13,7 +13,7 @@
 // component, every source flows through here and emits the same
 // `Workflow[]` the canvas already understands.
 
-import type { Workflow, FlowNode, FlowEdge } from "@/components/automation/types";
+import type { Workflow, FlowNode, FlowEdge } from "@/components/loops/types";
 import type { AgentGroup, AgentGroupMember, RouterConfig } from "@/lib/agentGroups";
 import { parseRouterConfig } from "@/lib/agentGroups";
 import type { CronJob } from "@/components/cron/types";

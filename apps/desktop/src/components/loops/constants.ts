@@ -25,6 +25,15 @@ import {
   RefreshCw,
   Variable,
   LayoutTemplate,
+  // v2.14: LLM-aware Loop Composer kinds
+  Zap,            // dispatch — single LLM call
+  Beaker,         // methodology_run — variant matrix experiment
+  Stethoscope,    // diagnose — LLM-driven refinement
+  Hammer,         // apply — patch application
+  ScanSearch,     // review — multi-LLM code review
+  Swords,         // war_room — multi-seat debate
+  Award,          // score — rubric application
+  Inbox,          // input — markdown context bundle
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -54,6 +63,16 @@ export const TYPE_COLORS: Record<string, string> = {
   retry: "#f59e0b",       // Amber for retry
   variable: "#8b5cf6",    // Purple for variables
   template: "#6366f1",    // Indigo for templates
+  // v2.14: LLM-aware kinds — adjacent hues so the palette reads as
+  // "one family" without losing per-kind distinguishability.
+  dispatch: "#10b981",        // Emerald — single shot of execution
+  methodology_run: "#14b8a6", // Teal — variant matrix
+  diagnose: "#f43f5e",        // Rose — diagnostic
+  apply: "#84cc16",           // Lime — patch landed
+  review: "#0ea5e9",          // Sky — eyes on the diff
+  war_room: "#d946ef",        // Fuchsia — multi-seat debate
+  score: "#facc15",           // Yellow-400 — rubric verdict
+  input: "#94a3b8",           // Slate — neutral context container
 };
 
 export const SERVICE_COLORS: Record<string, string> = {
@@ -93,6 +112,18 @@ export const NODE_ICONS: Record<string, React.ElementType> = {
   retry: RefreshCw,
   variable: Variable,
   template: LayoutTemplate,
+  // v2.14: LLM-aware Loop Composer kinds
+  dispatch: Zap,
+  methodology_run: Beaker,
+  diagnose: Stethoscope,
+  apply: Hammer,
+  review: ScanSearch,
+  war_room: Swords,
+  score: Award,
+  input: Inbox,
+  // Note: "output" already maps above (legacy CheckCircle). The v2.14
+  // Output BUNDLE shares the kind name; if we add a distinct
+  // packaged-bundle icon later (lucide's `Package`), swap it in here.
 };
 
 // v0.8.0: Webhook-specific icon

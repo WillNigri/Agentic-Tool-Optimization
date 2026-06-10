@@ -14,7 +14,7 @@ import {
   Globe,
 } from "lucide-react";
 import { SERVICE_COLORS, SERVICE_ICONS } from "./constants";
-import { useAutomationStore } from "@/stores/useAutomationStore";
+import { useAutomationStore } from "@/stores/useLoopStore";
 import type { Workflow, BuilderMode } from "./types";
 
 interface WorkflowToolbarProps {

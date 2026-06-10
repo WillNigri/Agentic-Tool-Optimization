@@ -353,6 +353,30 @@ export async function listWorkflows(): Promise<WorkflowData[]> {
   }
 }
 
+/**
+ * v2.14 — one-shot migration of file-based ~/.ato/workflows/*.json into
+ * the new SQLite `loops` table. Safe to call repeatedly; the Rust side
+ * tracks already-migrated rows via `source='migrated-from-automations'`
+ * and `source_ref=<original workflow id>`. The Loop Composer calls this
+ * once on mount so users upgrading from v2.13 see their old automations
+ * appear under the new tab without any manual action.
+ */
+export interface WorkflowMigrationReport {
+  scanned: number;
+  migrated: number;
+  skippedAlreadyMigrated: number;
+  skippedParseError: number;
+}
+
+export async function migrateWorkflowsToLoops(): Promise<WorkflowMigrationReport> {
+  try {
+    return await invoke<WorkflowMigrationReport>('migrate_workflows_to_loops');
+  } catch {
+    // Browser-dev fallback — nothing to migrate, return empty report.
+    return { scanned: 0, migrated: 0, skippedAlreadyMigrated: 0, skippedParseError: 0 };
+  }
+}
+
 export async function saveWorkflow(workflow: WorkflowData): Promise<void> {
   try {
     await invoke('save_workflow', { workflow: JSON.stringify(workflow) });

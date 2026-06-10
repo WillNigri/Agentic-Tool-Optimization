@@ -49,7 +49,7 @@
     "runsLive": "Live",
     "runsHistory": "History",
     "runsSchedules": "Schedules",
-    "runsAutomations": "Automations",
+    "runsAutomations": "Loop Composer",
     "runsHooks": "Hooks",
     "insightsAgents": "Agents",
     "insightsHealth": "Health",
@@ -493,6 +493,8 @@
     "search": "Search nodes...",
     "builder": {
       "palette": "Node Palette",
+      "llm": "LLM",
+      "data": "Data",
       "triggers": "Triggers",
       "services": "Services",
       "actions": "Actions",

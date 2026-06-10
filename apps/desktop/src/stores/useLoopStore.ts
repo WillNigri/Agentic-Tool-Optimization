@@ -9,7 +9,7 @@ import type {
   ExecutionNodeStatus,
   WorkflowTemplate,
   WorkflowVariables,
-} from "@/components/automation/types";
+} from "@/components/loops/types";
 
 // ---------------------------------------------------------------------------
 // Mock workflows (moved from AutomationFlow.tsx)

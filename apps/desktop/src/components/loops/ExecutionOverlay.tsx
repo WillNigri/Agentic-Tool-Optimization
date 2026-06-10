@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { X, Clock, CheckCircle, AlertTriangle, Loader2, SkipForward, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useAutomationStore } from "@/stores/useAutomationStore";
+import { useAutomationStore } from "@/stores/useLoopStore";
 import type { ExecutionNodeStatus } from "./types";
 
 const STATUS_ICONS: Record<ExecutionNodeStatus, React.ElementType> = {

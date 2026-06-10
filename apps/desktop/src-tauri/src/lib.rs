@@ -327,6 +327,14 @@ pub fn run() {
             get_chat_messages,
             append_chat_message,
             delete_chat_message,
+            // v2.14 Loop Composer — SQLite-backed CRUD for loops.
+            list_loops,
+            get_loop,
+            create_loop,
+            update_loop,
+            delete_loop,
+            list_loop_runs,
+            get_loop_run_steps,
             prompt_agent_stream,
             prompt_agent_with_history_stream,
             prompt_claude,
@@ -334,6 +342,9 @@ pub fn run() {
             save_workflow,
             load_workflow,
             delete_workflow,
+            // v2.14 — one-time migration of file-based ~/.ato/workflows/*.json
+            // into the new SQLite `loops` table. Idempotent.
+            migrate_workflows_to_loops,
             detect_agent_runtimes,
             set_runtime_path,
             get_runtime_path,

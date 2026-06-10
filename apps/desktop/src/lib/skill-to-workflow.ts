@@ -4,8 +4,8 @@
 // YAML frontmatter tools, conditional branches, and tool references.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, FlowNode, FlowEdge } from "@/components/automation/types";
-import { NODE_W } from "@/components/automation/constants";
+import type { Workflow, FlowNode, FlowEdge } from "@/components/loops/types";
+import { NODE_W } from "@/components/loops/constants";
 import type { SkillDetail } from "@/lib/tauri-api";
 
 // ---------------------------------------------------------------------------

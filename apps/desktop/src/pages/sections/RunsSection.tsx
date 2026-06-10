@@ -13,7 +13,7 @@ import SectionTabs, { type TabDef } from "./SectionTabs";
 // AgentMonitor uses `export default`; importing directly gives the right shape.
 const AgentMonitor = lazy(() => import("@/components/AgentMonitor/AgentMonitor"));
 const CronDashboard = lazy(() => import("@/components/cron/CronDashboard"));
-const AutomationFlow = lazy(() => import("@/components/AutomationFlow"));
+const LoopComposer = lazy(() => import("@/components/LoopComposer"));
 const HooksManager = lazy(() => import("@/components/HooksManager"));
 // v2.3.20 Phase 5.5 — Activity feed lives under Runs since it's the
 // "what's happening between humans and agents" surface, adjacent to
@@ -59,9 +59,9 @@ export default function RunsSection() {
     },
     {
       id: "automations",
-      label: t("subnav.runsAutomations", "Automations"),
+      label: t("subnav.runsAutomations", "Loop Composer"),
       icon: Workflow,
-      Component: AutomationFlow,
+      Component: LoopComposer,
     },
     {
       id: "hooks",

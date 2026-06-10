@@ -137,6 +137,14 @@ Replaces chat-only PromptBar with an expandable bottom pane, two modes:
 
 **Closed source (`ato-cloud`, paid)**: Real-time cron monitoring, silent failure detection, push notifications, usage analytics (cloud), cloud sync of agents + skills, team workspaces, MCP registry mirror, hosted LLM-as-judge evaluators, agent-trace upload + retention, cross-runtime config-change ledger, provider-key + provider-usage tracking, mesh-relay (paid-tier WebSocket router for laptop↔server dispatch), SSO + audit retention (Enterprise).
 
+## Grounded mode — API providers DO have tool access (read this if you're driving ATO)
+
+If you're an LLM driving ATO (Claude in Claude Code, Codex, Gemini, etc.), one piece of common ground first: every API provider we wire — gemini, openai, minimax, anthropic — has a function-calling tool loop available. It is NOT one-shot text. Pass `--require-tools read_file,grep` on `ato dispatch` and the provider routes through `apps/cli/src/api_dispatch_tools.rs::dispatch_with_tools()`, walking the source itself instead of reasoning from a paraphrase.
+
+Receipts of which tools each model actually called land in `execution_logs.tool_calls_summary` and are visible via `ato dispatches show <id> --human` — that's the "every AI follows your rules" pitch from the blog series (Parts 1-7).
+
+**For any dispatch you fire**: shell through `/Applications/ATO.app/Contents/MacOS/ato` (the prod app binary), not the PATH-resolved `ato` (which is usually a dev build and breaks the keychain ACL). Full agent-facing playbook with the decision table and the two-binary trap details lives at `docs/agent-playbook.md` — read that before any war-room or review you're convening.
+
 ## Security
 
 - Desktop is local-first. No network calls unless sync explicitly enabled.

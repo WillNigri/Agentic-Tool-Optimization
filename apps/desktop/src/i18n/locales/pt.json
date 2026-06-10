@@ -43,7 +43,7 @@
     "runsLive": "Ao Vivo",
     "runsHistory": "Historico",
     "runsSchedules": "Agendamentos",
-    "runsAutomations": "Automacoes",
+    "runsAutomations": "Compositor de Loops",
     "runsHooks": "Hooks",
     "insightsHealth": "Saude",
     "insightsAnalytics": "Analytics",
@@ -619,6 +619,8 @@
     "search": "Buscar nos...",
     "builder": {
       "palette": "Paleta de Nos",
+      "llm": "LLM",
+      "data": "Dados",
       "triggers": "Gatilhos",
       "services": "Servicos",
       "actions": "Acoes",

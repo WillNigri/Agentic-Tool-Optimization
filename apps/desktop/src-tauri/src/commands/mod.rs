@@ -43,6 +43,8 @@ pub mod mcp;
 pub mod mcp_dispatch;
 pub mod mcp_install;
 pub mod telemetry;
+// v2.14 Loop Composer — reframed Automations w/ SQLite persistence.
+pub mod loops;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -74,6 +76,7 @@ pub use skills_mutate::*;
 pub use mcp::*;
 pub use mcp_install::*;
 pub use telemetry::*;
+pub use loops::*;
 
 use crate::*;
 use std::collections::HashMap;

@@ -3,28 +3,28 @@ import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { X, Globe, Activity, Workflow, BarChart3 } from "lucide-react";
-import { TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./automation/constants";
+import { TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./loops/constants";
 import { useUiStore } from "@/stores/useUiStore";
-import { serializeWorkflowToPrompt } from "./automation/helpers";
-import { useAutomationStore } from "@/stores/useAutomationStore";
-import WorkflowToolbar from "./automation/WorkflowToolbar";
-import NodePalette from "./automation/NodePalette";
-import NodeConfigPanel from "./automation/NodeConfigPanel";
-import FlowCanvas from "./automation/FlowCanvas";
-import ExecutionOverlay from "./automation/ExecutionOverlay";
+import { serializeWorkflowToPrompt } from "./loops/helpers";
+import { useAutomationStore } from "@/stores/useLoopStore";
+import WorkflowToolbar from "./loops/WorkflowToolbar";
+import NodePalette from "./loops/NodePalette";
+import NodeConfigPanel from "./loops/NodeConfigPanel";
+import FlowCanvas from "./loops/FlowCanvas";
+import ExecutionOverlay from "./loops/ExecutionOverlay";
 import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
-import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows, decorateWorkflowsWithStatus } from "@/lib/automationsAggregator";
+import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows, decorateWorkflowsWithStatus } from "@/lib/loopsAggregator";
 import { listAgentGroups } from "@/lib/agentGroups";
 import { listAgents } from "@/lib/agents";
 import { listAgentHooks } from "@/lib/agentHooks";
-import { listCronJobs } from "@/lib/tauri-api";
+import { listCronJobs, migrateWorkflowsToLoops } from "@/lib/tauri-api";
 import { getAgentMetrics } from "@/lib/agentObservability";
 import type { SkillDetail } from "@/lib/api";
-import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./automation/types";
+import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./loops/types";
 
-export default function AutomationFlow() {
+export default function LoopComposer() {
   const { t } = useTranslation();
   const {
     mode,
@@ -103,6 +103,23 @@ export default function AutomationFlow() {
     staleTime: 30_000,
     refetchInterval: 30_000,
   });
+
+  // v2.14 — one-shot migration of v2.13 file-based workflows into the
+  // new SQLite `loops` table. Idempotent on the Rust side (re-running
+  // skips rows already tagged with source='migrated-from-automations').
+  // Logs the report to the console so an upgrading user can confirm
+  // their old automations were picked up.
+  useEffect(() => {
+    migrateWorkflowsToLoops()
+      .then((report) => {
+        if (report.scanned > 0) {
+          console.log("[ATO] Loop Composer migration:", report);
+        }
+      })
+      .catch((err) => {
+        console.warn("[ATO] Loop Composer migration failed:", err);
+      });
+  }, []);
 
   useEffect(() => {
     const groupWorkflows = groupsToWorkflows(agentGroups);

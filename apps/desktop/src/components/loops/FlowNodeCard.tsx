@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import { Hash, AlertTriangle, Clock, Globe, Activity } from "lucide-react";
 import { NODE_W, NODE_H, PORT_SIZE, TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./constants";
 import type { FlowNode, BuilderMode, ExecutionNodeStatus } from "./types";
-import { useAutomationStore } from "@/stores/useAutomationStore";
+import { useAutomationStore } from "@/stores/useLoopStore";
 
 interface FlowNodeCardProps {
   node: FlowNode;

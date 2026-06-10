@@ -2,8 +2,71 @@ import { useTranslation } from "react-i18next";
 import { Trash2, Globe, Activity, Terminal, Cpu, Server } from "lucide-react";
 import { CONFIG_PANEL_W, TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./constants";
 import { SERVICE_ACTIONS } from "./service-catalog";
-import { useAutomationStore } from "@/stores/useAutomationStore";
-import type { FlowNode, AgentRuntime } from "./types";
+import { useAutomationStore } from "@/stores/useLoopStore";
+import type { FlowNode, AgentRuntime, LoopStepKind } from "./types";
+
+// ── v2.14 — per-kind field schemas for the LLM-aware Loop Composer ──────
+//
+// Each LLM-aware LoopStepKind owns a small declarative schema of fields
+// the user fills in for that step. The renderer below is the same shape
+// as the existing service-action param renderer (text / textarea /
+// select), so the LLM-aware path doesn't need a bespoke widget set —
+// future polish (autocomplete for methodology slugs, multi-select for
+// reviewers, etc.) can replace individual rows without touching the
+// dispatch logic.
+//
+// All field values land in `node.config.params.<key>` so the loop
+// executor (#14) can read uniform `params.runtime`, `params.slug`, etc.
+// regardless of kind.
+interface LlmKindField {
+  key: string;
+  label: string;
+  type: "text" | "textarea" | "select";
+  placeholder?: string;
+  required?: boolean;
+  options?: string[];
+}
+
+const LLM_KIND_FIELDS: Record<LoopStepKind, LlmKindField[]> = {
+  dispatch: [
+    { key: "runtime", label: "Runtime", type: "select", required: true, options: ["claude", "codex", "gemini", "openclaw", "hermes"] },
+    { key: "model", label: "Model (optional)", type: "text", placeholder: "sonnet-4.6, gpt-4o, gemini-2.5-flash …" },
+    { key: "prompt", label: "Prompt template", type: "textarea", required: true, placeholder: "Use {{vars.x}} / {{steps.previous.output.field}} …" },
+    { key: "agent_slug", label: "Agent slug (optional)", type: "text", placeholder: "eng-manager, code-reviewer …" },
+  ],
+  methodology_run: [
+    { key: "slug", label: "Methodology slug", type: "text", required: true, placeholder: "weekly-security-eval" },
+    { key: "models", label: "Models (comma-separated)", type: "text", placeholder: "claude-sonnet-4.6, gpt-4o" },
+    { key: "reps", label: "Reps per cell", type: "text", placeholder: "10" },
+  ],
+  diagnose: [
+    { key: "input_ref", label: "Source run reference", type: "text", required: true, placeholder: "{{steps.run.output.run_id}}" },
+    { key: "model", label: "Diagnose model", type: "text", placeholder: "claude-opus-4.7" },
+  ],
+  apply: [
+    { key: "diagnose_ref", label: "Diagnose proposal reference", type: "text", required: true, placeholder: "{{steps.diagnose.output}}" },
+  ],
+  review: [
+    { key: "reviewers", label: "Reviewers (comma-separated)", type: "text", required: true, placeholder: "claude, codex, gemini" },
+    { key: "against", label: "Against ref", type: "text", placeholder: "main, HEAD~1 …" },
+  ],
+  war_room: [
+    { key: "seats", label: "Seats (comma-separated runtimes/agents)", type: "text", required: true, placeholder: "codex, gemini, minimax …" },
+    { key: "framing", label: "Framing prompt", type: "textarea", required: true, placeholder: "Decision under debate: A vs B …" },
+  ],
+  score: [
+    { key: "rubric", label: "Rubric slug", type: "text", required: true, placeholder: "regression-watch" },
+    { key: "target_ref", label: "Target output reference", type: "text", required: true, placeholder: "{{steps.previous.output}}" },
+  ],
+  input: [
+    { key: "slug", label: "Input slug", type: "text", required: true, placeholder: "weekly-security-context" },
+    { key: "paths", label: "File paths (comma-separated)", type: "text", placeholder: "docs/PRD.md, src/types.ts" },
+  ],
+};
+
+function isLlmKind(t: string): t is LoopStepKind {
+  return Object.prototype.hasOwnProperty.call(LLM_KIND_FIELDS, t);
+}
 
 const RUNTIMES: { id: AgentRuntime; label: string; color: string; Icon: typeof Terminal }[] = [
   { id: "claude", label: "Claude", color: "#f97316", Icon: Terminal },
@@ -185,6 +248,54 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
             )}
           </div>
         ))}
+
+        {/* v2.14 — per-kind config for LLM-aware Loop Composer kinds.
+            Field schema comes from LLM_KIND_FIELDS; renderer mirrors
+            the SERVICE_ACTIONS param renderer above so the two paths
+            stay visually consistent. */}
+        {isLlmKind(node.type) && (
+          <div className="mb-2">
+            <div className="mb-2 text-[10px] text-[#8888a0] uppercase tracking-wider font-medium">
+              {node.type.replace(/_/g, " ")} config
+            </div>
+            {LLM_KIND_FIELDS[node.type].map((field) => (
+              <div key={field.key} className="mb-3">
+                <label className="block text-[10px] text-[#8888a0] uppercase tracking-wider mb-1 font-medium">
+                  {field.label}
+                  {field.required && <span className="text-[#FF4466] ml-0.5">*</span>}
+                </label>
+                {field.type === "textarea" ? (
+                  <textarea
+                    value={node.config?.params?.[field.key] || ""}
+                    onChange={(e) => setParam(field.key, e.target.value)}
+                    placeholder={field.placeholder}
+                    rows={3}
+                    className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors resize-none font-mono"
+                  />
+                ) : field.type === "select" ? (
+                  <select
+                    value={node.config?.params?.[field.key] || ""}
+                    onChange={(e) => setParam(field.key, e.target.value)}
+                    className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
+                  >
+                    <option value="">{t("automation.builder.selectOption", "-- select --")}</option>
+                    {field.options?.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={node.config?.params?.[field.key] || ""}
+                    onChange={(e) => setParam(field.key, e.target.value)}
+                    placeholder={field.placeholder}
+                    className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Runtime selector for action/process nodes */}
         {(node.type === "action" || node.type === "process") && (

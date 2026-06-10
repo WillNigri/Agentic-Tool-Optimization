@@ -128,6 +128,12 @@ enum Commands {
     /// v2.13 — Team workspaces. Share agents + methodologies with
     /// teammates (Team tier; persistence + tier gating in ato-cloud).
     Teams(commands::teams::TeamsArgs),
+    /// v2.14 — Loop Composer. Persisted SQLite-backed graphs of LLM
+    /// operations (dispatch / methodology run / diagnose / review /
+    /// war-room) that compose into recurring inference workflows.
+    /// Reframed from the v2.13 Automations tab. See Loop Composer
+    /// plan: ~/.claude/plans/eager-yawning-crane.md.
+    Loop(commands::loops::LoopArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1238,6 +1244,10 @@ fn main() -> Result<()> {
         }
         Commands::Teams(args) => {
             commands::teams::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Loop(args) => {
+            commands::loops::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

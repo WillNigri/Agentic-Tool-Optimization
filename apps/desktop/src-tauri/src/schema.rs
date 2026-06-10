@@ -1579,6 +1579,141 @@ pub fn init_database(conn: &Connection) {
             rusqlite::params![&uuid::Uuid::new_v4().to_string(), &now],
         );
     }
+
+    // v2.14 — Loop Composer (reframed Automations).
+    //
+    // The Automations tab was a generic React-Flow node editor stored
+    // entirely in localStorage. v2.14 promotes loops to a first-class
+    // SQLite entity so they're queryable, schedulable, and CLI-driven
+    // alongside the desktop UI. Node taxonomy is LLM-aware
+    // (dispatch / methodology_run / diagnose / apply / review /
+    // war_room / score / input / output) plus the existing
+    // service catalog entries (kept under kind='service' for
+    // backwards compat with migrated localStorage workflows).
+    //
+    // `graph` and `variables` hold the canonical Loop blob as JSON;
+    // `trigger_config` encodes cron expression / webhook path / etc.
+    // `source` records whether the loop came from the UI editor,
+    // a skill auto-detection, or the v2.13→v2.14 migration.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS loops (
+            id              TEXT PRIMARY KEY,
+            slug            TEXT NOT NULL UNIQUE,
+            name            TEXT NOT NULL,
+            description     TEXT,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            graph           TEXT NOT NULL,
+            variables       TEXT,
+            trigger_kind    TEXT NOT NULL DEFAULT 'manual',
+            trigger_config  TEXT,
+            source          TEXT NOT NULL DEFAULT 'manual',
+            source_ref      TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loops_enabled_trigger
+            ON loops(enabled, trigger_kind)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loops_source
+            ON loops(source, source_ref)",
+        [],
+    );
+
+    // One row per loop execution. `status` is a state-machine column:
+    // pending → running → (success | error | cancelled). `triggered_by`
+    // records the caller — manual:<user>, schedule:<schedule_id>,
+    // webhook:<path> — so we can audit + filter the runs feed.
+    // `variables` is the snapshot of resolved variables AT RUN TIME so
+    // a later loop edit doesn't change what an old run reports.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS loop_runs (
+            id              TEXT PRIMARY KEY,
+            loop_id         TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT,
+            error           TEXT,
+            triggered_by    TEXT,
+            variables       TEXT,
+            FOREIGN KEY (loop_id) REFERENCES loops(id) ON DELETE CASCADE
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop_started
+            ON loop_runs(loop_id, started_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_runs_status
+            ON loop_runs(status, started_at DESC)",
+        [],
+    );
+
+    // Per-step audit of each loop run. `execution_log_id` links to
+    // execution_logs for dispatch/review/methodology steps so we can
+    // cross-reference token cost + dispatch ID without re-storing it.
+    // For pure control-flow steps (decision/parallel/retry) the link
+    // is NULL. `input` and `output` capture resolved variables in/out
+    // so a step's contribution to subsequent steps is debuggable.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS loop_run_steps (
+            id                  TEXT PRIMARY KEY,
+            loop_run_id         TEXT NOT NULL,
+            node_id             TEXT NOT NULL,
+            node_type           TEXT NOT NULL,
+            status              TEXT NOT NULL,
+            started_at          TEXT,
+            finished_at         TEXT,
+            input               TEXT,
+            output              TEXT,
+            error               TEXT,
+            execution_log_id    INTEGER,
+            FOREIGN KEY (loop_run_id) REFERENCES loop_runs(id) ON DELETE CASCADE
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_run_steps_run
+            ON loop_run_steps(loop_run_id)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_run_steps_exec
+            ON loop_run_steps(execution_log_id)
+            WHERE execution_log_id IS NOT NULL",
+        [],
+    );
+
+    // Recurring schedules. `next_fire_at` is the planner's hint so we
+    // can `WHERE next_fire_at <= NOW()` from the cron tick without
+    // parsing every cron expression on every tick. `last_fired_at`
+    // closes the loop so we never re-fire the same minute on a fast
+    // reboot.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS loop_schedules (
+            id              TEXT PRIMARY KEY,
+            loop_id         TEXT NOT NULL,
+            cron_expr       TEXT NOT NULL,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            last_fired_at   TEXT,
+            next_fire_at    TEXT,
+            created_at      TEXT NOT NULL,
+            FOREIGN KEY (loop_id) REFERENCES loops(id) ON DELETE CASCADE
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_schedules_next_fire
+            ON loop_schedules(enabled, next_fire_at)
+            WHERE enabled = 1",
+        [],
+    );
 }
 
 #[cfg(test)]
@@ -1881,5 +2016,104 @@ mod tests {
             overrides, None,
             "grounding_overrides is nullable — no dispatch-time override means no row"
         );
+    }
+
+    // v2.14 Loop Composer schema smoke. Pins the contract: a loop can
+    // be inserted, can carry a child loop_run + loop_run_steps, and
+    // ON DELETE CASCADE wipes the lineage when the parent loop goes
+    // away. Catches the most common slip ("forgot the FK / index").
+    #[test]
+    fn loops_schema_round_trip_and_cascade() {
+        let conn = init_in_memory();
+        // Foreign keys are off by default in rusqlite; turn them on so
+        // the cascade assertion exercises the actual FK declarations.
+        conn.execute_batch("PRAGMA foreign_keys = ON;").expect("enable FK");
+
+        let now = "2026-06-10T00:00:00Z";
+        conn.execute(
+            "INSERT INTO loops (
+                id, slug, name, description, enabled, graph, variables,
+                trigger_kind, trigger_config, source, source_ref,
+                created_at, updated_at
+            ) VALUES (
+                'loop-1', 'weekly-security-review', 'Weekly security review',
+                'methodology run → diagnose → apply', 1,
+                '{\"nodes\":[],\"edges\":[]}', NULL,
+                'schedule', '0 9 * * 1', 'manual', NULL,
+                ?1, ?1
+            )",
+            [now],
+        )
+        .expect("insert loop");
+
+        conn.execute(
+            "INSERT INTO loop_runs (
+                id, loop_id, status, started_at, triggered_by
+            ) VALUES (
+                'run-1', 'loop-1', 'success', ?1, 'manual:test'
+            )",
+            [now],
+        )
+        .expect("insert loop_run");
+
+        conn.execute(
+            "INSERT INTO loop_run_steps (
+                id, loop_run_id, node_id, node_type, status,
+                input, output
+            ) VALUES (
+                'step-1', 'run-1', 'n-methodology-run', 'methodology_run',
+                'success', '{\"slug\":\"x\"}', '{\"run_id\":\"mr-1\"}'
+            )",
+            [],
+        )
+        .expect("insert loop_run_step");
+
+        conn.execute(
+            "INSERT INTO loop_schedules (
+                id, loop_id, cron_expr, enabled, next_fire_at, created_at
+            ) VALUES (
+                'sched-1', 'loop-1', '0 9 * * 1', 1, ?1, ?1
+            )",
+            [now],
+        )
+        .expect("insert loop_schedule");
+
+        // Read-back roundtrips.
+        let (slug, trigger_kind): (String, String) = conn
+            .query_row(
+                "SELECT slug, trigger_kind FROM loops WHERE id = 'loop-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read loop");
+        assert_eq!(slug, "weekly-security-review");
+        assert_eq!(trigger_kind, "schedule");
+
+        let step_status: String = conn
+            .query_row(
+                "SELECT status FROM loop_run_steps WHERE id = 'step-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read step");
+        assert_eq!(step_status, "success");
+
+        // Cascade: deleting the parent loop must wipe runs, steps, and
+        // schedules in one shot. Otherwise we leak orphan rows.
+        conn.execute("DELETE FROM loops WHERE id = 'loop-1'", [])
+            .expect("delete loop");
+
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM loop_runs", [], |r| r.get(0))
+            .unwrap();
+        let steps: i64 = conn
+            .query_row("SELECT COUNT(*) FROM loop_run_steps", [], |r| r.get(0))
+            .unwrap();
+        let scheds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM loop_schedules", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 0, "loop_runs must cascade from loops");
+        assert_eq!(steps, 0, "loop_run_steps must cascade from loop_runs");
+        assert_eq!(scheds, 0, "loop_schedules must cascade from loops");
     }
 }

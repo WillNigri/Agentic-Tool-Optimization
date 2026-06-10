@@ -128,7 +128,7 @@ npx ato-mcp
 - **Live runs registry + kill** — every in-flight dispatch with agent, runtime, workspace, elapsed; one-click kill.
 - **Cross-runtime regression detection** — flags *"success rate dropped 17pp after the model swap"* by joining the config-change ledger with trace windows.
 - **Cost optimizer** — `ato optimize recommend --human`. Concrete swaps with quality guards (≥30% cheaper, ok-rate within 10pp, eval-score within 5pp).
-- **Automation pipelines** — sequential + routed (classifier picks the model) multi-stage dispatches. Claude → Codex → Gemini chains. Visual graph editor.
+- **Loop Composer** (v2.14) — visual + CLI graph editor for **LLM workflow loops**. First-class node types: dispatch, methodology run, diagnose, apply (Goodhart-defended), review, war-room, score. Persisted SQLite, scriptable via `ato loop run <slug>` for headless boxes and MCP agents. *"Weekly: run methodology X, diagnose failures, apply the patch, re-run on the holdout, alert on regression"* is one loop. Reframed from Automations — same node-graph muscle, but the palette is LLM-aware. Reads the moment as Peter Steinberger put it: design loops that prompt your agents, not prompts in isolation.
 - **Embedded terminal** — xterm.js + portable-pty, scoped to active project, persistent across navigation.
 - **Dynamic prompts** — resolvers: env / file / SQL / MCP / computed JS.
 - **Agent wizard + skills marketplace** — writes the right file per runtime (`~/.claude/agents/`, `~/.codex/agents/`, `<proj>/.gemini/agents/`, `~/.openclaw/agents/`, `~/.hermes/agents/`).

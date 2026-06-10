@@ -165,6 +165,68 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
 };
 
 export const NODE_TEMPLATES: NodeTemplate[] = [
+  // ── v2.14 — LLM-aware first-class kinds ──────────────────────────────
+  // Surfaced FIRST in the palette so users encounter the LLM-workflow
+  // story before the IFTTT-style legacy entries. Each kind wraps a
+  // specific ATO CLI primitive; the loop executor (#14) dispatches them
+  // in-process.
+  {
+    type: "dispatch",
+    label: "Dispatch",
+    description: "Single LLM call (ato dispatch)",
+    category: "llm",
+  },
+  {
+    type: "methodology_run",
+    label: "Methodology Run",
+    description: "Variant matrix × prompts × models (ato evaluations methodology run)",
+    category: "llm",
+  },
+  {
+    type: "diagnose",
+    label: "Diagnose",
+    description: "LLM-driven refinement on a failing run (ato evaluations methodology diagnose)",
+    category: "llm",
+  },
+  {
+    type: "apply",
+    label: "Apply",
+    description: "Apply a diagnose proposal (... methodology diagnose --apply)",
+    category: "llm",
+  },
+  {
+    type: "review",
+    label: "Review",
+    description: "Multi-LLM diff review (ato review)",
+    category: "llm",
+  },
+  {
+    type: "war_room",
+    label: "War Room",
+    description: "Multi-seat debate session (ato war-rooms)",
+    category: "llm",
+  },
+  {
+    type: "score",
+    label: "Score",
+    description: "Apply a rubric to a target output",
+    category: "llm",
+  },
+
+  // Data — bundles, inputs, outputs.
+  {
+    type: "input",
+    label: "Input Bundle",
+    description: "Markdown context bundle referenced by downstream LLM steps",
+    category: "data",
+  },
+  {
+    type: "output",
+    label: "Output Bundle",
+    description: "Packaged inference result (shareable as a signed URL when synced to cloud)",
+    category: "data",
+  },
+
   // Triggers
   {
     type: "trigger",

@@ -54,3 +54,9 @@ pub mod teams;
 // boxes + CI runners get the same universal multi-LLM observability
 // the desktop auto-starts. See [[ato-live-billing-path]].
 pub mod observe;
+// v2.14 — `ato loop create/list/show/edit/delete/runs`. CLI parity
+// for the Loop Composer (reframed Automations) so loops are
+// scriptable from headless boxes + agents over MCP. Both the CLI
+// and the desktop Tauri commands write to the same `loops` /
+// `loop_runs` / `loop_run_steps` tables in ~/.ato/local.db.
+pub mod loops;
