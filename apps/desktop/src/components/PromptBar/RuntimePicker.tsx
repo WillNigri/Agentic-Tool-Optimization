@@ -24,7 +24,6 @@ import { cn } from "@/lib/utils";
 
 import type { AvailableRuntimeRow } from "./_helpers";
 import { RUNTIME_META, RUNTIME_OPTIONS } from "./_helpers";
-import { PROVIDER_TO_RUNTIME } from "@/lib/runtimes";
 import type { AgentRuntime } from "@/components/cron/types";
 
 interface Props {
@@ -101,13 +100,22 @@ export function RuntimePicker({
                     key={r.slug}
                     type="button"
                     onClick={() => {
-                      // v2.14.2 — API provider slugs ("google", "anthropic",
-                      // "openai") aren't direct RUNTIME_OPTIONS keys (those
-                      // are "gemini", "claude", "codex"). Alias before set
-                      // so downstream consumers (PromptBar's currentRuntime
-                      // lookup, chat history filters) get a known id.
-                      const aliased = PROVIDER_TO_RUNTIME[r.slug] ?? r.slug;
-                      setRuntime(aliased as AgentRuntime);
+                      // v2.14.3 — REVERTED v2.14.2's PROVIDER_TO_RUNTIME
+                      // aliasing here. That alias mapped "google" →
+                      // "gemini" so PromptBar's currentRuntime lookup
+                      // wouldn't crash on unknown ids — but it also
+                      // pointed the dispatch at the CLI-native "gemini"
+                      // path, which tries to spawn the gemini binary
+                      // instead of routing through the API. Will hit
+                      // this on v2.14.2 dogfood ("Gemini CLI not found.
+                      // Install: npm install -g @google/gemini-cli"
+                      // even after picking Google (Gemini) from API
+                      // PROVIDERS). The defensive Globe fallback in
+                      // PromptBar.tsx (also v2.14.2) handles the icon
+                      // lookup so no black screen; the dispatch wrapper
+                      // sees the original API slug ("google") and
+                      // routes via prompt_api_provider as intended.
+                      setRuntime(r.slug as AgentRuntime);
                       setOpen(false);
                     }}
                     title={
