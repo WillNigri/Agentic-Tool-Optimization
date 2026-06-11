@@ -1,11 +1,14 @@
 // v2.15.3 Resilience Settings tab — exhaustion-policy chooser +
 // fallback-chain editor. Per war_room 27522371 (codex):
 //   - Two-stage consent for fallback-chain (explicit confirm needed)
-//   - Pause-and-wake shown as a "coming in v2.15.4" note OUTSIDE the
-//     radio group, NOT as a disabled option (avoids false affordance)
 //   - Fallback chain candidates filtered to dispatchable runtimes
 //   - Snapshot semantics: settings edits apply to next loop run, not
 //     in-flight (no live re-read — codex's reproducibility note)
+//
+// v2.15.4 — pause-and-wake is now a real selectable radio option (was
+// shown as a "coming soon" info note in v2.15.3 prior to the scheduler
+// landing). Backend: paused_dispatches table + StepError::Paused +
+// `ato loop resume` CLI + startup scanner. See ROADMAP.md.
 
 import { useState, useMemo, useEffect } from "react";
 import { GripVertical, ShieldCheck, AlertTriangle, ArrowRight } from "lucide-react";
@@ -165,19 +168,13 @@ export default function Resilience() {
           onClick={() => handlePolicyChange("fallback-chain")}
         />
 
-        {/* Pause-and-wake explicitly OUTSIDE the radio group per codex */}
-        <div className="rounded-md border border-dashed border-cs-border/60 bg-cs-bg/40 px-3 py-2.5 text-xs text-cs-muted">
-          <div className="flex items-center gap-1.5 font-medium text-cs-muted/90 mb-0.5">
-            <span>Pause and resume at reset time</span>
-            <span className="px-1.5 py-0.5 rounded text-[10px] bg-cs-bg border border-cs-border text-cs-muted/80">
-              Coming in v2.15.4
-            </span>
-          </div>
-          <p>
-            The scheduler that parks loops until the provider's quota resets is
-            still in development. Tracked in <code className="font-mono">ROADMAP.md</code> under v2.15.x.
-          </p>
-        </div>
+        <PolicyOption
+          id="pause-and-wake"
+          current={policy}
+          title="Pause and resume at reset time"
+          description="When a runtime's quota resets at a known time (codex: 'try again at <date>'), ATO persists the dispatch, exits the loop cleanly, and re-fires at reset. After 3 consecutive failed wakes the dispatch is abandoned with a decision brief. Best for reproducibility — no runtime swap."
+          onClick={() => handlePolicyChange("pause-and-wake")}
+        />
       </section>
 
       {/* Consent modal */}

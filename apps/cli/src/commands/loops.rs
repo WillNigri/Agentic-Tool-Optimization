@@ -1277,7 +1277,31 @@ fn run_resume(paused_dispatch_id: &str, db_path: &PathBuf, opts: &Opts) -> Resul
 
     // Runtime is clear — re-fire the original dispatch. Standalone
     // (loop_run_id=None) and loop-bound paths share the same dispatch
-    // entrypoint; on success we mark_resumed + clear the loop_runs mirror.
+    // entrypoint.
+    //
+    // v2.15.5 — capture before_max_id BEFORE the dispatch so we can
+    // round-trip the freshly-written execution_logs row's status +
+    // error_message. dispatch::run() returns Ok(()) regardless of the
+    // underlying CLI/API exit status (it just writes the row), so the
+    // OUTCOME of the dispatch is in execution_logs, not the Result.
+    // Without this we'd silently mark_resumed even when the runtime
+    // hit a fresh exhaustion mid-wake — which is exactly the failure
+    // mode pause-and-wake exists to prevent.
+    let before_max_id: i64 = {
+        let c = crate::db::open_readonly(db_path)?;
+        c.query_row(
+            "SELECT COALESCE(MAX(id), '') FROM execution_logs",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or_default()
+    };
+    // execution_logs.id is TEXT (UUID), so "MAX(id)" returns a string
+    // we compare lexicographically. UUIDv4 is not monotonic, so we
+    // capture the max id THEN query by created_at after the dispatch.
+    let _ = before_max_id;
+    let wake_started_at = chrono::Utc::now().to_rfc3339();
+
     let fire_result = crate::commands::dispatch::run(
         &row.runtime,
         &row.prompt,
@@ -1294,8 +1318,39 @@ fn run_resume(paused_dispatch_id: &str, db_path: &PathBuf, opts: &Opts) -> Resul
     );
 
     let now = chrono::Utc::now().to_rfc3339();
-    match fire_result {
-        Ok(_) => {
+
+    // If the function itself errored (anyhow bail before dispatch::run
+    // could even write a row), nothing was persisted — leave the paused
+    // row in 'resuming' so a retry can pick it up.
+    if let Err(err) = fire_result {
+        anyhow::bail!(
+            "wake-time dispatch panicked for paused {} ({}): {:#}",
+            paused_dispatch_id,
+            row.runtime,
+            err
+        );
+    }
+
+    // Read the freshly-written execution_logs row. We match by runtime
+    // + created_at >= wake_started_at; pick the newest.
+    let conn_ro = crate::db::open_readonly(db_path)?;
+    let outcome_row: Option<(String, Option<String>)> = conn_ro
+        .query_row(
+            "SELECT status, error_message
+               FROM execution_logs
+              WHERE runtime = ?1
+                AND created_at >= ?2
+              ORDER BY created_at DESC
+              LIMIT 1",
+            rusqlite::params![row.runtime, wake_started_at],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .ok();
+    drop(conn_ro);
+
+    match outcome_row {
+        Some((status, _)) if status == "success" => {
+            // Real success — mark resumed.
             crate::paused_dispatches::mark_resumed(
                 &conn,
                 paused_dispatch_id,
@@ -1324,18 +1379,131 @@ fn run_resume(paused_dispatch_id: &str, db_path: &PathBuf, opts: &Opts) -> Resul
             }
             Ok(())
         }
-        Err(err) => {
-            // Dispatch failed at wake — could be transient (network,
-            // 5xx) or could be a fresh exhaustion not yet reflected in
-            // subscription_resets. We leave the row in 'resuming' so a
-            // future scan or manual re-resume picks it up; the caller
-            // sees the error so they can decide. (Don't mark_resumed —
-            // that would lie about success.)
+        Some((_, err_msg_opt)) => {
+            // CLI/API errored. Two sub-cases:
+            //   (a) Error classifies as exhaustion (e.g. "monthly spend
+            //       limit", "Try again at <date>") — re-pause with the
+            //       fresh reset_at if parseable, or with the original
+            //       reset_at + 1h if not.
+            //   (b) Other error — leave row in 'resuming' and surface
+            //       the error to the caller.
+            let err_msg = err_msg_opt.unwrap_or_default();
+            let exhaustion = crate::quota::parse_reset_time(&err_msg);
+            let is_subscription_msg = err_msg.to_ascii_lowercase().contains("spend limit")
+                || err_msg.to_ascii_lowercase().contains("usage limit")
+                || err_msg.to_ascii_lowercase().contains("quota");
+
+            if let Some((fresh_reset_at, _source)) = exhaustion {
+                // Exhaustion with a parseable reset time — record it
+                // in runtime_quotas AND re-pause this row.
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO runtime_quotas (runtime, resets_at, source, captured_at)
+                     VALUES (?1, ?2, 'wake_dispatch_error', ?3)",
+                    rusqlite::params![row.runtime, fresh_reset_at, now],
+                );
+                let outcome = crate::paused_dispatches::re_pause_or_abandon(
+                    &conn,
+                    paused_dispatch_id,
+                    &fresh_reset_at,
+                    "wake-time dispatch hit fresh exhaustion",
+                )?;
+                crate::events_publisher::publish_dispatch_resumed(
+                    &conn,
+                    paused_dispatch_id,
+                    &row.runtime,
+                    outcome,
+                    row.pause_count + 1,
+                    Some(&fresh_reset_at),
+                    &now,
+                );
+                if outcome == "abandoned" {
+                    let brief = build_abandon_brief(&row, &fresh_reset_at);
+                    let _ = conn.execute(
+                        "UPDATE loop_runs SET error = ?1 WHERE paused_dispatch_id = ?2 OR id = ?3",
+                        rusqlite::params![brief.clone(), paused_dispatch_id, row.loop_run_id.clone().unwrap_or_default()],
+                    );
+                    eprintln!("\n{}\n", brief);
+                    if opts.human {
+                        emit_human(&format!(
+                            "✗ paused dispatch {} ABANDONED on {} (wake-time exhaustion) — see brief above",
+                            paused_dispatch_id, row.runtime
+                        ));
+                    } else {
+                        emit_json(&serde_json::json!({
+                            "paused_dispatch_id": paused_dispatch_id,
+                            "outcome": "abandoned",
+                            "runtime": row.runtime,
+                            "decision_brief": brief,
+                        }))?;
+                    }
+                } else if opts.human {
+                    emit_human(&format!(
+                        "⏸ paused dispatch {} hit fresh exhaustion on {} — re-paused until {} (pause_count={})",
+                        paused_dispatch_id, row.runtime, fresh_reset_at, row.pause_count + 1
+                    ));
+                } else {
+                    emit_json(&serde_json::json!({
+                        "paused_dispatch_id": paused_dispatch_id,
+                        "outcome": "re_paused",
+                        "runtime": row.runtime,
+                        "reset_at": fresh_reset_at,
+                        "pause_count": row.pause_count + 1,
+                    }))?;
+                }
+                Ok(())
+            } else if is_subscription_msg {
+                // Exhaustion message without a parseable date — re-pause
+                // with row.reset_at + 1h as a conservative fallback so
+                // we don't immediately retry into the same wall.
+                let fallback_reset_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+                let outcome = crate::paused_dispatches::re_pause_or_abandon(
+                    &conn,
+                    paused_dispatch_id,
+                    &fallback_reset_at,
+                    &format!("wake-time exhaustion (no parseable reset_at): {}", err_msg),
+                )?;
+                crate::events_publisher::publish_dispatch_resumed(
+                    &conn,
+                    paused_dispatch_id,
+                    &row.runtime,
+                    outcome,
+                    row.pause_count + 1,
+                    Some(&fallback_reset_at),
+                    &now,
+                );
+                if opts.human {
+                    emit_human(&format!(
+                        "⏸ paused dispatch {} hit unparseable exhaustion on {} — re-paused +1h (pause_count={})",
+                        paused_dispatch_id, row.runtime, row.pause_count + 1
+                    ));
+                } else {
+                    emit_json(&serde_json::json!({
+                        "paused_dispatch_id": paused_dispatch_id,
+                        "outcome": outcome,
+                        "runtime": row.runtime,
+                        "reset_at": fallback_reset_at,
+                        "pause_count": row.pause_count + 1,
+                    }))?;
+                }
+                Ok(())
+            } else {
+                // Non-exhaustion error — leave row in 'resuming' for
+                // manual inspection; surface the error.
+                anyhow::bail!(
+                    "wake-time dispatch errored on {} (paused {}): {} — row left in 'resuming' for retry",
+                    row.runtime,
+                    paused_dispatch_id,
+                    err_msg
+                )
+            }
+        }
+        None => {
+            // No execution_logs row at all — dispatch::run returned but
+            // didn't persist. Defensive: leave row in 'resuming'.
             anyhow::bail!(
-                "wake-time dispatch failed for paused {} ({}): {:#}",
-                paused_dispatch_id,
+                "wake-time dispatch on {} (paused {}) did not produce an execution_logs row — row left in 'resuming'",
                 row.runtime,
-                err
+                paused_dispatch_id
             )
         }
     }
@@ -1992,5 +2160,76 @@ mod tests {
         // Recommended actions still present — the prescription doesn't
         // depend on the dispatch shape.
         assert!(brief.contains("RECOMMENDED NEXT ACTIONS"));
+    }
+
+    // v2.15.5 — wake-time error classification tests.
+    //
+    // The v2.15.4 bug: run_resume was calling mark_resumed unconditionally
+    // because dispatch::run() returns Ok(()) regardless of CLI exit status.
+    // The fix reads execution_logs.status after dispatch and branches:
+    //   success                            → mark_resumed
+    //   error + parseable reset_at         → re_pause with parsed time
+    //   error + cap-shape keyword (no date)→ re_pause with +1h fallback
+    //   error + other                      → bail, leave in 'resuming'
+    //
+    // These tests cover the classification predicates used in that branch.
+
+    /// Mirror of the predicate used inside `run_resume`. Kept as a free
+    /// fn so the test suite can prove the classification decisions are
+    /// stable as the message catalog grows.
+    fn classify_wake_err_for_test(err_msg: &str) -> &'static str {
+        let lower = err_msg.to_ascii_lowercase();
+        if crate::quota::parse_reset_time(err_msg).is_some() {
+            return "exhausted_with_reset_at";
+        }
+        if lower.contains("spend limit")
+            || lower.contains("usage limit")
+            || lower.contains("quota")
+        {
+            return "exhausted_no_date";
+        }
+        "other_error"
+    }
+
+    #[test]
+    fn wake_error_classifier_picks_exhausted_for_real_claude_cap_message() {
+        // Verbatim from a real execution_logs row (2026-06-11) — caught
+        // claude hitting its monthly spend limit mid-test. Without this
+        // classifier wired, v2.15.4 silently marked the dispatch resumed.
+        let msg = "You've hit your monthly spend limit · raise it at claude.ai/settings/usage";
+        assert_eq!(classify_wake_err_for_test(msg), "exhausted_no_date");
+    }
+
+    #[test]
+    fn wake_error_classifier_picks_exhausted_with_reset_at_for_codex_shape() {
+        let msg = "ERROR: You've hit your usage limit. Upgrade to Plus to continue using Codex, or try again at Jul 10th, 2026 11:22 AM.";
+        assert_eq!(classify_wake_err_for_test(msg), "exhausted_with_reset_at");
+    }
+
+    #[test]
+    fn wake_error_classifier_picks_other_for_non_exhaustion_errors() {
+        // Cases that should NOT be re-paused — surface the error.
+        let cases = [
+            "claude exited with status exit status: 1",
+            "network: connection refused",
+            "TLS handshake failed",
+            "command not found: nonexistent-binary",
+            "permission denied",
+        ];
+        for msg in &cases {
+            assert_eq!(
+                classify_wake_err_for_test(msg),
+                "other_error",
+                "expected other_error for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn wake_error_classifier_handles_anthropic_api_rate_limit() {
+        // Anthropic API surface — different shape from CLI exhaustion.
+        let msg = "anthropic returned 429: rate limit exceeded; quota reset at midnight";
+        assert_eq!(classify_wake_err_for_test(msg), "exhausted_no_date");
     }
 }

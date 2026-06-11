@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "ato"
-version = "2.15.4"
+version = "2.15.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
