@@ -131,31 +131,55 @@ pub async fn dispatch(
         }
         (_, default) => default.to_string(),
     };
-    let url = format!("{}{}", provider.base_url, provider.path);
+    // v2.14.6 — gemini branch. Pre-2.14.6 the desktop dispatcher
+    // applied OpenAI's shape uniformly: model in the body, key as
+    // Bearer in the Authorization header, literal `{model}` token
+    // left in `provider.path` because no replacement step was wired.
+    // Gemini's API takes the model in the URL path and the key as a
+    // `?key=` query param — Bearer auth is silently ignored, so
+    // every desktop chat-to-gemini call hit Google as unauthenticated
+    // and returned HTTP 401 SERVICE_BLOCKED. CLI's mirror
+    // (apps/cli/src/api_dispatch.rs) had the gemini branch from v2.3
+    // onward, which is why CLI dispatches worked while desktop chat
+    // didn't. This block ports the same shape over.
+    let (url, body, set_bearer) = if provider.flavor == "gemini" {
+        let path = provider.path.replace("{model}", &model);
+        let url = format!("{}{}?key={}", provider.base_url, path, urlencode(&key));
+        let body = serde_json::json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }],
+            "generationConfig": { "maxOutputTokens": 8192 },
+        });
+        (url, body, false)
+    } else {
+        let url = format!("{}{}", provider.base_url, provider.path);
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 4096,
+        });
+        (url, body, true)
+    };
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("build reqwest client: {}", e))?;
 
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4096,
-    });
-
     let start = std::time::Instant::now();
     let mut req = client.post(&url).header("Content-Type", "application/json");
     if provider.flavor == "anthropic" {
         // Anthropic Messages API auth: x-api-key + required version
-        // header. Bearer rejected. Body shape is OpenAI-compatible
-        // for {messages,max_tokens,model} so we don't need a separate
-        // body builder here.
+        // header. Bearer rejected.
         req = req
             .header("x-api-key", &key)
             .header("anthropic-version", "2023-06-01");
-    } else {
+    } else if set_bearer {
         req = req.bearer_auth(&key);
     }
+    // Gemini path puts the key in the URL — no auth header.
     let resp = req
         .json(&body)
         .send()
@@ -251,6 +275,58 @@ fn parse_response(
             tool_calls: None,
         });
     }
+    // v2.14.6 — gemini response parsing. Mirror of the CLI's shape:
+    // text lives at `candidates[0].content.parts[0..].text`; usage
+    // metadata is `usageMetadata.promptTokenCount` / `candidatesTokenCount`
+    // (+ optional `thoughtsTokenCount` which the CLI sums into output).
+    if provider.flavor == "gemini" {
+        if let Some(err) = payload["error"].as_object() {
+            let code = err.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
+            let msg = err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no error.message)");
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(format!("Gemini error {}: {}", code, msg)),
+                model_used: model,
+                duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+                tool_calls: None,
+            });
+        }
+        let text = payload["candidates"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|c| c["content"]["parts"].as_array())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p["text"].as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+        let usage = &payload["usageMetadata"];
+        let tokens_in = usage["promptTokenCount"].as_i64();
+        let cand_out = usage["candidatesTokenCount"].as_i64().unwrap_or(0);
+        let thought_out = usage["thoughtsTokenCount"].as_i64().unwrap_or(0);
+        let tokens_out = if cand_out > 0 || thought_out > 0 {
+            Some(cand_out + thought_out)
+        } else {
+            None
+        };
+        return Ok(ApiDispatchOutcome {
+            response: if text.is_empty() { None } else { Some(text) },
+            error_message: None,
+            model_used: model,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+            tool_calls: None,
+        });
+    }
     if provider.flavor == "minimax" {
         let br = &payload["base_resp"];
         let status = br["status_code"].as_i64();
@@ -307,6 +383,25 @@ fn parse_response(
         tokens_out,
         tool_calls: None,
     })
+}
+
+/// v2.14.6 — RFC 3986 percent-encoder for the Gemini URL `?key=` param.
+/// Mirrors apps/cli/src/api_dispatch.rs::urlencode so both crates encode
+/// the same way without pulling in the `url` crate (the dep). Adequate for
+/// the small character class API keys can contain.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 fn truncate_for_audit(s: &str, max_chars: usize) -> String {
