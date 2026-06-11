@@ -26,7 +26,7 @@ which = "6"
 # v2.10 PR-4 — regex rubric for methodology scoring
 regex = "1"
 # Color-aware output for --human mode
-colored = "2.1"
+colored = "3.1"
 ato-recipes = { path = "../../packages/ato-recipes" }
 ato-posts = { path = "../../packages/ato-posts" }
 ato-api-providers = { path = "../../packages/ato-api-providers" }
