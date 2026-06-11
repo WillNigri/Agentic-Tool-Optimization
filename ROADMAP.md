@@ -218,8 +218,10 @@ Sully (@SullyOmarr) flagged on X (10/06/2026) that with Fable-class models no lo
 
 **Open-core split locked 2026-06-11:**
 
-- **OSS (this repo):** Mission primitive (table + state machine), local Mission-control board (single machine), CLI (`ato missions ...`), all 4 categories incl. `ignored`, decision-brief output, narrative markdown file, no-subdelegation enforcement.
-- **PRO (ato-cloud):** Cross-machine Mission aggregation board, hosted scheduler (Missions wake even if laptop asleep), team-shared Missions, online improvements loop running against shared corpus, push notifications on Mission state transitions, hosted judge LLM for Mission rubric-pass gating, Mission analytics + cost dashboards.
+- **OSS (this repo):** Mission primitive (table + state machine), local Mission-control board (single machine), CLI (`ato missions ...`), all 4 categories incl. `ignored`, decision-brief output, narrative markdown file, no-subdelegation enforcement, **API-provider write/edit tool surface (PR-1.5) with workspace_root sandboxing + bash allowlist**.
+- **PRO (ato-cloud):** Cross-machine Mission aggregation board, hosted scheduler (Missions wake even if laptop asleep), team-shared Missions, online improvements loop running against shared corpus, push notifications on Mission state transitions, hosted judge LLM for Mission rubric-pass gating, Mission analytics + cost dashboards, **hosted policy enforcement (which tools any agent may call, per-runtime allowlists, team-level deny rules)**.
+
+**v2.16 dependency added 2026-06-11 (driver clarification):** Missions coordinate *multiple coding agents working in different worktrees, all merged as a team by the coordinator.* Today only CLI runtimes (claude/codex/gemini CLI) can edit/write code; API providers (anthropic, openai, google, minimax) have read_file + grep only in `api_dispatch_tools.rs`. **PR-1.5 adds edit_file/write_file/list_dir/git_status/git_diff/scoped-bash to the API-provider tool loop** — required before PR-4 (coordinator tick) so any runtime can be a Mission worker. Without it, Missions are limited to a 3-runtime team and the Fable-wedge value (cheapest-model-per-step across all providers) is gutted. See `docs/v2.16-missions.md` § "API-providers-as-coding-agents" for the tool table and security model.
 
 ### v2.16+ — Collison gap-matrix items still open
 
