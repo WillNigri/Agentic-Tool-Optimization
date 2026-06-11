@@ -59,51 +59,37 @@ pub struct ToolCallAudit {
     pub is_error: bool,
 }
 
-/// Resolve an API key for the given provider. Looks at the env var
-/// first, then the llm_api_keys table (case-insensitive provider
-/// match because the GUI stores "MiniMax", "Grok", etc. but flags
-/// come through lowercased).
+/// v2.15.0 Slice C: thin shim over the shared `ato-llm-key-resolver`
+/// crate (war_room 0D398F74 codex finding — CLI + desktop had drifted
+/// on usage_count update and error wording). The crate handles
+/// env-var precedence + DB row selection; this shim wraps the result
+/// with anyhow's context + this crate's encryption::decrypt for the
+/// keychain-aware decryption step. usage_count is bumped after a
+/// successful decrypt to ATTribute CLI dispatches in the desktop's
+/// API Keys panel.
 pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<String> {
-    if let Ok(v) = std::env::var(provider.env_var) {
-        if !v.trim().is_empty() {
-            return Ok(v);
+    let resolved =
+        ato_llm_key_resolver::resolve_key_material(provider, conn).map_err(|e| anyhow!("{}", e))?;
+    match resolved.source {
+        ato_llm_key_resolver::KeySource::Env { .. } => Ok(resolved.material),
+        ato_llm_key_resolver::KeySource::Stored { key_id } => {
+            let plaintext = crate::encryption::decrypt(&resolved.material).with_context(|| {
+                format!(
+                    "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
+                     cannot be authenticated under the current master key — almost always this means \
+                     the macOS keychain master_key entry was rotated or refreshed after the key was \
+                     saved, orphaning the stored ciphertext (the 2026-05-14 cliff pattern). \
+                     \n\nFix: re-enter the {} API key in ATO → Settings → API Keys. The masked preview \
+                     hides the value — you must paste the actual key text to trigger re-encryption \
+                     (just hitting Save bumps `updated_at` without re-encrypting).\
+                     \n\nAlternative: set ${}=<your-key> in the shell to bypass the stored key entirely.",
+                    provider.slug, provider.slug, provider.env_var,
+                )
+            })?;
+            let _ = ato_llm_key_resolver::touch_usage_count(conn, &key_id);
+            Ok(plaintext)
         }
     }
-    let row: Option<(String, i32)> = conn
-        .query_row(
-            "SELECT encrypted_key, is_active FROM llm_api_keys
-              WHERE LOWER(provider) = ?1
-                AND is_active = 1
-              ORDER BY updated_at DESC LIMIT 1",
-            [provider.slug],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    let (encrypted, _is_active) = row.ok_or_else(|| {
-        anyhow!(
-            "No active API key for provider '{}'. Set ${} or add one in ATO → Settings → API Keys.",
-            provider.slug,
-            provider.env_var,
-        )
-    })?;
-    // v2.4.8 audit H1 — route through the shared encryption module
-    // which handles both AES-GCM v1 rows AND legacy plain-base64
-    // rows (the pre-2.4.8 format). The CLI hits the same OS keychain
-    // entry the desktop uses, so a row written by either is
-    // decryptable by either.
-    crate::encryption::decrypt(&encrypted).with_context(|| {
-        format!(
-            "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
-             cannot be authenticated under the current master key — almost always this means \
-             the macOS keychain master_key entry was rotated or refreshed after the key was \
-             saved, orphaning the stored ciphertext (the 2026-05-14 cliff pattern). \
-             \n\nFix: re-enter the {} API key in ATO → Settings → API Keys. The masked preview \
-             hides the value — you must paste the actual key text to trigger re-encryption \
-             (just hitting Save bumps `updated_at` without re-encrypting).\
-             \n\nAlternative: set ${}=<your-key> in the shell to bypass the stored key entirely.",
-            provider.slug, provider.slug, provider.env_var,
-        )
-    })
 }
 
 /// One message in the chat-completions `messages` array. `role` is

@@ -55,6 +55,7 @@ import {
 } from "./_helpers";
 import { RoomTypePicker } from "./RoomTypePicker";
 import { RuntimePicker } from "./RuntimePicker";
+import ModelPicker from "./ModelPicker";
 import { AgentPicker } from "./AgentPicker";
 import { ThreadHistoryHeader } from "./ThreadHistoryHeader";
 import { ChatHistoryView } from "./ChatHistoryView";
@@ -103,7 +104,7 @@ export default function PromptBar() {
   // truth only one popover is ever open. Each toggle/open also
   // implicitly closes the others.
   const [openPicker, setOpenPicker] = useState<
-    "runtime" | "agent" | "thread" | null
+    "runtime" | "agent" | "thread" | "model" | null
   >(null);
   const showRuntimePicker = openPicker === "runtime";
   const setShowRuntimePicker = (next: boolean | ((v: boolean) => boolean)) => {
@@ -133,6 +134,13 @@ export default function PromptBar() {
     const nextValue =
       typeof next === "function" ? next(showThreadPicker) : next;
     setOpenPicker(nextValue ? "thread" : null);
+  };
+  // v2.15.0 Slice C — model picker, shares the openPicker mutex so only
+  // one popover is open at a time.
+  const showModelPicker = openPicker === "model";
+  const setShowModelPicker = (next: boolean | ((v: boolean) => boolean)) => {
+    const nextValue = typeof next === "function" ? next(showModelPicker) : next;
+    setOpenPicker(nextValue ? "model" : null);
   };
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [renamingThread, setRenamingThread] = useState<{ id: string; title: string } | null>(null);
@@ -509,6 +517,16 @@ export default function PromptBar() {
             response = simulateMock(prompt);
           } else {
             const { invoke } = await import("@tauri-apps/api/core");
+            // v2.15.0 Slice C — read user's saved model override from
+            // model_configs (war_room 0D398F74 codex finding: this was
+            // the critical user-facing gap — picker existed, override
+            // was persisted, but PromptBar still passed model: null so
+            // dispatch fell back to registry's default_model). Pass the
+            // resolved model so user picks actually take effect.
+            const { getModelConfig } = await import("@/lib/tauri-api");
+            const cfg = await getModelConfig(runtime, activeProject?.id).catch(
+              () => null
+            );
             const result = await invoke<{
               status: string;
               response: string | null;
@@ -518,7 +536,7 @@ export default function PromptBar() {
             }>("prompt_api_provider", {
               runtime,
               prompt,
-              model: null,
+              model: cfg?.modelId ?? null,
               agentSlug: selectedAgent?.slug ?? null,
               // v2.7.8 PR-3b — required by the backend when the
               // agent's permissions enable a tool-call loop. Without
@@ -993,6 +1011,23 @@ export default function PromptBar() {
           open={showRuntimePicker}
           setOpen={setShowRuntimePicker}
         />
+
+        {/* v2.15.0 Slice C — model picker. Renders only for API-provider
+            runtimes; CLI runtimes (claude/codex/openclaw/hermes) handle
+            model selection inside the CLI binary itself. The chip shows
+            the user's saved model_configs override (or "default" if
+            none saved). Click opens a popover with the LIVE model list
+            from the provider, with a "live" or "curated" badge. */}
+        {availableRuntimes
+          ?.find((r) => r.slug === runtime)
+          ?.kind === "api" && (
+          <ModelPicker
+            providerSlug={runtime}
+            projectId={activeProject?.id}
+            open={showModelPicker}
+            setOpen={setShowModelPicker}
+          />
+        )}
 
         {/* Agent / Group selector — extracted to AgentPicker.tsx per
             the 2026-05-19 elegance war-room. Same shared-popover-state

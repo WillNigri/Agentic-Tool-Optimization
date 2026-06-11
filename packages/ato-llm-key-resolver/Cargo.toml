@@ -1,0 +1,11 @@
+[package]
+name = "ato-llm-key-resolver"
+version = "0.1.0"
+edition = "2021"
+description = "Shared resolver: provider env-var → encrypted llm_api_keys row → plaintext key. Used by both desktop and CLI dispatch paths. Extracted in v2.15.0 Slice C per war_room 0D398F74 (codex finding: CLI/desktop had drifted on decrypt/usage-count behavior)."
+license = "MIT"
+
+[dependencies]
+ato-api-providers = { path = "../ato-api-providers" }
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }

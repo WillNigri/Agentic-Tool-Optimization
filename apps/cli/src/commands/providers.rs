@@ -41,6 +41,73 @@ pub struct ProviderTestRow {
 const SMOKE_PROMPT: &str =
     "Respond with exactly the single word 'ok' and nothing else — no punctuation, no quotes.";
 
+/// v2.15.0 Slice C — `ato runtimes models --slug <provider>` handler.
+/// Resolves the user's stored API key for the provider, then asks the
+/// shared `ato-list-models` crate to fetch (or pull from cache) the
+/// model list. Output includes `source: live | curated_fallback` and
+/// `fallback_reason` for honest provenance.
+pub fn list_models(
+    db_path: &PathBuf,
+    slug: &str,
+    no_cache: bool,
+    opts: &Opts,
+) -> Result<()> {
+    let slug_lc = slug.to_ascii_lowercase();
+    let provider = ato_api_providers::find_provider(&slug_lc).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unknown provider slug '{}'. Known slugs: {}",
+            slug,
+            ato_api_providers::registry()
+                .iter()
+                .map(|p| p.slug)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let conn = db::open_readonly(db_path)?;
+    let api_key = resolve_api_key(provider, &conn).map_err(|e| {
+        anyhow::anyhow!(
+            "couldn't resolve API key for '{}': {}. \
+             Set ${} in the env, or add a key in Settings → API Keys.",
+            provider.slug,
+            e,
+            provider.env_var
+        )
+    })?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let response = rt.block_on(async {
+        if no_cache {
+            ato_list_models::invalidate_cache().await;
+        }
+        ato_list_models::list_models(provider, &api_key).await
+    })?;
+
+    if opts.human {
+        let badge = match response.source {
+            ato_list_models::ModelListSource::Live => "live".to_string(),
+            ato_list_models::ModelListSource::CuratedFallback => "curated (NOT live)".to_string(),
+        };
+        emit_human(&format!(
+            "Provider: {} — source: {} ({} models)",
+            response.provider_slug,
+            badge,
+            response.models.len()
+        ));
+        if let Some(reason) = response.fallback_reason.as_deref() {
+            emit_human(&format!("  reason: {}", reason));
+        }
+        for m in &response.models {
+            let owner = m.owned_by.as_deref().unwrap_or("-");
+            emit_human(&format!("  - {} ({}) [{}]", m.id, m.display_name, owner));
+        }
+        Ok(())
+    } else {
+        emit_json(&response)?;
+        Ok(())
+    }
+}
+
 pub fn run(db_path: &PathBuf, only_slug: Option<&str>, opts: &Opts) -> Result<()> {
     let conn = db::open_readonly(db_path)?;
     let providers: Vec<&ApiProvider> = ato_api_providers::registry()

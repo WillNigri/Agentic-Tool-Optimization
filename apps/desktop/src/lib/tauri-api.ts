@@ -1647,6 +1647,38 @@ export async function getModelConfig(runtime: string, projectId?: string): Promi
   return invoke<ModelConfig | null>('get_model_config', { runtime, projectId });
 }
 
+/**
+ * v2.15.0 Slice C — live model list from an API provider.
+ * Resolves the user's stored API key for the provider and asks Google /
+ * OpenAI / Anthropic / etc. what models THIS key can call. Returns
+ * `source: 'live' | 'curated_fallback'` so consumers can show
+ * provenance honestly. Backed by a 10-minute in-process cache; pass
+ * `noCache: true` to bypass (Settings → Models "Pull live" button).
+ */
+export interface ProviderModelInfo {
+  id: string;
+  display_name: string;
+  owned_by: string | null;
+}
+
+export interface ProviderModelListResponse {
+  provider_slug: string;
+  source: 'live' | 'curated_fallback';
+  models: ProviderModelInfo[];
+  fetched_at: string;
+  fallback_reason: string | null;
+}
+
+export async function listProviderModels(
+  slug: string,
+  opts?: { noCache?: boolean }
+): Promise<ProviderModelListResponse> {
+  return invoke<ProviderModelListResponse>('list_provider_models', {
+    slug,
+    noCache: opts?.noCache ?? false,
+  });
+}
+
 // ============================================================================
 // Execution Logs
 // ============================================================================

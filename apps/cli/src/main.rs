@@ -793,6 +793,22 @@ enum RuntimesSub {
         #[arg(long)]
         slug: Option<String>,
     },
+    /// v2.15.0 Slice C — List models the user's stored API key can
+    /// actually call, fetched live from the provider's models endpoint
+    /// (with a 10-minute in-process cache). Output includes `source:
+    /// live | curated_fallback` so callers see provenance honestly.
+    /// MiniMax has no public list endpoint, so it returns a curated
+    /// fallback with `fallback_reason` set.
+    Models {
+        /// The provider slug (e.g. `google`, `openai`, `anthropic`).
+        /// Use the same slug as `ato dispatch <slug>`.
+        #[arg(long)]
+        slug: String,
+        /// Bypass the in-process cache for THIS call. Same UX shape as
+        /// Settings → Models "Pull live" button.
+        #[arg(long)]
+        no_cache: bool,
+    },
     /// Register a remote machine that runs a runtime CLI. Once added,
     /// `ato dispatch <slug> "..."` routes over SSH instead of spawning
     /// a local binary. Phase 6.x-J — laptop ↔ server bridging.
@@ -2059,6 +2075,9 @@ fn main() -> Result<()> {
             RuntimesSub::Health => commands::runtimes::run_health_check(&opts),
             RuntimesSub::TestProviders { slug } => {
                 commands::providers::run(&db_path, slug.as_deref(), &opts)
+            }
+            RuntimesSub::Models { slug, no_cache } => {
+                commands::providers::list_models(&db_path, &slug, no_cache, &opts)
             }
             RuntimesSub::AddRemote {
                 name,

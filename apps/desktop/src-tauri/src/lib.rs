@@ -447,6 +447,7 @@ pub fn run() {
             list_model_configs,
             save_model_config,
             get_model_config,
+            commands::models::list_provider_models,
             // Execution Logs
             get_execution_logs,
             add_execution_log,

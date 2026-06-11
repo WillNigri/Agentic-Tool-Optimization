@@ -180,3 +180,34 @@ pub fn get_model_config(db: State<'_, DbState>, runtime: String, project_id: Opt
         Err(e) => Err(e.to_string()),
     }
 }
+
+/// v2.15.0 Slice C — list models the stored API key can call.
+/// Resolves the user's plaintext key for the provider, calls the
+/// shared `ato-list-models` crate (which caches in-process for 10
+/// minutes), and returns the response. The frontend's React Query
+/// hook keeps its own 1h cache in front of this.
+#[tauri::command]
+pub async fn list_provider_models(
+    db: State<'_, DbState>,
+    slug: String,
+    no_cache: bool,
+) -> Result<ato_list_models::ModelListResponse, String> {
+    let slug_lc = slug.to_ascii_lowercase();
+    let provider = ato_api_providers::find_provider(&slug_lc)
+        .ok_or_else(|| format!("Unknown provider slug '{}'", slug))?;
+
+    // Resolve the API key in a scoped sync block so the Connection
+    // drops before any .await (same pattern as api_dispatch::dispatch).
+    let api_key = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::api_dispatch::resolve_api_key(provider, &conn)
+            .map_err(|e| format!("resolve API key for '{}': {}", provider.slug, e))?
+    };
+
+    if no_cache {
+        ato_list_models::invalidate_cache().await;
+    }
+    ato_list_models::list_models(provider, &api_key)
+        .await
+        .map_err(|e| e.to_string())
+}

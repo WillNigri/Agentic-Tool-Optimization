@@ -294,13 +294,15 @@ dependencies = [
 
 [[package]]
 name = "ato"
-version = "2.14.6"
+version = "2.15.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "ato-agent-permissions",
  "ato-api-providers",
  "ato-db-views",
+ "ato-list-models",
+ "ato-llm-key-resolver",
  "ato-passive-observer",
  "ato-posts",
  "ato-pricing",
@@ -343,6 +345,27 @@ version = "0.1.0"
 [[package]]
 name = "ato-db-views"
 version = "0.1.0"
+
+[[package]]
+name = "ato-list-models"
+version = "0.1.0"
+dependencies = [
+ "ato-api-providers",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "ato-llm-key-resolver"
+version = "0.1.0"
+dependencies = [
+ "ato-api-providers",
+ "chrono",
+ "rusqlite",
+]
 
 [[package]]
 name = "ato-passive-observer"

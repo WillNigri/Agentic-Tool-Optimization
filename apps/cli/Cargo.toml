@@ -1,6 +1,6 @@
 [package]
 name = "ato"
-version = "2.14.6"
+version = "2.15.0"
 edition = "2021"
 description = "ATO CLI — local-first developer-workflow operations platform for multi-runtime AI agents"
 license = "MIT"
@@ -30,6 +30,8 @@ colored = "2.1"
 ato-recipes = { path = "../../packages/ato-recipes" }
 ato-posts = { path = "../../packages/ato-posts" }
 ato-api-providers = { path = "../../packages/ato-api-providers" }
+ato-llm-key-resolver = { path = "../../packages/ato-llm-key-resolver" }
+ato-list-models = { path = "../../packages/ato-list-models" }
 ato-pricing = { path = "../../packages/ato-pricing" }
 ato-db-views = { path = "../../packages/ato-db-views" }
 ato-agent-permissions = { path = "../../packages/ato-agent-permissions" }

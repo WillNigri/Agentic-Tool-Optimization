@@ -65,46 +65,22 @@ pub struct Message {
     pub content: String,
 }
 
+/// v2.15.0 Slice C: thin shim over the shared `ato-llm-key-resolver`
+/// crate (war_room 0D398F74 codex finding). Encryption::decrypt is the
+/// keychain-aware step that stays in this crate; the resolver handles
+/// the env-var precedence + DB row selection + usage_count update so
+/// CLI and desktop share one source of truth.
 pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<String, String> {
-    if let Ok(v) = std::env::var(provider.env_var) {
-        if !v.trim().is_empty() {
-            return Ok(v);
+    let resolved = ato_llm_key_resolver::resolve_key_material(provider, conn)
+        .map_err(|e| e.to_string())?;
+    match resolved.source {
+        ato_llm_key_resolver::KeySource::Env { .. } => Ok(resolved.material),
+        ato_llm_key_resolver::KeySource::Stored { key_id } => {
+            let plaintext = encryption::decrypt(&resolved.material).map_err(|e| e.to_string())?;
+            let _ = ato_llm_key_resolver::touch_usage_count(conn, &key_id);
+            Ok(plaintext)
         }
     }
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT id, encrypted_key FROM llm_api_keys
-              WHERE LOWER(provider) = ?1
-                AND is_active = 1
-              ORDER BY updated_at DESC LIMIT 1",
-            [provider.slug],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    let (key_id, encrypted) = row.ok_or_else(|| {
-        format!(
-            "No active API key for provider '{}'. Set ${} or add one in Settings → API Keys.",
-            provider.slug, provider.env_var,
-        )
-    })?;
-    // 2026-05-15 fix (codex review finding): the prior code base64-
-    // decoded `encrypted_key` directly, which only works for legacy
-    // plain-base64 rows. v1: AES-256-GCM rows (the migration-018-era
-    // default since the H1 security audit) need to route through the
-    // encryption module. Stale path missed in the H1 audit follow-up;
-    // the CLI mirror (apps/cli/src/api_dispatch.rs) already routes
-    // through encryption::decrypt — desktop was the orphan.
-    let key = encryption::decrypt(&encrypted).map_err(|e| e.to_string())?;
-    // Touch last_used + usage_count so the API Keys panel's "0 uses"
-    // counter increments when the GUI dispatches. Best-effort.
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = conn.execute(
-        "UPDATE llm_api_keys
-            SET last_used = ?1, usage_count = usage_count + 1, updated_at = ?1
-          WHERE id = ?2",
-        rusqlite::params![now, key_id],
-    );
-    Ok(key)
 }
 
 pub async fn dispatch(
