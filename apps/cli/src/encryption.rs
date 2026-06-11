@@ -17,10 +17,17 @@ use base64::{engine::general_purpose, Engine as _};
 use rand::RngCore;
 
 const KEYCHAIN_SERVICE: &str = "ato-desktop";
-const MASTER_KEY_ACCOUNT: &str = "master_key_v1";
+/// v2.14.3 — fallback used only when master_key_ledger is empty
+/// (truly fresh install before the schema migration writes the v1 backfill).
+/// In every other case the active account is read from the ledger row whose
+/// `retired_at IS NULL`. Mirrors apps/desktop/src-tauri/src/encryption.rs.
+const MASTER_KEY_ACCOUNT_FALLBACK: &str = "master_key_v1";
 const VERSION_PREFIX: &str = "v1:";
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
+/// v2.14.3 — same fixed plaintext as desktop. Mirrored so a key written
+/// by desktop can be validated by CLI rekey paths (and vice-versa).
+pub(crate) const CANARY_PLAINTEXT: &str = "ATO_MASTER_KEY_CANARY_v1";
 
 /// 2026-05-16 — wrap the keychain read in a hard timeout. macOS shows a
 /// Keychain Access permission dialog the first time a new binary
@@ -39,15 +46,34 @@ const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
 // 2026-05-17 — process-memory cache. macOS keychain ACL re-prompts on
 // every binary-signature change, AND historically the dispatch path
 // fetched the master key per call. Within a single process there's no
-// reason to hit the keychain more than once: cache the [u8; 32] in a
-// OnceLock, the first call pays the keychain round-trip, every
-// subsequent call returns instantly. Cuts the "dialog spam during
-// rebuilds" problem AND makes scripted/cron flows cheaper.
+// reason to hit the keychain more than once.
+//
+// v2.14.3 cache shape change: `OnceLock<[u8; 32]>` → `OnceLock<RwLock<Option<(String, [u8; 32])>>>`.
+// Same rationale as the desktop mirror — the old shape couldn't be
+// invalidated, so a rekey + same-process re-use returned a stale key.
+// The (account, key) tuple lets us detect cache/ledger drift.
 //
 // Cache is per-process — a new `ato dispatch` invocation starts cold,
 // which is correct (macOS code-signature ACL is the right enforcement
 // boundary across processes; in-process caching shouldn't bypass it).
-static MASTER_KEY_CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+static MASTER_KEY_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<(String, [u8; 32])>>> =
+    std::sync::OnceLock::new();
+
+fn cache() -> &'static std::sync::RwLock<Option<(String, [u8; 32])>> {
+    MASTER_KEY_CACHE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// v2.14.3 — same shape as desktop. CLI doesn't run rekey itself but
+/// this is exposed for the master-key export + tests that exercise the
+/// cache lifecycle.
+#[allow(dead_code)]
+pub fn invalidate_master_key_cache() {
+    if let Some(lock) = MASTER_KEY_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+}
 
 // PR-6 (master_key_v2) — exposed to `commands::master_key::export`
 // so the CLI's `ato master-key export` subcommand can read the
@@ -63,62 +89,154 @@ pub(crate) fn export_master_key_b64() -> Result<String> {
 }
 
 fn master_key() -> Result<[u8; 32]> {
-    if let Some(cached) = MASTER_KEY_CACHE.get() {
-        return Ok(*cached);
+    // v2.15.0 — same cache-hit-revalidates-ledger pattern as the
+    // desktop mirror, ported per war_room C75F743A codex follow-up:
+    // the CLI shares the same race invariant. A cached key MUST only
+    // short-circuit when its account name still matches the current
+    // active ledger row. Otherwise drop to full resolution so the new
+    // post-rekey account is honored.
+    let cached_check = cache()
+        .read()
+        .map_err(|e| anyhow!("cache read lock: {}", e))?;
+    let active_account = read_active_master_key_account().ok();
+    if let (Some((cached_account, key)), Some(current_account)) =
+        (cached_check.as_ref(), active_account.as_ref())
+    {
+        if cached_account == current_account {
+            return Ok(*key);
+        }
     }
-    let key = master_key_fetch()?;
-    // Use `get_or_init`-style write — if two threads raced through the
-    // check above, the loser's write is dropped; both end up with the
-    // same value (keychain is the source of truth).
-    let _ = MASTER_KEY_CACHE.set(key);
+    drop(cached_check);
+
+    let (account, key) = master_key_resolve()?;
+    let _ = ensure_canary_initialized(&account, &key);
+    if let Ok(mut w) = cache().write() {
+        *w = Some((account, key));
+    }
     Ok(key)
 }
 
-fn master_key_fetch() -> Result<[u8; 32]> {
+fn master_key_resolve() -> Result<(String, [u8; 32])> {
     // 2026-05-17 — dev-mode bypass. Unsigned local builds (cargo build
     // --release on a dev machine) produce a fresh code signature on
-    // every rebuild, which macOS keychain treats as "a new app" — so
-    // even after clicking "Always Allow" the dialog comes back on the
-    // next rebuild. The env var bypass lets dev builds skip the
-    // keychain entirely. Production users on signed Apple Developer
-    // releases NEVER set this var and go through the normal keychain
-    // path. Same security model: an attacker with user-level env access
-    // already has the user's keychain too.
+    // every rebuild, which macOS keychain treats as "a new app".
     if let Ok(b64) = std::env::var("ATO_MASTER_KEY_B64") {
         let trimmed = b64.trim();
         if !trimmed.is_empty() {
-            return decode_key_b64(trimmed);
+            let key = decode_key_b64(trimmed)?;
+            return Ok((MASTER_KEY_ACCOUNT_FALLBACK.to_string(), key));
         }
     }
+
+    let account = read_active_master_key_account()
+        .unwrap_or_else(|_| MASTER_KEY_ACCOUNT_FALLBACK.to_string());
 
     use std::sync::mpsc;
     use std::time::Duration;
 
-    // Send a String error rather than anyhow::Error since the latter
-    // isn't Send. Caller re-wraps with anyhow!() after recv.
     let (tx, rx) = mpsc::channel::<std::result::Result<[u8; 32], String>>();
+    let account_for_thread = account.clone();
 
     std::thread::spawn(move || {
-        let result = master_key_inner().map_err(|e| format!("{:#}", e));
+        let result = master_key_inner(&account_for_thread).map_err(|e| format!("{:#}", e));
         let _ = tx.send(result);
     });
 
     match rx.recv_timeout(Duration::from_secs(KEYCHAIN_TIMEOUT_SECS)) {
-        Ok(Ok(key)) => Ok(key),
+        Ok(Ok(key)) => Ok((account, key)),
         Ok(Err(s)) => Err(anyhow!("{}", s)),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
             "keychain access timed out after {}s — macOS is likely showing a Keychain Access permission dialog \
              (the first read after a new binary build needs explicit approval). \
              Approve the dialog if visible (use 'Always Allow' so future dispatches don't re-prompt). \
              To bypass the keychain for this run, copy the master key from the OS keychain into the env var ATO_MASTER_KEY_B64: \
-             `export ATO_MASTER_KEY_B64=\"$(security find-generic-password -s ato-desktop -a master_key_v1 -w)\"`. \
+             `export ATO_MASTER_KEY_B64=\"$(security find-generic-password -s {} -a {} -w)\"`. \
              Provider API-key env vars (GEMINI_API_KEY, MINIMAX_API_KEY, ANTHROPIC_API_KEY, ...) only help if you also have those keys handy — the ATO_MASTER_KEY_B64 path is the real bypass.",
-            KEYCHAIN_TIMEOUT_SECS
+            KEYCHAIN_TIMEOUT_SECS,
+            KEYCHAIN_SERVICE,
+            account
         )),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
             "keychain reader thread disconnected without sending a result — unexpected; report as a bug"
         )),
     }
+}
+
+/// v2.14.3 — read the active master-key account from `master_key_ledger`.
+/// Returns the keychain account name from the row where `retired_at IS NULL`.
+/// Errors when the ledger is empty or schema-missing; callers fall back to
+/// the legacy account name for fresh installs.
+fn read_active_master_key_account() -> Result<String> {
+    let db_path = crate::db::default_db_path();
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .with_context(|| format!("open db {} for ledger", db_path.display()))?;
+    let s: String = conn
+        .query_row(
+            "SELECT keychain_account FROM master_key_ledger
+                WHERE retired_at IS NULL
+             ORDER BY created_at DESC
+                LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .with_context(|| "read master_key_ledger active row")?;
+    Ok(s)
+}
+
+/// v2.14.3 — write the encrypted canary on the active ledger row if missing.
+/// Best-effort; failures are ignored so the next master_key() call retries.
+fn ensure_canary_initialized(account: &str, key: &[u8; 32]) -> Result<()> {
+    let db_path = crate::db::default_db_path();
+    let conn = rusqlite::Connection::open(&db_path)
+        .with_context(|| format!("open db {} for canary init", db_path.display()))?;
+
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT canary_ciphertext FROM master_key_ledger
+               WHERE keychain_account = ?1 AND retired_at IS NULL",
+            [account],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap_or(None);
+
+    if current.is_some() {
+        return Ok(());
+    }
+
+    let ct = encrypt_with_key_internal(CANARY_PLAINTEXT, key)?;
+    conn.execute(
+        "UPDATE master_key_ledger
+             SET canary_ciphertext = ?1
+           WHERE keychain_account = ?2 AND retired_at IS NULL",
+        rusqlite::params![ct, account],
+    )
+    .with_context(|| "write canary ciphertext")?;
+    Ok(())
+}
+
+/// CLI-side helper mirroring desktop's `encrypt_with_key`. Pure crypto,
+/// no keychain access. Used by the canary init path.
+fn encrypt_with_key_internal(plaintext: &str, key_bytes: &[u8; 32]) -> Result<String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Key, Nonce};
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| anyhow!("encrypt: {}", e))?;
+    let mut payload = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    payload.extend_from_slice(&nonce_bytes);
+    payload.extend_from_slice(&ciphertext);
+    Ok(format!(
+        "{}{}",
+        VERSION_PREFIX,
+        general_purpose::STANDARD.encode(&payload)
+    ))
 }
 
 /// PR 13 (2026-05-17) — first-run sentinel file. The 2026-05-15
@@ -178,12 +296,12 @@ fn write_first_run_sentinel() {
     }
 }
 
-fn master_key_inner() -> Result<[u8; 32]> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
+fn master_key_inner(account: &str) -> Result<[u8; 32]> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
         .with_context(|| {
             format!(
                 "open keyring entry {}/{}",
-                KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT
+                KEYCHAIN_SERVICE, account
             )
         })?;
     // 2026-05-15 — CRITICAL FIX (limited): previous shape treated
@@ -231,10 +349,10 @@ fn master_key_inner() -> Result<[u8; 32]> {
                      If you genuinely want to start fresh and re-enter all API keys, delete the \
                      sentinel file (`rm ~/.ato/{}`) AND the keychain entry, then re-run.",
                     KEYCHAIN_SERVICE,
-                    MASTER_KEY_ACCOUNT,
+                    account,
                     FIRST_RUN_SENTINEL_NAME,
                     KEYCHAIN_SERVICE,
-                    MASTER_KEY_ACCOUNT,
+                    account,
                     FIRST_RUN_SENTINEL_NAME,
                 ))
             } else {

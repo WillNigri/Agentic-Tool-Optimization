@@ -35,10 +35,19 @@ use base64::{engine::general_purpose, Engine as _};
 use rand::RngCore;
 
 const KEYCHAIN_SERVICE: &str = "ato-desktop";
-const MASTER_KEY_ACCOUNT: &str = "master_key_v1";
+/// v2.14.3 — fallback account name used ONLY when master_key_ledger is empty
+/// (truly fresh install before the schema migration writes the v1 backfill).
+/// In every other case the active account is read from the ledger row whose
+/// `retired_at IS NULL`. See `read_active_master_key_account` below.
+const MASTER_KEY_ACCOUNT_FALLBACK: &str = "master_key_v1";
 const VERSION_PREFIX: &str = "v1:";
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
+/// v2.14.3 — fixed plaintext stored encrypted on the active ledger row.
+/// Used by `rekey.rs` to prove a candidate "old key" actually corresponds
+/// to the master key that wrote the existing ciphertexts. Distinctive +
+/// short so a chance match against random bytes is astronomically unlikely.
+pub(crate) const CANARY_PLAINTEXT: &str = "ATO_MASTER_KEY_CANARY_v1";
 
 /// Read (or atomically create) the AES-256 master key from the OS
 /// keychain. Result is the 32-byte raw key.
@@ -68,55 +77,210 @@ const KEYCHAIN_TIMEOUT_SECS: u64 = 8;
 // Reasons for both: (a) macOS keychain re-prompts on every binary
 // signature change, including unsigned dev rebuilds — even after
 // "Always Allow"; (b) within a single process there's no reason to
-// pay the keychain round-trip on every call. Together: first call
-// pays once (or skips entirely in dev with ATO_MASTER_KEY_B64), every
-// subsequent call returns from the in-memory OnceLock.
-static MASTER_KEY_CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+// pay the keychain round-trip on every call.
+//
+// v2.14.3 cache shape change: `OnceLock<[u8; 32]>` → `OnceLock<RwLock<Option<(String, [u8; 32])>>>`.
+// The old shape couldn't be invalidated after rekey, so an in-process
+// post-rekey encrypt() would return the OLD key (codex war-room verdict
+// 2026-06-10 518FBBA2). The new shape lets `invalidate_master_key_cache`
+// clear the slot when rekey commits, and the (account, key) tuple lets
+// us detect cache/ledger drift on every read.
+static MASTER_KEY_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<(String, [u8; 32])>>> =
+    std::sync::OnceLock::new();
+
+fn cache() -> &'static std::sync::RwLock<Option<(String, [u8; 32])>> {
+    MASTER_KEY_CACHE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// v2.14.3 — invalidate the in-process master-key cache. Called by
+/// `rekey.rs` after a successful rekey commits, so the next `encrypt`
+/// / `decrypt` re-reads the active ledger row + keychain entry instead
+/// of returning the stale pre-rekey key.
+pub fn invalidate_master_key_cache() {
+    if let Some(lock) = MASTER_KEY_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+}
 
 fn master_key() -> Result<[u8; 32], String> {
-    if let Some(cached) = MASTER_KEY_CACHE.get() {
-        return Ok(*cached);
+    // v2.15.0 REWORK from war_room 2EAAE58B (codex finding #1):
+    // Cache hit MUST re-validate the cached account against the current
+    // active ledger row. Pre-rework, a thread holding a cached key from
+    // before a rekey commit would return that stale key indefinitely
+    // (cache invalidation only protects FUTURE reads; in-flight calls
+    // that already passed the cache-hit check kept using the old key).
+    // Now: cache hit only short-circuits when the cached account name
+    // STILL matches what the ledger says is active. If the ledger has
+    // moved on (post-rekey), we drop to the cache-miss path which
+    // re-reads keychain under the new account.
+    let cached_check = cache().read().map_err(|e| format!("cache read lock: {}", e))?;
+    let active_account = read_active_master_key_account().ok();
+    if let (Some((cached_account, key)), Some(current_account)) =
+        (cached_check.as_ref(), active_account.as_ref())
+    {
+        if cached_account == current_account {
+            return Ok(*key);
+        }
     }
-    let key = master_key_fetch()?;
-    let _ = MASTER_KEY_CACHE.set(key);
+    // Drop the read lock before any I/O — the env-bypass path and the
+    // ATO_MASTER_KEY_B64 short-circuit below would self-deadlock if a
+    // write tried to take the lock with us still holding read.
+    drop(cached_check);
+
+    // Cache miss (or stale cache from a rekey) — full resolution.
+    let (account, key) = master_key_resolve()?;
+    // Best-effort canary init for this ledger row. Runs once per process
+    // per rekey; idempotent on the SQL side.
+    let _ = ensure_canary_initialized(&account, &key);
+    // Populate cache.
+    if let Ok(mut w) = cache().write() {
+        *w = Some((account, key));
+    }
     Ok(key)
 }
 
-fn master_key_fetch() -> Result<[u8; 32], String> {
+/// Resolve the current master key by reading the active ledger row and
+/// fetching from the keychain under the account name it declares. Returns
+/// `(account_name, key_bytes)` so the cache can be keyed by account.
+fn master_key_resolve() -> Result<(String, [u8; 32]), String> {
     // Dev-mode bypass — unsigned local builds skip the keychain
     // entirely. Production releases (signed Apple Developer cert) never
     // set this env var and go through the normal keychain path.
     if let Ok(b64) = std::env::var("ATO_MASTER_KEY_B64") {
         let trimmed = b64.trim();
         if !trimmed.is_empty() {
-            return decode_key_b64(trimmed);
+            let key = decode_key_b64(trimmed)?;
+            // Env bypass = no ledger lookup; use the fallback account
+            // string just as the cache key. The ledger isn't consulted.
+            return Ok((MASTER_KEY_ACCOUNT_FALLBACK.to_string(), key));
         }
     }
+
+    let account = read_active_master_key_account()
+        .unwrap_or_else(|_| MASTER_KEY_ACCOUNT_FALLBACK.to_string());
 
     use std::sync::mpsc;
     use std::time::Duration;
 
     let (tx, rx) = mpsc::channel::<Result<[u8; 32], String>>();
+    let account_for_thread = account.clone();
 
     std::thread::spawn(move || {
-        let _ = tx.send(master_key_inner());
+        let _ = tx.send(master_key_inner(&account_for_thread));
     });
 
     match rx.recv_timeout(Duration::from_secs(KEYCHAIN_TIMEOUT_SECS)) {
-        Ok(result) => result,
+        Ok(result) => result.map(|k| (account, k)),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
             "keychain access timed out after {}s — macOS is likely showing a Keychain Access permission dialog \
              (the first read after a new binary build needs explicit approval). \
              Approve the dialog if visible ('Always Allow' so future opens don't re-prompt). \
              To bypass the keychain for this run, set ATO_MASTER_KEY_B64 in the env to the value of the keychain entry \
-             (`security find-generic-password -s ato-desktop -a master_key_v1 -w` on macOS). \
+             (`security find-generic-password -s {} -a {} -w` on macOS). \
              Setting per-provider API-key env vars (GEMINI_API_KEY, MINIMAX_API_KEY, ANTHROPIC_API_KEY, ...) only sidesteps the keychain if you have those keys available.",
-            KEYCHAIN_TIMEOUT_SECS
+            KEYCHAIN_TIMEOUT_SECS,
+            KEYCHAIN_SERVICE,
+            account
         )),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(
             "keychain reader thread disconnected without sending a result".to_string(),
         ),
     }
+}
+
+/// v2.14.3 — read the active master-key account from `master_key_ledger`.
+/// "Active" = the row with `retired_at IS NULL`. If multiple match (should
+/// never happen but is non-fatal), take the most recent. Failure means the
+/// ledger table is missing or empty; callers fall back to the legacy
+/// account name (`master_key_v1`) so brand-new installs still work.
+fn read_active_master_key_account() -> Result<String, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("open db for ledger: {}", e))?;
+    conn.query_row(
+        "SELECT keychain_account FROM master_key_ledger
+            WHERE retired_at IS NULL
+         ORDER BY created_at DESC
+            LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .map_err(|e| format!("read master_key_ledger active row: {}", e))
+}
+
+/// v2.14.3 — write the encrypted canary on the active ledger row if
+/// missing. Best-effort: write failures (DB locked, schema drift) are
+/// logged and ignored so the next master_key() call retries. The canary
+/// lets rekey verify it has the right "old key" before destructive ops.
+fn ensure_canary_initialized(account: &str, key: &[u8; 32]) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("open db for canary init: {}", e))?;
+
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT canary_ciphertext FROM master_key_ledger
+               WHERE keychain_account = ?1 AND retired_at IS NULL",
+            [account],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap_or(None);
+
+    if current.is_some() {
+        return Ok(());
+    }
+
+    let ct = encrypt_with_key(CANARY_PLAINTEXT, key)?;
+    conn.execute(
+        "UPDATE master_key_ledger
+             SET canary_ciphertext = ?1
+           WHERE keychain_account = ?2 AND retired_at IS NULL",
+        rusqlite::params![ct, account],
+    )
+    .map_err(|e| format!("write canary ciphertext: {}", e))?;
+    Ok(())
+}
+
+/// v2.14.3 — read the encrypted canary for the active ledger row. Used by
+/// `rekey.rs` precondition: the candidate "old key" must decrypt this to
+/// `CANARY_PLAINTEXT` exactly, or the rekey aborts without touching keychain
+/// or ciphertext columns.
+pub fn read_active_canary_ciphertext() -> Result<Option<String>, String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("open db for canary read: {}", e))?;
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT canary_ciphertext FROM master_key_ledger
+               WHERE retired_at IS NULL
+            ORDER BY created_at DESC
+               LIMIT 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("read canary: {}", e))?;
+    Ok(v)
+}
+
+/// v2.14.3 — write the encrypted canary onto a specific ledger row.
+/// Called by `rekey.rs` after a successful rekey commits, so the new
+/// active row holds the canary under the NEW master key. Same
+/// best-effort posture as the init path.
+pub fn write_canary_for_account(account: &str, key: &[u8; 32]) -> Result<(), String> {
+    let db_path = crate::get_db_path();
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("open db for canary write: {}", e))?;
+    let ct = encrypt_with_key(CANARY_PLAINTEXT, key)?;
+    conn.execute(
+        "UPDATE master_key_ledger
+             SET canary_ciphertext = ?1
+           WHERE keychain_account = ?2",
+        rusqlite::params![ct, account],
+    )
+    .map_err(|e| format!("write canary: {}", e))?;
+    Ok(())
 }
 
 /// PR 13 (2026-05-17) — first-run sentinel. See the CLI mirror at
@@ -151,9 +315,9 @@ fn write_first_run_sentinel() {
     }
 }
 
-fn master_key_inner() -> Result<[u8; 32], String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT)
-        .map_err(|e| format!("keyring entry {}/{}: {}", KEYCHAIN_SERVICE, MASTER_KEY_ACCOUNT, e))?;
+fn master_key_inner(account: &str) -> Result<[u8; 32], String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
+        .map_err(|e| format!("keyring entry {}/{}: {}", KEYCHAIN_SERVICE, account, e))?;
     match entry.get_password() {
         Ok(b64) => {
             // PR 13 migration — write the sentinel on the success
@@ -182,7 +346,7 @@ fn master_key_inner() -> Result<[u8; 32], String> {
                      so the entry's ACL grants access. If you intend a true reset, delete \
                      `~/.ato/{}` AND the keychain entry, then re-launch and re-enter all API keys.",
                     KEYCHAIN_SERVICE,
-                    MASTER_KEY_ACCOUNT,
+                    account,
                     FIRST_RUN_SENTINEL_NAME,
                     FIRST_RUN_SENTINEL_NAME,
                 ))

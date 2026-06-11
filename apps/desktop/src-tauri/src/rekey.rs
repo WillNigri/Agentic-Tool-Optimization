@@ -210,6 +210,110 @@ pub fn rekey_inner(
             }
         })?;
 
+    // v2.15.0 REWORK from war_room 2EAAE58B (codex findings #2 + #3):
+    //
+    // Finding #2: The "assert(probe_match && canary_decrypts)" invariant
+    // from war_room 518FBBA2 must be expressed as a SINGLE precondition
+    // INSIDE rekey_inner. Pre-rework, probe-match lived upstream in the
+    // caller and only canary-decrypts ran here — they could disagree
+    // if anything mutated between caller's probe check and this point.
+    //
+    // Finding #3: The NULL-canary "log + proceed" bypass was too
+    // permissive — Will's machine is in exactly that state today and
+    // the bypass means the rekey-bug class wouldn't be caught for any
+    // pre-2.14.3 install. Now we REFUSE rekey when the canary is
+    // missing; the user must relaunch the app so encryption::ensure_
+    // canary_initialized() backfills against the CURRENT master_key
+    // first. That gives us a known-good canary written under a
+    // known-working key before any rekey can run.
+    let row: Option<(Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT canary_ciphertext, identity_probe FROM master_key_ledger
+               WHERE version = 'v1' AND retired_at IS NULL",
+            [],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .ok();
+    let (canary_v1, stored_probe) = match row {
+        Some((c, p)) => (c, p),
+        None => {
+            return Err(RekeyError::LedgerWrite(
+                "no active v1 ledger row found — refusing to rekey from an empty ledger".to_string(),
+            ));
+        }
+    };
+
+    // CLAUSE 1 of the precondition: canary must exist + decrypt to expected.
+    let canary_ct = canary_v1.ok_or_else(|| RekeyError::DecryptFailed {
+        row_id: "canary".to_string(),
+        // war_room C75F743A nit (codex review): app startup intentionally
+        // does NOT call master_key() (lib.rs:234, PERMISSIONS.md:24), so
+        // "Relaunch ATO" alone won't backfill the canary. The user must
+        // ALSO trigger a path that resolves the master key — typically
+        // Settings → API Keys → reveal a stored key, or a Chat dispatch
+        // to an API provider. Doing one of those calls
+        // ensure_canary_initialized() which writes the canary against
+        // the current master_key. Then rekey can proceed.
+        context: "v1 ledger row has NULL canary_ciphertext — pre-2.14.3 install. \
+                  Relaunch ATO, then trigger a path that resolves the master key \
+                  (Settings → API Keys → reveal a stored key, OR a chat dispatch to \
+                  a configured API provider). That writes the canary against the \
+                  current master_key. Then retry rekey. \
+                  Refusing to proceed without a known-good canary (war_room verdict 2EAAE58B)."
+            .to_string(),
+    })?;
+    let payload = canary_ct.strip_prefix(V1_PREFIX).ok_or_else(|| RekeyError::DecryptFailed {
+        row_id: "canary".to_string(),
+        context: "canary_ciphertext missing v1: prefix".to_string(),
+    })?;
+    let decrypted_canary = decrypt_v1_with_key(payload, old_key).map_err(|e| {
+        RekeyError::DecryptFailed {
+            row_id: "canary".to_string(),
+            context: format!(
+                "canary decrypt failed — supplied old key does NOT match \
+                 the master key that wrote ledger v1. \
+                 Rekey ABORTED to prevent garbage re-encryption. \
+                 Original error: {}",
+                e
+            ),
+        }
+    })?;
+    if decrypted_canary != crate::encryption::CANARY_PLAINTEXT {
+        return Err(RekeyError::DecryptFailed {
+            row_id: "canary".to_string(),
+            context:
+                "canary decrypted but plaintext does not match expected. \
+                 Either the canary was tampered with or the old key is \
+                 subtly wrong. Rekey ABORTED."
+                    .to_string(),
+        });
+    }
+
+    // CLAUSE 2 of the precondition: probe_match. Verify in-band so the
+    // war-room's `probe_match && canary_decrypts` invariant holds as a
+    // single check at this exact point.
+    if let Some(expected_probe) = &stored_probe {
+        let computed_probe = probe_hash(old_key);
+        if &computed_probe != expected_probe {
+            return Err(RekeyError::DecryptFailed {
+                row_id: "probe".to_string(),
+                context: format!(
+                    "probe_hash mismatch: ledger v1 row has identity_probe={} \
+                     but probe_hash(old_key)={}. The canary check above passed, \
+                     which means the supplied old key decrypts ciphertext correctly, \
+                     but the ledger's stored probe disagrees — possible ledger \
+                     tampering or stale probe. Rekey ABORTED so an investigator \
+                     can examine state before any destructive operation.",
+                    expected_probe, computed_probe
+                ),
+            });
+        }
+    }
+    // (If stored_probe is NULL on a pre-PR-2 row, we accept canary alone
+    // since PR-1 explicitly shipped rows without probes. The canary
+    // verification is the binding security check; probe is corroborating.)
+    let canary_verified = true;
+
     // Step 4: re-encrypt every v1 row. Collect the work into a Vec
     // first so we drop the SELECT statement before issuing UPDATEs
     // (avoids a "statement is in use" lock issue on the same conn).
@@ -276,6 +380,14 @@ pub fn rekey_inner(
     )
     .map_err(|e| RekeyError::LedgerWrite(format!("retire v1: {}", e)))?;
 
+    // v2.14.3 — encrypt the canary under the NEW key for the v2 row.
+    // Inside the transaction so it commits atomically with the rekey.
+    let v2_canary = encrypt_with_key(crate::encryption::CANARY_PLAINTEXT, new_key)
+        .map_err(|e| RekeyError::EncryptFailed {
+            row_id: "canary".to_string(),
+            context: format!("encrypt v2 canary: {}", e),
+        })?;
+
     // Step 6: INSERT v2 ledger row. identity_probe stays NULL —
     // PR-2's populate path fills it on the next launch. notes
     // carries provenance so a future audit shows this was a rekey
@@ -283,11 +395,12 @@ pub fn rekey_inner(
     tx.execute(
         "INSERT INTO master_key_ledger
             (version, keychain_account, ciphertext_format,
-             identity_probe, source, created_at, retired_at, notes)
+             identity_probe, source, created_at, retired_at, notes,
+             canary_ciphertext)
          VALUES
             ('v2', 'master_key_v2', 'aes-gcm-v1', NULL,
-             'keychain', ?1, NULL, 'rekey from v1 (PR-4)')",
-        rusqlite::params![retired_at],
+             'keychain', ?1, NULL, 'rekey from v1 (PR-4)', ?2)",
+        rusqlite::params![retired_at, v2_canary],
     )
     .map_err(|e| RekeyError::LedgerWrite(format!("insert v2 ledger: {}", e)))?;
 
@@ -295,11 +408,24 @@ pub fn rekey_inner(
     // resource (the new ledger version), JSON details with the
     // probe hashes so investigators can correlate this rekey with
     // PR-3's prior mismatch detection rows.
+    //
+    // v2.14.3 — record the canary verification outcome so a future
+    // forensic investigation can prove the rekey only proceeded when
+    // the old-key candidate decrypted the canary to the expected
+    // plaintext. SHA256 of the decrypted plaintext is recorded so
+    // tampering with the canary post-fact is detectable.
     let details = serde_json::json!({
         "rows_rekeyed": rows_rekeyed,
         "retired_v1_at": retired_at,
         "old_key_probe": probe_hash(old_key),
         "new_key_probe": probe_hash(new_key),
+        "canary_verified": canary_verified,
+        "canary_plaintext_sha256": canary_verified.then(|| {
+            use sha2::{Sha256, Digest};
+            let mut h = Sha256::new();
+            h.update(crate::encryption::CANARY_PLAINTEXT.as_bytes());
+            format!("{:x}", h.finalize())
+        }),
     })
     .to_string();
     let audit_id = uuid::Uuid::new_v4().to_string();
@@ -314,6 +440,14 @@ pub fn rekey_inner(
     .map_err(|e| RekeyError::LedgerWrite(format!("audit insert: {}", e)))?;
 
     tx.commit().map_err(|e| RekeyError::CommitFailed(e.to_string()))?;
+
+    // v2.14.3 — invalidate the in-process encryption cache so the
+    // next encrypt/decrypt re-reads the active ledger row + keychain
+    // under the new account. Without this, a subsequent encrypt() in
+    // the same process would return the cached OLD master key
+    // (codex war-room corner case).
+    crate::encryption::invalidate_master_key_cache();
+
     Ok((rows_rekeyed, retired_at))
 }
 
@@ -446,7 +580,8 @@ mod tests {
                  source            TEXT NOT NULL DEFAULT 'keychain',
                  created_at        TEXT NOT NULL,
                  retired_at        TEXT,
-                 notes             TEXT
+                 notes             TEXT,
+                 canary_ciphertext TEXT
              );
              INSERT INTO master_key_ledger
                  (version, keychain_account, ciphertext_format,
@@ -466,6 +601,25 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// v2.15.0 test helper — backfill the v1 ledger row with a real
+    /// canary (encrypted under the given old_key) and a probe_hash that
+    /// matches. Required after the rework: rekey_inner's precondition
+    /// now refuses to proceed without both. Each test that exercises
+    /// rekey_inner must call this with the same `old_key` it'll pass
+    /// to rekey_inner so the precondition passes.
+    fn seed_v1_ledger_for(conn: &Connection, old_key: &[u8; 32]) {
+        let canary_ct = encrypt_with_key(crate::encryption::CANARY_PLAINTEXT, old_key).unwrap();
+        let probe = probe_hash(old_key);
+        conn.execute(
+            "UPDATE master_key_ledger
+                SET canary_ciphertext = ?1,
+                    identity_probe    = ?2
+              WHERE version = 'v1' AND retired_at IS NULL",
+            rusqlite::params![canary_ct, probe],
+        )
+        .unwrap();
     }
 
     fn insert_v1_row(conn: &Connection, id: &str, plaintext: &str, old_key: &[u8; 32]) {
@@ -514,6 +668,7 @@ mod tests {
         let mut conn = fresh_db_with_ledger_and_audit_and_keys();
         let old = [1u8; 32];
         let new = [2u8; 32];
+        seed_v1_ledger_for(&conn, &old);
         let (rows, retired_at) = rekey_inner(&mut conn, &old, &new).unwrap();
         assert_eq!(rows, 0);
         assert!(!retired_at.is_empty());
@@ -546,6 +701,7 @@ mod tests {
         let mut conn = fresh_db_with_ledger_and_audit_and_keys();
         let old = [3u8; 32];
         let new = [4u8; 32];
+        seed_v1_ledger_for(&conn, &old);
         insert_v1_row(&conn, "row-1", "sk-openai-aaaa", &old);
         insert_v1_row(&conn, "row-2", "sk-anthropic-bbbb", &old);
         insert_v1_row(&conn, "row-3", "ghp_github_cccc", &old);
@@ -589,19 +745,25 @@ mod tests {
 
     #[test]
     fn rekey_inner_wrong_old_key_rolls_back_everything() {
-        // The atomicity test: feed in the wrong old key. The first
-        // row's decrypt fails → ROLLBACK → ledger unchanged, rows
-        // unchanged. War-room D fail-fast invariant.
+        // The atomicity test: feed in the wrong old key.
+        //
+        // v2.15.0 (war_room 2EAAE58B finding #2): the precondition
+        // CATCHES the wrong key at the CANARY stage before touching any
+        // llm_api_keys row — better than the pre-rework behavior where
+        // the first row's decrypt failure forced ROLLBACK (rollback was
+        // correct but ran AFTER touching data). row_id is now "canary"
+        // because the canary is verified first.
         let mut conn = fresh_db_with_ledger_and_audit_and_keys();
         let real_old = [5u8; 32];
         let wrong_old = [99u8; 32];
         let new = [6u8; 32];
+        seed_v1_ledger_for(&conn, &real_old);
         insert_v1_row(&conn, "row-1", "secret-value", &real_old);
 
         let err = rekey_inner(&mut conn, &wrong_old, &new).unwrap_err();
         match err {
-            RekeyError::DecryptFailed { row_id, .. } => assert_eq!(row_id, "row-1"),
-            other => panic!("expected DecryptFailed, got {:?}", other),
+            RekeyError::DecryptFailed { row_id, .. } => assert_eq!(row_id, "canary"),
+            other => panic!("expected DecryptFailed at canary, got {:?}", other),
         }
 
         // v1 still active in ledger (rollback).
@@ -667,6 +829,7 @@ mod tests {
         .unwrap();
         let old = [7u8; 32];
         let new = [8u8; 32];
+        seed_v1_ledger_for(&conn, &old);
         let (rows, _) = rekey_inner(&mut conn, &old, &new).unwrap();
         assert_eq!(rows, 0, "v0 row must not be touched by rekey");
         let kv: String = conn
@@ -684,6 +847,7 @@ mod tests {
         let mut conn = fresh_db_with_ledger_and_audit_and_keys();
         let old = [10u8; 32];
         let new = [11u8; 32];
+        seed_v1_ledger_for(&conn, &old);
         insert_v1_row(&conn, "row-1", "secret", &old);
         let _ = rekey_inner(&mut conn, &old, &new).unwrap();
 
@@ -718,5 +882,80 @@ mod tests {
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 32);
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // v2.15.0 — new tests pinning the war_room 2EAAE58B rework.
+
+    #[test]
+    fn rekey_inner_refuses_when_canary_is_null() {
+        // Codex finding #3: the pre-2.14.3 NULL-canary bypass was too
+        // permissive — rekey now must refuse, instructing the user to
+        // relaunch so encryption::ensure_canary_initialized() backfills.
+        let mut conn = fresh_db_with_ledger_and_audit_and_keys();
+        // Intentionally DON'T call seed_v1_ledger_for(). The fixture
+        // leaves canary_ciphertext NULL, which is the pre-2.14.3 state.
+        let old = [13u8; 32];
+        let new = [14u8; 32];
+        let err = rekey_inner(&mut conn, &old, &new).unwrap_err();
+        match err {
+            RekeyError::DecryptFailed { row_id, context } => {
+                assert_eq!(row_id, "canary");
+                assert!(
+                    context.contains("Relaunch ATO"),
+                    "error must instruct user to relaunch: {}",
+                    context
+                );
+                assert!(
+                    context.contains("resolves the master key"),
+                    "error must explain that simple relaunch isn't enough — must also trigger key resolution: {}",
+                    context
+                );
+            }
+            other => panic!("expected DecryptFailed at canary, got {:?}", other),
+        }
+        // Ledger state must be unchanged (no v2 row, v1 still active).
+        let v2_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM master_key_ledger WHERE version='v2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v2_count, 0, "no v2 row may exist when precondition fails");
+    }
+
+    #[test]
+    fn rekey_inner_refuses_when_probe_does_not_match() {
+        // Codex finding #2: probe_match must be verified in-band as
+        // CLAUSE 2 of the single precondition. If the canary decrypts
+        // correctly but the stored probe disagrees, that's ledger
+        // tampering or stale state — abort.
+        let mut conn = fresh_db_with_ledger_and_audit_and_keys();
+        let old = [15u8; 32];
+        let new = [16u8; 32];
+        // Seed the canary so CLAUSE 1 passes...
+        let canary_ct = encrypt_with_key(crate::encryption::CANARY_PLAINTEXT, &old).unwrap();
+        // ...but override the probe to a value that won't match probe_hash(old).
+        conn.execute(
+            "UPDATE master_key_ledger
+                SET canary_ciphertext = ?1,
+                    identity_probe    = 'deliberately-wrong-probe-deadbeef'
+              WHERE version = 'v1' AND retired_at IS NULL",
+            rusqlite::params![canary_ct],
+        )
+        .unwrap();
+
+        let err = rekey_inner(&mut conn, &old, &new).unwrap_err();
+        match err {
+            RekeyError::DecryptFailed { row_id, context } => {
+                assert_eq!(row_id, "probe");
+                assert!(
+                    context.contains("probe_hash mismatch"),
+                    "error must explain probe mismatch: {}",
+                    context
+                );
+            }
+            other => panic!("expected DecryptFailed at probe, got {:?}", other),
+        }
     }
 }

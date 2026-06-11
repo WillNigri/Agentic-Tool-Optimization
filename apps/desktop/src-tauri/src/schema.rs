@@ -173,7 +173,13 @@ pub fn init_database(conn: &Connection) {
             source            TEXT NOT NULL DEFAULT 'keychain',
             created_at        TEXT NOT NULL,
             retired_at        TEXT,
-            notes             TEXT
+            notes             TEXT,
+            -- v2.14.3 — encrypted canary used by rekey to validate the
+            -- old-key candidate before any destructive operation.
+            -- Plaintext is a fixed string (CANARY_PLAINTEXT in encryption.rs);
+            -- the column holds its ciphertext under THIS row master key.
+            -- NULL on pre-2.14.3 rows; backfilled on first v2.14.3 launch.
+            canary_ciphertext TEXT
         );
         CREATE TABLE IF NOT EXISTS agents (
             id            TEXT PRIMARY KEY,
@@ -1714,6 +1720,12 @@ pub fn init_database(conn: &Connection) {
             WHERE enabled = 1",
         [],
     );
+
+    // v2.14.3 — master_key_ledger canary column. NULL on pre-2.14.3 rows;
+    // backfilled on first call to encryption::master_key() when a
+    // valid key is fetched from the keychain. The canary lets rekey
+    // assert it has the right "old key" before destructive ops.
+    let _ = conn.execute("ALTER TABLE master_key_ledger ADD COLUMN canary_ciphertext TEXT", []);
 }
 
 #[cfg(test)]
