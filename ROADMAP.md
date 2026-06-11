@@ -223,6 +223,47 @@ Sully (@SullyOmarr) flagged on X (10/06/2026) that with Fable-class models no lo
 
 **v2.16 dependency added 2026-06-11 (driver clarification):** Missions coordinate *multiple coding agents working in different worktrees, all merged as a team by the coordinator.* Today only CLI runtimes (claude/codex/gemini CLI) can edit/write code; API providers (anthropic, openai, google, minimax) have read_file + grep only in `api_dispatch_tools.rs`. **PR-1.5 adds edit_file/write_file/list_dir/git_status/git_diff/scoped-bash to the API-provider tool loop** — required before PR-4 (coordinator tick) so any runtime can be a Mission worker. Without it, Missions are limited to a 3-runtime team and the Fable-wedge value (cheapest-model-per-step across all providers) is gutted. See `docs/v2.16-missions.md` § "API-providers-as-coding-agents" for the tool table and security model.
 
+**v2.16 schema refinements adopted 2026-06-11 (gemini round-3 war-room):**
+
+| Refinement | Why | Where in doc |
+|---|---|---|
+| `cleanup_policy` field on missions (`retain` / `delete_on_success` / `always_delete`) | Gemini's "biter" — without it, `per_agent_worktree` mode fills `~/.ato/missions/<slug>/worktrees/` on disk and clutters `git worktree list` forever | docs/v2.16-missions.md schema block |
+| `success_criteria` JSON entries now include programmatic `check_command` (exit-0 in workspace_root = met) | Text-only criteria are hallucinatable; check_command makes "complete" verifiable | docs/v2.16-missions.md schema |
+| `max_loops` + `token_budget_usd` fields | Bounded resource consumption per Mission so stuck `in_progress` can't burn $$$. Coordinator tick refuses to spawn beyond `max_loops`; aggregates `execution_logs.cost_usd` against budget | docs/v2.16-missions.md schema |
+| `result_metadata` JSON field | Declarative outputs — PR URL, artifact paths, summary. Coordinator writes on completion | docs/v2.16-missions.md schema |
+| `mission_id` nullable on related rows; Mission ↔ Loop link in `mission_events.payload.loop_run_id`, NOT a `loop_runs.mission_id` FK | Standalone v2.14 loops keep working without a Mission parent | docs/v2.16-missions.md schema |
+| Concurrency rule: `single_cwd` + parallel agents UNSAFE by default — coordinator tick refuses >1 in-flight Dispatch under a `single_cwd` Mission unless `--allow-concurrent-single-cwd` is set | Two agents running `cargo build` in same dir race on `target/` etc | docs/v2.16-missions.md concurrency rules |
+| Dispatch signature MUST carry explicit `workspace_root` for `per_agent_worktree` Missions | Seam exists in `paused_dispatches.workspace_root` from v2.15.4 — extend to `dispatch::run()` in PR-1.5 | docs/v2.16-missions.md concurrency rules |
+
+**Two gemini-round-3 misreads explicitly rejected in the doc:**
+- `merge_strategy` is the **coordinator integration strategy** (`human_approves_each` / `coordinator_merges_all` / `coordinator_picks_winner` / `ranked_by_score`), NOT git mechanics (squash/merge/ff/rebase). Don't conflate.
+- `category` is **operational policy** (gates coordinator behavior), NOT organizational metadata. Removing it collapses the Steinberger triage primitive.
+
+### v2.15.x — URGENT blocker: encryption save flow hardcodes v1 ledger version (orphans EVERY new key)
+
+**Discovered 2026-06-11 during v2.16 war-room dispatch:** `apps/desktop/src-tauri/src/encryption.rs:42-43` hardcodes:
+
+```rust
+const MASTER_KEY_ACCOUNT_FALLBACK: &str = "master_key_v1";
+const VERSION_PREFIX: &str = "v1:";
+```
+
+**Impact:** Every UI Save in Settings → API Keys encrypts under v1 keychain entry + writes `v1:` prefix even when v2 is the active ledger version. The next master key rotation orphans the row. Re-entering the key doesn't help — the new ciphertext is ALSO v1, so it'll orphan on the next rotation too. Currently breaks war-room dispatches that need API-provider keys (gemini hit this twice tonight; minimax key only works because it was entered before the v1→v2 transition; google key was orphaned and re-orphaned even after re-entering).
+
+**Fix (queued as task #31, URGENT):**
+1. Replace `VERSION_PREFIX` constant with a function that reads `master_key_ledger` for `retired_at IS NULL` and returns `"v{N}:"`.
+2. Replace `MASTER_KEY_ACCOUNT_FALLBACK` similarly — use active ledger's `keychain_account`.
+3. Backfill migration: scan `llm_api_keys` for `v1:` rows when v1 is retired; alert + offer "re-encrypt under current key" recovery flow.
+4. Regression test in `apps/desktop/src-tauri/src/encryption_tests.rs`: after `master_key_ledger` has retired v1 + active v2, `encrypt()` writes `v2:` prefix and reads from the v2 keychain account.
+
+War-room before code lands (security boundary). Estimated effort: 1-2h focused work + war-room. **Must ship before v2.16 PR-1.5** because PR-1.5 (API provider write tool surface) will dispatch to API providers heavily; orphaned keys break that path.
+
+**The queued `session-master-key-pr2..pr6` branches are NOT the fix** — PR-2 inspected on 2026-06-11 turns out to be a -56977-LOC scope-cut cleanup, not the save-flow migration. The fix is a surgical change in `encryption.rs`, not the chained PR merge. Task #31 reflects this.
+
+### v2.15.x — UX gap: read-time error message doesn't acknowledge the save-flow bug
+
+Today's `byok.rs::read_active_key` error message (line 71-81) advises users to "re-enter the {provider} API key in ATO → Settings → API Keys" — but with the save-flow bug, re-entering doesn't actually fix the orphan. The advice is unintentionally misleading. Fix when task #31 lands: update the error message to acknowledge that re-entry is only effective AFTER the encryption.rs fix ships, and recommend the env-var BYOK bypass (`GEMINI_API_KEY=... ato dispatch gemini ...`) as the interim workaround.
+
 ### v2.16+ — Collison gap-matrix items still open
 
 From the 2026-06-10 Collison/Steinberger gap-matrix conversation, items still not shipped:
