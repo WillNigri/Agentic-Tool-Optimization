@@ -157,6 +157,60 @@ pub fn publish_dispatch_exhausted(
     }
 }
 
+/// Publish a DispatchResumed event (v2.15.4 — pause-and-wake). Fired when
+/// a paused dispatch is woken at its reset_at and successfully re-fired
+/// (or, if outcome="re_paused"/"abandoned", when the resume attempt found
+/// the runtime still exhausted and bumped pause_count). One source of
+/// truth: events_log is consumed by the desktop modal, the CLI status
+/// view, and the future scheduler dashboard.
+pub fn publish_dispatch_resumed(
+    conn: &Connection,
+    paused_dispatch_id: &str,
+    runtime: &str,
+    outcome: &str,        // "resumed" | "re_paused" | "abandoned"
+    pause_count: i64,
+    reset_at: Option<&str>,
+    occurred_at: &str,
+) {
+    let table_exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='events_log'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if table_exists == 0 {
+        return;
+    }
+    let payload = serde_json::json!({
+        "type": "dispatch_resumed",
+        "event_seq": 0_u64,
+        "paused_dispatch_id": paused_dispatch_id,
+        "runtime": runtime,
+        "outcome": outcome,
+        "pause_count": pause_count,
+        "reset_at": reset_at,
+        "occurred_at": occurred_at,
+    });
+    let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+    if let Ok(seq) = insert_event_row(conn, "dispatch_resumed", &payload_str, occurred_at) {
+        let final_payload = serde_json::json!({
+            "type": "dispatch_resumed",
+            "event_seq": seq,
+            "paused_dispatch_id": paused_dispatch_id,
+            "runtime": runtime,
+            "outcome": outcome,
+            "pause_count": pause_count,
+            "reset_at": reset_at,
+            "occurred_at": occurred_at,
+        });
+        let _ = conn.execute(
+            "UPDATE events_log SET payload = ?1 WHERE event_seq = ?2",
+            rusqlite::params![final_payload.to_string(), seq],
+        );
+    }
+}
+
 /// Publish a ReplayDone event.
 pub fn publish_replay_done(
     conn: &Connection,

@@ -1756,6 +1756,67 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE execution_logs ADD COLUMN exhaustion_audit TEXT",
         [],
     );
+
+    // v2.15.4 — pause-and-wake scheduler (war_room E063A89E).
+    //
+    // Codex's amendments to the initial design:
+    //   - paused_dispatches is AUTHORITATIVE storage; loop_runs.paused_until
+    //     is a cheap mirror for Loop UX queries.
+    //   - Pause-and-wake is loops-only in v2.15.4; standalone CLI dispatches
+    //     with the policy degrade to stop-and-notify with a clearer error.
+    //   - Wake via one-shot OS jobs (launchd plist on macOS) registered
+    //     per paused dispatch — no always-on daemon dependency. Cron.rs
+    //     already has the per-OS builders to extract.
+    //   - Hardcoded pause_count cap of 3 per row as a reliability guard
+    //     against infinite re-pause cycles (not a user-facing setting).
+    //   - At wake time, the resumer CLAIMS the row transactionally
+    //     (status: paused → resuming) and RE-RUNS the quota pre-flight
+    //     against runtime_quotas instead of trusting the stale reset_at.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS paused_dispatches (
+            id              TEXT PRIMARY KEY,
+            runtime         TEXT NOT NULL,
+            reset_at        TEXT NOT NULL,
+            loop_run_id     TEXT,
+            step_id         TEXT,
+            prompt          TEXT NOT NULL,
+            model           TEXT,
+            agent_slug      TEXT,
+            workspace_root  TEXT,
+            pause_count     INTEGER NOT NULL DEFAULT 1,
+            max_pause_count INTEGER NOT NULL DEFAULT 3,
+            status          TEXT NOT NULL DEFAULT 'paused',
+            paused_at       TEXT NOT NULL,
+            resumed_at      TEXT,
+            abandoned_at    TEXT,
+            audit_json      TEXT,
+            created_at      TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paused_dispatches_status_reset
+            ON paused_dispatches(status, reset_at)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paused_dispatches_loop_run
+            ON paused_dispatches(loop_run_id)
+            WHERE loop_run_id IS NOT NULL",
+        [],
+    );
+
+    // Cheap mirror columns on loop_runs so Loop Composer UI can query
+    // "paused" status + sort by paused_until without joining
+    // paused_dispatches. Authoritative state stays in paused_dispatches.
+    let _ = conn.execute(
+        "ALTER TABLE loop_runs ADD COLUMN paused_until TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE loop_runs ADD COLUMN paused_dispatch_id TEXT",
+        [],
+    );
 }
 
 #[cfg(test)]

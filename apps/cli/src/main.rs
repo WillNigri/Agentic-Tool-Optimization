@@ -35,6 +35,10 @@ mod tier;
 // binary for keychain-bound API providers.
 mod cli_path;
 mod review_tools;
+// v2.15.4 — pause-and-wake persistence + lifecycle (war_room E063A89E).
+// Authoritative storage for paused_dispatches table; loop_runs has
+// mirror columns for fast queries. See module header for the full design.
+mod paused_dispatches;
 mod daemon;
 mod db;
 mod events_publisher;

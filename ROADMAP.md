@@ -155,11 +155,42 @@ This is distinct from v2.15.1 retry (which handles transient 503/429 over second
 | **Fallback chain** — define per-runtime fallback chain (codex → openai API → claude, etc.) | Per-loop config: `--fallback-chain codex,openai,claude`. On exhaustion, swap the seat for the next runtime in the chain that still has capacity. | Goodhart-defense caveat: silent runtime swaps could change output quality. Default to `fallback-with-warning` (the receipt records the swap; loop continues but the audit notes it). |
 | **Audit** — record exhaustion event + recovery action + eventual recovery | Extend `execution_logs.attempt_summary` JSON to include `exhaustion_event { runtime, reset_at, recovery_action }`. | Per-Mission view should highlight Missions that paused (so a human can intervene before the wake-fire if needed). |
 
-Open-core classification deferred until design slice. Initial guess: detection + pause-and-wake live in OSS (Free primitive); cloud-coordinated fallback-chain dispatching across paid runtimes is Pro (Mission's hosted execution).
+**Shipped status (2026-06-11):**
+
+| Layer | Version | Shipped where |
+|---|---|---|
+| Detection — per-runtime classifier (codex / claude / openai / anthropic / google / minimax) | v2.15.2 | OSS (`apps/cli/src/quota.rs`) |
+| Policy storage + `ExhaustionPolicy` enum (AskOrDefault / StopAndNotify / FallbackChain / PauseAndWake) | v2.15.2 | OSS |
+| Fallback chain — walk user-ordered peers, skip exhausted, swap seat with audit-receipt | v2.15.2 | OSS (`select_fallback_runtime` in quota.rs) |
+| Settings → Resilience UI + drag-to-reorder + two-stage consent + onboarding tip | v2.15.3 | OSS (`apps/desktop/src/components/Resilience/`) |
+| **Pause-and-wake** — `paused_dispatches` table + module CRUD + `StepError::Paused` arm + `ato loop resume <id>` + `ato loop resume-due` startup scanner + `publish_dispatch_resumed` event | v2.15.4 | OSS |
+| **Abandon decision brief** — when pause_count > max_pause_count, emit runtime + history + recommended next actions (not just `status='error'`) | v2.15.4 | OSS |
+
+**v2.15.4+ PRO extensions (queued in ato-cloud, NOT this repo):**
+
+- Cross-device pause/resume sync (pause on laptop → resume on desktop)
+- Online dashboard of paused dispatches across all your machines
+- Push notification when a paused dispatch resumes
+- **Hosted scheduler webhook** — fires resume at `reset_at` even if your laptop is asleep (the reliability promise on top of the local startup scanner)
+- Pause-and-wake analytics (cost saved by waiting, pause patterns by runtime, cross-loop trends)
+- Team-shared paused work + group orchestration
+- Hosted judge LLM for "did the resumed run pass the rubric"
+
+Open-core split locked 2026-06-11 — see [feedback_v2_15_4_open_core_split](https://github.com/.../memory) for the policy rule.
 
 ---
 
+### Why v2.15.x matters more now — Sully (Fable) thesis (2026-06-11)
 
+Sully (@SullyOmarr) flagged on X (10/06/2026) that with Fable-class models no longer subsidized, post-subsidy AI bills are about to 5x. This sharpens ATO's positioning:
+
+- **The v2.10 model-level optimization engine** (pricing registry, tiered recommend, autotest, judge) was built for exactly this world. When token-per-output cost stops being free-money, picking the cheapest model that passes the rubric stops being a curiosity and becomes the dashboard.
+- **v2.15.x resilience layer** prevents the failure mode about to spike: subscription exhausted → loop dies → human babysits. Pause-and-wake + fallback-chain mean the loop continues. The v2.15.4 abandon brief means when it can't continue, the user gets a usable next-step prescription.
+- **Steinberger's two codex-loop skills** (maintainer-orchestrator + github-project-triage, OSS'd 2026-06-10) validate the loop-shape direction AND explicitly punt on model selection ("Do not set or request a custom model; omit model selection and inherit the platform default."). That's the wedge ATO closes.
+
+**Positioning lead-line for v2.16 Missions:** NOT "scheduled loops" (Steinberger has those). The line is **"loops that pick the right model per step, with receipts."** The Fable shift makes this urgent in a way it wasn't 6 months ago.
+
+---
 
 ### v2.16 — Missions (proactive coordinator class)
 
@@ -173,7 +204,22 @@ Open-core classification deferred until design slice. Initial guess: detection +
 | **Approval gates** — human approves mid-flight LLM contributions before next LLM picks up | War-room synthesis is end-of-flight; Missions need mid-flight | Planned |
 | **Provenance trail** — which LLM contributed which line, surfaced per-Mission | Already in file_attribution; needs Mission-scoped view | Planned |
 
-Open-core classification deferred to v2.16 design slice. Likely shape: Mission primitives + local single-user Missions are Free; multi-user Mission collaboration + cloud-coordinated Mission orchestration are Pro/Team.
+**Design decisions locked 2026-06-11 from Steinberger maintainer-orchestrator + github-project-triage skill teardown:**
+
+| Decision | Choice | Why |
+|---|---|---|
+| **Triage taxonomy** | 4 categories: `autonomous` / `needs_owner` / `ignored` / `done` | Steinberger uses 3 (autonomous / needs-owner / ignored); we add `done` to close the lifecycle. The **"ignored by owner"** category is the surprise — items the owner has explicitly told the system to skip stay visible and open, never silently closed. New primitive. |
+| **No-subdelegation rule** | Missions can spawn Dispatches; Dispatches CANNOT spawn Missions | Both Steinberger skills enforce this. Without it, blast radius and cost compound unpredictably. Documented as a deliberate constraint in `docs/v2.16-missions.md` when the design slice lands. |
+| **Decision briefs on escalation** | When a Mission asks the owner for a decision, it emits a brief — tradeoffs, proof state, recommendation, exact choices — not a URL. | Steinberger: *"Never ask for land/delete, approval, access, waiver, or a product choice with only a URL or status label."* v2.15.4 already implements this for the pause-and-wake abandon path; v2.16 generalizes the pattern. |
+| **Live proof before landing** | External-integration steps require authenticated live calls, not mocks. | Steinberger: *"Mocks, fixtures, protocol captures, route-existence checks supplement live proof; they do not replace it."* Our v2.10 methodology runner already does this for rubric-pass gating; v2.16 borrows the language for docs. |
+| **Persistent narrative alongside DB** | Each Mission gets a `~/.ato/missions/<slug>.md` running narrative AND a SQLite row | Steinberger's `~/oss-orchestrator.md` bets on owner-inspectability. We get both — query-ability + `cat <mission>.md` to see the history without booting desktop. |
+| **Pre-flight on resume** | When a paused Mission step wakes, re-verify pre-conditions (rate limit cleared, key still valid, git state still clean) before re-firing | Codex amendment to v2.15.4 + Steinberger's stateless-re-inspection pattern. Already shipped in v2.15.4 `run_resume`. |
+| **Mission-control UI** | Basic local-single-machine board ships OSS. Cross-machine + cross-team aggregated control room ships in ato-cloud as PRO. | Will-confirmed 2026-06-11. |
+
+**Open-core split locked 2026-06-11:**
+
+- **OSS (this repo):** Mission primitive (table + state machine), local Mission-control board (single machine), CLI (`ato missions ...`), all 4 categories incl. `ignored`, decision-brief output, narrative markdown file, no-subdelegation enforcement.
+- **PRO (ato-cloud):** Cross-machine Mission aggregation board, hosted scheduler (Missions wake even if laptop asleep), team-shared Missions, online improvements loop running against shared corpus, push notifications on Mission state transitions, hosted judge LLM for Mission rubric-pass gating, Mission analytics + cost dashboards.
 
 ### v2.16+ — Collison gap-matrix items still open
 

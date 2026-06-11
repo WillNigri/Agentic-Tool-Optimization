@@ -104,6 +104,21 @@ pub enum LoopSub {
         #[command(subcommand)]
         sub: RunsSub,
     },
+    /// Resume a paused dispatch (v2.15.4). Claims the row transactionally
+    /// (paused → resuming), re-verifies that reset_at has passed and the
+    /// runtime is no longer flagged exhausted in `subscription_resets`,
+    /// then re-fires the dispatch. If the runtime is still exhausted at
+    /// wake time, the row is re-paused with a fresh reset_at and the
+    /// pause_count is incremented; if pause_count exceeds max_pause_count
+    /// the row is abandoned and the owning loop_run is failed with a
+    /// decision brief (runtime, history, recommended next action).
+    Resume {
+        paused_dispatch_id: String,
+    },
+    /// Scan for paused dispatches whose reset_at has passed and resume
+    /// each one. Designed to be called from a launchd / cron tick or
+    /// from `ato` startup. Walks oldest-first.
+    ResumeDue,
     /// Recurring schedules for a loop. v2.14.0 ships the SQLite-backed
     /// surface (create / list / delete) so the contract is honest; the
     /// `launchd` plist registration that fires the loop at the cron
@@ -364,6 +379,8 @@ pub fn run(args: LoopArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
         }
         LoopSub::Delete { slug_or_id } => run_delete(slug_or_id, db_path, opts),
         LoopSub::Run { slug_or_id, vars } => run_execute(slug_or_id, vars, db_path, opts),
+        LoopSub::Resume { paused_dispatch_id } => run_resume(&paused_dispatch_id, db_path, opts),
+        LoopSub::ResumeDue => run_resume_due(db_path, opts),
         LoopSub::Schedule { sub } => match sub {
             ScheduleSub::Create { slug_or_id, cron } => run_schedule_create(slug_or_id, cron, db_path, opts),
             ScheduleSub::List { slug_or_id } => run_schedule_list(slug_or_id, db_path, opts),
@@ -768,6 +785,10 @@ fn run_execute(
     let mut last_error: Option<String> = None;
     let mut steps_succeeded: usize = 0;
     let mut steps_executed: usize = 0;
+    // v2.15.4 — populated when a step returns StepError::Paused; signals
+    // the post-loop status writer to set loop_runs.status='paused' (not
+    // success/error) and to emit a resume-hint summary.
+    let mut paused_signal: Option<(String, String, String)> = None;
 
     // Walk nodes in topological order so edge dependencies are honored.
     // Falls back to declaration order if the graph is edgeless or cyclic
@@ -792,7 +813,7 @@ fn run_execute(
             emit_human(&format!("→ step {} ({}) running …", node.id, node.node_type));
         }
 
-        let result = execute_step(node, db_path, opts);
+        let result = execute_step(node, &run_id, &step_id, db_path, opts);
         let step_finished = chrono::Utc::now().to_rfc3339();
 
         match result {
@@ -858,6 +879,46 @@ fn run_execute(
                 // on error, retry, branch to catch) lands in v2.14.1.
                 break;
             }
+            Err(StepError::Paused {
+                paused_dispatch_id,
+                runtime: paused_runtime,
+                reset_at,
+            }) => {
+                // v2.15.4 — subscription exhausted, policy=pause-and-wake.
+                // Mark the step + run as paused (not error) and mirror the
+                // paused_dispatch id onto loop_runs so the resumer can find
+                // this run via either side. Exit the loop cleanly — the
+                // resumer (CLI or startup scanner) re-fires this step at
+                // reset_at via `ato loop resume <paused-dispatch-id>`.
+                conn.execute(
+                    "UPDATE loop_run_steps
+                        SET status = ?1, finished_at = ?2, error = ?3
+                      WHERE id = ?4",
+                    params![
+                        "paused",
+                        step_finished,
+                        format!(
+                            "paused on {}; reset_at={}; resume via `ato loop resume {}`",
+                            paused_runtime, reset_at, paused_dispatch_id
+                        ),
+                        step_id
+                    ],
+                )?;
+                conn.execute(
+                    "UPDATE loop_runs
+                        SET paused_until = ?1, paused_dispatch_id = ?2
+                      WHERE id = ?3",
+                    params![reset_at, paused_dispatch_id, run_id],
+                )?;
+                if opts.human {
+                    emit_human(&format!(
+                        "  ⏸ step {} ({}) paused — {} exhausted until {} (paused_dispatch={})",
+                        node.id, node.node_type, paused_runtime, reset_at, paused_dispatch_id
+                    ));
+                }
+                paused_signal = Some((paused_dispatch_id, paused_runtime, reset_at));
+                break;
+            }
         }
     }
 
@@ -868,10 +929,17 @@ fn run_execute(
     // - success if at least one step actually executed and succeeded
     // - skipped if NO step succeeded but no step failed (e.g. all
     //   LLM-aware kinds still stubbed, or the loop is empty)
-    let (status, error_col): (&str, Option<String>) = match (&last_error, steps_succeeded) {
-        (Some(msg), _) => ("error", Some(msg.clone())),
-        (None, 0) => ("skipped", None),
-        (None, _) => ("success", None),
+    let (status, error_col): (&str, Option<String>) = match (&paused_signal, &last_error, steps_succeeded) {
+        (Some((pid, runtime, reset_at)), _, _) => (
+            "paused",
+            Some(format!(
+                "paused on {} until {}; resume via `ato loop resume {}`",
+                runtime, reset_at, pid
+            )),
+        ),
+        (None, Some(msg), _) => ("error", Some(msg.clone())),
+        (None, None, 0) => ("skipped", None),
+        (None, None, _) => ("success", None),
     };
     conn.execute(
         "UPDATE loop_runs
@@ -891,6 +959,9 @@ fn run_execute(
         "steps_executed": steps_executed,
         "steps_succeeded": steps_succeeded,
         "steps_planned": graph.nodes.len(),
+        "paused_dispatch_id": paused_signal.as_ref().map(|(id, _, _)| id.clone()),
+        "paused_runtime": paused_signal.as_ref().map(|(_, r, _)| r.clone()),
+        "paused_until": paused_signal.as_ref().map(|(_, _, ts)| ts.clone()),
     });
 
     if opts.human {
@@ -906,9 +977,18 @@ fn run_execute(
 
 /// One-step result. `Skipped` means the kind isn't implemented yet but
 /// the run continues; `Failed` is a real error and the run breaks here.
+/// `Paused` (v2.15.4) means the step hit subscription exhaustion and was
+/// persisted to `paused_dispatches` for later resume — the loop run
+/// updates its `paused_until` mirror and returns; the resumer (CLI or
+/// startup scanner) picks it up at reset_at.
 enum StepError {
     Skipped(String),
     Failed(String),
+    Paused {
+        paused_dispatch_id: String,
+        runtime: String,
+        reset_at: String,
+    },
 }
 
 impl From<anyhow::Error> for StepError {
@@ -919,12 +999,14 @@ impl From<anyhow::Error> for StepError {
 
 fn execute_step(
     node: &LoopGraphNode,
+    loop_run_id: &str,
+    node_id: &str,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> std::result::Result<serde_json::Value, StepError> {
     let params = graph_params(node);
     match node.node_type.as_str() {
-        "dispatch" => handle_dispatch(&params, db_path, opts),
+        "dispatch" => handle_dispatch(&params, loop_run_id, node_id, db_path, opts),
         "methodology_run" => handle_methodology_run(&params, db_path, opts),
         "diagnose" | "apply" | "review" | "war_room" | "score" | "input" | "output" => {
             Err(StepError::Skipped(format!(
@@ -943,6 +1025,8 @@ fn execute_step(
 
 fn handle_dispatch(
     params: &serde_json::Map<String, serde_json::Value>,
+    loop_run_id: &str,
+    node_id: &str,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> std::result::Result<serde_json::Value, StepError> {
@@ -952,6 +1036,60 @@ fn handle_dispatch(
         .ok_or_else(|| StepError::Failed("dispatch: 'prompt' is required".into()))?;
     let model = param_str(params, "model").map(String::from);
     let agent_slug = param_str(params, "agent_slug").map(String::from);
+
+    // v2.15.4 (war_room E063A89E) — pause-and-wake pre-flight gate.
+    // Before invoking dispatch::run, check if the runtime is currently
+    // rate-limited AND the user's policy is `pause-and-wake`. If so,
+    // persist a paused_dispatches row and bail with StepError::Paused
+    // so the loop runner can record paused_until + pick this up at
+    // reset_at.
+    //
+    // Standalone dispatches (no loop_run_id context) keep the v2.15.2
+    // "degrade to stop-and-notify" behavior in dispatch.rs.
+    if let Ok(Some(resets_at)) = crate::quota::lookup_future(db_path, runtime) {
+        let policy = if let Ok(c) = rusqlite::Connection::open(db_path) {
+            crate::quota::read_exhaustion_policy(&c)
+                .unwrap_or(crate::quota::ExhaustionPolicy::AskOrDefault)
+        } else {
+            crate::quota::ExhaustionPolicy::AskOrDefault
+        };
+        if matches!(policy, crate::quota::ExhaustionPolicy::PauseAndWake) {
+            if let Ok(c) = rusqlite::Connection::open(db_path) {
+                let inserted = crate::paused_dispatches::insert_new(
+                    &c,
+                    crate::paused_dispatches::InsertPausedDispatch {
+                        runtime,
+                        reset_at: &resets_at,
+                        loop_run_id: Some(loop_run_id),
+                        step_id: Some(node_id),
+                        prompt,
+                        model: model.as_deref(),
+                        agent_slug: agent_slug.as_deref(),
+                        workspace_root: None,
+                    },
+                );
+                if let Ok(paused_id) = inserted {
+                    // Emit dispatch_exhausted with policy=pause-and-wake
+                    // and the new paused_dispatch id so observability
+                    // ties the event to the persisted row.
+                    crate::events_publisher::publish_dispatch_exhausted(
+                        &c,
+                        runtime,
+                        &resets_at,
+                        "pause-and-wake",
+                        Some(&paused_id),
+                        None,
+                        &chrono::Utc::now().to_rfc3339(),
+                    );
+                    return Err(StepError::Paused {
+                        paused_dispatch_id: paused_id,
+                        runtime: runtime.to_string(),
+                        reset_at: resets_at,
+                    });
+                }
+            }
+        }
+    }
 
     // Capture the latest execution_logs.id BEFORE the dispatch so we
     // can identify the row this dispatch creates by reading "highest
@@ -1044,6 +1182,275 @@ fn handle_methodology_run(
         "run_id": summary.run_id,
         "status": summary.status,
     }))
+}
+
+// ── Resume (v2.15.4 — pause-and-wake) ─────────────────────────────────
+//
+// Pause-and-wake is OSS primitive — the local lifecycle of a paused
+// dispatch row lives here. The PRO upgrades (cross-machine sync, hosted
+// scheduler that fires even when this laptop is asleep, analytics on
+// pause patterns, team-shared paused work) ship in ato-cloud per
+// docs/tiers.md.
+
+/// Re-fire one paused dispatch. Steinberger-borrow: when we abandon,
+/// emit a decision brief — runtime, what was tried, pause history,
+/// recommended next action — into loop_runs.error AND stderr, not
+/// just status='error'. The maintainer-orchestrator skill's "never
+/// ask with only a URL or status label" rule applied to our exhaustion
+/// path.
+fn run_resume(paused_dispatch_id: &str, db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+
+    // Transactional claim: paused → resuming. Any other status (already
+    // resuming/resumed/abandoned) bails — prevents double-resume races
+    // between the manual CLI and the startup scanner.
+    let row = crate::paused_dispatches::claim_for_resume(&conn, paused_dispatch_id)?;
+
+    // Pre-flight (codex's amendment to v2.15.4): re-verify the runtime
+    // is no longer flagged exhausted before firing. If subscription_resets
+    // still holds a future reset_at, re-pause with that fresh value;
+    // pause_count bumps and may flip to abandoned per max_pause_count.
+    if let Ok(Some(still_resets_at)) = crate::quota::lookup_future(db_path, &row.runtime) {
+        let outcome = crate::paused_dispatches::re_pause_or_abandon(
+            &conn,
+            paused_dispatch_id,
+            &still_resets_at,
+            "wake-time pre-flight: subscription_resets still holds a future reset_at",
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::events_publisher::publish_dispatch_resumed(
+            &conn,
+            paused_dispatch_id,
+            &row.runtime,
+            outcome,
+            row.pause_count + 1,
+            Some(&still_resets_at),
+            &now,
+        );
+
+        if outcome == "abandoned" {
+            // Steinberger-borrow: emit a decision brief, not just a
+            // status. Updates loop_runs.error with a richer narrative
+            // so the user sees what was tried + what to do next.
+            let brief = build_abandon_brief(&row, &still_resets_at);
+            let _ = conn.execute(
+                "UPDATE loop_runs SET error = ?1 WHERE paused_dispatch_id = ?2 OR id = ?3",
+                rusqlite::params![brief.clone(), paused_dispatch_id, row.loop_run_id.clone().unwrap_or_default()],
+            );
+            // Reset the loop_runs row mirror — re_pause_or_abandon already
+            // cleared paused_dispatch_id; we just enriched error.
+            eprintln!("\n{}\n", brief);
+            if opts.human {
+                emit_human(&format!(
+                    "✗ paused dispatch {} ABANDONED on {} — see decision brief above",
+                    paused_dispatch_id, row.runtime
+                ));
+            } else {
+                emit_json(&serde_json::json!({
+                    "paused_dispatch_id": paused_dispatch_id,
+                    "outcome": "abandoned",
+                    "runtime": row.runtime,
+                    "pause_count": row.pause_count + 1,
+                    "decision_brief": brief,
+                }))?;
+            }
+            return Ok(());
+        }
+
+        // outcome == "re_paused"
+        if opts.human {
+            emit_human(&format!(
+                "⏸ paused dispatch {} still exhausted on {} — re-paused until {} (pause_count={})",
+                paused_dispatch_id, row.runtime, still_resets_at, row.pause_count + 1
+            ));
+        } else {
+            emit_json(&serde_json::json!({
+                "paused_dispatch_id": paused_dispatch_id,
+                "outcome": "re_paused",
+                "runtime": row.runtime,
+                "reset_at": still_resets_at,
+                "pause_count": row.pause_count + 1,
+            }))?;
+        }
+        return Ok(());
+    }
+
+    // Runtime is clear — re-fire the original dispatch. Standalone
+    // (loop_run_id=None) and loop-bound paths share the same dispatch
+    // entrypoint; on success we mark_resumed + clear the loop_runs mirror.
+    let fire_result = crate::commands::dispatch::run(
+        &row.runtime,
+        &row.prompt,
+        row.model.clone(),
+        row.agent_slug.clone(),
+        None,  // session_id — paused loop steps don't share a session
+        None,  // war_room_id
+        None,  // war_room_round
+        false, // stream
+        false, // stream_jsonl
+        false, // with_tools — non-interactive
+        db_path,
+        opts,
+    );
+
+    let now = chrono::Utc::now().to_rfc3339();
+    match fire_result {
+        Ok(_) => {
+            crate::paused_dispatches::mark_resumed(
+                &conn,
+                paused_dispatch_id,
+                "wake-time dispatch succeeded",
+            )?;
+            crate::events_publisher::publish_dispatch_resumed(
+                &conn,
+                paused_dispatch_id,
+                &row.runtime,
+                "resumed",
+                row.pause_count,
+                Some(&row.reset_at),
+                &now,
+            );
+            if opts.human {
+                emit_human(&format!(
+                    "✓ paused dispatch {} resumed on {}",
+                    paused_dispatch_id, row.runtime
+                ));
+            } else {
+                emit_json(&serde_json::json!({
+                    "paused_dispatch_id": paused_dispatch_id,
+                    "outcome": "resumed",
+                    "runtime": row.runtime,
+                }))?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // Dispatch failed at wake — could be transient (network,
+            // 5xx) or could be a fresh exhaustion not yet reflected in
+            // subscription_resets. We leave the row in 'resuming' so a
+            // future scan or manual re-resume picks it up; the caller
+            // sees the error so they can decide. (Don't mark_resumed —
+            // that would lie about success.)
+            anyhow::bail!(
+                "wake-time dispatch failed for paused {} ({}): {:#}",
+                paused_dispatch_id,
+                row.runtime,
+                err
+            )
+        }
+    }
+}
+
+/// Scan for paused dispatches whose reset_at has passed; resume each.
+/// Designed to be safe to call on every CLI startup AND from a launchd
+/// tick — list_due reads only rows in status='paused' so already-claimed
+/// rows are skipped. Failures of one row don't block the rest.
+fn run_resume_due(db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let conn = db::open_readonly(db_path)?;
+    let due_ids = crate::paused_dispatches::list_due(&conn)?;
+    drop(conn);
+
+    if due_ids.is_empty() {
+        if opts.human {
+            emit_human("No paused dispatches are due to resume.");
+        } else {
+            emit_json(&serde_json::json!({
+                "scanned": 0,
+                "resumed": 0,
+                "outcomes": [],
+            }))?;
+        }
+        return Ok(());
+    }
+
+    let mut outcomes: Vec<serde_json::Value> = Vec::new();
+    for id in &due_ids {
+        match run_resume(id, db_path, opts) {
+            Ok(()) => {
+                outcomes.push(serde_json::json!({
+                    "paused_dispatch_id": id,
+                    "ok": true,
+                }));
+            }
+            Err(err) => {
+                outcomes.push(serde_json::json!({
+                    "paused_dispatch_id": id,
+                    "ok": false,
+                    "error": format!("{:#}", err),
+                }));
+                if opts.human {
+                    emit_human(&format!(
+                        "  ✗ resume failed for {} — {}",
+                        id, err
+                    ));
+                }
+            }
+        }
+    }
+
+    if opts.human {
+        emit_human(&format!(
+            "Scanned {} due paused dispatches; see per-row outcomes above.",
+            due_ids.len()
+        ));
+    } else {
+        emit_json(&serde_json::json!({
+            "scanned": due_ids.len(),
+            "resumed": outcomes.iter().filter(|o| o["ok"].as_bool() == Some(true)).count(),
+            "outcomes": outcomes,
+        }))?;
+    }
+    Ok(())
+}
+
+/// Steinberger-borrow: when a pause-and-wake row is abandoned (pause_count
+/// would exceed max_pause_count), emit a decision brief — not just a
+/// status. The brief names what was tried, the pause history, and the
+/// recommended next action. Maps maintainer-orchestrator's "never escalate
+/// with only a URL or status label" rule onto our exhaustion path.
+fn build_abandon_brief(row: &crate::paused_dispatches::PausedDispatch, last_reset_at: &str) -> String {
+    let agent_line = match &row.agent_slug {
+        Some(slug) => format!("agent={}, ", slug),
+        None => String::new(),
+    };
+    let model_line = match &row.model {
+        Some(m) => format!("model={}, ", m),
+        None => String::new(),
+    };
+    let loop_line = match &row.loop_run_id {
+        Some(lr) => format!("loop_run_id={}, ", lr),
+        None => "standalone, ".to_string(),
+    };
+    format!(
+        "── DECISION BRIEF: pause-and-wake ABANDONED ──\n\
+         paused_dispatch_id: {pid}\n\
+         runtime:            {rt}\n\
+         {agent}{model}{loop_}pause_count: {pc} / max {pcmax}\n\
+         first_paused_at:    {paused_at}\n\
+         last_reset_at:      {last_reset}\n\
+         \n\
+         WHAT WAS TRIED:\n\
+         · Loop step hit subscription exhaustion on {rt}\n\
+         · Policy=pause-and-wake persisted the dispatch and re-attempted at each reset\n\
+         · {pc} consecutive wakes still found {rt} flagged exhausted\n\
+         · Reached max_pause_count={pcmax} — abandoning to surface the decision\n\
+         \n\
+         RECOMMENDED NEXT ACTIONS (pick one):\n\
+         · Switch policy to fallback-chain so peer runtimes pick this work up automatically\n\
+           (Settings → Resilience → Fallback chain; or `ato config set exhaustion-policy fallback-chain`)\n\
+         · Manually re-run with `ato dispatch <other-runtime> '...'` — your fallback order is shown in Settings → Resilience\n\
+         · Inspect the audit trail: `sqlite3 ~/.ato/local.db \"SELECT audit_json FROM paused_dispatches WHERE id='{pid}'\"`\n\
+         · If the runtime is permanently broken (not just exhausted), disable it in Settings → Runtimes\n",
+        pid = row.id,
+        rt = row.runtime,
+        agent = agent_line,
+        model = model_line,
+        loop_ = loop_line,
+        pc = row.pause_count + 1,
+        pcmax = row.max_pause_count,
+        paused_at = row.paused_at,
+        last_reset = last_reset_at,
+    )
 }
 
 // ── Schedules (v2.14.0 — SQLite-backed surface; launchd integration TBD) ──
@@ -1497,5 +1904,93 @@ mod tests {
         // slug path also works, load Loop A by its actual slug.
         let a_via_slug = load_loop(&conn, "real-loop").expect("load by slug");
         assert_eq!(a_via_slug.id, real_id);
+    }
+
+    // v2.15.4 — pause-and-wake decision brief tests.
+    //
+    // Steinberger's maintainer-orchestrator rule: "never ask with only a URL
+    // or status label." When pause-and-wake hits max_pause_count and
+    // abandons, the user needs the brief — runtime, history, recommended
+    // actions — not just `status='error'`.
+
+    fn mk_paused_dispatch(
+        id: &str,
+        runtime: &str,
+        pause_count: i64,
+        max: i64,
+        model: Option<&str>,
+        agent: Option<&str>,
+        loop_run_id: Option<&str>,
+    ) -> crate::paused_dispatches::PausedDispatch {
+        crate::paused_dispatches::PausedDispatch {
+            id: id.into(),
+            runtime: runtime.into(),
+            reset_at: "2026-06-11T12:00:00+00:00".into(),
+            loop_run_id: loop_run_id.map(String::from),
+            step_id: None,
+            prompt: "dispatch payload that does not appear in brief".into(),
+            model: model.map(String::from),
+            agent_slug: agent.map(String::from),
+            workspace_root: None,
+            pause_count,
+            max_pause_count: max,
+            status: "resuming".into(),
+            paused_at: "2026-06-11T08:00:00+00:00".into(),
+            resumed_at: None,
+            abandoned_at: None,
+            audit_json: None,
+            created_at: "2026-06-11T08:00:00+00:00".into(),
+        }
+    }
+
+    #[test]
+    fn abandon_brief_includes_all_critical_fields_and_actions() {
+        let row = mk_paused_dispatch(
+            "pd-abc-123",
+            "codex",
+            3,
+            3,
+            Some("gpt-5"),
+            Some("eng-manager"),
+            Some("lr-42"),
+        );
+        let brief = build_abandon_brief(&row, "2026-06-11T15:00:00+00:00");
+
+        // Names the row + runtime + pause count vs max so the user can
+        // grep audit_json.
+        assert!(brief.contains("pd-abc-123"), "brief must name paused_dispatch_id");
+        assert!(brief.contains("codex"), "brief must name runtime");
+        assert!(brief.contains("4 / max 3"), "brief must show pause_count+1 vs max");
+        assert!(brief.contains("agent=eng-manager"), "brief must surface agent");
+        assert!(brief.contains("model=gpt-5"), "brief must surface model");
+        assert!(brief.contains("loop_run_id=lr-42"), "brief must surface loop linkage");
+        assert!(brief.contains("2026-06-11T08:00:00"), "brief must name first paused_at");
+        assert!(brief.contains("2026-06-11T15:00:00"), "brief must name last reset_at");
+
+        // The decision-brief structure: what was tried + next actions.
+        // Without these the brief is just a status label — which is
+        // exactly what Steinberger's rule prohibits.
+        assert!(brief.contains("WHAT WAS TRIED"), "brief must enumerate what was tried");
+        assert!(brief.contains("RECOMMENDED NEXT ACTIONS"), "brief must offer next steps");
+        assert!(brief.contains("fallback-chain"), "brief must offer the policy switch path");
+        assert!(brief.contains("ato dispatch"), "brief must offer manual retry path");
+        assert!(brief.contains("audit_json"), "brief must point at the audit trail");
+    }
+
+    #[test]
+    fn abandon_brief_handles_standalone_dispatch_without_loop_or_agent_or_model() {
+        let row = mk_paused_dispatch("pd-standalone", "claude", 2, 2, None, None, None);
+        let brief = build_abandon_brief(&row, "2026-06-11T15:00:00+00:00");
+
+        // Standalone dispatches still get a brief.
+        assert!(brief.contains("pd-standalone"));
+        assert!(brief.contains("claude"));
+        assert!(brief.contains("standalone"), "brief must mark non-loop dispatches");
+        // No agent/model lines should leak when those fields are None.
+        assert!(!brief.contains("agent="), "brief must omit agent line when agent_slug is None");
+        assert!(!brief.contains("model="), "brief must omit model line when model is None");
+        // Recommended actions still present — the prescription doesn't
+        // depend on the dispatch shape.
+        assert!(brief.contains("RECOMMENDED NEXT ACTIONS"));
     }
 }
