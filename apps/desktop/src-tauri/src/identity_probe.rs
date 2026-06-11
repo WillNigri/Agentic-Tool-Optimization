@@ -285,10 +285,16 @@ pub fn check_for_mismatch(conn: &Connection, computed_probe: &str) -> ProbeStatu
         );
         return ProbeStatus::NotPopulated;
     }
+    // v2.15.0 Slice B (war_room F293287E codex finding) — read from the
+    // ACTIVE ledger row (retired_at IS NULL), not hardcoded version='v1'.
+    // Pre-rework this kept reading the retired v1 row after any rekey,
+    // so the banner would mis-fire forever once a user rekeyed to v2.
     let stored: Option<Option<String>> = conn
         .query_row(
-            "SELECT identity_probe FROM master_key_ledger WHERE version = ?1",
-            ["v1"],
+            "SELECT identity_probe FROM master_key_ledger
+                WHERE retired_at IS NULL
+             ORDER BY created_at DESC LIMIT 1",
+            [],
             |r| r.get::<_, Option<String>>(0),
         )
         .map(Some)
@@ -505,12 +511,15 @@ pub enum ProbeStatus {
 /// PR-3's future comparison reads it as a legitimate identity
 /// transition. Review war-room 9B1F252F round 2 — claude's note.
 fn populate_active_row_with(conn: &Connection, probe: &str) -> rusqlite::Result<usize> {
+    // v2.15.0 Slice B (war_room F293287E codex finding) — write to the
+    // active ledger row (retired_at IS NULL), not hardcoded version='v1'.
+    // Symmetric with the read site above.
     conn.execute(
         "UPDATE master_key_ledger
             SET identity_probe = ?1
-          WHERE version = ?2
+          WHERE retired_at IS NULL
             AND identity_probe IS NULL",
-        rusqlite::params![probe, "v1"],
+        rusqlite::params![probe],
     )
 }
 

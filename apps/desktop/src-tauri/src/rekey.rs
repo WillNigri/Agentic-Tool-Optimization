@@ -180,6 +180,151 @@ pub fn probe_hash(key_bytes: &[u8; 32]) -> String {
     h[..16].iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// v2.15.0 Slice B (war_room F293287E) — probe resync, non-destructive
+/// state repair for the common case where the user's keychain bytes are
+/// still correct but the ledger's identity_probe has gone stale (e.g.,
+/// after a binary identity swap that re-handshakes the keychain ACL).
+///
+/// Verifies the active ledger row's canary decrypts with `current_key`.
+/// If yes — the keychain bytes really are the master_key that wrote the
+/// active row, so the probe just needs refreshing. UPDATE the active
+/// row's identity_probe to `probe_hash(current_key)` and audit-log the
+/// transition. Returns the OLD probe so the caller can show before/after.
+///
+/// If canary FAILS to decrypt → true key drift; caller falls through to
+/// the destructive rekey path with paste-old-key UX.
+///
+/// Wrapped in BEGIN IMMEDIATE so the canary check + probe UPDATE can't
+/// race a concurrent rekey. The keychain itself can't be locked, but
+/// that's acceptable: if it rotates mid-resync, the next probe cycle
+/// will mismatch again and self-correct.
+pub fn probe_resync(
+    conn: &mut Connection,
+    current_key: &[u8; 32],
+) -> Result<ProbeResyncOutcome, RekeyError> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("busy") {
+                RekeyError::TransactionBusy(msg)
+            } else {
+                RekeyError::LedgerWrite(format!("BEGIN IMMEDIATE for probe_resync: {}", msg))
+            }
+        })?;
+
+    let row: Option<(String, Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT version, canary_ciphertext, identity_probe
+               FROM master_key_ledger
+              WHERE retired_at IS NULL
+           ORDER BY created_at DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)),
+        )
+        .ok();
+    let (active_version, canary_ct, old_probe) = match row {
+        Some(r) => r,
+        None => {
+            return Err(RekeyError::LedgerWrite(
+                "no active ledger row — refusing to resync probe on empty ledger".to_string(),
+            ));
+        }
+    };
+
+    // Verify the active row's canary decrypts with the supplied current
+    // key. This is the authority — the war_room verdict allows the OLD
+    // probe to be ignored here because the whole point is to repair a
+    // stale probe. Canary decryption proves the keychain bytes really
+    // are the master_key for this ledger row.
+    let canary_ct = canary_ct.ok_or_else(|| RekeyError::DecryptFailed {
+        row_id: "canary".to_string(),
+        context: format!(
+            "active ledger row ({}) has NULL canary_ciphertext — \
+             probe_resync requires a backfilled canary. \
+             Relaunch ATO, then trigger a path that resolves the master key \
+             (Settings → API Keys → reveal a stored key, OR a chat dispatch \
+             to a configured API provider). That writes the canary. \
+             Then retry resolve_drift.",
+            active_version
+        ),
+    })?;
+    let payload = canary_ct.strip_prefix(V1_PREFIX).ok_or_else(|| RekeyError::DecryptFailed {
+        row_id: "canary".to_string(),
+        context: "canary_ciphertext missing v1: prefix".to_string(),
+    })?;
+    let decrypted = decrypt_v1_with_key(payload, current_key).map_err(|e| {
+        RekeyError::DecryptFailed {
+            row_id: "canary".to_string(),
+            context: format!(
+                "canary decrypt failed with current keychain bytes — \
+                 keychain bytes do NOT match the master_key that wrote \
+                 the active ledger row's ciphertexts. This is real key drift; \
+                 caller must fall through to destructive rekey with the OLD \
+                 key supplied. Original error: {}",
+                e
+            ),
+        }
+    })?;
+    if decrypted != crate::encryption::CANARY_PLAINTEXT {
+        return Err(RekeyError::DecryptFailed {
+            row_id: "canary".to_string(),
+            context:
+                "canary decrypted but plaintext does not match expected. \
+                 Tampering or subtle key mismatch — probe_resync aborted."
+                    .to_string(),
+        });
+    }
+
+    // Canary verified. UPDATE the probe.
+    let new_probe = probe_hash(current_key);
+    tx.execute(
+        "UPDATE master_key_ledger
+            SET identity_probe = ?1
+          WHERE version = ?2 AND retired_at IS NULL",
+        rusqlite::params![new_probe, active_version],
+    )
+    .map_err(|e| RekeyError::LedgerWrite(format!("UPDATE active row probe: {}", e)))?;
+
+    // Audit log with distinct action name per codex verdict.
+    let resynced_at = chrono::Utc::now().to_rfc3339();
+    let details = serde_json::json!({
+        "active_version": active_version,
+        "old_probe": old_probe,
+        "new_probe": new_probe,
+    })
+    .to_string();
+    let audit_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, action, resource_type, resource_id, resource_name,
+             details, created_at)
+         VALUES (?1, 'master_key_probe_resynced', 'master_key_ledger',
+                 ?2, NULL, ?3, ?4)",
+        rusqlite::params![audit_id, active_version, details, resynced_at],
+    )
+    .map_err(|e| RekeyError::LedgerWrite(format!("audit insert: {}", e)))?;
+
+    tx.commit().map_err(|e| RekeyError::CommitFailed(e.to_string()))?;
+
+    Ok(ProbeResyncOutcome {
+        active_version,
+        old_probe,
+        new_probe,
+        resynced_at,
+    })
+}
+
+/// Result of a successful probe_resync — visible to the caller (Tauri
+/// command + audit consumers) so the UX can show before/after.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeResyncOutcome {
+    pub active_version: String,
+    pub old_probe: Option<String>,
+    pub new_probe: String,
+    pub resynced_at: String,
+}
+
 /// PURE rekey core. Takes both keys explicitly + a SQLite
 /// connection; opens BEGIN IMMEDIATE, re-encrypts every v1 row,
 /// updates the ledger, COMMITs. No keychain access — the outer
@@ -547,6 +692,79 @@ pub fn rekey_master_key(
         *slot = new_status;
     }
     Ok(result)
+}
+
+/// v2.15.0 Slice B (war_room F293287E) — unified drift resolution.
+/// Per codex's alternative design: one UX entry point that auto-attempts
+/// non-destructive probe_resync first and only escalates to destructive
+/// rekey when the canary proves true key drift.
+///
+/// Returns one of three outcomes:
+/// - `Resynced` — non-destructive repair succeeded (most cases)
+/// - `RekeyRequired` — true key drift; caller should show paste-old-key UX
+/// - `NoCanary` — pre-2.15.0 install needs to relaunch + trigger key
+///   resolution first to backfill the canary
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum DriftResolution {
+    Resynced {
+        active_version: String,
+        old_probe: Option<String>,
+        new_probe: String,
+        resynced_at: String,
+    },
+    RekeyRequired {
+        reason: String,
+    },
+    NoCanary {
+        instruction: String,
+    },
+}
+
+#[tauri::command]
+pub fn resolve_master_key_drift(
+    db: tauri::State<'_, crate::DbState>,
+    probe_state: tauri::State<'_, crate::identity_probe::IdentityProbeState>,
+) -> Result<DriftResolution, String> {
+    if std::env::var("ATO_MASTER_KEY_B64")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Err(
+            "drift resolution refused: ATO_MASTER_KEY_B64 env-bypass is active. Unset the env var \
+             and restart the app from the production-signed bundle first."
+                .to_string(),
+        );
+    }
+    let mut conn = db.0.lock().map_err(|e| format!("db lock poisoned: {}", e))?;
+    // The current keychain bytes: we go through the encryption module
+    // so this respects sentinel + timeout + ledger-driven account
+    // resolution (Slice A's invariants).
+    let current_key = crate::encryption::expect_master_key_bytes()
+        .map_err(|e| format!("read current master key bytes: {}", e))?;
+
+    let outcome = match probe_resync(&mut conn, &current_key) {
+        Ok(o) => DriftResolution::Resynced {
+            active_version: o.active_version,
+            old_probe: o.old_probe,
+            new_probe: o.new_probe,
+            resynced_at: o.resynced_at,
+        },
+        Err(RekeyError::DecryptFailed { context, .. }) if context.contains("real key drift") => {
+            DriftResolution::RekeyRequired { reason: context }
+        }
+        Err(RekeyError::DecryptFailed { context, .. }) if context.contains("Relaunch ATO") => {
+            DriftResolution::NoCanary { instruction: context }
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+
+    // Re-run probe cycle so the banner updates without restart.
+    let new_status = crate::identity_probe::run_full_probe_cycle(&conn);
+    if let Ok(mut slot) = probe_state.0.lock() {
+        *slot = new_status;
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -922,6 +1140,110 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v2_count, 0, "no v2 row may exist when precondition fails");
+    }
+
+    #[test]
+    fn probe_resync_updates_active_row_when_canary_decrypts() {
+        // The happy path: current keychain bytes still decrypt the
+        // active row's canary. probe_resync UPDATEs the active row's
+        // identity_probe to probe_hash(current_key) without touching
+        // any ciphertext, writes the audit row, returns success.
+        let mut conn = fresh_db_with_ledger_and_audit_and_keys();
+        let key = [17u8; 32];
+        seed_v1_ledger_for(&conn, &key); // backfills canary + probe
+        // Tamper the stored probe so we can verify it gets REPLACED.
+        conn.execute(
+            "UPDATE master_key_ledger
+                SET identity_probe = 'stale-probe-value'
+              WHERE version = 'v1' AND retired_at IS NULL",
+            [],
+        )
+        .unwrap();
+
+        let outcome = probe_resync(&mut conn, &key).unwrap();
+        assert_eq!(outcome.active_version, "v1");
+        assert_eq!(outcome.old_probe.as_deref(), Some("stale-probe-value"));
+        assert_eq!(outcome.new_probe, probe_hash(&key));
+
+        // Confirm the ledger row was updated.
+        let stored: String = conn
+            .query_row(
+                "SELECT identity_probe FROM master_key_ledger WHERE version = 'v1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, probe_hash(&key));
+
+        // Confirm the audit row was written with the right action name.
+        let (action, details): (String, String) = conn
+            .query_row(
+                "SELECT action, details FROM audit_logs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(action, "master_key_probe_resynced");
+        assert!(details.contains("stale-probe-value"));
+        assert!(details.contains(&probe_hash(&key)));
+    }
+
+    #[test]
+    fn probe_resync_refuses_when_canary_does_not_decrypt() {
+        // True key drift: current keychain bytes do NOT decrypt the
+        // canary. probe_resync MUST refuse (returning DecryptFailed)
+        // so the caller falls through to destructive rekey UX.
+        // No ledger or audit writes should happen.
+        let mut conn = fresh_db_with_ledger_and_audit_and_keys();
+        let real_key = [19u8; 32];
+        let drifted_key = [20u8; 32];
+        seed_v1_ledger_for(&conn, &real_key);
+
+        let err = probe_resync(&mut conn, &drifted_key).unwrap_err();
+        match err {
+            RekeyError::DecryptFailed { row_id, context } => {
+                assert_eq!(row_id, "canary");
+                assert!(
+                    context.contains("real key drift"),
+                    "error must label this as real key drift: {}",
+                    context
+                );
+            }
+            other => panic!("expected DecryptFailed, got {:?}", other),
+        }
+
+        // Ledger unchanged.
+        let stored: String = conn
+            .query_row(
+                "SELECT identity_probe FROM master_key_ledger WHERE version = 'v1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, probe_hash(&real_key));
+
+        // No audit row.
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0);
+    }
+
+    #[test]
+    fn probe_resync_refuses_when_canary_is_null() {
+        // Pre-2.15.0 install: canary NULL → probe_resync can't verify
+        // → refuse with instruction to relaunch + trigger key resolution.
+        let mut conn = fresh_db_with_ledger_and_audit_and_keys();
+        let key = [21u8; 32];
+        // Do NOT call seed_v1_ledger_for — canary stays NULL.
+        let err = probe_resync(&mut conn, &key).unwrap_err();
+        match err {
+            RekeyError::DecryptFailed { row_id, context } => {
+                assert_eq!(row_id, "canary");
+                assert!(context.contains("Relaunch ATO"));
+            }
+            other => panic!("expected DecryptFailed, got {:?}", other),
+        }
     }
 
     #[test]

@@ -92,6 +92,15 @@ fn cache() -> &'static std::sync::RwLock<Option<(String, [u8; 32])>> {
     MASTER_KEY_CACHE.get_or_init(|| std::sync::RwLock::new(None))
 }
 
+/// v2.15.0 Slice B — public accessor for the current master key bytes.
+/// Used by the drift-resolution Tauri command (resolve_master_key_drift)
+/// to obtain the current keychain bytes for canary verification without
+/// going through encrypt/decrypt. Honors the same cache + env-bypass +
+/// ledger lookup as encrypt/decrypt's master_key().
+pub fn expect_master_key_bytes() -> Result<[u8; 32], String> {
+    master_key()
+}
+
 /// v2.14.3 — invalidate the in-process master-key cache. Called by
 /// `rekey.rs` after a successful rekey commits, so the next `encrypt`
 /// / `decrypt` re-reads the active ledger row + keychain entry instead
