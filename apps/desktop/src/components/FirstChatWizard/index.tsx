@@ -243,6 +243,44 @@ export default function FirstChatWizard({
             onAddSubscription={() => goToSettings("runtimes")}
           />
 
+          {/* v2.15.3 (war_room 27522371) — onboarding touchpoint for the
+              new Resilience tab. Per codex: live first-run path is
+              FirstChatWizard, not the retired SetupWizard. A small
+              discovery tip surfaces the new tab without interrupting
+              the war-room flow. Full dedicated onboarding step ships
+              with the v2.15.4 scheduler. */}
+          {enabled.length >= 2 && (
+            <button
+              type="button"
+              onClick={() => {
+                setSubTab("ato.subtab.settings", "resilience");
+                if (onOpenSettings) onOpenSettings();
+                else setSection("settings");
+                onClose();
+              }}
+              className="w-full rounded-md border border-cs-accent/30 bg-cs-accent/5 px-3 py-2.5 text-left text-xs text-cs-text hover:bg-cs-accent/10 transition-colors"
+            >
+              <div className="flex items-start gap-2.5">
+                <span className="text-cs-accent text-base leading-none mt-0.5">↻</span>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">
+                    {t(
+                      "firstChat.resilienceTip.title",
+                      "Optional: configure runtime resilience"
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-cs-muted">
+                    {t(
+                      "firstChat.resilienceTip.body",
+                      "ATO can auto-fallback to another runtime when one exhausts its quota mid-Mission. Worth configuring for unattended loops."
+                    )}
+                  </div>
+                </div>
+                <span className="text-cs-accent text-xs whitespace-nowrap">→</span>
+              </div>
+            </button>
+          )}
+
           {selected.size > 0 && (agentsQuery.data?.length ?? 0) > 0 && (
             <SeatAgentsPicker
               selectedRuntimes={Array.from(selected)}

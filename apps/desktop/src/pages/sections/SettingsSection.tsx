@@ -11,6 +11,7 @@ import {
   Archive,
   Info,
   Loader2,
+  Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import SectionTabs, { type TabDef } from "./SectionTabs";
@@ -30,6 +31,7 @@ const ProjectManager = lazy(() =>
   import("@/components/AgentManager").then((m) => ({ default: m.ProjectManager }))
 );
 const ConfigBackup = lazy(() => import("@/components/ConfigBackup"));
+const Resilience = lazy(() => import("@/components/Resilience/Resilience"));
 const AboutPanel = lazy(() => import("@/components/AboutPanel"));
 
 // Cloud is a meta-tab that nests auth + teams + sync + provider keys + notifications.
@@ -168,6 +170,12 @@ export default function SettingsSection() {
       label: t("subnav.settingsProjects", "Projects"),
       icon: FolderKanban,
       Component: ProjectManager,
+    },
+    {
+      id: "resilience",
+      label: t("subnav.settingsResilience", "Resilience"),
+      icon: Shield,
+      Component: Resilience,
     },
     {
       id: "backup",
