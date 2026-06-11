@@ -137,6 +137,30 @@ Strategic notes from the 2026-05-25 YC discussion saved at `memory/project_yc_se
 | v2.15.x — Receipt UI surface for `retry_count` + `attempt_summary` JSON | ⏳ open | OSS |
 | v2.15.x — `ato runtimes models <provider>` shipped in v2.15.0 CLI; add `--no-cache` to docs | ⏳ open | OSS |
 
+### v2.15.x — Subscription exhaustion handling (CRITICAL for loops/Missions)
+
+**The requirement Will flagged 2026-06-11 after a war-room codex seat hit ChatGPT Plus cap:**
+
+> *"When a loop fails due to subscription end, we should let the user either set a wake up and continue when the subscription tokens are live again (should be automated if that's the default user wants) or have a fall back for other model that still has tokens to take control of part of the loop."*
+
+This is distinct from v2.15.1 retry (which handles transient 503/429 over seconds-to-minutes). Subscription exhaustion is a longer-window failure mode — codex told us "try again Jul 10th, 2026 11:22 AM," three months out. Retrying in 16 seconds doesn't help; the loop needs to either pause-and-wake-on-reset OR fall back to a peer runtime with capacity.
+
+**Why this matters for the Missions vision (v2.16):** A proactive coordinator running unattended must survive subscription exhaustion. Otherwise the goal-driven loop dies mid-mission and a human has to babysit.
+
+| Layer | What it needs | Notes |
+|---|---|---|
+| **Detection** — recognize subscription-exhaustion errors per runtime | Each runtime says it differently: codex CLI gives "try again at <date>"; claude CLI different shape; openai API 429 + rate-limit headers; anthropic API 429; minimax status_code 1027; google API 429 + Retry-After. Need per-runtime classifier (extends ato-retry-policy crate). | Today's codex log shows exact format — "ERROR: You've hit your usage limit. Upgrade to Plus to continue using Codex (...), or try again at Jul 10th, 2026 11:22 AM." Parse the date. |
+| **Policy** — user-config per loop: `pause-and-wake` / `fallback-model` / `stop-with-error` | Default candidate: `pause-and-wake` when an exact reset time is in the error; `fallback-model` when only "retry later" with no date; `stop-with-error` opt-in only. | Loop-level override beats user-level default. Methodology cells could carry their own policy. |
+| **Persistence** — pause loop state + schedule wake | Reuse `loop_runs` rows from v2.14 Loop Composer; add `paused_until` column + a launchd/cron firing at `paused_until` that resumes the run. | Falls naturally out of v2.14 Loop Composer's existing schedule infra. |
+| **Fallback chain** — define per-runtime fallback chain (codex → openai API → claude, etc.) | Per-loop config: `--fallback-chain codex,openai,claude`. On exhaustion, swap the seat for the next runtime in the chain that still has capacity. | Goodhart-defense caveat: silent runtime swaps could change output quality. Default to `fallback-with-warning` (the receipt records the swap; loop continues but the audit notes it). |
+| **Audit** — record exhaustion event + recovery action + eventual recovery | Extend `execution_logs.attempt_summary` JSON to include `exhaustion_event { runtime, reset_at, recovery_action }`. | Per-Mission view should highlight Missions that paused (so a human can intervene before the wake-fire if needed). |
+
+Open-core classification deferred until design slice. Initial guess: detection + pause-and-wake live in OSS (Free primitive); cloud-coordinated fallback-chain dispatching across paid runtimes is Pro (Mission's hosted execution).
+
+---
+
+
+
 ### v2.16 — Missions (proactive coordinator class)
 
 **The strategic shift Will flagged 2026-06-11:** ATO today is reactive — humans coordinate LLM reviewers in war-rooms + sessions. v2.16 introduces a proactive shape: humans state a goal, ATO coordinates LLMs as a writing+reviewing team, humans inspect the audit trail of who did what. This is the multi-agent system class.
