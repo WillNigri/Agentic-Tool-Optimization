@@ -99,6 +99,64 @@ pub fn publish_dispatch_failed(
     }
 }
 
+/// v2.15.2 (war_room 78617E68) — publish a DispatchExhausted event
+/// when a dispatch is short-circuited by the runtime_quotas pre-flight
+/// gate (subscription / long-window quota, not transient rate limit).
+/// Distinct from dispatch_failed: this event carries the parsed
+/// reset_at + the policy that was applied + the fallback runtime
+/// chosen (if any). Per codex's alternative design verdict: "emit a
+/// first-class dispatch_exhausted event into events_log; desktop
+/// reacts with a chooser only for interactive sessions; loops/CLI
+/// consume the persisted policy directly. One canonical signal that
+/// v2.15.3 pause/resume and notifications bolt onto."
+pub fn publish_dispatch_exhausted(
+    conn: &Connection,
+    runtime: &str,
+    reset_at: &str,
+    policy_chosen: &str,
+    fallback_runtime: Option<&str>,
+    raw_message: Option<&str>,
+    occurred_at: &str,
+) {
+    let table_exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='events_log'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if table_exists == 0 {
+        return;
+    }
+    let payload = serde_json::json!({
+        "type": "dispatch_exhausted",
+        "event_seq": 0_u64,
+        "runtime": runtime,
+        "reset_at": reset_at,
+        "policy_chosen": policy_chosen,
+        "fallback_runtime": fallback_runtime,
+        "raw_message": raw_message,
+        "occurred_at": occurred_at,
+    });
+    let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+    if let Ok(seq) = insert_event_row(conn, "dispatch_exhausted", &payload_str, occurred_at) {
+        let final_payload = serde_json::json!({
+            "type": "dispatch_exhausted",
+            "event_seq": seq,
+            "runtime": runtime,
+            "reset_at": reset_at,
+            "policy_chosen": policy_chosen,
+            "fallback_runtime": fallback_runtime,
+            "raw_message": raw_message,
+            "occurred_at": occurred_at,
+        });
+        let _ = conn.execute(
+            "UPDATE events_log SET payload = ?1 WHERE event_seq = ?2",
+            rusqlite::params![final_payload.to_string(), seq],
+        );
+    }
+}
+
 /// Publish a ReplayDone event.
 pub fn publish_replay_done(
     conn: &Connection,

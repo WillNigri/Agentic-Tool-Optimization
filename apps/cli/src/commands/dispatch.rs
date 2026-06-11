@@ -826,6 +826,11 @@ pub fn run(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // v2.15.2 — capture runtime_name as a mutable owned String for
+    // the exhaustion-policy fallback-chain branch. After the gate
+    // block we shadow back to &str so the rest of the function
+    // (50+ usages) is unchanged. War_room 78617E68.
+    let mut effective_runtime: String = runtime_name.to_string();
     // PR 16 — synthesize the war-room history envelope BEFORE any
     // downstream prompt processing. When the war-room is in round
     // 1 (or war_room_id is None) this is a no-op and the original
@@ -893,13 +898,108 @@ pub fn run(
     // future, short-circuit without burning another dispatch attempt.
     // Caller sees a stable, scriptable error early instead of a real
     // 4xx with the same info.
+    //
+    // v2.15.2 (war_room 78617E68) — applies the user's exhaustion
+    // policy instead of unconditionally bailing. Three branches:
+    //   - StopAndNotify (also the implicit CLI fallback for
+    //     AskOrDefault): emit dispatch_exhausted event, bail with
+    //     the original message. Desktop polling sees the event and
+    //     may render a modal asking the user to persist a choice.
+    //   - FallbackChain: walk user's preferred order; if a non-
+    //     exhausted peer exists, retarget runtime_name to it +
+    //     emit event marking fallback runtime. Audit the swap.
+    //   - PauseAndWake: scheduler ships v2.15.3; for v2.15.2,
+    //     degrade to StopAndNotify with an explicit explanation.
     if let Ok(Some(resets_at)) = crate::quota::lookup_future(db_path, runtime_name) {
-        anyhow::bail!(
-            "Runtime '{}' is rate-limited until {} (cached from previous error). Try again after that time.",
-            runtime_name,
-            resets_at
-        );
+        // Open a write connection to read the policy and emit the
+        // event. quota::read_exhaustion_policy needs a Connection,
+        // and events_publisher::publish_dispatch_exhausted does too.
+        let mut fallback_chosen: Option<String> = None;
+        let policy = if let Ok(c) = rusqlite::Connection::open(db_path) {
+            let p = crate::quota::read_exhaustion_policy(&c)
+                .unwrap_or(crate::quota::ExhaustionPolicy::AskOrDefault);
+            if matches!(p, crate::quota::ExhaustionPolicy::FallbackChain) {
+                if let Ok(Some(swap_to)) =
+                    crate::quota::select_fallback_runtime(&c, runtime_name)
+                {
+                    fallback_chosen = Some(swap_to);
+                }
+            }
+            p
+        } else {
+            crate::quota::ExhaustionPolicy::AskOrDefault
+        };
+
+        // Always emit the event (one canonical signal for v2.15.3
+        // scheduler + desktop modal + observability). Best-effort.
+        if let Ok(c) = rusqlite::Connection::open(db_path) {
+            crate::events_publisher::publish_dispatch_exhausted(
+                &c,
+                runtime_name,
+                &resets_at,
+                match policy {
+                    crate::quota::ExhaustionPolicy::FallbackChain
+                        if fallback_chosen.is_some() =>
+                    {
+                        "fallback-chain"
+                    }
+                    crate::quota::ExhaustionPolicy::FallbackChain => "fallback-chain-no-peer",
+                    crate::quota::ExhaustionPolicy::PauseAndWake => "pause-and-wake-deferred",
+                    crate::quota::ExhaustionPolicy::StopAndNotify => "stop-and-notify",
+                    crate::quota::ExhaustionPolicy::AskOrDefault => "ask-defaulted-to-stop",
+                },
+                fallback_chosen.as_deref(),
+                None,
+                &chrono::Utc::now().to_rfc3339(),
+            );
+        }
+
+        // Apply the policy decision.
+        if let Some(swap_to) = fallback_chosen {
+            crate::output::emit_human(&format!(
+                "[quota] '{}' is rate-limited until {}. Falling back to '{}' per your exhaustion-fallback-order setting.",
+                runtime_name, resets_at, swap_to
+            ));
+            // Swap the runtime name + re-check its own gate before
+            // we proceed. If the swap_to is itself exhausted at the
+            // moment of re-check (race), bail clearly so the user
+            // sees the chain exhausted.
+            if let Ok(Some(swap_resets_at)) =
+                crate::quota::lookup_future(db_path, &swap_to)
+            {
+                anyhow::bail!(
+                    "Fallback target '{}' is ALSO rate-limited until {}. Every runtime in your fallback chain is exhausted.",
+                    swap_to,
+                    swap_resets_at
+                );
+            }
+            effective_runtime = swap_to;
+        } else {
+            // No fallback (or policy doesn't request one) — bail
+            // with the pre-2.15.2 message shape so existing tools
+            // continue to parse the error. v2.15.3 will replace
+            // this with the scheduler for PauseAndWake users.
+            let policy_note = match policy {
+                crate::quota::ExhaustionPolicy::PauseAndWake => {
+                    " (your policy = pause-and-wake; scheduler ships in v2.15.3 — for now this fails)"
+                }
+                crate::quota::ExhaustionPolicy::FallbackChain => {
+                    " (your policy = fallback-chain but every peer is exhausted)"
+                }
+                _ => "",
+            };
+            anyhow::bail!(
+                "Runtime '{}' is rate-limited until {} (cached from previous error). Try again after that time.{}",
+                runtime_name,
+                resets_at,
+                policy_note
+            );
+        }
     }
+    // v2.15.2 — shadow back to &str for the rest of the function so
+    // the 50+ downstream references compile unchanged. After this
+    // point `runtime_name` is the (possibly fallback-swapped) name.
+    let runtime_name: &str = effective_runtime.as_str();
 
     // v2.3.46 Phase 6.x-K — ratchet pre-flight (soft warning).
     // If the runtime has a locked floor AND the rolling window is

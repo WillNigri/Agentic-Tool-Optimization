@@ -1742,6 +1742,20 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE execution_logs ADD COLUMN attempt_summary TEXT",
         [],
     );
+
+    // v2.15.2 — subscription-exhaustion audit (war_room 78617E68
+    // codex audit verdict: "Do not repurpose execution_logs.attempt_
+    // summary into an object. The current code and schema describe
+    // it as a JSON array of retry attempts. Add a sibling JSON field
+    // for exhaustion audit, or append a clearly typed terminal record
+    // to the same array shape."). Sibling field chosen because it
+    // keeps attempt_summary's array shape stable for existing
+    // consumers. JSON shape: { runtime_attempted, reset_at,
+    // policy_chosen, fallback_runtime, raw_message }.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN exhaustion_audit TEXT",
+        [],
+    );
 }
 
 #[cfg(test)]
