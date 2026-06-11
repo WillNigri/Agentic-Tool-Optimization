@@ -1726,6 +1726,22 @@ pub fn init_database(conn: &Connection) {
     // valid key is fetched from the keychain. The canary lets rekey
     // assert it has the right "old key" before destructive ops.
     let _ = conn.execute("ALTER TABLE master_key_ledger ADD COLUMN canary_ciphertext TEXT", []);
+
+    // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
+    // codex audit verdict: "one execution_logs row per dispatch,
+    // plus retry_count and a compact JSON attempt summary column").
+    // retry_count: number of retries that happened (0 = first
+    // attempt succeeded). attempt_summary: JSON array of
+    // AttemptRecord rows from ato-retry-policy. NULL on legacy
+    // rows; 0 / "[]" on rows written after this migration.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN attempt_summary TEXT",
+        [],
+    );
 }
 
 #[cfg(test)]

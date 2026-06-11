@@ -2050,8 +2050,8 @@ pub async fn prompt_api_provider(
             // of swallowing them. The dispatch still succeeds; the
             // log row just doesn't exist, and the user sees why.
             if let Err(e) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -2068,6 +2068,8 @@ pub async fn prompt_api_provider(
                     tool_calls_summary,
                     o.model_used,
                     "api_key",
+                    o.retry_count,
+                    o.attempt_summary_json.as_ref(),
                 ],
             ) {
                 eprintln!("prompt_api_provider: execution_logs write failed: {}", e);

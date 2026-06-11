@@ -144,6 +144,8 @@ pub fn dispatch_with_tools(
                 tokens_in: tokens_in_total,
                 tokens_out: tokens_out_total,
                 tool_calls: Some(audit),
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
         let payload: serde_json::Value =
@@ -226,6 +228,8 @@ pub fn dispatch_with_tools(
                 tokens_in: tokens_in_total,
                 tokens_out: tokens_out_total,
                 tool_calls: Some(audit),
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
         return Ok(ApiDispatchOutcome {
@@ -236,6 +240,8 @@ pub fn dispatch_with_tools(
             tokens_in: tokens_in_total,
             tokens_out: tokens_out_total,
             tool_calls: Some(audit),
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
 }

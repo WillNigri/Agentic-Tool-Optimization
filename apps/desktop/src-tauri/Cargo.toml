@@ -1,6 +1,6 @@
 [package]
 name = "ato-desktop"
-version = "2.15.0"
+version = "2.15.1"
 edition = "2021"
 
 [lib]
@@ -53,6 +53,7 @@ ato-posts = { path = "../../../packages/ato-posts" }
 ato-api-providers = { path = "../../../packages/ato-api-providers" }
 ato-llm-key-resolver = { path = "../../../packages/ato-llm-key-resolver" }
 ato-list-models = { path = "../../../packages/ato-list-models" }
+ato-retry-policy = { path = "../../../packages/ato-retry-policy" }
 ato-pricing = { path = "../../../packages/ato-pricing" }
 ato-db-views = { path = "../../../packages/ato-db-views" }
 ato-agent-permissions = { path = "../../../packages/ato-agent-permissions" }

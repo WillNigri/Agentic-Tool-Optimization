@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "ato"
-version = "2.15.0"
+version = "2.15.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -307,6 +307,7 @@ dependencies = [
  "ato-posts",
  "ato-pricing",
  "ato-recipes",
+ "ato-retry-policy",
  "ato-review-tools",
  "base64",
  "chrono",
@@ -400,6 +401,14 @@ name = "ato-recipes"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "ato-retry-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

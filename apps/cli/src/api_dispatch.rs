@@ -47,6 +47,12 @@ pub struct ApiDispatchOutcome {
     /// but the model chose not to use them" which is itself signal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallAudit>>,
+    /// v2.15.1 (war_room 08F8629A) — see desktop mirror's docs.
+    #[serde(default)]
+    pub retry_count: i64,
+    /// v2.15.1 — JSON-serialized AttemptRecord[]; NULL when no retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_summary_json: Option<String>,
 }
 
 /// One row of the tool-call audit log written into execution_logs.
@@ -217,77 +223,153 @@ pub fn dispatch_with_history(
         (url, body, true, false)
     };
 
-    let start = std::time::Instant::now();
-    let mut req = client.post(&url).header("Content-Type", "application/json");
-    if use_bearer_auth {
-        req = req.bearer_auth(&key);
-    }
-    if use_x_api_key {
-        // Anthropic auth: x-api-key header + required version pin.
-        // The version is stable across SDK releases for a given
-        // major; update only if we adopt a new request shape.
-        req = req
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01");
-    }
-    // v2.7.13 (Will dogfood 2026-05-21) — when reqwest.send() fails,
-    // classify into timeout / connect / request shape and surface
-    // each distinctly. Pre-fix the audit row showed only "POST <url>",
-    // which made a 120s timeout look identical to a DNS failure, a
-    // TLS error, or a connection reset — see the war-room
-    // 76F7CEEB-… reproduction: MiniMax took >120s to process a 20K-
-    // token code-review prompt (content-moderation latency on
-    // dense code blocks) and the audit just said "POST <url>".
-    // duration_ms is also recorded on error now so the operator can
-    // tell "instant fail" from "timed out at 120s" at a glance.
-    let resp = match req.json(&body).send() {
-        Ok(r) => r,
-        Err(e) => {
-            let elapsed = start.elapsed().as_millis() as i64;
-            let kind = if e.is_timeout() {
-                format!("timeout after {}ms (client cap is 120s)", elapsed)
-            } else if e.is_connect() {
-                "connect failed (DNS / TLS / network)".to_string()
-            } else if e.is_request() {
-                "request building or transport error".to_string()
-            } else {
-                "transport error".to_string()
-            };
-            return Err(anyhow::Error::new(e)).with_context(|| {
-                format!("POST {}: {}", url, kind)
+    // v2.15.1 (war_room 08F8629A) — retry-with-backoff. Blocking
+    // mirror of the desktop's async retry loop. Same classifier,
+    // same accounting, std::thread::sleep instead of tokio.
+    let policy = ato_retry_policy::RetryPolicy::default_v1();
+    let mut attempts: Vec<ato_retry_policy::AttemptRecord> = Vec::new();
+
+    let (final_http_status, final_body_text, final_attempt_duration_ms) = loop {
+        let attempt_start = std::time::Instant::now();
+        let mut req = client.post(&url).header("Content-Type", "application/json");
+        if use_bearer_auth {
+            req = req.bearer_auth(&key);
+        }
+        if use_x_api_key {
+            req = req
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01");
+        }
+
+        let result = req.json(&body).send();
+        let elapsed_ms = attempt_start.elapsed().as_millis() as i64;
+
+        let (http_status_code, body_text, headers_map, transport_err): (
+            Option<u16>,
+            String,
+            std::collections::HashMap<String, String>,
+            Option<String>,
+        ) = match result {
+            Ok(resp) => {
+                let s = resp.status().as_u16();
+                let mut h = std::collections::HashMap::new();
+                for (k, v) in resp.headers().iter() {
+                    if let Ok(vs) = v.to_str() {
+                        h.insert(k.as_str().to_string(), vs.to_string());
+                    }
+                }
+                let body = resp.text().unwrap_or_default();
+                (Some(s), body, h, None)
+            }
+            Err(e) => {
+                let kind = if e.is_timeout() {
+                    format!("timeout after {}ms", elapsed_ms)
+                } else if e.is_connect() {
+                    "connect failed (DNS / TLS / network)".to_string()
+                } else if e.is_request() {
+                    "request building or transport error".to_string()
+                } else {
+                    "transport error".to_string()
+                };
+                (
+                    None,
+                    String::new(),
+                    std::collections::HashMap::new(),
+                    Some(format!("POST {}: {}", url, kind)),
+                )
+            }
+        };
+
+        let outcome = ato_retry_policy::classify_attempt(
+            provider.flavor,
+            http_status_code,
+            &headers_map,
+            Some(&body_text),
+            transport_err.as_deref(),
+        );
+        let outcome_class =
+            ato_retry_policy::AttemptRecord::outcome_class_for(&outcome, http_status_code);
+        let error_brief = match &outcome {
+            ato_retry_policy::AttemptOutcome::Success => None,
+            ato_retry_policy::AttemptOutcome::PermanentError { reason }
+            | ato_retry_policy::AttemptOutcome::RetriableError { reason, .. }
+            | ato_retry_policy::AttemptOutcome::TransportFailure { reason } => {
+                Some(truncate_for_audit(reason, 240))
+            }
+        };
+        attempts.push(ato_retry_policy::AttemptRecord {
+            attempt_index: attempts.len() as u32,
+            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            duration_ms: elapsed_ms,
+            status_code: http_status_code,
+            outcome_class,
+            error_brief,
+        });
+
+        let history_before = &attempts[..attempts.len() - 1];
+        let disposition = ato_retry_policy::next_disposition(&policy, history_before, outcome);
+
+        match disposition {
+            ato_retry_policy::RetryDisposition::GiveUpSuccess
+            | ato_retry_policy::RetryDisposition::GiveUpPermanent { .. }
+            | ato_retry_policy::RetryDisposition::GiveUpExhausted { .. } => {
+                break (http_status_code, body_text, elapsed_ms);
+            }
+            ato_retry_policy::RetryDisposition::RetryAfter { wait, .. } => {
+                std::thread::sleep(wait);
+                continue;
+            }
+        }
+    };
+
+    let retry_count = (attempts.len() as i64) - 1;
+    let attempt_summary_json = serde_json::to_string(&attempts).ok();
+
+    let http_status_code = match final_http_status {
+        Some(s) => s,
+        None => {
+            let last_brief = attempts
+                .last()
+                .and_then(|a| a.error_brief.clone())
+                .unwrap_or_else(|| "transport failure".to_string());
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(last_brief),
+                model_used: model,
+                duration_ms: final_attempt_duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+                tool_calls: None,
+                retry_count,
+                attempt_summary_json,
             });
         }
     };
-    let http_status = resp.status();
-    // MiniMax-as-reviewer flagged that unwrap_or_default() here would
-    // silently swallow a body-read error after a successful response
-    // (e.g. connection reset mid-body) and then surface as "not valid
-    // JSON" downstream. Propagate the read error instead so the audit
-    // shows the actual root cause.
-    let body_text = resp
-        .text()
-        .with_context(|| format!("read response body from {}", url))?;
-    let duration_ms = start.elapsed().as_millis() as i64;
 
-    if !http_status.is_success() {
+    if !(200..300).contains(&http_status_code) {
         return Ok(ApiDispatchOutcome {
             response: None,
             error_message: Some(format!(
                 "HTTP {}: {}",
-                http_status.as_u16(),
-                truncate_for_audit(&body_text, 1000)
+                http_status_code,
+                truncate_for_audit(&final_body_text, 1000)
             )),
             model_used: model,
-            duration_ms,
+            duration_ms: final_attempt_duration_ms,
             tokens_in: None,
             tokens_out: None,
             tool_calls: None,
+            retry_count,
+            attempt_summary_json,
         });
     }
 
     let payload: serde_json::Value =
-        serde_json::from_str(&body_text).context("response was not valid JSON")?;
-    parse_response(provider, payload, model, duration_ms)
+        serde_json::from_str(&final_body_text).context("response was not valid JSON")?;
+    let mut outcome = parse_response(provider, payload, model, final_attempt_duration_ms)?;
+    outcome.retry_count = retry_count;
+    outcome.attempt_summary_json = attempt_summary_json;
+    Ok(outcome)
 }
 
 /// v2.3.47 Phase 6.x-F — streaming dispatch.
@@ -392,6 +474,8 @@ where
             tokens_in: None,
             tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
 
@@ -468,6 +552,8 @@ where
             tokens_in: None,
             tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
     if minimax_status.is_some() {
@@ -485,6 +571,8 @@ where
             tokens_in: None,
             tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
     if full_response.is_empty() {
@@ -496,6 +584,8 @@ where
             tokens_in: None,
             tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
 
@@ -514,6 +604,8 @@ where
         tokens_in,
         tokens_out,
         tool_calls: None,
+        retry_count: 0,
+        attempt_summary_json: None,
     })
 }
 
@@ -538,6 +630,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
             });
         }
         // Success: candidates[0].content.parts is an array of {text:"..."}.
@@ -566,6 +660,8 @@ fn parse_response(
                     tokens_in: None,
                     tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
                 });
             }
         };
@@ -598,6 +694,8 @@ fn parse_response(
             tokens_in,
             tokens_out,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
 
@@ -618,6 +716,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
                 tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
         // Content is a typed-block array. Concatenate every text
@@ -664,6 +764,8 @@ fn parse_response(
             tokens_in,
             tokens_out,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
 
@@ -689,6 +791,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
             });
         }
     }
@@ -731,6 +835,8 @@ fn parse_response(
                     tokens_in: None,
                     tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
                 });
             }
             return Ok(ApiDispatchOutcome {
@@ -745,6 +851,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
             });
         }
     };
@@ -772,6 +880,8 @@ fn parse_response(
         tokens_in,
         tokens_out,
         tool_calls: None,
+        retry_count: 0,
+        attempt_summary_json: None,
     })
 }
 

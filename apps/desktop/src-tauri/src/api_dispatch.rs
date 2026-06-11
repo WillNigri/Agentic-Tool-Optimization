@@ -41,6 +41,17 @@ pub struct ApiDispatchOutcome {
     /// dispatches. Empty vec means "tools were offered, model declined."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallAudit>>,
+    /// v2.15.1 (war_room 08F8629A) — number of retries that fired
+    /// before the final outcome. 0 = first attempt succeeded.
+    /// Always populated; defaults to 0 for compatibility.
+    #[serde(default)]
+    pub retry_count: i64,
+    /// v2.15.1 — JSON-serialized array of AttemptRecord from
+    /// ato-retry-policy. NULL when no retries fired. Used by the
+    /// receipt UI to render the attempt timeline + by analytics
+    /// to identify providers with high transient-failure rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_summary_json: Option<String>,
 }
 
 /// One row of the tool-call audit log written into
@@ -144,48 +155,154 @@ pub async fn dispatch(
         .build()
         .map_err(|e| format!("build reqwest client: {}", e))?;
 
-    let start = std::time::Instant::now();
-    let mut req = client.post(&url).header("Content-Type", "application/json");
-    if provider.flavor == "anthropic" {
-        // Anthropic Messages API auth: x-api-key + required version
-        // header. Bearer rejected.
-        req = req
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01");
-    } else if set_bearer {
-        req = req.bearer_auth(&key);
-    }
-    // Gemini path puts the key in the URL — no auth header.
-    let resp = req
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("POST {}: {}", url, e))?;
-    let http_status = resp.status();
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| format!("read response body from {}: {}", url, e))?;
-    let duration_ms = start.elapsed().as_millis() as i64;
+    // v2.15.1 (war_room 08F8629A) — retry-with-backoff. Wraps the
+    // send/receive cycle in the shared classifier from ato-retry-policy.
+    // For ALL providers + ALL retriable codes (503/502/504/429 +
+    // transport timeouts + MiniMax body-status). Loops up to
+    // policy.max_attempts times; sleeps with backoff between attempts.
+    // The final attempt's response is what gets parsed. retry_count +
+    // JSON attempt summary land on the returned ApiDispatchOutcome so
+    // the audit row records the full timeline.
+    let policy = ato_retry_policy::RetryPolicy::default_v1();
+    let mut attempts: Vec<ato_retry_policy::AttemptRecord> = Vec::new();
+    let overall_start = std::time::Instant::now();
 
-    if !http_status.is_success() {
+    let (final_http_status, final_body_text, final_attempt_duration_ms) = loop {
+        let attempt_start = std::time::Instant::now();
+        let mut req = client.post(&url).header("Content-Type", "application/json");
+        if provider.flavor == "anthropic" {
+            req = req
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01");
+        } else if set_bearer {
+            req = req.bearer_auth(&key);
+        }
+        // Gemini path puts the key in the URL — no auth header.
+
+        let result = req.json(&body).send().await;
+        let elapsed_ms = attempt_start.elapsed().as_millis() as i64;
+
+        let (http_status_code, body_text, headers_map, transport_err): (
+            Option<u16>,
+            String,
+            std::collections::HashMap<String, String>,
+            Option<String>,
+        ) = match result {
+            Ok(resp) => {
+                let s = resp.status().as_u16();
+                let mut h = std::collections::HashMap::new();
+                for (k, v) in resp.headers().iter() {
+                    if let Ok(vs) = v.to_str() {
+                        h.insert(k.as_str().to_string(), vs.to_string());
+                    }
+                }
+                let body = resp.text().await.unwrap_or_default();
+                (Some(s), body, h, None)
+            }
+            Err(e) => (
+                None,
+                String::new(),
+                std::collections::HashMap::new(),
+                Some(format!("POST {}: {}", url, e)),
+            ),
+        };
+
+        let outcome = ato_retry_policy::classify_attempt(
+            provider.flavor,
+            http_status_code,
+            &headers_map,
+            Some(&body_text),
+            transport_err.as_deref(),
+        );
+        let outcome_class =
+            ato_retry_policy::AttemptRecord::outcome_class_for(&outcome, http_status_code);
+        let error_brief = match &outcome {
+            ato_retry_policy::AttemptOutcome::Success => None,
+            ato_retry_policy::AttemptOutcome::PermanentError { reason }
+            | ato_retry_policy::AttemptOutcome::RetriableError { reason, .. }
+            | ato_retry_policy::AttemptOutcome::TransportFailure { reason } => {
+                Some(truncate_for_audit(reason, 240))
+            }
+        };
+        attempts.push(ato_retry_policy::AttemptRecord {
+            attempt_index: attempts.len() as u32,
+            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            duration_ms: elapsed_ms,
+            status_code: http_status_code,
+            outcome_class,
+            error_brief,
+        });
+
+        let history_before = &attempts[..attempts.len() - 1];
+        let disposition = ato_retry_policy::next_disposition(&policy, history_before, outcome);
+
+        match disposition {
+            ato_retry_policy::RetryDisposition::GiveUpSuccess
+            | ato_retry_policy::RetryDisposition::GiveUpPermanent { .. }
+            | ato_retry_policy::RetryDisposition::GiveUpExhausted { .. } => {
+                break (
+                    http_status_code,
+                    body_text,
+                    elapsed_ms,
+                );
+            }
+            ato_retry_policy::RetryDisposition::RetryAfter { wait, .. } => {
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+        }
+    };
+
+    let _overall_ms = overall_start.elapsed().as_millis() as i64;
+    let retry_count = (attempts.len() as i64) - 1;
+    let attempt_summary_json =
+        serde_json::to_string(&attempts).ok();
+
+    let http_status_code = match final_http_status {
+        Some(s) => s,
+        None => {
+            // All attempts were transport failures.
+            let last_brief = attempts
+                .last()
+                .and_then(|a| a.error_brief.clone())
+                .unwrap_or_else(|| "transport failure".to_string());
+            return Ok(ApiDispatchOutcome {
+                response: None,
+                error_message: Some(last_brief),
+                model_used: model,
+                duration_ms: final_attempt_duration_ms,
+                tokens_in: None,
+                tokens_out: None,
+                tool_calls: None,
+                retry_count,
+                attempt_summary_json,
+            });
+        }
+    };
+
+    if !(200..300).contains(&http_status_code) {
         return Ok(ApiDispatchOutcome {
             response: None,
             error_message: Some(format!(
                 "HTTP {}: {}",
-                http_status.as_u16(),
-                truncate_for_audit(&body_text, 1000)
+                http_status_code,
+                truncate_for_audit(&final_body_text, 1000)
             )),
             model_used: model,
-            duration_ms,
+            duration_ms: final_attempt_duration_ms,
             tokens_in: None,
             tokens_out: None,
             tool_calls: None,
+            retry_count,
+            attempt_summary_json,
         });
     }
-    let payload: serde_json::Value =
-        serde_json::from_str(&body_text).map_err(|e| format!("response not valid JSON: {}", e))?;
-    parse_response(provider, payload, model, duration_ms)
+    let payload: serde_json::Value = serde_json::from_str(&final_body_text)
+        .map_err(|e| format!("response not valid JSON: {}", e))?;
+    let mut outcome = parse_response(provider, payload, model, final_attempt_duration_ms)?;
+    outcome.retry_count = retry_count;
+    outcome.attempt_summary_json = attempt_summary_json;
+    Ok(outcome)
 }
 
 fn parse_response(
@@ -211,6 +328,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
                 tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
         // Concatenate text blocks without filtering empty strings —
@@ -249,6 +368,8 @@ fn parse_response(
             tokens_in: payload["usage"]["input_tokens"].as_i64(),
             tokens_out: payload["usage"]["output_tokens"].as_i64(),
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
     // v2.14.6 — gemini response parsing. Mirror of the CLI's shape:
@@ -270,6 +391,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
                 tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
         let text = payload["candidates"]
@@ -301,6 +424,8 @@ fn parse_response(
             tokens_in,
             tokens_out,
             tool_calls: None,
+            retry_count: 0,
+            attempt_summary_json: None,
         });
     }
     if provider.flavor == "minimax" {
@@ -322,6 +447,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
                 tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
     }
@@ -344,6 +471,8 @@ fn parse_response(
                 tokens_in: None,
                 tokens_out: None,
                 tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
     };
@@ -358,6 +487,8 @@ fn parse_response(
         tokens_in,
         tokens_out,
         tool_calls: None,
+        retry_count: 0,
+        attempt_summary_json: None,
     })
 }
 

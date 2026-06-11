@@ -125,6 +125,49 @@ v2.12+ candidates queued for product decision. **Each row carries its classifica
 
 Strategic notes from the 2026-05-25 YC discussion saved at `memory/project_yc_self_improving_company.md`. Boundary classifications above were confirmed with Will 2026-05-26 PM.
 
+### v2.15.x — Resilient dispatch + live model surface (in progress 2026-06-11)
+
+| Item | Status | Lives in |
+|---|---|---|
+| v2.15.0 — encryption hardening + canary precondition + drift resolution | ✅ Shipped | OSS |
+| v2.15.0 — live `list_models()` per provider + per-chat ModelPicker | ✅ Shipped | OSS |
+| **v2.15.1 — retry-with-backoff on 503/502/504/429/transport for ALL providers** | ✅ Shipped | OSS |
+| v2.15.x — Settings → Models tab parity for API providers (currently CLI-only) | ⏳ open | OSS |
+| v2.15.x — `dispatch_with_tools` retry wrap (currently only main `dispatch()`) | ⏳ open | OSS |
+| v2.15.x — Receipt UI surface for `retry_count` + `attempt_summary` JSON | ⏳ open | OSS |
+| v2.15.x — `ato runtimes models <provider>` shipped in v2.15.0 CLI; add `--no-cache` to docs | ⏳ open | OSS |
+
+### v2.16 — Missions (proactive coordinator class)
+
+**The strategic shift Will flagged 2026-06-11:** ATO today is reactive — humans coordinate LLM reviewers in war-rooms + sessions. v2.16 introduces a proactive shape: humans state a goal, ATO coordinates LLMs as a writing+reviewing team, humans inspect the audit trail of who did what. This is the multi-agent system class.
+
+| Primitive | Why it doesn't exist yet | Status |
+|---|---|---|
+| **Mission / Objective / Goal** — persisted artifact with success criteria, lifecycle (open → in-progress → blocked → complete) | Not a chat. Not a session. New row class in SQLite. | Planned |
+| **LLM team configuration** — which LLMs play writer / reviewer / planner / tester roles | v2.10 methodology configs are close but framed as "test recipe," not "team" | Planned |
+| **Work products** — files changed, branches, PR diffs, test outputs pinned to a Mission | file_attribution (v2.1 PR-3) exists but isn't surfaced per-Mission | Planned |
+| **Approval gates** — human approves mid-flight LLM contributions before next LLM picks up | War-room synthesis is end-of-flight; Missions need mid-flight | Planned |
+| **Provenance trail** — which LLM contributed which line, surfaced per-Mission | Already in file_attribution; needs Mission-scoped view | Planned |
+
+Open-core classification deferred to v2.16 design slice. Likely shape: Mission primitives + local single-user Missions are Free; multi-user Mission collaboration + cloud-coordinated Mission orchestration are Pro/Team.
+
+### v2.16+ — Collison gap-matrix items still open
+
+From the 2026-06-10 Collison/Steinberger gap-matrix conversation, items still not shipped:
+
+| Item | Maps to | Status |
+|---|---|---|
+| **Inputs panel** — markdown context bundles any agent/loop can reference | Collison #1 "stored set of prompts" | Planned |
+| **Live team workspace** — WebSocket-backed presence on sessions/war-rooms (extends v2.13 Team tier) | Collison #2 "real-time collab" | Planned |
+| **Output bundles** — packaged inference results, signed URL, shareable externally | Collison #5 "compiled outputs / shareable results" | Planned |
+| **Git linkage on every dispatch** — auto-stamp current commit SHA so we can answer "what run produced this commit?" | Collison #2 (VCS) | Planned |
+
+Already shipped from the matrix:
+- ✅ Loop Composer UI (Steinberger ask) — v2.14
+- ✅ Methodology runner (loops as variants×prompts×models×reps) — v2.10
+- ✅ Multi-runtime coding agents (the unfair advantage) — pre-v2.7
+- ✅ Live model picker (per-chat + Settings) — v2.15.0
+
 ### STAGE 7 — close out the PR-12.8 migration (next commit on the path)
 
 PR-12.8 STAGE 5 + STAGE 7 (deferred from the original 5-stage plan now that STAGE 6 expanded the scope):

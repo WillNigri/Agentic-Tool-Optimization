@@ -1,0 +1,10 @@
+[package]
+name = "ato-retry-policy"
+version = "0.1.0"
+edition = "2021"
+description = "Shared retry classification + attempt-accounting for ATO dispatch paths. Built v2.15.1 per war_room 08F8629A (codex alternative-design verdict: 'classification and accounting only, not HTTP execution'). CLI and desktop each keep their own send() call; both pass results into the shared classifier and accumulate AttemptRecord history. Avoids the reqwest 0.11 (CLI) vs reqwest 0.12 (desktop) ABI mismatch while eliminating policy drift."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
