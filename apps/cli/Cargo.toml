@@ -64,7 +64,7 @@ keyring = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "fs"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
-sha2 = "0.10"
+sha2 = "0.11"
 # v2.4.4 Phase 7.0 step 2 — mDNS discovery on _ato._tcp.local.
 mdns-sd = "0.11"
 hostname = "0.4"
