@@ -13,11 +13,11 @@
   "scripts": { "build": "tsc", "dev": "tsc --watch" },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
-    "pg": "^8.13.0"
+    "pg": "^8.21.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "@types/pg": "^8.11.10",
+    "@types/pg": "^8.20.0",
     "typescript": "^5.7.0"
   }
 }
