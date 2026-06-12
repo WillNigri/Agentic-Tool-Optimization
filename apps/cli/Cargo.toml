@@ -82,3 +82,8 @@ hostname = "0.4"
 # Already transitively pulled in by notify; promoting to a direct
 # dep so the API is stable. Unix-only by feature.
 nix = { version = "0.27", default-features = false, features = ["signal"] }
+
+[dev-dependencies]
+# v2.16 PR-2 — Mission dispatch tests use temp files for prompt-from-file
+# scaffolding.
+tempfile = "3"

@@ -142,6 +142,46 @@ pub enum MissionSub {
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// v2.16 PR-2 — fire a worker dispatch under a Mission.
+    ///
+    /// Enforces the Mission's budgets (max_loops, token_budget_usd) BEFORE
+    /// the dispatch; refuses if either would be exceeded. Transitions an
+    /// open mission to in_progress on first dispatch. Records a
+    /// 'dispatched' mission_event with the execution_log_id + runtime +
+    /// cost so the coordinator (PR-4) and the Mission-control board (PR-7)
+    /// can reconstruct the work timeline.
+    ///
+    /// workspace_strategy=per_agent_worktree refuses (queued for PR-3 —
+    /// worktree create/cleanup isn't shipped yet).
+    Dispatch {
+        slug_or_id: String,
+        /// Runtime to fire (claude / codex / gemini / anthropic / openai /
+        /// google / minimax / etc.).
+        #[arg(long)]
+        runtime: String,
+        /// Prompt text. Mutually exclusive with --prompt-file.
+        #[arg(long, conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        /// Path to prompt file ('-' for stdin). Mutually exclusive with --prompt.
+        #[arg(long = "prompt-file", value_name = "FILE", conflicts_with = "prompt")]
+        prompt_file: Option<PathBuf>,
+        /// Optional model override.
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional agent slug (label-only today — agent file loading
+        /// lands in v2.6 PR-A.5).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Enable the API-provider tool-call loop (read_file / grep /
+        /// edit_file / write_file / list_dir / git_status / git_diff /
+        /// bash, etc.). Only applies when runtime is an API provider.
+        #[arg(long = "with-tools")]
+        with_tools: bool,
+        /// Comma-separated tool name list to require (e.g.
+        /// "edit_file,write_file,bash"). Implies --with-tools.
+        #[arg(long = "require-tools", value_delimiter = ',')]
+        require_tools: Vec<String>,
+    },
 }
 
 // ── Row types (mirror the DB rows for JSON serialization) ─────────────
@@ -241,6 +281,29 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
         }
         MissionSub::Narrative { slug_or_id } => run_narrative(slug_or_id, db_path, opts),
         MissionSub::Events { slug_or_id, limit } => run_events(slug_or_id, limit, db_path, opts),
+        MissionSub::Dispatch {
+            slug_or_id,
+            runtime,
+            prompt,
+            prompt_file,
+            model,
+            agent,
+            with_tools,
+            require_tools,
+        } => run_dispatch_under_mission(
+            DispatchInput {
+                slug_or_id,
+                runtime,
+                prompt,
+                prompt_file,
+                model,
+                agent,
+                with_tools,
+                require_tools,
+            },
+            db_path,
+            opts,
+        ),
     }
 }
 
@@ -620,6 +683,297 @@ fn run_events(slug_or_id: String, limit: i64, db_path: &PathBuf, opts: &Opts) ->
     Ok(())
 }
 
+// ── v2.16 PR-2: Mission-scoped dispatch ───────────────────────────────
+
+struct DispatchInput {
+    slug_or_id: String,
+    runtime: String,
+    prompt: Option<String>,
+    prompt_file: Option<PathBuf>,
+    model: Option<String>,
+    agent: Option<String>,
+    with_tools: bool,
+    require_tools: Vec<String>,
+}
+
+fn run_dispatch_under_mission(
+    input: DispatchInput,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    if input.runtime.trim().is_empty() {
+        anyhow::bail!("missions dispatch: --runtime is required");
+    }
+    let prompt_text = read_prompt_arg(input.prompt, input.prompt_file)?;
+    if prompt_text.trim().is_empty() {
+        anyhow::bail!("missions dispatch: prompt is empty (use --prompt or --prompt-file)");
+    }
+
+    let conn = db::open_readwrite(db_path)?;
+    let mission = load_mission(&conn, &input.slug_or_id)?;
+
+    // Refuse states that don't accept new work.
+    match mission.state.as_str() {
+        "complete" => anyhow::bail!(
+            "missions dispatch: mission '{}' is in state 'complete' — no further work needed. \
+             Use `ato missions set-state {} in_progress` to reopen if you really want to.",
+            mission.slug,
+            mission.slug
+        ),
+        _ => {}
+    }
+    if mission.category == "ignored" {
+        anyhow::bail!(
+            "missions dispatch: mission '{}' has category 'ignored' (owner explicitly said skip). \
+             Use `ato missions set-category {} autonomous` to undo the ignore before dispatching.",
+            mission.slug,
+            mission.slug
+        );
+    }
+
+    // Workspace-strategy gate. per_agent_worktree needs PR-3.
+    if mission.workspace_strategy == "per_agent_worktree" {
+        anyhow::bail!(
+            "missions dispatch: mission '{}' has workspace_strategy='per_agent_worktree' but worktree \
+             creation/cleanup is queued for PR-3. Either change the mission to single_cwd (`ato missions \
+             set-state ...` after editing the row), or wait for PR-3.",
+            mission.slug
+        );
+    }
+
+    // Budget enforcement — count prior dispatches + sum cost (gemini-round-3
+    // refinements from PR-1 schema: max_loops + token_budget_usd).
+    let prior_dispatch_count = count_dispatches_for_mission(&conn, &mission.id)?;
+    if let Some(max) = mission.max_loops {
+        if prior_dispatch_count >= max {
+            anyhow::bail!(
+                "missions dispatch refused: mission '{}' has fired {} worker dispatches already \
+                 and max_loops={}. Raise the cap or close the mission.",
+                mission.slug,
+                prior_dispatch_count,
+                max
+            );
+        }
+    }
+    let prior_cost_usd = sum_cost_for_mission(&conn, &mission.id)?;
+    if let Some(budget) = mission.token_budget_usd {
+        if prior_cost_usd >= budget {
+            anyhow::bail!(
+                "missions dispatch refused: mission '{}' has spent ${:.4} of ${:.4} token_budget_usd. \
+                 Raise the budget or close the mission.",
+                mission.slug,
+                prior_cost_usd,
+                budget
+            );
+        }
+    }
+
+    // First-dispatch state transition: open → in_progress + emit event.
+    if mission.state == "open" {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE missions SET state = 'in_progress', updated_at = ?1 WHERE id = ?2",
+            params![now, mission.id],
+        )?;
+        insert_event(
+            &conn,
+            &mission.id,
+            "state_changed",
+            Some(serde_json::json!({
+                "from": "open",
+                "to": "in_progress",
+                "reason": "first_dispatch",
+            })),
+            &now,
+        )?;
+    }
+
+    // Capture wake_started_at so we can find the freshly-written execution_logs
+    // row that this dispatch creates. Same pattern v2.15.5 uses in paused-
+    // dispatch resume (execution_logs.id is TEXT UUID, not auto-increment).
+    let wake_started_at = chrono::Utc::now().to_rfc3339();
+    drop(conn);
+
+    if opts.human {
+        emit_human(&format!(
+            "→ firing {} under mission '{}' (prior dispatches: {}, prior cost: ${:.4})",
+            input.runtime, mission.slug, prior_dispatch_count, prior_cost_usd
+        ));
+    }
+
+    // Resolve with_tools: --require-tools implies --with-tools.
+    let effective_with_tools = input.with_tools || !input.require_tools.is_empty();
+
+    // Set ATO_REQUIRE_TOOLS env for the dispatch — dispatch.rs reads
+    // --require-tools off Opts; we pass via the simpler env-var path so
+    // we don't have to re-engineer the Opts struct for this caller.
+    // Standard dispatch::run respects this env var (see api_dispatch and
+    // the grounding policy compiler).
+    if !input.require_tools.is_empty() {
+        std::env::set_var("ATO_REQUIRE_TOOLS", input.require_tools.join(","));
+    }
+
+    // Fire the dispatch through the shared entrypoint. Errors here are
+    // dispatch failures (network, no key, etc.) — they propagate up and
+    // the mission stays in_progress so the operator can retry.
+    crate::commands::dispatch::run(
+        &input.runtime,
+        &prompt_text,
+        input.model.clone(),
+        input.agent.clone(),
+        None,  // session_id — Mission dispatches aren't anchored to a session today
+        None,  // war_room_id
+        None,  // war_room_round
+        false, // stream
+        false, // stream_jsonl
+        effective_with_tools,
+        db_path,
+        opts,
+    )?;
+
+    if !input.require_tools.is_empty() {
+        std::env::remove_var("ATO_REQUIRE_TOOLS");
+    }
+
+    // Read back the freshly-written execution_logs row.
+    let conn = db::open_readwrite(db_path)?;
+    let outcome: Option<(String, String, Option<String>, Option<f64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, status, error_message, cost_usd_estimated, tool_calls_count
+               FROM execution_logs
+              WHERE runtime = ?1 AND created_at >= ?2
+              ORDER BY created_at DESC
+              LIMIT 1",
+            params![input.runtime, wake_started_at],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<f64>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .ok();
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let event_payload = match &outcome {
+        Some((exec_id, status, err, cost, tool_calls)) => serde_json::json!({
+            "runtime": input.runtime,
+            "model": input.model,
+            "agent": input.agent,
+            "with_tools": effective_with_tools,
+            "require_tools": input.require_tools,
+            "execution_log_id": exec_id,
+            "status": status,
+            "error_message": err,
+            "cost_usd": cost,
+            "tool_calls_count": tool_calls,
+        }),
+        None => serde_json::json!({
+            "runtime": input.runtime,
+            "model": input.model,
+            "agent": input.agent,
+            "with_tools": effective_with_tools,
+            "require_tools": input.require_tools,
+            "warning": "no execution_logs row was created — dispatch may have failed before persisting",
+        }),
+    };
+    insert_event(&conn, &mission.id, "dispatched", Some(event_payload.clone()), &now)?;
+
+    // Bump updated_at on the mission so list ordering reflects activity.
+    conn.execute(
+        "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+        params![now, mission.id],
+    )?;
+
+    if opts.human {
+        match outcome {
+            Some((exec_id, status, err, cost, _tool_calls)) => {
+                let cost_str = cost.map(|c| format!("${:.4}", c)).unwrap_or_else(|| "n/a".into());
+                emit_human(&format!(
+                    "  ✓ dispatched on {} — status={} cost={} execution_log_id={}{}",
+                    input.runtime,
+                    status,
+                    cost_str,
+                    exec_id,
+                    err.map(|e| format!(" error={}", e)).unwrap_or_default(),
+                ));
+            }
+            None => {
+                emit_human(
+                    "  ⚠ dispatch fired but no execution_logs row was found — see the runtime's own output above for context",
+                );
+            }
+        }
+    } else {
+        emit_json(&serde_json::json!({
+            "mission_id": mission.id,
+            "mission_slug": mission.slug,
+            "event_kind": "dispatched",
+            "occurred_at": now,
+            "payload": event_payload,
+        }))?;
+    }
+
+    Ok(())
+}
+
+fn read_prompt_arg(prompt: Option<String>, prompt_file: Option<PathBuf>) -> Result<String> {
+    match (prompt, prompt_file) {
+        (Some(p), None) => Ok(p),
+        (None, Some(path)) => {
+            if path.as_os_str() == "-" {
+                use std::io::Read;
+                let mut s = String::new();
+                std::io::stdin().read_to_string(&mut s).context("read prompt from stdin")?;
+                Ok(s)
+            } else {
+                fs::read_to_string(&path)
+                    .with_context(|| format!("read prompt file {}", path.display()))
+            }
+        }
+        (None, None) => Err(anyhow::anyhow!(
+            "missions dispatch: provide --prompt or --prompt-file"
+        )),
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "missions dispatch: --prompt and --prompt-file are mutually exclusive"
+        )),
+    }
+}
+
+/// Count of prior worker dispatches under a Mission. Used to enforce
+/// max_loops cap. Counts both 'dispatched' and 'loop_run_completed'
+/// events (PR-2.5 will add the loop-spawn variant).
+fn count_dispatches_for_mission(conn: &Connection, mission_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM mission_events
+          WHERE mission_id = ?1 AND kind IN ('dispatched', 'loop_run_completed')",
+        params![mission_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Aggregate cost_usd across all execution_logs rows referenced in this
+/// Mission's events. Uses json_extract on payload.execution_log_id so we
+/// don't need a join column — keeps schema slim (codex's B-lite shape).
+fn sum_cost_for_mission(conn: &Connection, mission_id: &str) -> Result<f64> {
+    let total: Option<f64> = conn
+        .query_row(
+            "SELECT COALESCE(SUM(el.cost_usd_estimated), 0.0)
+               FROM mission_events me
+               JOIN execution_logs el
+                 ON json_extract(me.payload, '$.execution_log_id') = el.id
+              WHERE me.mission_id = ?1
+                AND me.kind = 'dispatched'",
+            params![mission_id],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(total.unwrap_or(0.0))
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn id_or_slug_column(input: &str) -> &'static str {
@@ -955,5 +1309,142 @@ mod tests {
         let payload_back: serde_json::Value =
             serde_json::from_str(&payload_back_str.unwrap()).unwrap();
         assert_eq!(payload_back, payload);
+    }
+
+    // ── v2.16 PR-2 — dispatch budget enforcement tests ────────────────
+    //
+    // These tests cover the budget + state-transition logic that the
+    // dispatch path runs BEFORE calling the LLM. The LLM-firing path
+    // itself is exercised by the integration smoke (separate from unit
+    // tests — needs an API key).
+
+    fn seed_mission(
+        conn: &Connection,
+        id: &str,
+        slug: &str,
+        max_loops: Option<i64>,
+        token_budget_usd: Option<f64>,
+    ) {
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                                    max_loops, token_budget_usd, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'Goal', '[]', '/tmp/x.md', ?4, ?5, '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
+            rusqlite::params![id, slug, slug, max_loops, token_budget_usd],
+        )
+        .unwrap();
+    }
+
+    fn db_with_execution_logs() -> Connection {
+        let conn = make_db();
+        conn.execute(
+            "CREATE TABLE execution_logs (
+                id TEXT PRIMARY KEY,
+                runtime TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                cost_usd_estimated REAL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn count_dispatches_returns_dispatched_plus_loop_run_completed() {
+        let conn = db_with_execution_logs();
+        seed_mission(&conn, "m-cnt", "cnt", None, None);
+        insert_event(&conn, "m-cnt", "state_changed", None, "2026-06-12T00:00:01Z").unwrap();
+        insert_event(&conn, "m-cnt", "dispatched", None, "2026-06-12T00:00:02Z").unwrap();
+        insert_event(&conn, "m-cnt", "dispatched", None, "2026-06-12T00:00:03Z").unwrap();
+        insert_event(&conn, "m-cnt", "loop_run_completed", None, "2026-06-12T00:00:04Z").unwrap();
+        // state_changed should NOT count toward max_loops.
+        insert_event(&conn, "m-cnt", "category_changed", None, "2026-06-12T00:00:05Z").unwrap();
+
+        let n = count_dispatches_for_mission(&conn, "m-cnt").unwrap();
+        assert_eq!(n, 3, "should count dispatched + loop_run_completed only");
+    }
+
+    #[test]
+    fn sum_cost_aggregates_only_dispatched_events_with_execution_log_id() {
+        let conn = db_with_execution_logs();
+        seed_mission(&conn, "m-cost", "cost", None, None);
+        // Seed two execution_logs rows.
+        conn.execute(
+            "INSERT INTO execution_logs (id, runtime, status, cost_usd_estimated, created_at)
+             VALUES ('el-1', 'claude', 'success', 0.0123, '2026-06-12T00:00:00Z'),
+                    ('el-2', 'codex',  'success', 0.0456, '2026-06-12T00:01:00Z'),
+                    ('el-3', 'gemini', 'error',   0.0001, '2026-06-12T00:02:00Z')",
+            [],
+        )
+        .unwrap();
+        // Two 'dispatched' events reference el-1 and el-3.
+        insert_event(
+            &conn,
+            "m-cost",
+            "dispatched",
+            Some(serde_json::json!({"execution_log_id": "el-1"})),
+            "2026-06-12T00:00:30Z",
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            "m-cost",
+            "dispatched",
+            Some(serde_json::json!({"execution_log_id": "el-3"})),
+            "2026-06-12T00:02:30Z",
+        )
+        .unwrap();
+        // A 'state_changed' event also has a payload — should NOT count.
+        insert_event(
+            &conn,
+            "m-cost",
+            "state_changed",
+            Some(serde_json::json!({"execution_log_id": "el-2"})),
+            "2026-06-12T00:01:30Z",
+        )
+        .unwrap();
+
+        let total = sum_cost_for_mission(&conn, "m-cost").unwrap();
+        // el-1 + el-3 = 0.0123 + 0.0001 = 0.0124 (NOT el-2 — that was state_changed)
+        assert!(
+            (total - 0.0124).abs() < 1e-9,
+            "expected 0.0124, got {}",
+            total
+        );
+    }
+
+    #[test]
+    fn sum_cost_zero_for_mission_with_no_dispatched_events() {
+        let conn = db_with_execution_logs();
+        seed_mission(&conn, "m-zero", "zero", None, None);
+        let total = sum_cost_for_mission(&conn, "m-zero").unwrap();
+        assert_eq!(total, 0.0);
+    }
+
+    #[test]
+    fn read_prompt_arg_rejects_both_or_neither() {
+        // Both → error.
+        let err = read_prompt_arg(Some("p".into()), Some(PathBuf::from("/tmp/f"))).unwrap_err();
+        assert!(format!("{}", err).contains("mutually exclusive"));
+
+        // Neither → error.
+        let err = read_prompt_arg(None, None).unwrap_err();
+        assert!(format!("{}", err).contains("--prompt"));
+
+        // Just --prompt → ok.
+        assert_eq!(
+            read_prompt_arg(Some("hello".into()), None).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn read_prompt_arg_reads_file_when_path_given() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "from file\n").unwrap();
+        let body = read_prompt_arg(None, Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(body, "from file\n");
     }
 }
