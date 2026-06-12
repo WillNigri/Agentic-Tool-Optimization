@@ -17,30 +17,22 @@
 // nullable mission_id on related rows.
 //
 // Subcommands shipped in PR-1 (CRUD + lifecycle + audit only):
+//   ato missions create / list / show / set-category / set-state / narrative / events
 //
-//   ato missions create --name "X" --goal "..."
-//                       [--success-criteria FILE]
-//                       [--workspace-strategy single_cwd|per_agent_worktree]
-//                       [--merge-strategy human_approves_each|coordinator_merges_all|coordinator_picks_winner|ranked_by_score]
-//                       [--cleanup-policy retain|delete_on_success|always_delete]
-//                       [--category autonomous|needs_owner|ignored|done]
-//                       [--max-loops N] [--token-budget-usd FLOAT]
-//                       [--base-sha <sha>]
-//   ato missions list [--state STATE] [--category CATEGORY]
-//   ato missions show <slug-or-id>
-//   ato missions set-category <slug-or-id> <category>
-//   ato missions set-state    <slug-or-id> <state>
-//   ato missions narrative    <slug-or-id>
-//   ato missions events       <slug-or-id> [--limit N]
+// PR-2: ato missions dispatch
+// PR-3: ato missions cleanup + worktree create/cleanup
 //
-// Out of scope for PR-1 (queued for PR-2..PR-8):
-//   - `ato missions tick`     — the coordinator wake (PR-4)
-//   - `ato missions dispatch` — fire a worker Loop under a Mission (PR-2)
-//   - Worktree create/cleanup for per_agent_worktree (PR-3)
-//   - Merge execution (PR-5)
-//   - Decision briefs on escalation (PR-6)
-//   - Desktop Mission-control board (PR-7)
-//   - Narrative auto-population (PR-8)
+// PR-4 (this file):
+//   ato missions tick [<slug>] [--json]       — coordinator one-shot wake
+//   ato missions check <slug>                  — force success evaluation
+//   ato missions set-worker <slug>             — configure worker_config
+//
+// Schedule note (PR-5 installer SKIPPED — pattern not cleanly reusable):
+//   Wire the tick manually:
+//     macOS (launchd):
+//       every 15 min: $(which ato) missions tick
+//     Linux (cron):
+//       */15 * * * *  /usr/local/bin/ato missions tick
 //
 // Output defaults to JSON; `--human` swaps to terminal formatting.
 
@@ -54,6 +46,18 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::output::{emit_human, emit_json, Opts};
+
+// ── Worker config JSON shape ──────────────────────────────────────────
+//
+// {"runtime": "...", "model": null|"...", "require_tools": ["..."]}
+// Stored in missions.worker_config column (TEXT / JSON).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+struct WorkerConfig {
+    runtime: String,
+    model: Option<String>,
+    #[serde(default)]
+    require_tools: Vec<String>,
+}
 
 // ── CLI surface ────────────────────────────────────────────────────────
 
@@ -200,6 +204,61 @@ pub enum MissionSub {
         /// Loop variables (K=V). Only meaningful with --loop.
         #[arg(long = "var", value_name = "K=V")]
         vars: Vec<String>,
+        /// Internal: attempt_id pre-minted by the parent tick so the child
+        /// does NOT insert a second dispatch_started event.
+        #[arg(long = "attempt-id", hide = true)]
+        attempt_id: Option<String>,
+    },
+
+    // ── v2.16 PR-4: coordinator tick ──────────────────────────────────
+
+    /// v2.16 PR-4 — one-shot coordinator wake.
+    ///
+    /// Iterates missions in state open|in_progress (or just <slug>).
+    /// Per mission, decides at most ONE action (see design doc D6A23631):
+    ///   (a) skip if category=ignored
+    ///   (b) pre-flight worktree base_sha check → escalate once if broken
+    ///   (c) in-flight scan: mark stale dispatch_started events abandoned
+    ///   (d) success evaluation: run check_commands → complete if all met
+    ///   (e) failure guard: 3 consecutive failures → blocked + escalated
+    ///   (f) spawn detached child if worker_config set + budgets allow
+    ///
+    /// Safe to call from a scheduler:
+    ///   macOS launchd: $(which ato) missions tick every 15 minutes
+    ///   Linux cron:    */15 * * * *  /usr/local/bin/ato missions tick
+    Tick {
+        /// Optional: run tick for one mission only (slug or id).
+        slug_or_id: Option<String>,
+        /// Emit JSON array of {slug, state, action, detail} instead of
+        /// one human-readable line per mission.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// v2.16 PR-4 — force success evaluation for one mission immediately,
+    /// regardless of whether a terminal event has occurred since the last
+    /// success_check. Records a success_check event; transitions to
+    /// complete if all criteria are met.
+    Check {
+        slug_or_id: String,
+    },
+
+    /// v2.16 PR-4 — configure the worker that the coordinator tick spawns
+    /// for this mission when budgets allow and criteria are unmet.
+    ///
+    /// JSON shape stored: {"runtime": "...", "model": null|"...", "require_tools": [...]}.
+    /// Inserts a worker_config_changed event {from, to}.
+    SetWorker {
+        slug_or_id: String,
+        /// Runtime to fire (claude / codex / gemini / etc.).
+        #[arg(long)]
+        runtime: String,
+        /// Optional model override for this runtime.
+        #[arg(long)]
+        model: Option<String>,
+        /// Comma-separated tool names to pass as --require-tools when spawning.
+        #[arg(long = "require-tools", value_delimiter = ',')]
+        require_tools: Vec<String>,
     },
 }
 
@@ -228,6 +287,9 @@ struct MissionRow {
     // v2.16 PR-3: absolute path to the git repo captured at create time.
     // Used by ensure_agent_worktree to resolve base_sha. NULL for single_cwd.
     repo_root: Option<String>,
+    // v2.16 PR-4: worker config JSON — {"runtime":"...","model":null|"...","require_tools":[...]}.
+    // NULL means the coordinator tick will escalate with reason="no_worker_config".
+    worker_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -243,11 +305,12 @@ struct MissionEventRow {
 //   0=id 1=slug 2=name 3=goal 4=success_criteria 5=escalation_policy
 //   6=workspace_strategy 7=base_sha 8=cleanup_policy 9=merge_strategy
 //   10=category 11=state 12=max_loops 13=token_budget_usd 14=result_metadata
-//   15=narrative_md_path 16=created_at 17=updated_at 18=repo_root (PR-3, last)
+//   15=narrative_md_path 16=created_at 17=updated_at 18=repo_root (PR-3)
+//   19=worker_config (PR-4, last)
 const MISSION_SELECT: &str = "SELECT id, slug, name, goal, success_criteria, escalation_policy,
             workspace_strategy, base_sha, cleanup_policy, merge_strategy,
             category, state, max_loops, token_budget_usd, result_metadata,
-            narrative_md_path, created_at, updated_at, repo_root FROM missions";
+            narrative_md_path, created_at, updated_at, repo_root, worker_config FROM missions";
 
 // ── Validation constants ──────────────────────────────────────────────
 
@@ -261,6 +324,12 @@ const VALID_MERGE_STRATEGIES: &[&str] = &[
 ];
 const VALID_CATEGORIES: &[&str] = &["autonomous", "needs_owner", "ignored", "done"];
 const VALID_STATES: &[&str] = &["open", "in_progress", "blocked", "complete"];
+
+/// Maximum age in seconds for an open `dispatch_started` event to be considered
+/// live even when its pid is alive and has the right argv. Beyond this the
+/// dispatch must have crashed or hung without leaving a closing event.
+/// (Finding 1 — PR-4 review, 2026-06-12)
+const MAX_WORKER_AGE_SECS: i64 = 7200;
 
 // ── Dispatcher ────────────────────────────────────────────────────────
 
@@ -328,6 +397,7 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
             require_tools,
             loop_slug,
             vars,
+            attempt_id,
         } => run_dispatch_under_mission(
             DispatchInput {
                 slug_or_id,
@@ -340,10 +410,24 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
                 require_tools,
                 loop_slug,
                 vars,
+                attempt_id,
             },
             db_path,
             opts,
         ),
+        // ── PR-4 ──────────────────────────────────────────────────────
+        MissionSub::Tick { slug_or_id, json } => {
+            run_tick(slug_or_id, json, db_path, opts)
+        }
+        MissionSub::Check { slug_or_id } => {
+            run_check(slug_or_id, db_path, opts)
+        }
+        MissionSub::SetWorker {
+            slug_or_id,
+            runtime,
+            model,
+            require_tools,
+        } => run_set_worker(slug_or_id, runtime, model, require_tools, db_path, opts),
     }
 }
 
@@ -650,37 +734,16 @@ fn run_set_state(slug_or_id: String, state: String, db_path: &PathBuf, opts: &Op
         }
         return Ok(());
     }
-    let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE missions SET state = ?1, updated_at = ?2 WHERE id = ?3",
-        params![state, now, row.id],
-    )?;
-    insert_event(
-        &conn,
-        &row.id,
-        "state_changed",
-        Some(serde_json::json!({
-            "from": row.state,
-            "to": state,
-        })),
-        &now,
-    )?;
-    // v2.16 PR-3 — trigger event-driven cleanup on terminal state transitions.
-    if state == "complete" {
-        let cleaned = cleanup_mission_worktrees(&conn, &row, &state, false)?;
-        if opts.human && !cleaned.is_empty() {
-            emit_human(&format!(
-                "  Worktrees cleaned: {}",
-                cleaned.join(", ")
-            ));
-        }
-    }
-    let updated = load_mission(&conn, &row.id)?;
+    let prev_state = row.state.clone();
+    let (updated, cleanup_err) = transition_state(&conn, &row, &state, None)?;
     if opts.human {
         emit_human(&format!(
             "Mission '{}' state: {} → {}",
-            updated.slug, row.state, updated.state
+            updated.slug, prev_state, updated.state
         ));
+        if let Some(ref e) = cleanup_err {
+            emit_human(&format!("  ⚠ worktree cleanup failed: {}", e));
+        }
     } else {
         emit_json(&updated)?;
     }
@@ -757,6 +820,9 @@ struct DispatchInput {
     require_tools: Vec<String>,
     loop_slug: Option<String>,
     vars: Vec<String>,
+    /// Pre-minted attempt_id from the parent tick (Finding 3 — PR-4 review).
+    /// When Some, skip inserting dispatch_started (parent already did it).
+    attempt_id: Option<String>,
 }
 
 fn run_dispatch_under_mission(
@@ -966,10 +1032,44 @@ fn run_dispatch_under_mission(
     // Single-dispatch path.
     let (runtime, prompt_text) = single_dispatch.expect("loop_slug was None");
 
+    // v2.16 PR-4 / Finding-3 — attempt_id and dispatch_started handling.
+    //
+    // When the parent tick pre-minted an attempt_id and already inserted
+    // dispatch_started, the child re-uses that id and skips a second insert.
+    // When there is no pre-minted id (manual CLI dispatch), mint one now and
+    // insert dispatch_started ourselves — keeping today's behavior.
+    let started_at_ts = chrono::Utc::now().to_rfc3339();
+    let attempt_id = match input.attempt_id.clone() {
+        Some(id) => {
+            // Parent already wrote dispatch_started — do NOT insert again.
+            id
+        }
+        None => {
+            // Manual dispatch: mint and insert as before.
+            let new_id = Uuid::new_v4().to_string();
+            let current_pid = std::process::id();
+            insert_event(
+                &conn,
+                &mission.id,
+                "dispatch_started",
+                Some(serde_json::json!({
+                    "attempt_id": new_id,
+                    "runtime": runtime,
+                    "agent": input.agent,
+                    "pid": current_pid,
+                    "spawned_by": "manual",
+                    "slug": mission.slug,
+                })),
+                &started_at_ts,
+            )?;
+            new_id
+        }
+    };
+
     // Capture wake_started_at so we can find the freshly-written execution_logs
     // row that this dispatch creates. Same pattern v2.15.5 uses in paused-
     // dispatch resume (execution_logs.id is TEXT UUID, not auto-increment).
-    let wake_started_at = chrono::Utc::now().to_rfc3339();
+    let wake_started_at = started_at_ts.clone();
     drop(conn);
 
     if opts.human {
@@ -1030,8 +1130,11 @@ fn run_dispatch_under_mission(
         .ok();
 
     let now = chrono::Utc::now().to_rfc3339();
+    // v2.16 PR-4: include attempt_id in dispatched event so the tick can
+    // correlate dispatch_started → dispatched pairs for in-flight detection.
     let event_payload = match &outcome {
         Some((exec_id, status, err, cost, tool_calls)) => serde_json::json!({
+            "attempt_id": attempt_id,
             "runtime": runtime,
             "model": input.model,
             "agent": input.agent,
@@ -1044,6 +1147,7 @@ fn run_dispatch_under_mission(
             "tool_calls_count": tool_calls,
         }),
         None => serde_json::json!({
+            "attempt_id": attempt_id,
             "runtime": runtime,
             "model": input.model,
             "agent": input.agent,
@@ -1328,6 +1432,8 @@ fn row_to_mission(r: &rusqlite::Row) -> rusqlite::Result<MissionRow> {
     let rm_str: Option<String> = r.get(14)?;
     let result_metadata =
         rm_str.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let wc_str: Option<String> = r.get(19).ok().flatten(); // PR-4: worker_config — tolerates old rows
+    let worker_config = wc_str.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
     Ok(MissionRow {
         id: r.get(0)?,
         slug: r.get(1)?,
@@ -1347,7 +1453,8 @@ fn row_to_mission(r: &rusqlite::Row) -> rusqlite::Result<MissionRow> {
         narrative_md_path: r.get(15)?,
         created_at: r.get(16)?,
         updated_at: r.get(17)?,
-        repo_root: r.get(18).ok().flatten(), // PR-3: new last column; .ok().flatten() tolerates old rows without it
+        repo_root: r.get(18).ok().flatten(), // PR-3: .ok().flatten() tolerates old rows without it
+        worker_config,
     })
 }
 
@@ -1682,7 +1789,1092 @@ fn run_cleanup_command(
     Ok(())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+// ── v2.16 PR-4: set-worker ────────────────────────────────────────────
+
+fn run_set_worker(
+    slug_or_id: String,
+    runtime: String,
+    model: Option<String>,
+    require_tools: Vec<String>,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    if runtime.trim().is_empty() {
+        anyhow::bail!("missions set-worker: --runtime is required");
+    }
+    let conn = db::open_readwrite(db_path)?;
+    let mission = load_mission(&conn, &slug_or_id)?;
+
+    let new_cfg = WorkerConfig {
+        runtime: runtime.clone(),
+        model: model.clone(),
+        require_tools: require_tools.clone(),
+    };
+    let new_cfg_json = serde_json::to_value(&new_cfg).context("serialize worker_config")?;
+    let new_cfg_str = serde_json::to_string(&new_cfg_json).context("serialize worker_config")?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let old_cfg = mission.worker_config.clone();
+
+    conn.execute(
+        "UPDATE missions SET worker_config = ?1, updated_at = ?2 WHERE id = ?3",
+        params![new_cfg_str, now, mission.id],
+    )
+    .context("update missions.worker_config")?;
+
+    insert_event(
+        &conn,
+        &mission.id,
+        "worker_config_changed",
+        Some(serde_json::json!({
+            "from": old_cfg,
+            "to": new_cfg_json,
+        })),
+        &now,
+    )?;
+
+    let updated = load_mission(&conn, &mission.id)?;
+    if opts.human {
+        emit_human(&format!(
+            "Mission '{}' worker_config set: runtime={}{}{}\n  previous: {}",
+            updated.slug,
+            runtime,
+            model
+                .as_deref()
+                .map(|m| format!(" model={}", m))
+                .unwrap_or_default(),
+            if require_tools.is_empty() {
+                String::new()
+            } else {
+                format!(" require-tools={}", require_tools.join(","))
+            },
+            old_cfg
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+        ));
+    } else {
+        emit_json(&updated)?;
+    }
+    Ok(())
+}
+
+// ── v2.16 PR-4: tick ──────────────────────────────────────────────────
+
+/// Output produced by `tick` for a single mission.
+#[derive(Debug, Serialize)]
+struct TickResult {
+    slug: String,
+    state: String,
+    action: String,
+    detail: Option<serde_json::Value>,
+}
+
+/// `ato missions tick [<slug>] [--json]`
+///
+/// One-shot coordinator wake. Iterates missions in state open|in_progress
+/// (or just the specified slug). Per mission, at most ONE action per tick.
+fn run_tick(
+    slug_or_id: Option<String>,
+    json_output: bool,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+
+    let missions: Vec<MissionRow> = if let Some(ref s) = slug_or_id {
+        let m = load_mission(&conn, s)?;
+        vec![m]
+    } else {
+        // All open or in_progress missions.
+        let mut stmt = conn.prepare(&format!(
+            "{} WHERE state IN ('open', 'in_progress') ORDER BY updated_at ASC",
+            MISSION_SELECT
+        ))?;
+        let iter = stmt.query_map([], row_to_mission)?;
+        iter.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut results: Vec<TickResult> = Vec::new();
+
+    for mission in &missions {
+        let result = tick_one_mission(&conn, mission, db_path)?;
+        results.push(result);
+    }
+
+    if json_output || !opts.human {
+        emit_json(&results)?;
+    } else {
+        for r in &results {
+            let detail_str = r
+                .detail
+                .as_ref()
+                .map(|d| format!(" — {}", d))
+                .unwrap_or_default();
+            emit_human(&format!(
+                "  {} [{}]  {}{}",
+                r.slug, r.state, r.action, detail_str
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Execute the coordinator decision tree for one mission.
+/// Returns the action taken (or "no action").
+fn tick_one_mission(
+    conn: &Connection,
+    mission: &MissionRow,
+    db_path: &PathBuf,
+) -> Result<TickResult> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // (a) Skip if ignored.
+    if mission.category == "ignored" {
+        return Ok(TickResult {
+            slug: mission.slug.clone(),
+            state: mission.state.clone(),
+            action: "skip".to_string(),
+            detail: Some(serde_json::json!("category=ignored")),
+        });
+    }
+
+    // (b) Pre-flight for worktree missions: verify base_sha is still resolvable.
+    if mission.workspace_strategy == "per_agent_worktree" {
+        if let Some(repo_root) = mission.repo_root.as_deref() {
+            if let Some(base_sha) = mission.base_sha.as_deref() {
+                let resolve_out = std::process::Command::new("git")
+                    .args(["-C", repo_root, "rev-parse", "--verify", "--quiet"])
+                    .arg(format!("{}^{{commit}}", base_sha))
+                    .output()
+                    .ok();
+                let resolvable = resolve_out
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !resolvable {
+                    // Escalate once (dedup).
+                    let reason = "base_sha_unresolvable";
+                    if !escalation_is_pending(conn, &mission.id, reason)? {
+                        insert_event(
+                            conn,
+                            &mission.id,
+                            "escalated",
+                            Some(serde_json::json!({
+                                "reason": reason,
+                                "base_sha": base_sha,
+                                "repo_root": repo_root,
+                            })),
+                            &now,
+                        )?;
+                        conn.execute(
+                            "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+                            params![now, mission.id],
+                        )?;
+                        return Ok(TickResult {
+                            slug: mission.slug.clone(),
+                            state: mission.state.clone(),
+                            action: "escalated".to_string(),
+                            detail: Some(serde_json::json!({"reason": reason})),
+                        });
+                    }
+                    return Ok(TickResult {
+                        slug: mission.slug.clone(),
+                        state: mission.state.clone(),
+                        action: "no action".to_string(),
+                        detail: Some(serde_json::json!("base_sha unresolvable (already escalated)")),
+                    });
+                }
+            }
+        }
+    }
+
+    // (c) In-flight scan — look for dispatch_started events without a matching
+    // dispatched event and with a dead pid. ONE stale event found = that IS
+    // this tick's action for this mission.
+    let stale_attempt = find_stale_dispatch_started(conn, &mission.id)?;
+    if let Some((attempt_id, pid)) = stale_attempt {
+        insert_event(
+            conn,
+            &mission.id,
+            "dispatch_abandoned",
+            Some(serde_json::json!({
+                "attempt_id": attempt_id,
+                "pid": pid,
+                "reason": "stale_started_event_dead_pid",
+            })),
+            &now,
+        )?;
+        conn.execute(
+            "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+            params![now, mission.id],
+        )?;
+        return Ok(TickResult {
+            slug: mission.slug.clone(),
+            state: mission.state.clone(),
+            action: "dispatch_abandoned".to_string(),
+            detail: Some(serde_json::json!({"attempt_id": attempt_id, "pid": pid})),
+        });
+    }
+
+    // (d) Success evaluation — only if there are terminal worker events newer
+    // than the latest success_check (or no success_check + at least one terminal event).
+    if should_run_success_check(conn, &mission.id)? {
+        let sc_result = run_success_evaluation(conn, mission, &now, db_path)?;
+        if sc_result.all_met {
+            let (_updated, cleanup_err) = transition_state(conn, mission, "complete", Some("success_criteria_met"))?;
+            return Ok(TickResult {
+                slug: mission.slug.clone(),
+                state: "complete".to_string(),
+                action: "completed".to_string(),
+                detail: Some(serde_json::json!({
+                    "success_check": sc_result.results,
+                    "cleanup_warning": cleanup_err,
+                })),
+            });
+        }
+        return Ok(TickResult {
+            slug: mission.slug.clone(),
+            state: mission.state.clone(),
+            action: "success_check".to_string(),
+            detail: Some(serde_json::json!({"all_met": false, "results": sc_result.results})),
+        });
+    }
+
+    // (e) Failure guard — 3 consecutive failures → blocked + escalated brief.
+    let consecutive_failures = count_consecutive_failures(conn, &mission.id)?;
+    if consecutive_failures >= 3 {
+        // Only escalate if not already pending.
+        let reason = "consecutive_failures";
+        if !escalation_is_pending(conn, &mission.id, reason)? {
+            let last_failures = last_n_failure_summaries(conn, &mission.id, 3)?;
+            let brief_payload = serde_json::json!({
+                "reason": reason,
+                "failures": last_failures,
+                "options": [
+                    "fix the underlying error and set-state in_progress",
+                    "change worker_config",
+                    "abandon: set-category done",
+                ],
+            });
+            // Block the mission.
+            conn.execute(
+                "UPDATE missions SET state = 'blocked', updated_at = ?1 WHERE id = ?2",
+                params![now, mission.id],
+            )?;
+            insert_event(
+                conn,
+                &mission.id,
+                "state_changed",
+                Some(serde_json::json!({"from": mission.state, "to": "blocked", "reason": reason})),
+                &now,
+            )?;
+            insert_event(conn, &mission.id, "escalated", Some(brief_payload.clone()), &now)?;
+            return Ok(TickResult {
+                slug: mission.slug.clone(),
+                state: "blocked".to_string(),
+                action: "blocked+escalated".to_string(),
+                detail: Some(brief_payload),
+            });
+        }
+        // Already blocked + escalated — no action.
+        return Ok(TickResult {
+            slug: mission.slug.clone(),
+            state: mission.state.clone(),
+            action: "no action".to_string(),
+            detail: Some(serde_json::json!("consecutive_failures (already escalated)")),
+        });
+    }
+
+    // (f) Spawn detached child if worker_config set, no in-flight, budgets allow.
+    // Check in-flight via loop_run_started + loop_run_completed or dispatch_started events.
+    if is_in_flight(conn, &mission.id)? {
+        return Ok(TickResult {
+            slug: mission.slug.clone(),
+            state: mission.state.clone(),
+            action: "no action".to_string(),
+            detail: Some(serde_json::json!("work already in flight")),
+        });
+    }
+
+    // Budget check — same gates as dispatch.
+    let prior_dispatch_count = count_dispatches_for_mission(conn, &mission.id)?;
+    if let Some(max) = mission.max_loops {
+        if prior_dispatch_count >= max {
+            return Ok(TickResult {
+                slug: mission.slug.clone(),
+                state: mission.state.clone(),
+                action: "no action".to_string(),
+                detail: Some(serde_json::json!({
+                    "reason": "max_loops_reached",
+                    "prior": prior_dispatch_count,
+                    "max": max,
+                })),
+            });
+        }
+    }
+    let prior_cost = sum_cost_for_mission(conn, &mission.id)?;
+    if let Some(budget) = mission.token_budget_usd {
+        if prior_cost >= budget {
+            return Ok(TickResult {
+                slug: mission.slug.clone(),
+                state: mission.state.clone(),
+                action: "no action".to_string(),
+                detail: Some(serde_json::json!({
+                    "reason": "token_budget_exhausted",
+                    "spent": prior_cost,
+                    "budget": budget,
+                })),
+            });
+        }
+    }
+
+    // worker_config gate.
+    let wc = match &mission.worker_config {
+        Some(v) => v.clone(),
+        None => {
+            // Escalate once with reason=no_worker_config.
+            let reason = "no_worker_config";
+            if !escalation_is_pending(conn, &mission.id, reason)? {
+                insert_event(
+                    conn,
+                    &mission.id,
+                    "escalated",
+                    Some(serde_json::json!({
+                        "reason": reason,
+                        "hint": "run `ato missions set-worker <slug> --runtime <r>` to configure the coordinator worker",
+                    })),
+                    &now,
+                )?;
+                conn.execute(
+                    "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+                    params![now, mission.id],
+                )?;
+                return Ok(TickResult {
+                    slug: mission.slug.clone(),
+                    state: mission.state.clone(),
+                    action: "escalated".to_string(),
+                    detail: Some(serde_json::json!({"reason": reason})),
+                });
+            }
+            return Ok(TickResult {
+                slug: mission.slug.clone(),
+                state: mission.state.clone(),
+                action: "no action".to_string(),
+                detail: Some(serde_json::json!("no_worker_config (already escalated)")),
+            });
+        }
+    };
+
+    // Parse worker_config.
+    let wc_parsed: WorkerConfig =
+        serde_json::from_value(wc).unwrap_or_else(|_| WorkerConfig::default());
+    if wc_parsed.runtime.is_empty() {
+        return Ok(TickResult {
+            slug: mission.slug.clone(),
+            state: mission.state.clone(),
+            action: "no action".to_string(),
+            detail: Some(serde_json::json!("worker_config has empty runtime")),
+        });
+    }
+
+    // Compose the prompt: goal + last 5 event digest + unmet criteria.
+    let prompt = compose_tick_prompt(conn, mission)?;
+
+    // Spawn detached child: ato missions dispatch <slug> --runtime <r> [--model <m>] [--require-tools <t>] --prompt <p> --attempt-id <id>
+    //
+    // Finding 3 (PR-4 review): the PARENT mints the attempt_id and inserts
+    // dispatch_started BEFORE the child runs, so in-flight is visible the
+    // instant spawn() returns.  The child receives --attempt-id and skips
+    // its own dispatch_started insert; it still writes the closing 'dispatched'
+    // event with the same attempt_id.
+    let tick_attempt_id = Uuid::new_v4().to_string();
+    let exe = std::env::current_exe()
+        .context("resolve current exe for detached spawn")?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("missions")
+        .arg("dispatch")
+        .arg(&mission.slug)
+        .arg("--runtime")
+        .arg(&wc_parsed.runtime);
+    if let Some(ref m) = wc_parsed.model {
+        cmd.arg("--model").arg(m);
+    }
+    if !wc_parsed.require_tools.is_empty() {
+        cmd.arg("--require-tools").arg(wc_parsed.require_tools.join(","));
+    }
+    cmd.arg("--prompt").arg(&prompt);
+    // Pass the pre-minted attempt_id so the child skips its own dispatch_started.
+    cmd.arg("--attempt-id").arg(&tick_attempt_id);
+    // Detach: null stdin/stdout/stderr, do NOT wait.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd.spawn().context("spawn detached dispatch child")?;
+
+    // Record dispatch_started in the PARENT immediately after spawn() so the
+    // in-flight record exists even if the child crashes before its own DB write.
+    insert_event(
+        conn,
+        &mission.id,
+        "dispatch_started",
+        Some(serde_json::json!({
+            "attempt_id": tick_attempt_id,
+            "runtime": wc_parsed.runtime,
+            "agent": null,
+            "pid": child.id(),
+            "slug": mission.slug,
+            "spawned_by": "tick",
+        })),
+        &now,
+    )?;
+
+    // Transition open → in_progress if needed.
+    if mission.state == "open" {
+        conn.execute(
+            "UPDATE missions SET state = 'in_progress', updated_at = ?1 WHERE id = ?2",
+            params![now, mission.id],
+        )?;
+        insert_event(
+            conn,
+            &mission.id,
+            "state_changed",
+            Some(serde_json::json!({
+                "from": "open",
+                "to": "in_progress",
+                "reason": "tick_spawned_worker",
+            })),
+            &now,
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+            params![now, mission.id],
+        )?;
+    }
+
+    Ok(TickResult {
+        slug: mission.slug.clone(),
+        state: "in_progress".to_string(),
+        action: "worker_spawned".to_string(),
+        detail: Some(serde_json::json!({
+            "runtime": wc_parsed.runtime,
+            "model": wc_parsed.model,
+        })),
+    })
+}
+
+/// Compose the prompt the coordinator passes to the spawned worker:
+/// mission goal + bullet digest of last 5 events + unmet criteria descriptions.
+fn compose_tick_prompt(conn: &Connection, mission: &MissionRow) -> Result<String> {
+    // Last 5 events (newest first for context).
+    let mut stmt = conn.prepare(
+        "SELECT kind, occurred_at FROM mission_events
+          WHERE mission_id = ?1
+          ORDER BY occurred_at DESC
+          LIMIT 5",
+    )?;
+    let events: Vec<(String, String)> = stmt
+        .query_map(params![mission.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let event_bullets: String = events
+        .iter()
+        .map(|(k, t)| format!("  - {} ({})", k, t))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Unmet criteria descriptions.
+    let criteria_descs: Vec<String> = mission
+        .success_criteria
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|c| c.get("description").and_then(|d| d.as_str()).map(|s| format!("  - {}", s)))
+        .collect();
+
+    Ok(format!(
+        "Mission goal: {}\n\nRecent events:\n{}\n\nUnmet success criteria:\n{}",
+        mission.goal,
+        if event_bullets.is_empty() { "  (none yet)".to_string() } else { event_bullets },
+        if criteria_descs.is_empty() { "  (none defined)".to_string() } else { criteria_descs.join("\n") },
+    ))
+}
+
+// ── v2.16 PR-4: check ─────────────────────────────────────────────────
+
+/// `ato missions check <slug>` — force success evaluation immediately.
+fn run_check(slug_or_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+    let mission = load_mission(&conn, &slug_or_id)?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let sc_result = run_success_evaluation(&conn, &mission, &now, db_path)?;
+
+    let mut cleanup_err: Option<String> = None;
+    if sc_result.all_met && mission.state != "complete" {
+        let (_updated, ce) = transition_state(&conn, &mission, "complete", Some("manual_check_success"))?;
+        cleanup_err = ce;
+    }
+
+    let updated = load_mission(&conn, &mission.id)?;
+    if opts.human {
+        emit_human(&format!(
+            "Mission '{}' check: all_met={} state={}",
+            updated.slug, sc_result.all_met, updated.state
+        ));
+        for r in &sc_result.results {
+            emit_human(&format!(
+                "  [{}] {} (exit {})",
+                if r.met { "x" } else { " " },
+                r.description,
+                r.exit_code,
+            ));
+        }
+        if let Some(ref e) = cleanup_err {
+            emit_human(&format!("  ⚠ worktree cleanup failed: {}", e));
+        }
+    } else {
+        emit_json(&serde_json::json!({
+            "mission_slug": updated.slug,
+            "state": updated.state,
+            "all_met": sc_result.all_met,
+            "results": sc_result.results,
+            "cleanup_warning": cleanup_err,
+        }))?;
+    }
+    Ok(())
+}
+
+// ── PR-4 helpers ──────────────────────────────────────────────────────
+
+/// Pure predicate: is `pid` still OUR worker for mission `slug`?
+///
+/// Requires ALL of:
+///   (a) pid_alive  — `kill -0` returned success
+///   (b) ps_command contains both "missions" and "dispatch" and `slug`
+///       (argv check, no shell — `ps -p <pid> -o command=`)
+///       If ps_command is None (ps failed or produced no output) the
+///       process is treated as NOT ours → stale.
+///   (c) age_secs < MAX_WORKER_AGE_SECS — backstop against ancient events
+///       whose pids have been recycled by the OS.
+///
+/// The parameters are kept primitive so callers can unit-test without real pids.
+fn is_worker_process_live(pid_alive: bool, ps_command: Option<&str>, slug: &str, age_secs: i64) -> bool {
+    if !pid_alive {
+        return false;
+    }
+    // Identity check — ps output must mention "missions", "dispatch", and the slug.
+    let cmd_str = match ps_command {
+        Some(s) if !s.is_empty() => s,
+        _ => return false, // ps failed or empty → not our process
+    };
+    // Defensive: empty slug cannot match uniquely — treat as stale.
+    if slug.is_empty() {
+        return false;
+    }
+    // Exact token sequence: … missions dispatch <slug> …
+    // Substring match would allow slug "api" to match "api-v2".
+    let tokens: Vec<&str> = cmd_str.split_whitespace().collect();
+    let token_match = tokens.windows(3).any(|w| w[0] == "missions" && w[1] == "dispatch" && w[2] == slug);
+    if !token_match {
+        return false;
+    }
+    // Age backstop.
+    age_secs < MAX_WORKER_AGE_SECS
+}
+
+/// Run `ps -p <pid> -o command=` without a shell and return the trimmed output,
+/// or None if ps fails or produces no output.
+fn ps_command_for_pid(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Find a stale `dispatch_started` event: one whose attempt_id has no
+/// matching `dispatched` event AND that fails the `is_worker_process_live`
+/// predicate (dead pid, wrong argv, or older than MAX_WORKER_AGE_SECS).
+/// Returns Some((attempt_id, pid)) for the first stale event found.
+fn find_stale_dispatch_started(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Option<(String, u32)>> {
+    // Collect started attempt_ids + occurred_at that have NOT been closed.
+    let mut stmt = conn.prepare(
+        "SELECT payload, occurred_at FROM mission_events
+          WHERE mission_id = ?1 AND kind = 'dispatch_started'
+          ORDER BY occurred_at ASC",
+    )?;
+    let rows: Vec<(Option<String>, String)> = stmt
+        .query_map(params![mission_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Collect closed attempt_ids from 'dispatched' + 'dispatch_abandoned' events.
+    let mut stmt2 = conn.prepare(
+        "SELECT payload FROM mission_events
+          WHERE mission_id = ?1 AND kind IN ('dispatched', 'dispatch_abandoned')
+          ORDER BY occurred_at ASC",
+    )?;
+    let closed_attempt_ids: std::collections::HashSet<String> = stmt2
+        .query_map(params![mission_id], |r| r.get::<_, Option<String>>(0))?
+        .filter_map(|r| r.ok().flatten())
+        .filter_map(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .filter_map(|v| v.get("attempt_id").and_then(|a| a.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let now_utc = chrono::Utc::now();
+
+    for (payload_opt, occurred_at) in rows {
+        let Some(payload_str) = payload_opt else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload_str) else { continue };
+        let Some(attempt_id) = v.get("attempt_id").and_then(|a| a.as_str()) else { continue };
+        if closed_attempt_ids.contains(attempt_id) {
+            continue; // This dispatch completed normally.
+        }
+        let pid_val = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+        if pid_val == 0 {
+            continue; // No pid stored — can't verify.
+        }
+        // (a) pid alive?
+        let pid_alive = std::process::Command::new("kill")
+            .args(["-0", &pid_val.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        // (b) ps identity check — None if ps fails or output is empty.
+        let ps_cmd = if pid_alive { ps_command_for_pid(pid_val) } else { None };
+        let slug = v.get("slug_hint").and_then(|s| s.as_str())
+            .or_else(|| v.get("runtime").map(|_| "")).unwrap_or("");
+        // Re-read slug from the mission_events row via the caller-passed mission_id.
+        // The dispatch_started payload may include "slug" (written by tick path).
+        let slug_for_check: String = v.get("slug").and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        // (c) age check.
+        let age_secs = chrono::DateTime::parse_from_rfc3339(&occurred_at)
+            .map(|t| now_utc.signed_duration_since(t.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(i64::MAX);
+        let _ = slug; // suppress unused warning from earlier derivation
+        if !is_worker_process_live(pid_alive, ps_cmd.as_deref(), &slug_for_check, age_secs) {
+            return Ok(Some((attempt_id.to_string(), pid_val)));
+        }
+    }
+    Ok(None)
+}
+
+/// Returns true if there is work in-flight: an open `loop_run_started`
+/// without a matching `loop_run_completed`, or a `dispatch_started`
+/// without a matching `dispatched` event AND with a live pid.
+fn is_in_flight(conn: &Connection, mission_id: &str) -> Result<bool> {
+    // Check loop in-flight: loop_run_started without loop_run_completed.
+    let started: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mission_events
+          WHERE mission_id = ?1 AND kind = 'loop_run_started'",
+        params![mission_id],
+        |r| r.get(0),
+    )?;
+    let completed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mission_events
+          WHERE mission_id = ?1 AND kind = 'loop_run_completed'",
+        params![mission_id],
+        |r| r.get(0),
+    )?;
+    if started > completed {
+        return Ok(true);
+    }
+
+    // Check single-dispatch in-flight: dispatch_started without dispatched + live pid.
+    let mut stmt = conn.prepare(
+        "SELECT payload, occurred_at FROM mission_events
+          WHERE mission_id = ?1 AND kind = 'dispatch_started'
+          ORDER BY occurred_at ASC",
+    )?;
+    let started_rows: Vec<(Option<String>, String)> = stmt
+        .query_map(params![mission_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut stmt2 = conn.prepare(
+        "SELECT payload FROM mission_events
+          WHERE mission_id = ?1 AND kind IN ('dispatched', 'dispatch_abandoned')
+          ORDER BY occurred_at ASC",
+    )?;
+    let closed_ids: std::collections::HashSet<String> = stmt2
+        .query_map(params![mission_id], |r| r.get::<_, Option<String>>(0))?
+        .filter_map(|r| r.ok().flatten())
+        .filter_map(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .filter_map(|v| v.get("attempt_id").and_then(|a| a.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let now_utc = chrono::Utc::now();
+
+    for (payload_opt, occurred_at) in started_rows {
+        let Some(payload_str) = payload_opt else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload_str) else { continue };
+        let Some(attempt_id) = v.get("attempt_id").and_then(|a| a.as_str()) else { continue };
+        if closed_ids.contains(attempt_id) {
+            continue;
+        }
+        // Has open dispatch_started — check full liveness predicate.
+        let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+        if pid == 0 {
+            return Ok(true); // No pid — treat as in-flight (conservative).
+        }
+        let pid_alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let ps_cmd = if pid_alive { ps_command_for_pid(pid) } else { None };
+        let slug_for_check: String = v.get("slug").and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let age_secs = chrono::DateTime::parse_from_rfc3339(&occurred_at)
+            .map(|t| now_utc.signed_duration_since(t.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(i64::MAX);
+        if is_worker_process_live(pid_alive, ps_cmd.as_deref(), &slug_for_check, age_secs) {
+            return Ok(true);
+        }
+        // Predicate failed (dead pid, wrong argv, or too old) = stale — treated by step (c), not (f).
+    }
+    Ok(false)
+}
+
+/// Check if we should run success evaluation this tick:
+/// true when there are terminal events (dispatched/loop_run_completed)
+/// newer than the latest success_check, OR no success_check and at least
+/// one terminal event.
+fn should_run_success_check(conn: &Connection, mission_id: &str) -> Result<bool> {
+    let latest_check: Option<String> = conn
+        .query_row(
+            "SELECT MAX(occurred_at) FROM mission_events
+              WHERE mission_id = ?1 AND kind = 'success_check'",
+            params![mission_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let terminal_count: i64 = if let Some(ref check_ts) = latest_check {
+        conn.query_row(
+            "SELECT COUNT(*) FROM mission_events
+              WHERE mission_id = ?1
+                AND kind IN ('dispatched', 'loop_run_completed')
+                AND occurred_at > ?2",
+            params![mission_id, check_ts],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM mission_events
+              WHERE mission_id = ?1
+                AND kind IN ('dispatched', 'loop_run_completed')",
+            params![mission_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+
+    Ok(terminal_count > 0)
+}
+
+/// Per-criterion check result.
+#[derive(Debug, Serialize)]
+struct CriterionResult {
+    description: String,
+    exit_code: i32,
+    met: bool,
+}
+
+/// Aggregate result of a success evaluation.
+struct SuccessCheckResult {
+    results: Vec<CriterionResult>,
+    all_met: bool,
+}
+
+/// Run each criterion's check_command in the mission's working root (repo_root),
+/// record a success_check event, return results.
+fn run_success_evaluation(
+    conn: &Connection,
+    mission: &MissionRow,
+    now: &str,
+    _db_path: &PathBuf,
+) -> Result<SuccessCheckResult> {
+    let criteria = mission.success_criteria.as_array().cloned().unwrap_or_default();
+
+    // Working directory for check_commands: repo_root if set, else current dir.
+    let work_dir: PathBuf = mission
+        .repo_root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let mut results: Vec<CriterionResult> = Vec::new();
+    for criterion in &criteria {
+        let desc = criterion
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("(no description)")
+            .to_string();
+        let check_cmd = criterion
+            .get("check_command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if check_cmd.is_empty() {
+            results.push(CriterionResult {
+                description: desc,
+                exit_code: -1,
+                met: false,
+            });
+            continue;
+        }
+
+        // Parse argv — no shell.
+        let parts: Vec<&str> = check_cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            results.push(CriterionResult { description: desc, exit_code: -1, met: false });
+            continue;
+        }
+        let exit_code = std::process::Command::new(parts[0])
+            .args(&parts[1..])
+            .current_dir(&work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.code().unwrap_or(-1))
+            .unwrap_or(-1);
+
+        results.push(CriterionResult {
+            description: desc,
+            exit_code,
+            met: exit_code == 0,
+        });
+    }
+
+    let all_met = !results.is_empty() && results.iter().all(|r| r.met);
+
+    // Record success_check event.
+    let results_json: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "description": r.description,
+                "exit_code": r.exit_code,
+                "met": r.met,
+            })
+        })
+        .collect();
+    insert_event(
+        conn,
+        &mission.id,
+        "success_check",
+        Some(serde_json::json!({
+            "results": results_json,
+            "all_met": all_met,
+        })),
+        now,
+    )?;
+    conn.execute(
+        "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+        params![now, mission.id],
+    )?;
+
+    Ok(SuccessCheckResult { results, all_met })
+}
+
+/// Count consecutive failures (dispatched with status=="error" or
+/// dispatch_abandoned) walking newest-first, stopping at any success.
+fn count_consecutive_failures(conn: &Connection, mission_id: &str) -> Result<i64> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, payload FROM mission_events
+          WHERE mission_id = ?1
+            AND kind IN ('dispatched', 'dispatch_abandoned', 'loop_run_completed')
+          ORDER BY occurred_at DESC",
+    )?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map(params![mission_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut count = 0i64;
+    for (kind, payload_opt) in &rows {
+        let is_failure = if kind == "dispatch_abandoned" {
+            true
+        } else if kind == "dispatched" || kind == "loop_run_completed" {
+            let status = payload_opt
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s.to_string()));
+            status.as_deref() == Some("error")
+        } else {
+            false
+        };
+        if is_failure {
+            count += 1;
+        } else {
+            // Any non-failure breaks the consecutive streak.
+            break;
+        }
+    }
+    Ok(count)
+}
+
+/// Return summaries of the last N failure events for the decision brief.
+fn last_n_failure_summaries(
+    conn: &Connection,
+    mission_id: &str,
+    n: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, payload, occurred_at FROM mission_events
+          WHERE mission_id = ?1
+            AND kind IN ('dispatched', 'dispatch_abandoned', 'loop_run_completed')
+          ORDER BY occurred_at DESC
+          LIMIT 10",
+    )?;
+    let rows: Vec<(String, Option<String>, String)> = stmt
+        .query_map(params![mission_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut summaries = Vec::new();
+    for (kind, payload_opt, occurred_at) in &rows {
+        if summaries.len() >= n {
+            break;
+        }
+        let is_failure = if kind == "dispatch_abandoned" {
+            true
+        } else {
+            let status = payload_opt
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s.to_string()));
+            status.as_deref() == Some("error")
+        };
+        if is_failure {
+            let payload = payload_opt
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .unwrap_or(serde_json::json!(null));
+            summaries.push(serde_json::json!({
+                "kind": kind,
+                "occurred_at": occurred_at,
+                "payload": payload,
+            }));
+        } else {
+            break;
+        }
+    }
+    Ok(summaries)
+}
+
+/// Check if an 'escalated' event with the given reason exists and has not
+/// been resolved by a later 'owner_decision' or 'state_changed' event.
+/// Returns true = already pending (don't spam).
+fn escalation_is_pending(
+    conn: &Connection,
+    mission_id: &str,
+    reason: &str,
+) -> Result<bool> {
+    // Find the most recent escalated event with this reason.
+    let latest_escalation: Option<String> = conn
+        .query_row(
+            "SELECT MAX(occurred_at) FROM mission_events
+              WHERE mission_id = ?1
+                AND kind = 'escalated'
+                AND json_extract(payload, '$.reason') = ?2",
+            params![mission_id, reason],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let Some(esc_ts) = latest_escalation else {
+        return Ok(false); // No prior escalation of this kind.
+    };
+
+    // Check if a resolution event is newer.
+    let resolution_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM mission_events
+              WHERE mission_id = ?1
+                AND kind IN ('owner_decision', 'state_changed')
+                AND occurred_at > ?2",
+            params![mission_id, esc_ts],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(resolution_count == 0)
+}
+
+/// Shared state-transition helper (Finding 2 — PR-4 review, 2026-06-12).
+///
+/// Validates the transition, writes the UPDATE + state_changed event, and on
+/// transition to 'complete' runs `cleanup_mission_worktrees`.  A cleanup error
+/// does NOT roll back the state change — it inserts a 'worktree_cleanup_failed'
+/// event instead and the caller receives an optional cleanup error string.
+///
+/// Returns (updated_mission, Option<cleanup_error_string>).
+fn transition_state(
+    conn: &Connection,
+    mission: &MissionRow,
+    new_state: &str,
+    reason: Option<&str>,
+) -> Result<(MissionRow, Option<String>)> {
+    validate_enum("state", new_state, VALID_STATES)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE missions SET state = ?1, updated_at = ?2 WHERE id = ?3",
+        params![new_state, now, mission.id],
+    )?;
+    let payload = match reason {
+        Some(r) => serde_json::json!({"from": mission.state, "to": new_state, "reason": r}),
+        None    => serde_json::json!({"from": mission.state, "to": new_state}),
+    };
+    insert_event(conn, &mission.id, "state_changed", Some(payload), &now)?;
+
+    let mut cleanup_err: Option<String> = None;
+    if new_state == "complete" {
+        match cleanup_mission_worktrees(conn, mission, "complete", false) {
+            Ok(_) => {}
+            Err(e) => {
+                let err_str = format!("{:#}", e);
+                let _ = insert_event(
+                    conn,
+                    &mission.id,
+                    "worktree_cleanup_failed",
+                    Some(serde_json::json!({"error": err_str})),
+                    &now,
+                );
+                cleanup_err = Some(err_str);
+            }
+        }
+    }
+    let updated = load_mission(conn, &mission.id)?;
+    Ok((updated, cleanup_err))
+}
+
+// ── v2.16 PR-4: dispatch_started instrumentation ──────────────────────
+//
+// PR-4 instrumentation in run_dispatch_under_mission: before firing the
+// single-dispatch path, mint attempt_id + insert dispatch_started event.
+// The existing dispatched event gets attempt_id embedded in its payload.
+// (Loop path reuses loop_run_started/loop_run_completed as in-flight signal.)
+
+/// Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1741,7 +2933,8 @@ mod tests {
                 narrative_md_path   TEXT NOT NULL,
                 created_at          TEXT NOT NULL,
                 updated_at          TEXT NOT NULL,
-                repo_root           TEXT
+                repo_root           TEXT,
+                worker_config       TEXT
             );
             CREATE TABLE mission_events (
                 id              TEXT PRIMARY KEY,
@@ -1866,17 +3059,34 @@ mod tests {
         max_loops: Option<i64>,
         token_budget_usd: Option<f64>,
     ) {
+        seed_mission_full(conn, id, slug, "[]", "autonomous", "open", max_loops, token_budget_usd, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_mission_full(
+        conn: &Connection,
+        id: &str,
+        slug: &str,
+        success_criteria: &str,
+        category: &str,
+        state: &str,
+        max_loops: Option<i64>,
+        token_budget_usd: Option<f64>,
+        worker_config: Option<&str>,
+    ) {
         conn.execute(
             "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
-                                    max_loops, token_budget_usd, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'Goal', '[]', '/tmp/x.md', ?4, ?5, '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
-            rusqlite::params![id, slug, slug, max_loops, token_budget_usd],
+                                    category, state, max_loops, token_budget_usd, worker_config,
+                                    created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'Goal', ?4, '/tmp/x.md', ?5, ?6, ?7, ?8, ?9,
+                     '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
+            rusqlite::params![id, slug, slug, success_criteria, category, state, max_loops, token_budget_usd, worker_config],
         )
         .unwrap();
     }
 
     fn db_with_execution_logs() -> Connection {
-        let conn = make_db();
+        let conn = make_db(); // make_db already includes worker_config column
         conn.execute(
             "CREATE TABLE execution_logs (
                 id TEXT PRIMARY KEY,
@@ -2134,6 +3344,7 @@ mod tests {
             require_tools: vec![],
             loop_slug: None,
             vars: vec![],
+            attempt_id: None,
         };
         let err = run_dispatch_under_mission(input, &db_path, &opts).unwrap_err();
         let msg = format!("{}", err);
@@ -2278,6 +3489,7 @@ mod tests {
             require_tools: vec![],
             loop_slug: Some("no-such-loop".into()),
             vars: vec![],
+            attempt_id: None,
         };
         let err = run_dispatch_under_mission(input, &db_path, &opts).unwrap_err();
         assert!(
@@ -2417,7 +3629,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -2507,7 +3719,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -2586,7 +3798,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -2628,5 +3840,468 @@ mod tests {
         std::process::Command::new("git")
             .args(["-C", repo_path.to_str().unwrap(), "branch", "-D", "ato/mission/cleanup-test/codex"])
             .output().ok();
+    }
+
+    // ── v2.16 PR-4 tests ──────────────────────────────────────────────
+
+    /// (1) In-flight detection: dispatch_started without closing event + dead pid
+    /// → tick marks dispatch_abandoned.
+    #[test]
+    fn tick_stale_dispatch_started_marks_abandoned() {
+        let conn = make_db();
+        seed_mission(&conn, "m-stale", "stale", None, None);
+
+        // Insert a dispatch_started with a pid that can never be alive.
+        let attempt_id = "aaaaaaaa-0000-0000-0000-000000000001";
+        let dead_pid: u32 = 999_999;
+        insert_event(
+            &conn,
+            "m-stale",
+            "dispatch_started",
+            Some(serde_json::json!({
+                "attempt_id": attempt_id,
+                "runtime": "claude",
+                "pid": dead_pid,
+            })),
+            "2026-06-12T00:00:01Z",
+        ).unwrap();
+
+        // find_stale_dispatch_started should return this event.
+        let stale = find_stale_dispatch_started(&conn, "m-stale").unwrap();
+        assert!(stale.is_some(), "should find stale dispatch_started");
+        let (aid, pid) = stale.unwrap();
+        assert_eq!(aid, attempt_id);
+        assert_eq!(pid, dead_pid);
+
+        // After writing the abandoned event, it must no longer be stale.
+        insert_event(
+            &conn,
+            "m-stale",
+            "dispatch_abandoned",
+            Some(serde_json::json!({"attempt_id": attempt_id, "pid": dead_pid})),
+            "2026-06-12T00:00:02Z",
+        ).unwrap();
+        let stale_after = find_stale_dispatch_started(&conn, "m-stale").unwrap();
+        assert!(stale_after.is_none(), "should not find stale after abandoned event");
+    }
+
+    /// (1b) dispatch_started with matching dispatched event — NOT stale.
+    #[test]
+    fn tick_closed_dispatch_started_not_stale() {
+        let conn = make_db();
+        seed_mission(&conn, "m-closed", "closed", None, None);
+
+        let attempt_id = "aaaaaaaa-0000-0000-0000-000000000002";
+        insert_event(
+            &conn,
+            "m-closed",
+            "dispatch_started",
+            Some(serde_json::json!({"attempt_id": attempt_id, "pid": 999_999u32})),
+            "2026-06-12T00:00:01Z",
+        ).unwrap();
+        // Matching dispatched event — this pair is complete.
+        insert_event(
+            &conn,
+            "m-closed",
+            "dispatched",
+            Some(serde_json::json!({"attempt_id": attempt_id, "status": "success"})),
+            "2026-06-12T00:00:02Z",
+        ).unwrap();
+
+        let stale = find_stale_dispatch_started(&conn, "m-closed").unwrap();
+        assert!(stale.is_none(), "closed dispatch should not be stale");
+    }
+
+    /// (2) Consecutive-failure guard: 3 error dispatched events → blocked + escalated.
+    #[test]
+    fn tick_three_consecutive_failures_blocks_and_escalates() {
+        let conn = make_db();
+        seed_mission(&conn, "m-fail", "fail", None, None);
+
+        let t1 = "2026-06-12T00:01:00Z";
+        let t2 = "2026-06-12T00:02:00Z";
+        let t3 = "2026-06-12T00:03:00Z";
+
+        insert_event(&conn, "m-fail", "dispatched",
+            Some(serde_json::json!({"status": "error", "attempt_id": "a1"})), t1).unwrap();
+        insert_event(&conn, "m-fail", "dispatched",
+            Some(serde_json::json!({"status": "error", "attempt_id": "a2"})), t2).unwrap();
+        insert_event(&conn, "m-fail", "dispatched",
+            Some(serde_json::json!({"status": "error", "attempt_id": "a3"})), t3).unwrap();
+
+        let count = count_consecutive_failures(&conn, "m-fail").unwrap();
+        assert_eq!(count, 3, "three consecutive failures");
+
+        // escalation_is_pending should be false before any escalated event.
+        assert!(!escalation_is_pending(&conn, "m-fail", "consecutive_failures").unwrap());
+    }
+
+    /// (2b) Success breaks the consecutive streak.
+    #[test]
+    fn tick_success_breaks_consecutive_failure_streak() {
+        let conn = make_db();
+        seed_mission(&conn, "m-streak", "streak", None, None);
+
+        insert_event(&conn, "m-streak", "dispatched",
+            Some(serde_json::json!({"status": "error"})), "2026-06-12T00:01:00Z").unwrap();
+        insert_event(&conn, "m-streak", "dispatched",
+            Some(serde_json::json!({"status": "success"})), "2026-06-12T00:02:00Z").unwrap();
+        insert_event(&conn, "m-streak", "dispatched",
+            Some(serde_json::json!({"status": "error"})), "2026-06-12T00:03:00Z").unwrap();
+
+        // Only 1 consecutive failure at the head (newest-first scan).
+        let count = count_consecutive_failures(&conn, "m-streak").unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// (3) Success path: criterion with check_command "true" + terminal event
+    /// → success_check recorded + state complete.
+    #[test]
+    fn tick_success_check_true_command_sets_complete() {
+        let conn = make_db();
+        let sc = serde_json::json!([{
+            "description": "always passes",
+            "check_command": "true"
+        }]);
+        seed_mission_full(&conn, "m-sc-true", "sc-true", &sc.to_string(),
+            "autonomous", "in_progress", None, None, None);
+
+        // Seed a terminal event.
+        insert_event(&conn, "m-sc-true", "dispatched",
+            Some(serde_json::json!({"status": "success", "attempt_id": "x1"})),
+            "2026-06-12T00:01:00Z").unwrap();
+
+        // should_run_success_check should return true.
+        assert!(should_run_success_check(&conn, "m-sc-true").unwrap());
+
+        let db_path = PathBuf::from("/nonexistent/never.db");
+        let mission = load_mission(&conn, "sc-true").unwrap();
+        let now = "2026-06-12T00:02:00Z";
+        let result = run_success_evaluation(&conn, &mission, now, &db_path).unwrap();
+
+        assert!(result.all_met, "all_met must be true for 'true' command");
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].exit_code, 0);
+
+        // success_check event must exist.
+        let check_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-sc-true' AND kind = 'success_check'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(check_count, 1);
+
+        // After recording, should_run_success_check should return false (no new terminal events).
+        assert!(!should_run_success_check(&conn, "m-sc-true").unwrap());
+    }
+
+    /// (3b) check_command "false" → stays in_progress, all_met=false.
+    #[test]
+    fn tick_success_check_false_command_stays_in_progress() {
+        let conn = make_db();
+        let sc = serde_json::json!([{
+            "description": "always fails",
+            "check_command": "false"
+        }]);
+        seed_mission_full(&conn, "m-sc-false", "sc-false", &sc.to_string(),
+            "autonomous", "in_progress", None, None, None);
+
+        insert_event(&conn, "m-sc-false", "dispatched",
+            Some(serde_json::json!({"status": "success", "attempt_id": "x2"})),
+            "2026-06-12T00:01:00Z").unwrap();
+
+        let db_path = PathBuf::from("/nonexistent/never.db");
+        let mission = load_mission(&conn, "sc-false").unwrap();
+        let result = run_success_evaluation(&conn, &mission, "2026-06-12T00:02:00Z", &db_path).unwrap();
+
+        assert!(!result.all_met, "all_met must be false for 'false' command");
+        // State unchanged (evaluation code doesn't transition — caller does).
+        let state: String = conn.query_row(
+            "SELECT state FROM missions WHERE id = 'm-sc-false'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(state, "in_progress");
+    }
+
+    /// (4) Escalation dedup: second tick with same unresolved reason adds no event.
+    #[test]
+    fn tick_escalation_dedup_prevents_spam() {
+        let conn = make_db();
+        seed_mission(&conn, "m-esc", "esc", None, None);
+
+        let reason = "no_worker_config";
+        assert!(!escalation_is_pending(&conn, "m-esc", reason).unwrap());
+
+        // Insert an escalated event.
+        insert_event(&conn, "m-esc", "escalated",
+            Some(serde_json::json!({"reason": reason})),
+            "2026-06-12T00:01:00Z").unwrap();
+
+        // Now it should be pending (no resolution event).
+        assert!(escalation_is_pending(&conn, "m-esc", reason).unwrap());
+
+        // A state_changed event after the escalation resolves it.
+        insert_event(&conn, "m-esc", "state_changed",
+            Some(serde_json::json!({"from": "open", "to": "in_progress"})),
+            "2026-06-12T00:02:00Z").unwrap();
+        assert!(!escalation_is_pending(&conn, "m-esc", reason).unwrap());
+    }
+
+    /// (4b) owner_decision event also resolves pending escalation.
+    #[test]
+    fn tick_owner_decision_resolves_escalation() {
+        let conn = make_db();
+        seed_mission(&conn, "m-od", "od", None, None);
+
+        let reason = "base_sha_unresolvable";
+        insert_event(&conn, "m-od", "escalated",
+            Some(serde_json::json!({"reason": reason})),
+            "2026-06-12T00:01:00Z").unwrap();
+        assert!(escalation_is_pending(&conn, "m-od", reason).unwrap());
+
+        insert_event(&conn, "m-od", "owner_decision",
+            Some(serde_json::json!({"action": "skip"})),
+            "2026-06-12T00:02:00Z").unwrap();
+        assert!(!escalation_is_pending(&conn, "m-od", reason).unwrap());
+    }
+
+    /// (5) No-worker-config escalation: escalation_is_pending returns false before
+    /// first escalation, true after — ensuring first tick escalates and second does not.
+    #[test]
+    fn tick_no_worker_config_escalates_once() {
+        let conn = make_db();
+        seed_mission_full(&conn, "m-nwc", "nwc", "[]",
+            "autonomous", "in_progress", None, None, None);
+
+        // Mission has no worker_config.
+        let mission = load_mission(&conn, "nwc").unwrap();
+        assert!(mission.worker_config.is_none(), "worker_config must be None");
+
+        // First escalation: not pending yet.
+        let reason = "no_worker_config";
+        assert!(!escalation_is_pending(&conn, "m-nwc", reason).unwrap());
+
+        // Insert the escalation (as the tick would).
+        let now = "2026-06-12T00:01:00Z";
+        insert_event(&conn, "m-nwc", "escalated",
+            Some(serde_json::json!({"reason": reason})),
+            now).unwrap();
+
+        // Now pending — second tick should not insert another.
+        assert!(escalation_is_pending(&conn, "m-nwc", reason).unwrap());
+    }
+
+    /// (6) One-action-per-tick: mission with BOTH a stale dispatch_started AND
+    /// met criteria → only gets the dispatch_abandoned marker this tick.
+    #[test]
+    fn tick_one_action_per_tick_stale_takes_priority_over_success_check() {
+        let conn = make_db();
+        let sc = serde_json::json!([{
+            "description": "always passes",
+            "check_command": "true"
+        }]);
+        seed_mission_full(&conn, "m-1act", "one-act", &sc.to_string(),
+            "autonomous", "in_progress", None, None, None);
+
+        // Seed a stale dispatch_started (dead pid, no closing event).
+        let attempt_id = "aaaaaaaa-0000-0000-0000-000000000099";
+        insert_event(&conn, "m-1act", "dispatch_started",
+            Some(serde_json::json!({"attempt_id": attempt_id, "pid": 999_999u32, "runtime": "claude"})),
+            "2026-06-12T00:00:30Z").unwrap();
+
+        // Also a terminal event (dispatched) that would normally trigger success check.
+        insert_event(&conn, "m-1act", "dispatched",
+            Some(serde_json::json!({"attempt_id": "other-attempt", "status": "success"})),
+            "2026-06-12T00:00:20Z").unwrap();
+
+        // Step (c) must find the stale event — so we simulate tick_one_mission's decision tree.
+        // step (b): single_cwd — skip.
+        // step (c): find_stale_dispatch_started — found.
+        let stale = find_stale_dispatch_started(&conn, "m-1act").unwrap();
+        assert!(stale.is_some(), "should find stale dispatch for one-action test");
+
+        // Write the abandoned event (what step c does).
+        let (aid, pid) = stale.unwrap();
+        let now = "2026-06-12T00:01:00Z";
+        insert_event(&conn, "m-1act", "dispatch_abandoned",
+            Some(serde_json::json!({"attempt_id": aid, "pid": pid})),
+            now).unwrap();
+
+        // Now check event counts: exactly one dispatch_abandoned, zero success_check.
+        let abandoned_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-1act' AND kind = 'dispatch_abandoned'",
+            [], |r| r.get(0),
+        ).unwrap();
+        let check_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-1act' AND kind = 'success_check'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(abandoned_count, 1, "one abandoned event");
+        assert_eq!(check_count, 0, "no success_check — stale scan was the action this tick");
+    }
+
+    // ── Finding 1: is_worker_process_live unit tests ───────────────────
+
+    /// (F1-a) alive + exact argv + fresh → live.
+    #[test]
+    fn worker_live_alive_matching_fresh() {
+        let ps = "ato missions dispatch my-slug --runtime claude --attempt-id xxx";
+        assert!(
+            is_worker_process_live(true, Some(ps), "my-slug", 100),
+            "alive + matching argv + fresh → live"
+        );
+    }
+
+    /// (F1-b) alive + argv mismatch (different slug) → stale.
+    #[test]
+    fn worker_live_alive_wrong_slug() {
+        let ps = "ato missions dispatch other-slug --runtime claude";
+        assert!(
+            !is_worker_process_live(true, Some(ps), "my-slug", 100),
+            "argv belongs to a different slug → stale"
+        );
+    }
+
+    /// (F1-b2) slug "api" must NOT match "api-v2" (substring false-positive guard).
+    #[test]
+    fn worker_live_slug_prefix_no_match() {
+        let ps = "ato missions dispatch api-v2 --runtime google";
+        assert!(
+            !is_worker_process_live(true, Some(ps), "api", 100),
+            "slug 'api' is a prefix of 'api-v2' — must NOT match"
+        );
+    }
+
+    /// (F1-b3) exact slug "api" in the right position → live.
+    #[test]
+    fn worker_live_exact_slug_api() {
+        let ps = "ato missions dispatch api --runtime google";
+        assert!(
+            is_worker_process_live(true, Some(ps), "api", 100),
+            "exact slug 'api' in correct token position → live"
+        );
+    }
+
+    /// (F1-b4) empty slug → stale (cannot match uniquely).
+    #[test]
+    fn worker_live_empty_slug_is_stale() {
+        let ps = "ato missions dispatch api --runtime google";
+        assert!(
+            !is_worker_process_live(true, Some(ps), "", 100),
+            "empty slug → stale"
+        );
+    }
+
+    /// (F1-c) dead pid → stale regardless of argv.
+    #[test]
+    fn worker_live_dead_pid() {
+        let ps = "ato missions dispatch my-slug --runtime claude";
+        assert!(
+            !is_worker_process_live(false, Some(ps), "my-slug", 100),
+            "dead pid → stale"
+        );
+    }
+
+    /// (F1-d) alive + matching argv but older than MAX_WORKER_AGE_SECS → stale.
+    #[test]
+    fn worker_live_alive_matching_too_old() {
+        let ps = "ato missions dispatch my-slug --runtime claude";
+        assert!(
+            !is_worker_process_live(true, Some(ps), "my-slug", MAX_WORKER_AGE_SECS + 1),
+            "age > MAX_WORKER_AGE_SECS → stale even if pid matches"
+        );
+    }
+
+    // ── Finding 3: parent-minted dispatch_started dead-pid counts toward failure streak ──
+
+    /// A parent-style dispatch_started (spawned_by=tick) whose pid is dead and
+    /// has no closing 'dispatched' event must:
+    ///   (1) be found as stale by find_stale_dispatch_started
+    ///   (2) after being marked dispatch_abandoned, count toward the consecutive
+    ///       failure streak (count_consecutive_failures).
+    #[test]
+    fn tick_parent_dispatch_started_dead_pid_counts_toward_failure_streak() {
+        let conn = make_db();
+        seed_mission_full(&conn, "m-f3", "f3", "[]", "autonomous", "in_progress",
+            None, None, None);
+
+        // Two prior error dispatches (streak so far = 2).
+        insert_event(&conn, "m-f3", "dispatched",
+            Some(serde_json::json!({"attempt_id": "a1", "status": "error"})),
+            "2026-06-12T00:00:01Z").unwrap();
+        insert_event(&conn, "m-f3", "dispatched",
+            Some(serde_json::json!({"attempt_id": "a2", "status": "error"})),
+            "2026-06-12T00:00:02Z").unwrap();
+
+        // Parent-style dispatch_started with a dead pid, no closing event.
+        let tick_attempt = "tick-aaaa-0000-0000-000000000001";
+        let dead_pid: u32 = 999_997;
+        insert_event(&conn, "m-f3", "dispatch_started",
+            Some(serde_json::json!({
+                "attempt_id": tick_attempt,
+                "runtime": "claude",
+                "pid": dead_pid,
+                "slug": "f3",
+                "spawned_by": "tick",
+            })),
+            "2026-06-12T00:00:03Z").unwrap();
+
+        // Step (c): find_stale_dispatch_started must find it.
+        let stale = find_stale_dispatch_started(&conn, "m-f3").unwrap();
+        assert!(stale.is_some(), "parent-minted dead-pid dispatch_started must be found as stale");
+        let (found_aid, _found_pid) = stale.unwrap();
+        assert_eq!(found_aid, tick_attempt);
+
+        // Simulate what tick does: insert dispatch_abandoned.
+        insert_event(&conn, "m-f3", "dispatch_abandoned",
+            Some(serde_json::json!({
+                "attempt_id": tick_attempt,
+                "pid": dead_pid,
+                "reason": "stale_started_event_dead_pid",
+            })),
+            "2026-06-12T00:00:04Z").unwrap();
+
+        // dispatch_abandoned counts as a failure → total consecutive = 3.
+        let streak = count_consecutive_failures(&conn, "m-f3").unwrap();
+        assert_eq!(streak, 3,
+            "dispatch_abandoned must count toward consecutive failure streak (was {streak})");
+    }
+
+    // ── Fix 1: manual dispatch_started payload must carry "slug" ──────────
+
+    /// The manual (no attempt_id) dispatch path must include "slug" in its
+    /// dispatch_started payload so that find_stale_dispatch_started / is_in_flight
+    /// can call is_worker_process_live with the correct slug string instead of "".
+    #[test]
+    fn manual_dispatch_started_payload_contains_slug() {
+        let conn = make_db();
+        seed_mission_full(&conn, "m-slug-fix", "my-mission", "[]", "autonomous", "in_progress",
+            None, None, None);
+
+        // Build a dispatch_started payload the same way the manual path does,
+        // including the new "slug" field, and verify it round-trips correctly.
+        let slug = "my-mission";
+        let payload = serde_json::json!({
+            "attempt_id": "test-uuid",
+            "runtime": "claude",
+            "agent": "test-agent",
+            "pid": 12345u32,
+            "spawned_by": "manual",
+            "slug": slug,
+        });
+        insert_event(&conn, "m-slug-fix", "dispatch_started", Some(payload.clone()),
+            "2026-06-12T01:00:00Z").unwrap();
+
+        // Read back and assert "slug" is present and correct.
+        let raw: String = conn.query_row(
+            "SELECT payload FROM mission_events WHERE mission_id = 'm-slug-fix' AND kind = 'dispatch_started'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v.get("slug").and_then(|s| s.as_str()),
+            Some(slug),
+            "manual dispatch_started payload must carry the mission slug"
+        );
     }
 }

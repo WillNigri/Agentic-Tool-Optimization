@@ -124,6 +124,11 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
     // column already exists (desktop migration applied it first).
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
 
+    // v2.16 PR-4 — worker_config column on missions (coordinator tick).
+    // JSON shape: {"runtime":"...","model":null|"...","require_tools":["..."]}.
+    // NULL = tick will escalate with reason="no_worker_config".
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
+
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT
     // EXISTS` is a no-op after the first run, so applying on every

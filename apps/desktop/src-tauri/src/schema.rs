@@ -1809,6 +1809,11 @@ pub fn init_database(conn: &Connection) {
     // even when the process cwd has changed. NULL on single_cwd missions.
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
 
+    // v2.16 PR-4 — coordinator tick worker config. JSON shape:
+    // {"runtime": "...", "model": null|"...", "require_tools": [...]}
+    // NULL means the tick will escalate with reason="no_worker_config".
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
+
     // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
     // codex audit verdict: "one execution_logs row per dispatch,
     // plus retry_count and a compact JSON attempt summary column").
