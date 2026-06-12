@@ -94,7 +94,7 @@ pub struct LoopRunStep {
     pub input: Option<serde_json::Value>,
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
-    pub execution_log_id: Option<i64>,
+    pub execution_log_id: Option<String>,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ pub fn get_loop_run_steps(
                 input_raw,
                 output_raw,
                 row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })
         .map_err(|e| e.to_string())?;

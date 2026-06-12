@@ -208,7 +208,7 @@ struct LoopRunStepRow {
     input: Option<serde_json::Value>,
     output: Option<serde_json::Value>,
     error: Option<String>,
-    execution_log_id: Option<i64>,
+    execution_log_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -748,18 +748,46 @@ fn parse_vars(raw: &[String]) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Object(map))
 }
 
-fn run_execute(
-    slug_or_id: String,
+/// Validate a loop invocation without executing: vars parse as K=V and
+/// the loop exists. Used by missions dispatch to fail fast BEFORE it
+/// writes mission state.
+pub fn validate_loop_invocation(slug_or_id: &str, raw_vars: &[String], db_path: &PathBuf) -> Result<()> {
+    parse_vars(raw_vars)?;
+    let conn = db::open_readonly(db_path)?;
+    load_loop(&conn, slug_or_id)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoopRunOutcome {
+    pub run_id: String,
+    pub loop_id: String,
+    pub loop_slug: String,
+    pub loop_name: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub error: Option<String>,
+    pub steps_executed: usize,
+    pub steps_succeeded: usize,
+    pub steps_planned: usize,
+    pub paused_dispatch_id: Option<String>,
+    pub paused_runtime: Option<String>,
+    pub paused_until: Option<String>,
+}
+
+pub fn execute_loop(
+    slug_or_id: &str,
     raw_vars: Vec<String>,
     db_path: &PathBuf,
     opts: &Opts,
-) -> Result<()> {
+) -> Result<LoopRunOutcome> {
     let variables = parse_vars(&raw_vars)?;
 
     // Load + parse the loop's graph.
     let loop_row = {
         let conn = db::open_readonly(db_path)?;
-        load_loop(&conn, &slug_or_id)?
+        load_loop(&conn, slug_or_id)?
     };
     let graph: LoopGraph = serde_json::from_value(loop_row.graph.clone())
         .context("loop graph JSON did not match { nodes: [...] }")?;
@@ -826,7 +854,8 @@ fn run_execute(
                 // use: {{steps.<node_id>.output}} resolves through here.
                 let exec_log_id = output_value
                     .get("execution_log_id")
-                    .and_then(|v| v.as_i64());
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
                 conn.execute(
                     "UPDATE loop_run_steps
                         SET status = ?1, finished_at = ?2, output = ?3,
@@ -948,26 +977,52 @@ fn run_execute(
         params![status, finished_at, error_col, run_id],
     )?;
 
+    Ok(LoopRunOutcome {
+        run_id,
+        loop_id: loop_row.id.clone(),
+        loop_slug: loop_row.slug.clone(),
+        loop_name: loop_row.name.clone(),
+        status: status.to_string(),
+        started_at,
+        finished_at,
+        error: error_col,
+        steps_executed,
+        steps_succeeded,
+        steps_planned: graph.nodes.len(),
+        paused_dispatch_id: paused_signal.as_ref().map(|(id, _, _)| id.clone()),
+        paused_runtime: paused_signal.as_ref().map(|(_, r, _)| r.clone()),
+        paused_until: paused_signal.as_ref().map(|(_, _, ts)| ts.clone()),
+    })
+}
+
+fn run_execute(
+    slug_or_id: String,
+    raw_vars: Vec<String>,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let outcome = execute_loop(&slug_or_id, raw_vars, db_path, opts)?;
+
     let summary = serde_json::json!({
-        "run_id": run_id,
-        "loop_id": loop_row.id,
-        "loop_slug": loop_row.slug,
-        "status": status,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "error": error_col,
-        "steps_executed": steps_executed,
-        "steps_succeeded": steps_succeeded,
-        "steps_planned": graph.nodes.len(),
-        "paused_dispatch_id": paused_signal.as_ref().map(|(id, _, _)| id.clone()),
-        "paused_runtime": paused_signal.as_ref().map(|(_, r, _)| r.clone()),
-        "paused_until": paused_signal.as_ref().map(|(_, _, ts)| ts.clone()),
+        "run_id": outcome.run_id,
+        "loop_id": outcome.loop_id,
+        "loop_slug": outcome.loop_slug,
+        "status": outcome.status,
+        "started_at": outcome.started_at,
+        "finished_at": outcome.finished_at,
+        "error": outcome.error,
+        "steps_executed": outcome.steps_executed,
+        "steps_succeeded": outcome.steps_succeeded,
+        "steps_planned": outcome.steps_planned,
+        "paused_dispatch_id": outcome.paused_dispatch_id,
+        "paused_runtime": outcome.paused_runtime,
+        "paused_until": outcome.paused_until,
     });
 
     if opts.human {
         emit_human(&format!(
             "Loop '{}' ({}) finished — status={} run_id={}",
-            loop_row.slug, loop_row.name, status, run_id
+            outcome.loop_slug, outcome.loop_name, outcome.status, outcome.run_id
         ));
     } else {
         emit_json(&summary)?;
@@ -1091,23 +1146,11 @@ fn handle_dispatch(
         }
     }
 
-    // Capture the latest execution_logs.id BEFORE the dispatch so we
-    // can identify the row this dispatch creates by reading "highest
-    // id > before". dispatch::run() writes to execution_logs as part
-    // of its normal path; this is the only way to round-trip the
-    // response without modifying the existing dispatch signature.
-    // War-room (codex+gemini, war_room_id 0EDD3A31) caught the prior
-    // "handle_dispatch returns only {runtime, ok:true}" gap — this
-    // fix gives downstream steps real upstream output to reference.
-    let before_max_id: i64 = {
-        let conn = crate::db::open_readonly(db_path).map_err(StepError::from)?;
-        conn.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM execution_logs",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0)
-    };
+    // Capture a timestamp BEFORE the dispatch so we can read back the
+    // freshly-written execution_logs row by created_at. execution_logs.id
+    // is TEXT UUID (non-monotonic), so we cannot use MAX(id) > before.
+    // Pattern mirrors missions.rs run_dispatch_under_mission (~line 794).
+    let wake_started_at = chrono::Utc::now().to_rfc3339();
 
     crate::commands::dispatch::run(
         runtime,
@@ -1124,19 +1167,19 @@ fn handle_dispatch(
         opts,
     )?;
 
-    // Read back the freshly-written row (the one with id > before_max_id
-    // and matching runtime). This is the executor's view of the
-    // dispatch's outcome — response text + cost + model + execution_log_id —
-    // and is what {{steps.<id>.output.field}} resolves through in v2.14.1.
+    // Read back the freshly-written row using the correct prod-schema
+    // column names: response (not response_text), cost_usd_estimated
+    // (not cost_usd). Match by runtime + created_at >= wake_started_at.
     let conn = crate::db::open_readonly(db_path).map_err(StepError::from)?;
-    let row: Option<(i64, Option<String>, Option<String>, Option<String>, Option<f64>)> = conn
+    let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<f64>)> = conn
         .query_row(
-            "SELECT id, response_text, model, status, cost_usd
+            "SELECT id, response, model, status, cost_usd_estimated
                FROM execution_logs
-              WHERE id > ?1 AND runtime = ?2
-              ORDER BY id DESC
+              WHERE runtime = ?1
+                AND created_at >= ?2
+              ORDER BY created_at DESC
               LIMIT 1",
-            params![before_max_id, runtime],
+            params![runtime, wake_started_at],
             |r| Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -1154,7 +1197,7 @@ fn handle_dispatch(
             "response": response,
             "model": used_model,
             "status": status,
-            "cost_usd": cost,
+            "cost_usd": cost,  // key kept as cost_usd to preserve {{steps.x.output.cost_usd}} templates
         }),
         None => serde_json::json!({
             "runtime": runtime,
@@ -1279,27 +1322,9 @@ fn run_resume(paused_dispatch_id: &str, db_path: &PathBuf, opts: &Opts) -> Resul
     // (loop_run_id=None) and loop-bound paths share the same dispatch
     // entrypoint.
     //
-    // v2.15.5 — capture before_max_id BEFORE the dispatch so we can
-    // round-trip the freshly-written execution_logs row's status +
-    // error_message. dispatch::run() returns Ok(()) regardless of the
-    // underlying CLI/API exit status (it just writes the row), so the
-    // OUTCOME of the dispatch is in execution_logs, not the Result.
-    // Without this we'd silently mark_resumed even when the runtime
-    // hit a fresh exhaustion mid-wake — which is exactly the failure
-    // mode pause-and-wake exists to prevent.
-    let before_max_id: i64 = {
-        let c = crate::db::open_readonly(db_path)?;
-        c.query_row(
-            "SELECT COALESCE(MAX(id), '') FROM execution_logs",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or_default()
-    };
-    // execution_logs.id is TEXT (UUID), so "MAX(id)" returns a string
-    // we compare lexicographically. UUIDv4 is not monotonic, so we
-    // capture the max id THEN query by created_at after the dispatch.
-    let _ = before_max_id;
+    // Capture a timestamp BEFORE the dispatch. execution_logs.id is TEXT
+    // UUID (non-monotonic), so we identify the new row by created_at.
+    // Pattern mirrors missions.rs run_dispatch_under_mission (~line 794).
     let wake_started_at = chrono::Utc::now().to_rfc3339();
 
     let fire_result = crate::commands::dispatch::run(
@@ -1881,7 +1906,7 @@ fn run_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()> {
             row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<String>>(8)?,
             row.get::<_, Option<String>>(9)?,
-            row.get::<_, Option<i64>>(10)?,
+            row.get::<_, Option<String>>(10)?,
         ))
     })?;
     for r in iter {
@@ -2231,5 +2256,87 @@ mod tests {
         // Anthropic API surface — different shape from CLI exhaustion.
         let msg = "anthropic returned 429: rate limit exceeded; quota reset at midnight";
         assert_eq!(classify_wake_err_for_test(msg), "exhausted_no_date");
+    }
+
+    // v2.16 PR-2.5 — execute_loop unit test.
+    //
+    // An empty/edgeless graph produces status="skipped", steps_executed=0,
+    // and a non-empty run_id. Uses a real temp file because execute_loop
+    // calls db::open_readonly / db::open_readwrite (both check path existence).
+
+    fn make_file_db_with_loop(slug: &str) -> (tempfile::NamedTempFile, String) {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE loops (
+                id              TEXT PRIMARY KEY,
+                slug            TEXT NOT NULL UNIQUE,
+                name            TEXT NOT NULL,
+                description     TEXT,
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                graph           TEXT NOT NULL,
+                variables       TEXT,
+                trigger_kind    TEXT NOT NULL DEFAULT 'manual',
+                trigger_config  TEXT,
+                source          TEXT NOT NULL DEFAULT 'manual',
+                source_ref      TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE TABLE loop_runs (
+                id                  TEXT PRIMARY KEY,
+                loop_id             TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                started_at          TEXT NOT NULL,
+                finished_at         TEXT,
+                error               TEXT,
+                triggered_by        TEXT,
+                variables           TEXT,
+                paused_until        TEXT,
+                paused_dispatch_id  TEXT
+            );
+            CREATE TABLE loop_run_steps (
+                id                  TEXT PRIMARY KEY,
+                loop_run_id         TEXT NOT NULL,
+                node_id             TEXT NOT NULL,
+                node_type           TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                started_at          TEXT,
+                finished_at         TEXT,
+                input               TEXT,
+                output              TEXT,
+                error               TEXT,
+                execution_log_id    TEXT
+            );",
+        )
+        .unwrap();
+        let id = Uuid::new_v4().to_string();
+        let now = "2026-06-12T00:00:00Z";
+        // Empty graph — no nodes, no edges.
+        conn.execute(
+            "INSERT INTO loops (id, slug, name, graph, created_at, updated_at)
+             VALUES (?1, ?2, 'Test Loop', '{\"nodes\":[],\"edges\":[]}', ?3, ?3)",
+            rusqlite::params![id, slug, now],
+        )
+        .unwrap();
+        (f, id)
+    }
+
+    #[test]
+    fn execute_loop_empty_graph_returns_skipped_with_non_empty_run_id() {
+        let (file, _loop_id) = make_file_db_with_loop("empty-loop");
+        let db_path = file.path().to_path_buf();
+        let opts = Opts { human: false, quiet: false };
+        let outcome = execute_loop("empty-loop", vec![], &db_path, &opts)
+            .expect("execute_loop must succeed on an empty graph");
+
+        assert_eq!(outcome.status, "skipped", "empty graph → status=skipped");
+        assert_eq!(outcome.steps_executed, 0, "no steps for empty graph");
+        assert_eq!(outcome.steps_succeeded, 0);
+        assert_eq!(outcome.steps_planned, 0);
+        assert!(!outcome.run_id.is_empty(), "run_id must be a non-empty UUID");
+        assert!(outcome.error.is_none());
+        assert!(outcome.paused_dispatch_id.is_none());
+        assert_eq!(outcome.loop_slug, "empty-loop");
     }
 }

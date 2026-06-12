@@ -1679,7 +1679,7 @@ pub fn init_database(conn: &Connection) {
             input               TEXT,
             output              TEXT,
             error               TEXT,
-            execution_log_id    INTEGER,
+            execution_log_id    TEXT,
             FOREIGN KEY (loop_run_id) REFERENCES loop_runs(id) ON DELETE CASCADE
         )",
         [],
@@ -1779,6 +1779,8 @@ pub fn init_database(conn: &Connection) {
     // mission_events — append-only event log per mission. The Mission ↔
     // Loop relationship lives in payload.loop_run_id when kind='loop_run_
     // completed', NOT in a separate join table (codex round-1 "B-lite").
+    // Allowed kinds: state_changed | category_changed | dispatched |
+    //   loop_run_started | loop_run_completed.
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS mission_events (
             id              TEXT PRIMARY KEY,
