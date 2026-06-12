@@ -239,30 +239,40 @@ Sully (@SullyOmarr) flagged on X (10/06/2026) that with Fable-class models no lo
 - `merge_strategy` is the **coordinator integration strategy** (`human_approves_each` / `coordinator_merges_all` / `coordinator_picks_winner` / `ranked_by_score`), NOT git mechanics (squash/merge/ff/rebase). Don't conflate.
 - `category` is **operational policy** (gates coordinator behavior), NOT organizational metadata. Removing it collapses the Steinberger triage primitive.
 
-### v2.15.x — URGENT blocker: encryption save flow hardcodes v1 ledger version (orphans EVERY new key)
+### v2.15.x — URGENT blocker: cross-process keychain mismatch orphans saved API keys
 
-**Discovered 2026-06-11 during v2.16 war-room dispatch:** `apps/desktop/src-tauri/src/encryption.rs:42-43` hardcodes:
+**Discovered 2026-06-11 during v2.16 war-room dispatch. Diagnosis refined 2026-06-12 after empirical test refuted the initial theory.**
 
-```rust
-const MASTER_KEY_ACCOUNT_FALLBACK: &str = "master_key_v1";
-const VERSION_PREFIX: &str = "v1:";
-```
+**Initial (WRONG) theory:** `apps/desktop/src-tauri/src/encryption.rs:42-43` hardcodes `VERSION_PREFIX = "v1:"` and `MASTER_KEY_ACCOUNT_FALLBACK = "master_key_v1"`, so every save would encrypt under v1 even after the ledger advanced to v2.
 
-**Impact:** Every UI Save in Settings → API Keys encrypts under v1 keychain entry + writes `v1:` prefix even when v2 is the active ledger version. The next master key rotation orphans the row. Re-entering the key doesn't help — the new ciphertext is ALSO v1, so it'll orphan on the next rotation too. Currently breaks war-room dispatches that need API-provider keys (gemini hit this twice tonight; minimax key only works because it was entered before the v1→v2 transition; google key was orphaned and re-orphaned even after re-entering).
+**Why that theory was wrong:** Empirical decrypt test on 2026-06-12 against Will's actual stored google row:
+- `master_key_resolve()` (encryption.rs:156) DOES read the active ledger account via `read_active_master_key_account()` (line 170).
+- `simple_encrypt()` (commands/llm_api_keys.rs:50) round-trips at save time: encrypt → decrypt → assert plaintext matches. If the save used a wrong key, the round-trip would fail and the row wouldn't be written.
+- Tested: the stored google ciphertext `v1:lY5fMo/4gHt3vyRU2EIuinCHq4N...` (111 bytes) **fails AES-GCM auth with BOTH the v1 AND v2 keychain entries** (InvalidTag). The save used a third key that exists nowhere accessible from the current process.
 
-**Fix (queued as task #31, URGENT):**
-1. Replace `VERSION_PREFIX` constant with a function that reads `master_key_ledger` for `retired_at IS NULL` and returns `"v{N}:"`.
-2. Replace `MASTER_KEY_ACCOUNT_FALLBACK` similarly — use active ledger's `keychain_account`.
-3. Backfill migration: scan `llm_api_keys` for `v1:` rows when v1 is retired; alert + offer "re-encrypt under current key" recovery flow.
-4. Regression test in `apps/desktop/src-tauri/src/encryption_tests.rs`: after `master_key_ledger` has retired v1 + active v2, `encrypt()` writes `v2:` prefix and reads from the v2 keychain account.
+**Three candidate root causes (none confirmed — needs codex war-room before fix):**
+1. **Dev build ACL split.** The save happened in the `npm run dev:desktop` build (ad-hoc signed) which has a different macOS keychain DR string than the prod `/Applications/ATO.app` (Apple-Developer signed). macOS may have routed reads/writes to a different ACL view of the same `master_key_v2` keychain entry. Prod CLI reads its own view; bytes differ → InvalidTag.
+2. **`ATO_MASTER_KEY_B64` env-var pollution.** If that env var was set in the shell that launched the dev build, `master_key_resolve()` line 160-167 returns the b64-decoded env bytes instead of the keychain entry. Save encrypts with arbitrary env bytes. Prod CLI without that env var falls back to keychain → different key → InvalidTag.
+3. **Stale process cache.** The dev build process may have cached a master key from before the v1→v2 ledger transition, used it for save, then died — leaving the orphan.
 
-War-room before code lands (security boundary). Estimated effort: 1-2h focused work + war-room. **Must ship before v2.16 PR-1.5** because PR-1.5 (API provider write tool surface) will dispatch to API providers heavily; orphaned keys break that path.
+**Required diagnostic steps before any code change:**
+1. Check shell history: was `ATO_MASTER_KEY_B64` set when desktop dev build ran on 2026-06-11?
+2. Test A: prod-only save → prod-only dispatch. Should succeed if ACL-split is the cause (no dev build in the picture).
+3. Test B: dev save → prod dispatch. Should fail if ACL-split is the cause.
+4. War-room codex with the empirical findings before fix design.
 
-**The queued `session-master-key-pr2..pr6` branches are NOT the fix** — PR-2 inspected on 2026-06-11 turns out to be a -56977-LOC scope-cut cleanup, not the save-flow migration. The fix is a surgical change in `encryption.rs`, not the chained PR merge. Task #31 reflects this.
+**Empirical workaround (in effect today):** `packages/ato-llm-key-resolver/src/lib.rs:80-88` checks `provider.env_var` FIRST. Setting `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` in `~/.zshrc` bypasses the encryption path entirely. Confirmed working 2026-06-12 — used to unblock v2.16 design war-rooms. Setup script: `setup_ato_env.sh` (idempotent rc-append helper).
 
-### v2.15.x — UX gap: read-time error message doesn't acknowledge the save-flow bug
+**Why NOT to touch `encryption.rs` until diagnosis lands:** the file gates every stored key. A speculative fix targeting the wrong root cause could orphan more keys, not fewer. The `simple_encrypt` round-trip guarantees the save flow itself is correct under whatever key it picked. The mismatch is between save-process and dispatch-process — which is the cross-process bug we don't yet understand.
 
-Today's `byok.rs::read_active_key` error message (line 71-81) advises users to "re-enter the {provider} API key in ATO → Settings → API Keys" — but with the save-flow bug, re-entering doesn't actually fix the orphan. The advice is unintentionally misleading. Fix when task #31 lands: update the error message to acknowledge that re-entry is only effective AFTER the encryption.rs fix ships, and recommend the env-var BYOK bypass (`GEMINI_API_KEY=... ato dispatch gemini ...`) as the interim workaround.
+**Out of scope for this work (verified 2026-06-12):** the queued `session-master-key-pr2..pr6` branches. PR-2 is a -56977-LOC scope-cut cleanup, not a save-flow migration. Don't merge those expecting them to fix this.
+
+### v2.15.x — UX gap: read-time error message points to a remedy that doesn't work
+
+Today's `byok.rs::read_active_key` error message (line 71-81) and `api_dispatch::resolve_api_key` mirror advise users to "re-enter the {provider} API key in ATO → Settings → API Keys." Under the cross-process mismatch described above, **re-entering doesn't work** if the save happens in a different binary context than the dispatch. Update once the diagnostic identifies which cause is real:
+- If dev-build ACL split: error should detect dev-binary save and direct user to re-enter via prod app
+- If env-var pollution: error should warn when `ATO_MASTER_KEY_B64` differs between save and dispatch
+- Always recommend env-var BYOK (`GEMINI_API_KEY`, etc.) as the deterministic workaround
 
 ### v2.16+ — Collison gap-matrix items still open
 
