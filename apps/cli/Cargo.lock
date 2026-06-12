@@ -319,7 +319,7 @@ dependencies = [
  "keyring",
  "mdns-sd",
  "nix 0.27.1",
- "rand 0.8.6",
+ "rand 0.9.4",
  "regex",
  "reqwest",
  "rusqlite",
