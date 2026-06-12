@@ -37,6 +37,16 @@ use std::time::Duration;
 use crate::api_dispatch::{resolve_api_key, ApiDispatchOutcome, ApiProvider, Message, ToolCallAudit};
 use crate::review_tools::{self, ToolCall, ToolDef, ToolResult, MAX_TOOL_ROUNDS};
 
+// Fix C' — truncate helper (mirrors api_dispatch.rs).
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(n).collect();
+        format!("{}…", head)
+    }
+}
+
 /// Run a dispatch with a permission-aware tool registry available to
 /// the model. Iterates: dispatch → execute tool calls → dispatch
 /// again → … until the model produces a final text response or we
@@ -45,12 +55,17 @@ use crate::review_tools::{self, ToolCall, ToolDef, ToolResult, MAX_TOOL_ROUNDS};
 /// `tools` is caller-provided so each call site can pass either the
 /// full review registry (Tier 2 reviews) or an agent-permission-
 /// filtered subset (war-room dispatches).
+///
+/// `workspace_root` — when `Some`, tool calls execute relative to that
+/// path (used for per_agent_worktree Missions). When `None`, the
+/// ato-review-tools library resolves the root from CWD.
 pub fn dispatch_with_tools(
     provider: &ApiProvider,
     history: &[Message],
     prompt: &str,
     model_override: Option<&str>,
     tools: &[ToolDef],
+    workspace_root: Option<&std::path::Path>,
     conn: &Connection,
 ) -> Result<ApiDispatchOutcome> {
     if !provider_supports_tools(provider) {
@@ -94,6 +109,14 @@ pub fn dispatch_with_tools(
     // budget on more thinking with no return.
     let mut empty_response_retries = 0usize;
     const MAX_EMPTY_RETRIES: usize = 1;
+    // Fix C' — retry accounting accumulated across ALL rounds.
+    // Each round's HTTP POST is wrapped individually; on a retriable
+    // failure (503, 429, etc.) we re-POST the same round's request
+    // (conversation state is unchanged) without replaying prior
+    // rounds.  AttemptRecords span all rounds; at the end
+    // retry_count = total retries across all rounds.
+    let retry_policy = ato_retry_policy::RetryPolicy::default_v1();
+    let mut all_attempts: Vec<ato_retry_policy::AttemptRecord> = Vec::new();
 
     eprintln!(
         "  [tools] dispatch_with_tools provider={} flavor={} model={}",
@@ -112,31 +135,159 @@ pub fn dispatch_with_tools(
 
         let body = conv.build_request_body(provider, tools, &model, rounds >= MAX_TOOL_ROUNDS);
         let url = conv.build_url(provider, &model, &key);
-        let mut req = client.post(&url).header("Content-Type", "application/json");
-        // Auth header per flavor:
-        //   - openai / minimax: Bearer <key>
-        //   - gemini:           API key in URL ?key= (no header)
-        //   - anthropic:        x-api-key + anthropic-version
-        match provider.flavor {
-            "anthropic" => {
-                req = req
-                    .header("x-api-key", &key)
-                    .header("anthropic-version", "2023-06-01");
+
+        // Fix C' — wrap this round's HTTP POST in the shared retry
+        // policy (ato_retry_policy), exactly as dispatch_with_history
+        // does.  On a retriable failure (503/429/transport) we re-POST
+        // the same request; the conversation state is unchanged so the
+        // model will answer the same turn.  We accumulate AttemptRecords
+        // into all_attempts so the final outcome carries the full picture.
+        let (round_http_status, round_body_text) = {
+            let mut round_attempts: Vec<ato_retry_policy::AttemptRecord> = Vec::new();
+            let (final_status, final_body) = loop {
+                let attempt_start = std::time::Instant::now();
+                let mut req = client.post(&url).header("Content-Type", "application/json");
+                // Auth header per flavor:
+                //   - openai / minimax: Bearer <key>
+                //   - gemini:           API key in URL ?key= (no header)
+                //   - anthropic:        x-api-key + anthropic-version
+                match provider.flavor {
+                    "anthropic" => {
+                        req = req
+                            .header("x-api-key", &key)
+                            .header("anthropic-version", "2023-06-01");
+                    }
+                    "gemini" => { /* key is in URL ?key= */ }
+                    _ => {
+                        req = req.bearer_auth(&key);
+                    }
+                }
+                let result = req.json(&body).send();
+                let elapsed_ms = attempt_start.elapsed().as_millis() as i64;
+
+                let (http_status_code, body_text, headers_map, transport_err) = match result {
+                    Ok(resp) => {
+                        let s = resp.status().as_u16();
+                        let mut h = std::collections::HashMap::new();
+                        for (k, v) in resp.headers().iter() {
+                            if let Ok(vs) = v.to_str() {
+                                h.insert(k.as_str().to_string(), vs.to_string());
+                            }
+                        }
+                        let b = resp.text().unwrap_or_default();
+                        (Some(s), b, h, None)
+                    }
+                    Err(e) => {
+                        let kind = if e.is_timeout() {
+                            format!("timeout after {}ms", elapsed_ms)
+                        } else if e.is_connect() {
+                            "connect failed (DNS / TLS / network)".to_string()
+                        } else if e.is_request() {
+                            "request building or transport error".to_string()
+                        } else {
+                            "transport error".to_string()
+                        };
+                        (
+                            None,
+                            String::new(),
+                            std::collections::HashMap::new(),
+                            Some(format!("POST {}: {}", url, kind)),
+                        )
+                    }
+                };
+
+                let outcome = ato_retry_policy::classify_attempt(
+                    provider.flavor,
+                    http_status_code,
+                    &headers_map,
+                    Some(&body_text),
+                    transport_err.as_deref(),
+                );
+                let outcome_class = ato_retry_policy::AttemptRecord::outcome_class_for(
+                    &outcome,
+                    http_status_code,
+                );
+                let error_brief = match &outcome {
+                    ato_retry_policy::AttemptOutcome::Success => None,
+                    ato_retry_policy::AttemptOutcome::PermanentError { reason }
+                    | ato_retry_policy::AttemptOutcome::RetriableError { reason, .. }
+                    | ato_retry_policy::AttemptOutcome::TransportFailure { reason } => {
+                        Some(truncate(reason, 240))
+                    }
+                };
+                round_attempts.push(ato_retry_policy::AttemptRecord {
+                    attempt_index: round_attempts.len() as u32,
+                    started_at_ms: chrono::Utc::now().timestamp_millis(),
+                    duration_ms: elapsed_ms,
+                    status_code: http_status_code,
+                    outcome_class,
+                    error_brief,
+                });
+
+                let history_before = &round_attempts[..round_attempts.len() - 1];
+                let disposition =
+                    ato_retry_policy::next_disposition(&retry_policy, history_before, outcome);
+
+                match disposition {
+                    ato_retry_policy::RetryDisposition::GiveUpSuccess
+                    | ato_retry_policy::RetryDisposition::GiveUpPermanent { .. }
+                    | ato_retry_policy::RetryDisposition::GiveUpExhausted { .. } => {
+                        break (http_status_code, body_text);
+                    }
+                    ato_retry_policy::RetryDisposition::RetryAfter { wait, .. } => {
+                        eprintln!(
+                            "  [tools] round {} retriable failure, retrying after {:?}",
+                            rounds, wait
+                        );
+                        std::thread::sleep(wait);
+                        continue;
+                    }
+                }
+            };
+            // Rebase attempt indices relative to the global all_attempts
+            // vec so the final JSON is a flat, monotonically increasing
+            // sequence across all rounds.
+            let base = all_attempts.len() as u32;
+            for mut rec in round_attempts {
+                rec.attempt_index += base;
+                all_attempts.push(rec);
             }
-            "gemini" => { /* key is in URL ?key= */ }
-            _ => {
-                req = req.bearer_auth(&key);
+            (final_status, final_body)
+        };
+
+        // Map the retry-loop result back to the (http_status, body_text)
+        // shape the rest of the round uses.
+        let (http_status_code, body_text) = match round_http_status {
+            Some(s) => (s, round_body_text),
+            None => {
+                // Transport failure after exhausting retries — surface error.
+                let last_brief = all_attempts
+                    .last()
+                    .and_then(|a| a.error_brief.clone())
+                    .unwrap_or_else(|| "transport failure".to_string());
+                let retry_count = (all_attempts.len() as i64) - 1;
+                let attempt_summary_json = serde_json::to_string(&all_attempts).ok();
+                return Ok(ApiDispatchOutcome {
+                    response: None,
+                    error_message: Some(last_brief),
+                    model_used: model,
+                    duration_ms: start.elapsed().as_millis() as i64,
+                    tokens_in: tokens_in_total,
+                    tokens_out: tokens_out_total,
+                    tool_calls: Some(audit),
+                    retry_count,
+                    attempt_summary_json,
+                });
             }
-        }
-        let resp = req.json(&body).send().with_context(|| format!("POST {}", url))?;
-        let http_status = resp.status();
-        let body_text = resp.text().context("read response body")?;
-        if !http_status.is_success() {
+        };
+        if !(200..300).contains(&http_status_code) {
+            let retry_count = (all_attempts.len() as i64) - 1;
+            let attempt_summary_json = serde_json::to_string(&all_attempts).ok();
             return Ok(ApiDispatchOutcome {
                 response: None,
                 error_message: Some(format!(
                     "HTTP {}: {}",
-                    http_status.as_u16(),
+                    http_status_code,
                     truncate(&body_text, 1000)
                 )),
                 model_used: model,
@@ -144,8 +295,8 @@ pub fn dispatch_with_tools(
                 tokens_in: tokens_in_total,
                 tokens_out: tokens_out_total,
                 tool_calls: Some(audit),
-                retry_count: 0,
-                attempt_summary_json: None,
+                retry_count,
+                attempt_summary_json,
             });
         }
         let payload: serde_json::Value =
@@ -172,7 +323,14 @@ pub fn dispatch_with_tools(
             let results: Vec<ToolResult> = calls
                 .iter()
                 .map(|c| {
-                    let r = review_tools::execute_call(c);
+                    // v2.16 PR-3 — use execute_call_with_root when a
+                    // Mission worktree root is provided so all tool I/O
+                    // (read_file, bash, git_*) executes inside the agent's
+                    // worktree, not the parent process CWD.
+                    let r = match workspace_root {
+                        Some(root) => review_tools::execute_call_with_root(root, c),
+                        None => review_tools::execute_call(c),
+                    };
                     // S10 (v2.7.11) — shared log + audit-args helper. Was a
                     // 10-line block duplicated verbatim with desktop's async
                     // dispatch_with_tools.
@@ -216,6 +374,13 @@ pub fn dispatch_with_tools(
                 rounds += 1;
                 continue;
             }
+            // Fix C' — populate retry accounting from all_attempts.
+            let retry_count = (all_attempts.len() as i64).saturating_sub(rounds as i64 + 1);
+            let attempt_summary_json = if all_attempts.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&all_attempts).ok()
+            };
             return Ok(ApiDispatchOutcome {
                 response: None,
                 error_message: Some(format!(
@@ -228,10 +393,17 @@ pub fn dispatch_with_tools(
                 tokens_in: tokens_in_total,
                 tokens_out: tokens_out_total,
                 tool_calls: Some(audit),
-                retry_count: 0,
-                attempt_summary_json: None,
+                retry_count,
+                attempt_summary_json,
             });
         }
+        // Fix C' — populate retry accounting from all_attempts.
+        let retry_count = (all_attempts.len() as i64).saturating_sub(rounds as i64 + 1);
+        let attempt_summary_json = if all_attempts.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&all_attempts).ok()
+        };
         return Ok(ApiDispatchOutcome {
             response: Some(accumulated_text),
             error_message: None,
@@ -240,8 +412,8 @@ pub fn dispatch_with_tools(
             tokens_in: tokens_in_total,
             tokens_out: tokens_out_total,
             tool_calls: Some(audit),
-            retry_count: 0,
-            attempt_summary_json: None,
+            retry_count,
+            attempt_summary_json,
         });
     }
 }
@@ -433,15 +605,6 @@ fn find_fenced_json_block(s: &str) -> FenceMatch<'_> {
             FenceMatch::Single(inner.trim())
         }
         _ => FenceMatch::Multiple,
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let head: String = s.chars().take(n).collect();
-        format!("{}…", head)
     }
 }
 

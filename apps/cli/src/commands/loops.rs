@@ -1163,6 +1163,8 @@ fn handle_dispatch(
         false, // stream
         false, // stream_jsonl
         false, // with_tools — loop steps run non-interactively
+        vec![], // require_tools — loop steps don't require specific tools
+        None,  // workspace_root — loop steps use process CWD
         db_path,
         opts,
     )?;
@@ -1338,6 +1340,8 @@ fn run_resume(paused_dispatch_id: &str, db_path: &PathBuf, opts: &Opts) -> Resul
         false, // stream
         false, // stream_jsonl
         false, // with_tools — non-interactive
+        vec![], // require_tools — paused loop resumptions don't require specific tools
+        None,  // workspace_root — paused loop resumptions use process CWD
         db_path,
         opts,
     );

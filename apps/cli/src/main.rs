@@ -1535,8 +1535,17 @@ fn main() -> Result<()> {
             // false — the per-runtime CLI handles tools natively
             // (claude --allowedTools, codex sandbox, gemini --yolo) and
             // PR-2's stream-json parser handles the audit channel.
-            let runtime_is_api_provider =
-                crate::api_dispatch::is_api_provider(&runtime);
+            // Fix B — runtime_is_api_provider must also return true for
+            // CLI runtimes that have a known API fallback (gemini→google,
+            // claude→anthropic, codex→openai).  When the gemini binary is
+            // absent, dispatch::run routes through the google API provider;
+            // if we only checked is_api_provider("gemini") (which returns
+            // false) we'd compute with_tools_for_grounding=false and the
+            // fallback call site would receive with_tools=false, bypassing
+            // dispatch_with_tools entirely.  The static mapping mirrors
+            // api_fallback_for_missing_cli() in dispatch.rs.
+            let runtime_is_api_provider = crate::api_dispatch::is_api_provider(&runtime)
+                || matches!(runtime.as_str(), "gemini" | "claude" | "codex");
             let with_tools_for_grounding =
                 grounding_overrides.has_any() && runtime_is_api_provider;
 
@@ -1557,6 +1566,10 @@ fn main() -> Result<()> {
                 stream,
                 stream_jsonl,
                 with_tools_for_grounding,
+                // Fix E — thread require_tools through so run_api can
+                // build the correct offered set (trio UNION required).
+                grounding_overrides.require_tools.clone(),
+                None, // workspace_root — non-Mission dispatch uses process CWD
                 &db_path,
                 &opts,
             )?;

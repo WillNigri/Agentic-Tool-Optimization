@@ -49,7 +49,7 @@ use clap::{Args, Subcommand};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::db;
@@ -142,6 +142,18 @@ pub enum MissionSub {
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// v2.16 PR-3 — manual worktree sweep for a Mission.
+    ///
+    /// Respects cleanup_policy unless --force is passed (which removes
+    /// worktrees regardless of policy; branches are deleted only under
+    /// always_delete OR --force).
+    Cleanup {
+        slug_or_id: String,
+        /// Remove worktrees regardless of the mission's cleanup_policy.
+        /// Branches are still only deleted when policy=always_delete or --force.
+        #[arg(long)]
+        force: bool,
+    },
     /// v2.16 PR-2 — fire a worker dispatch under a Mission.
     ///
     /// Enforces the Mission's budgets (max_loops, token_budget_usd) BEFORE
@@ -213,6 +225,9 @@ struct MissionRow {
     narrative_md_path: String,
     created_at: String,
     updated_at: String,
+    // v2.16 PR-3: absolute path to the git repo captured at create time.
+    // Used by ensure_agent_worktree to resolve base_sha. NULL for single_cwd.
+    repo_root: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -224,10 +239,15 @@ struct MissionEventRow {
     occurred_at: String,
 }
 
+// Positional indices (0-based):
+//   0=id 1=slug 2=name 3=goal 4=success_criteria 5=escalation_policy
+//   6=workspace_strategy 7=base_sha 8=cleanup_policy 9=merge_strategy
+//   10=category 11=state 12=max_loops 13=token_budget_usd 14=result_metadata
+//   15=narrative_md_path 16=created_at 17=updated_at 18=repo_root (PR-3, last)
 const MISSION_SELECT: &str = "SELECT id, slug, name, goal, success_criteria, escalation_policy,
             workspace_strategy, base_sha, cleanup_policy, merge_strategy,
             category, state, max_loops, token_budget_usd, result_metadata,
-            narrative_md_path, created_at, updated_at FROM missions";
+            narrative_md_path, created_at, updated_at, repo_root FROM missions";
 
 // ── Validation constants ──────────────────────────────────────────────
 
@@ -259,24 +279,30 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
             max_loops,
             token_budget_usd,
             escalation_policy_file,
-        } => run_create(
-            CreateInput {
-                name,
-                goal,
-                success_criteria_file,
-                slug_override: slug,
-                workspace_strategy,
-                base_sha,
-                cleanup_policy,
-                merge_strategy,
-                category,
-                max_loops,
-                token_budget_usd,
-                escalation_policy_file,
-            },
-            db_path,
-            opts,
-        ),
+        } => {
+            // v2.16 PR-3: capture repo_root from CWD at create time so
+            // worktree creation later can resolve base_sha in the right repo.
+            let repo_root = detect_repo_root();
+            run_create(
+                CreateInput {
+                    name,
+                    goal,
+                    success_criteria_file,
+                    slug_override: slug,
+                    workspace_strategy,
+                    base_sha,
+                    cleanup_policy,
+                    merge_strategy,
+                    category,
+                    max_loops,
+                    token_budget_usd,
+                    escalation_policy_file,
+                    repo_root,
+                },
+                db_path,
+                opts,
+            )
+        }
         MissionSub::List { state, category } => run_list(state, category, db_path, opts),
         MissionSub::Show { slug_or_id } => run_show(slug_or_id, db_path, opts),
         MissionSub::SetCategory {
@@ -288,6 +314,9 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
         }
         MissionSub::Narrative { slug_or_id } => run_narrative(slug_or_id, db_path, opts),
         MissionSub::Events { slug_or_id, limit } => run_events(slug_or_id, limit, db_path, opts),
+        MissionSub::Cleanup { slug_or_id, force } => {
+            run_cleanup_command(slug_or_id, force, db_path, opts)
+        }
         MissionSub::Dispatch {
             slug_or_id,
             runtime,
@@ -333,6 +362,8 @@ struct CreateInput {
     max_loops: Option<i64>,
     token_budget_usd: Option<f64>,
     escalation_policy_file: Option<PathBuf>,
+    // v2.16 PR-3: captured from `git rev-parse --show-toplevel` at create time.
+    repo_root: Option<String>,
 }
 
 fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> {
@@ -353,6 +384,14 @@ fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> 
     if input.workspace_strategy == "per_agent_worktree" && input.base_sha.is_none() {
         anyhow::bail!(
             "workspace-strategy=per_agent_worktree requires --base-sha (the commit SHA worktrees branch from)"
+        );
+    }
+
+    // v2.16 PR-3 — per_agent_worktree also requires being inside a git
+    // repo so worktrees have somewhere to live.
+    if input.workspace_strategy == "per_agent_worktree" && input.repo_root.is_none() {
+        anyhow::bail!(
+            "workspace-strategy=per_agent_worktree requires creating the mission inside a git repository (git rev-parse --show-toplevel returned nothing)"
         );
     }
 
@@ -388,8 +427,8 @@ fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> 
             id, slug, name, goal, success_criteria, escalation_policy,
             workspace_strategy, base_sha, cleanup_policy, merge_strategy,
             category, state, max_loops, token_budget_usd, result_metadata,
-            narrative_md_path, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?13, NULL, ?14, ?15, ?15)",
+            narrative_md_path, created_at, updated_at, repo_root
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?13, NULL, ?14, ?15, ?15, ?16)",
         params![
             id,
             slug,
@@ -406,6 +445,7 @@ fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> 
             input.token_budget_usd,
             narrative_md_path.to_string_lossy().to_string(),
             now,
+            input.repo_root,
         ],
     )
     .context("insert mission")?;
@@ -625,6 +665,16 @@ fn run_set_state(slug_or_id: String, state: String, db_path: &PathBuf, opts: &Op
         })),
         &now,
     )?;
+    // v2.16 PR-3 — trigger event-driven cleanup on terminal state transitions.
+    if state == "complete" {
+        let cleaned = cleanup_mission_worktrees(&conn, &row, &state, false)?;
+        if opts.human && !cleaned.is_empty() {
+            emit_human(&format!(
+                "  Worktrees cleaned: {}",
+                cleaned.join(", ")
+            ));
+        }
+    }
     let updated = load_mission(&conn, &row.id)?;
     if opts.human {
         emit_human(&format!(
@@ -768,15 +818,25 @@ fn run_dispatch_under_mission(
         );
     }
 
-    // Workspace-strategy gate. per_agent_worktree needs PR-3.
-    if mission.workspace_strategy == "per_agent_worktree" {
-        anyhow::bail!(
-            "missions dispatch: mission '{}' has workspace_strategy='per_agent_worktree' but worktree \
-             creation/cleanup is queued for PR-3. Either change the mission to single_cwd (`ato missions \
-             set-state ...` after editing the row), or wait for PR-3.",
-            mission.slug
-        );
-    }
+    // Workspace-strategy gate: for per_agent_worktree, resolve the
+    // workspace root lazily (once per agent). Loop path still refused
+    // — that lands with the PR-4 coordinator tick.
+    let dispatch_workspace_root: Option<PathBuf> =
+        if mission.workspace_strategy == "per_agent_worktree" {
+            // --loop + per_agent_worktree: deferred to PR-4.
+            if input.loop_slug.is_some() {
+                anyhow::bail!(
+                    "missions dispatch: --loop + workspace_strategy=per_agent_worktree is not yet supported. \
+                     Loop workers inside per-agent worktrees land with the PR-4 coordinator tick."
+                );
+            }
+            let runtime = input.runtime.as_deref().expect("clap: --runtime required when --loop absent");
+            let agent_key = input.agent.clone().unwrap_or_else(|| runtime.to_string());
+            let wt_path = ensure_agent_worktree(&conn, &mission, &agent_key)?;
+            Some(wt_path)
+        } else {
+            None
+        };
 
     // Budget enforcement — count prior dispatches + sum cost (gemini-round-3
     // refinements from PR-1 schema: max_loops + token_budget_usd).
@@ -922,15 +982,6 @@ fn run_dispatch_under_mission(
     // Resolve with_tools: --require-tools implies --with-tools.
     let effective_with_tools = input.with_tools || !input.require_tools.is_empty();
 
-    // Set ATO_REQUIRE_TOOLS env for the dispatch — dispatch.rs reads
-    // --require-tools off Opts; we pass via the simpler env-var path so
-    // we don't have to re-engineer the Opts struct for this caller.
-    // Standard dispatch::run respects this env var (see api_dispatch and
-    // the grounding policy compiler).
-    if !input.require_tools.is_empty() {
-        std::env::set_var("ATO_REQUIRE_TOOLS", input.require_tools.join(","));
-    }
-
     // Fire the dispatch through the shared entrypoint. Errors here are
     // dispatch failures (network, no key, etc.) — they propagate up and
     // the mission stays in_progress so the operator can retry.
@@ -945,24 +996,27 @@ fn run_dispatch_under_mission(
         false, // stream
         false, // stream_jsonl
         effective_with_tools,
+        input.require_tools.clone(), // Fix E — thread require_tools for proper tool-set expansion
+        dispatch_workspace_root.as_deref(), // v2.16 PR-3: Some(path) for per_agent_worktree
         db_path,
         opts,
     )?;
 
-    if !input.require_tools.is_empty() {
-        std::env::remove_var("ATO_REQUIRE_TOOLS");
-    }
-
     // Read back the freshly-written execution_logs row.
+    // When the CLI runtime is missing and dispatch fell back to an API
+    // provider, the row is persisted under the provider slug (e.g.
+    // gemini→"google", claude→"anthropic", codex→"openai"). Query both
+    // the original runtime name and its fallback slug so we don't miss it.
     let conn = db::open_readwrite(db_path)?;
+    let fallback_runtime = api_fallback_slug(&runtime);
     let outcome: Option<(String, String, Option<String>, Option<f64>, Option<i64>)> = conn
         .query_row(
             "SELECT id, status, error_message, cost_usd_estimated, tool_calls_count
                FROM execution_logs
-              WHERE runtime = ?1 AND created_at >= ?2
+              WHERE runtime IN (?1, ?2) AND created_at >= ?3
               ORDER BY created_at DESC
               LIMIT 1",
-            params![runtime, wake_started_at],
+            params![runtime, fallback_runtime, wake_started_at],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -1036,6 +1090,22 @@ fn run_dispatch_under_mission(
     }
 
     Ok(())
+}
+
+/// Return the API-provider slug that the dispatch path falls back to when
+/// the CLI for `runtime` is missing. Mirrors the mapping in
+/// `dispatch::api_fallback_for_missing_cli`; kept as a static local so the
+/// missions read-back query can include BOTH slugs without touching the DB.
+///   gemini → "google"
+///   claude → "anthropic"
+///   codex  → "openai"
+fn api_fallback_slug(runtime: &str) -> &str {
+    match runtime {
+        "gemini" => "google",
+        "claude" => "anthropic",
+        "codex" => "openai",
+        other => other, // no fallback; IN (?1, ?2) with equal values is harmless
+    }
 }
 
 fn read_prompt_arg(prompt: Option<String>, prompt_file: Option<PathBuf>) -> Result<String> {
@@ -1277,6 +1347,7 @@ fn row_to_mission(r: &rusqlite::Row) -> rusqlite::Result<MissionRow> {
         narrative_md_path: r.get(15)?,
         created_at: r.get(16)?,
         updated_at: r.get(17)?,
+        repo_root: r.get(18).ok().flatten(), // PR-3: new last column; .ok().flatten() tolerates old rows without it
     })
 }
 
@@ -1306,11 +1377,347 @@ fn parse_payload(raw: Option<String>) -> Option<serde_json::Value> {
     raw.and_then(|s| serde_json::from_str(&s).ok())
 }
 
+// ── v2.16 PR-3 helpers ────────────────────────────────────────────────
+
+/// Detect the git repo root from the current working directory.
+/// Returns None when not in a git repo (no error — callers handle the None
+/// case based on workspace_strategy).
+fn detect_repo_root() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() { None } else { Some(path) }
+}
+
+/// Resolve the worktree path for `agent_key` under `mission`, creating it
+/// if it doesn't exist yet (lazy-once-per-agent).
+///
+/// Path: HOME/.ato/missions/<slug>/worktrees/<slugified-agent-key>/
+///
+/// On success: returns the absolute path to the worktree directory.
+/// On base_sha resolution failure: inserts an 'escalated' event and bails.
+fn ensure_agent_worktree(
+    conn: &Connection,
+    mission: &MissionRow,
+    agent_key: &str,
+) -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME / USERPROFILE in env"))?;
+    let agent_slug_dir = slugify(agent_key);
+    let wt_path = PathBuf::from(&home)
+        .join(".ato")
+        .join("missions")
+        .join(&mission.slug)
+        .join("worktrees")
+        .join(&agent_slug_dir);
+
+    // Lazy reuse: if directory already exists, return it immediately.
+    if wt_path.exists() {
+        return Ok(wt_path);
+    }
+
+    // Validate we have repo_root and base_sha.
+    let repo_root = mission.repo_root.as_deref().ok_or_else(|| anyhow::anyhow!(
+        "Mission '{}' has no repo_root — was it created outside a git repository?",
+        mission.slug
+    ))?;
+    let base_sha = mission.base_sha.as_deref().ok_or_else(|| anyhow::anyhow!(
+        "Mission '{}' has no base_sha — per_agent_worktree requires --base-sha at creation time",
+        mission.slug
+    ))?;
+
+    // Re-resolve base_sha to catch detached HEADs, force-pushed history, etc.
+    let resolve_out = std::process::Command::new("git")
+        .args(["-C", repo_root, "rev-parse", "--verify", "--quiet"])
+        .arg(format!("{}^{{commit}}", base_sha))
+        .output()
+        .context("spawn git rev-parse to verify base_sha")?;
+
+    if !resolve_out.status.success() {
+        // base_sha is unresolvable — escalate with a decision brief.
+        let now = chrono::Utc::now().to_rfc3339();
+        let options = serde_json::json!([
+            "recreate mission with a current base SHA (ato missions create ... --base-sha $(git rev-parse HEAD))",
+            "git fetch to restore the commit if it was in a remote branch",
+            "set cleanup_policy=retain and inspect worktrees manually"
+        ]);
+        let payload = serde_json::json!({
+            "reason": "base_sha_unresolvable",
+            "base_sha": base_sha,
+            "repo_root": repo_root,
+            "options": options,
+        });
+        insert_event(conn, &mission.id, "escalated", Some(payload), &now)
+            .context("insert escalated event")?;
+        anyhow::bail!(
+            "Mission '{}': base_sha '{}' is unresolvable in repo '{}'.\n\
+             \n\
+             Tradeoffs and choices:\n\
+             1. Recreate the mission with a current base SHA:\n\
+                ato missions create ... --base-sha $(git rev-parse HEAD)\n\
+                (Tradeoff: prior worktrees are orphaned; new mission has a clean base)\n\
+             2. Run `git fetch` to restore the commit if it was a remote branch tip:\n\
+                git -C {} fetch --all\n\
+                (Tradeoff: may not restore deleted commits; depends on remote availability)\n\
+             3. Set cleanup_policy=retain and inspect manually:\n\
+                The mission events log records this escalation for audit.\n\
+                (Tradeoff: no new worktrees until base_sha is valid)\n\
+             \n\
+             NEVER falls back to HEAD — that would silently branch from a different\n\
+             point than the mission intended (war-room decision Q4=C).",
+            mission.slug, base_sha, repo_root, repo_root
+        );
+    }
+
+    // Create the parent directory.
+    let parent = wt_path.parent().expect("wt_path always has a parent");
+    fs::create_dir_all(parent)
+        .with_context(|| format!("mkdir -p {}", parent.display()))?;
+
+    // Branch name for this worktree.
+    let branch = format!("ato/mission/{}/{}", mission.slug, agent_slug_dir);
+
+    // Check if the branch already exists (idempotent — possible if the
+    // worktree dir was deleted but the branch survived).
+    let branch_exists_out = std::process::Command::new("git")
+        .args(["-C", repo_root, "rev-parse", "--verify", "--quiet", &branch])
+        .output()
+        .context("spawn git rev-parse to check branch")?;
+
+    if branch_exists_out.status.success() {
+        // Branch exists: add worktree at existing branch.
+        let add_out = std::process::Command::new("git")
+            .args(["-C", repo_root, "worktree", "add"])
+            .arg(&wt_path)
+            .arg(&branch)
+            .output()
+            .with_context(|| format!("git worktree add {} {}", wt_path.display(), branch))?;
+        if !add_out.status.success() {
+            anyhow::bail!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&add_out.stderr).trim()
+            );
+        }
+    } else {
+        // Branch doesn't exist: create new branch at base_sha.
+        let add_out = std::process::Command::new("git")
+            .args(["-C", repo_root, "worktree", "add", "-b", &branch])
+            .arg(&wt_path)
+            .arg(base_sha)
+            .output()
+            .with_context(|| format!("git worktree add -b {} {} {}", branch, wt_path.display(), base_sha))?;
+        if !add_out.status.success() {
+            anyhow::bail!(
+                "git worktree add -b failed: {}",
+                String::from_utf8_lossy(&add_out.stderr).trim()
+            );
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    insert_event(
+        conn,
+        &mission.id,
+        "worktree_created",
+        Some(serde_json::json!({
+            "agent": agent_key,
+            "path": wt_path.to_string_lossy(),
+            "branch": branch,
+            "base_sha": base_sha,
+        })),
+        &now,
+    )?;
+
+    Ok(wt_path)
+}
+
+/// Perform event-driven worktree cleanup per the mission's cleanup_policy.
+///
+/// - retain: no-op always.
+/// - delete_on_success: remove when new_state == "complete".
+/// - always_delete: remove when new_state == "complete".
+///
+/// When `force` is true, removes regardless of policy (manual sweep path).
+/// Branches are deleted only under always_delete OR force.
+///
+/// Returns list of paths cleaned (for caller to surface in human output).
+fn cleanup_mission_worktrees(
+    conn: &Connection,
+    mission: &MissionRow,
+    new_state: &str,
+    force: bool,
+) -> Result<Vec<String>> {
+    // Decide whether to act based on policy × state × force.
+    let should_act = force || match mission.cleanup_policy.as_str() {
+        "retain" => false,
+        "delete_on_success" => new_state == "complete",
+        "always_delete" => new_state == "complete",
+        _ => false,
+    };
+    if !should_act {
+        return Ok(Vec::new());
+    }
+
+    let delete_branches = mission.cleanup_policy == "always_delete" || force;
+
+    let repo_root = match mission.repo_root.as_deref() {
+        Some(r) => r.to_string(),
+        None => return Ok(Vec::new()), // no repo_root — single_cwd mission, nothing to clean
+    };
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME / USERPROFILE in env"))?;
+    let wt_root = PathBuf::from(&home)
+        .join(".ato")
+        .join("missions")
+        .join(&mission.slug)
+        .join("worktrees");
+
+    if !wt_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut cleaned: Vec<String> = Vec::new();
+    let entries = fs::read_dir(&wt_root)
+        .with_context(|| format!("read_dir {}", wt_root.display()))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for entry in entries {
+        let entry = entry.context("read worktree dir entry")?;
+        let wt_path = entry.path();
+        if !wt_path.is_dir() {
+            continue;
+        }
+
+        let path_str = wt_path.to_string_lossy().to_string();
+        // Derive branch name from directory name (mirrors ensure_agent_worktree).
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let branch = format!("ato/mission/{}/{}", mission.slug, dir_name);
+
+        // git worktree remove --force <path>
+        let rm_out = std::process::Command::new("git")
+            .args(["-C", &repo_root, "worktree", "remove", "--force"])
+            .arg(&wt_path)
+            .output()
+            .with_context(|| format!("git worktree remove {}", wt_path.display()))?;
+
+        // Tolerate "not a worktree" errors (dir may have been manually moved).
+        let rm_ok = rm_out.status.success()
+            || String::from_utf8_lossy(&rm_out.stderr).contains("is not a working tree");
+
+        if rm_ok {
+            // Delete branch when policy demands it.
+            if delete_branches {
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &repo_root, "branch", "-D", &branch])
+                    .output();
+            }
+
+            insert_event(
+                conn,
+                &mission.id,
+                "worktree_cleaned",
+                Some(serde_json::json!({
+                    "path": path_str,
+                    "branch": branch,
+                    "policy": mission.cleanup_policy,
+                    "trigger": if force { "manual_sweep" } else { "state_transition" },
+                    "branch_deleted": delete_branches,
+                })),
+                &now,
+            )?;
+            cleaned.push(path_str);
+        }
+    }
+
+    Ok(cleaned)
+}
+
+/// `ato missions cleanup <slug> [--force]` — manual worktree sweep.
+fn run_cleanup_command(
+    slug_or_id: String,
+    force: bool,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+    let mission = load_mission(&conn, &slug_or_id)?;
+
+    // For manual sweep with --force we pass "complete" as new_state so that
+    // all policy branches that fire on completion also fire; force=true
+    // overrides the policy check entirely anyway.
+    let trigger_state = if force { "complete" } else { &mission.state };
+    let cleaned = cleanup_mission_worktrees(&conn, &mission, trigger_state, force)?;
+
+    if opts.human {
+        if cleaned.is_empty() {
+            emit_human(&format!(
+                "No worktrees removed for mission '{}' (policy={}, state={}, force={})",
+                mission.slug, mission.cleanup_policy, mission.state, force
+            ));
+        } else {
+            emit_human(&format!(
+                "Cleaned {} worktree(s) for mission '{}':",
+                cleaned.len(),
+                mission.slug
+            ));
+            for p in &cleaned {
+                emit_human(&format!("  {}", p));
+            }
+        }
+    } else {
+        emit_json(&serde_json::json!({
+            "mission_slug": mission.slug,
+            "cleaned": cleaned,
+            "force": force,
+        }))?;
+    }
+    Ok(())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Serialise every test that mutates or depends on the process-global HOME env var.
+    // `std::env::set_var` is not thread-safe; the parallel test runner races otherwise.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII helper: captures the current HOME on construction, restores it on drop.
+    struct HomeGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn acquire() -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prev = std::env::var_os("HOME");
+            HomeGuard { _guard: guard, prev }
+        }
+
+        fn set(&self, path: &std::path::Path) {
+            std::env::set_var("HOME", path);
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 
     fn make_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -1333,7 +1740,8 @@ mod tests {
                 result_metadata     TEXT,
                 narrative_md_path   TEXT NOT NULL,
                 created_at          TEXT NOT NULL,
-                updated_at          TEXT NOT NULL
+                updated_at          TEXT NOT NULL,
+                repo_root           TEXT
             );
             CREATE TABLE mission_events (
                 id              TEXT PRIMARY KEY,
@@ -1795,7 +2203,8 @@ mod tests {
                 result_metadata     TEXT,
                 narrative_md_path   TEXT NOT NULL,
                 created_at          TEXT NOT NULL,
-                updated_at          TEXT NOT NULL
+                updated_at          TEXT NOT NULL,
+                repo_root           TEXT
             );
             CREATE TABLE mission_events (
                 id              TEXT PRIMARY KEY,
@@ -1900,5 +2309,324 @@ mod tests {
             started_count, 0,
             "no 'loop_run_started' events must be written when pre-validation fails"
         );
+    }
+
+    // ── v2.16 PR-3 tests ─────────────────────────────────────────────
+
+    #[test]
+    fn slugify_agent_key_for_path() {
+        // agent key slugging is the same fn as mission name slugging.
+        assert_eq!(slugify("claude"), "claude");
+        assert_eq!(slugify("my-agent/v2"), "my-agent-v2");
+        assert_eq!(slugify("Agent With Spaces"), "agent-with-spaces");
+        assert_eq!(slugify(""), "mission");
+        // Slugified key used in path construction must not contain slashes.
+        let key = "ato/mission/foo";
+        let slug = slugify(key);
+        assert!(!slug.contains('/'), "slugified key must not contain '/' (got: {})", slug);
+    }
+
+    #[test]
+    fn cleanup_policy_decision_table() {
+        // Table: (policy, new_state, force) → (should_remove, delete_branch)
+        // We inline the logic from cleanup_mission_worktrees here so it's
+        // testable without filesystem ops.
+        let cases: &[(&str, &str, bool, bool)] = &[
+            // retain → never removes
+            ("retain", "complete", false, false),
+            ("retain", "complete", true, true),  // force overrides
+            ("retain", "in_progress", false, false),
+            // delete_on_success → only on complete
+            ("delete_on_success", "complete", false, true),
+            ("delete_on_success", "in_progress", false, false),
+            ("delete_on_success", "blocked", false, false),
+            ("delete_on_success", "complete", true, true), // force redundant but still true
+            // always_delete → on complete (branches too)
+            ("always_delete", "complete", false, true),
+            ("always_delete", "in_progress", false, false),
+            ("always_delete", "complete", true, true),
+        ];
+
+        for &(policy, state, force, expected_act) in cases {
+            let should_act = force || match policy {
+                "retain" => false,
+                "delete_on_success" => state == "complete",
+                "always_delete" => state == "complete",
+                _ => false,
+            };
+            assert_eq!(
+                should_act, expected_act,
+                "policy={} state={} force={} → expected_act={} but got {}",
+                policy, state, force, expected_act, should_act
+            );
+        }
+    }
+
+    /// Integration test: git init + one commit, seed mission row, call
+    /// ensure_agent_worktree, assert worktree dir + branch exist.
+    #[test]
+    fn ensure_agent_worktree_creates_dir_and_branch() {
+        // Skip on systems without git in PATH.
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo_path = repo_dir.path();
+
+        // Init repo and create a commit so we have a SHA to branch from.
+        let init = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "init"])
+            .output().unwrap();
+        assert!(init.status.success(), "git init failed: {:?}", init);
+
+        // Configure git identity for this test repo.
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "config", "user.email", "test@test.com"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "config", "user.name", "Test"])
+            .output().unwrap();
+
+        std::fs::write(repo_path.join("README.md"), b"init").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "add", "README.md"])
+            .output().unwrap();
+        let commit = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "commit", "-m", "init"])
+            .output().unwrap();
+        assert!(commit.status.success(), "git commit failed: {:?}", commit);
+
+        // Get the commit SHA.
+        let sha_out = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output().unwrap();
+        let base_sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+        assert!(!base_sha.is_empty());
+
+        // Seed a mission row.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+        let now = "2026-06-12T00:00:00Z";
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, workspace_strategy,
+                base_sha, cleanup_policy, narrative_md_path, created_at, updated_at, repo_root)
+             VALUES ('m-wt', 'wt-test', 'WT', 'Goal', '[]', 'per_agent_worktree',
+                ?1, 'delete_on_success', '/tmp/wt.md', ?2, ?2, ?3)",
+            rusqlite::params![base_sha, now, repo_path.to_str().unwrap()],
+        ).unwrap();
+
+        let mission = load_mission(&conn, "wt-test").unwrap();
+
+        // Override HOME so worktrees land in a temp dir (guarded against parallel tests).
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeGuard::acquire();
+        _home_guard.set(home_dir.path());
+
+        // First call: creates worktree.
+        let wt_path = ensure_agent_worktree(&conn, &mission, "claude").unwrap();
+        assert!(wt_path.exists(), "worktree dir must exist after creation");
+
+        // Check branch exists via `git worktree list`.
+        let wt_list = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "worktree", "list"])
+            .output().unwrap();
+        let wt_list_str = String::from_utf8_lossy(&wt_list.stdout);
+        assert!(wt_list_str.contains("claude"), "worktree list must include claude entry: {}", wt_list_str);
+
+        // Second call: reuses (no error, same path returned).
+        let wt_path2 = ensure_agent_worktree(&conn, &mission, "claude").unwrap();
+        assert_eq!(wt_path, wt_path2, "second call must return same path");
+
+        // Event log: worktree_created should be present.
+        let event_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-wt' AND kind = 'worktree_created'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(event_count, 1, "exactly one worktree_created event (second call is reuse)");
+
+        // Clean up worktree so the temp dir can be removed.
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "worktree", "remove", "--force"])
+            .arg(&wt_path)
+            .output().unwrap();
+    }
+
+    /// Integration test: unresolvable base_sha errors + writes 'escalated' event.
+    #[test]
+    fn ensure_agent_worktree_escalates_on_unresolvable_base_sha() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo_path = repo_dir.path();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "init"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "config", "user.email", "t@t.com"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "config", "user.name", "T"])
+            .output().unwrap();
+        std::fs::write(repo_path.join("x"), b"x").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "add", "x"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "commit", "-m", "x"])
+            .output().unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+        let now = "2026-06-12T00:00:00Z";
+        // Use 40 zeros as a deliberately unresolvable SHA.
+        let bad_sha = "0".repeat(40);
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, workspace_strategy,
+                base_sha, cleanup_policy, narrative_md_path, created_at, updated_at, repo_root)
+             VALUES ('m-bad', 'bad-sha', 'Bad', 'Goal', '[]', 'per_agent_worktree',
+                ?1, 'delete_on_success', '/tmp/bad.md', ?2, ?2, ?3)",
+            rusqlite::params![bad_sha, now, repo_path.to_str().unwrap()],
+        ).unwrap();
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeGuard::acquire();
+        _home_guard.set(home_dir.path());
+
+        let mission = load_mission(&conn, "bad-sha").unwrap();
+        let err = ensure_agent_worktree(&conn, &mission, "claude").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("unresolvable"), "error must mention unresolvable: {}", msg);
+        assert!(msg.contains("options") || msg.contains("recreate") || msg.contains("git fetch"),
+            "error must list recovery options: {}", msg);
+
+        // escalated event must be written.
+        let escalated: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-bad' AND kind = 'escalated'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(escalated, 1, "one escalated event must be written on unresolvable base_sha");
+    }
+
+    /// Integration test: cleanup with delete_on_success + new_state=complete removes worktree dir.
+    #[test]
+    fn cleanup_delete_on_success_removes_worktree_on_complete() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo_path = repo_dir.path();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "init"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "config", "user.email", "t@t.com"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "config", "user.name", "T"])
+            .output().unwrap();
+        std::fs::write(repo_path.join("y"), b"y").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "add", "y"])
+            .output().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "commit", "-m", "y"])
+            .output().unwrap();
+        let sha_out = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output().unwrap();
+        let base_sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+        let now = "2026-06-12T00:00:00Z";
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, workspace_strategy,
+                base_sha, cleanup_policy, narrative_md_path, created_at, updated_at, repo_root)
+             VALUES ('m-cl', 'cleanup-test', 'CL', 'Goal', '[]', 'per_agent_worktree',
+                ?1, 'delete_on_success', '/tmp/cl.md', ?2, ?2, ?3)",
+            rusqlite::params![base_sha, now, repo_path.to_str().unwrap()],
+        ).unwrap();
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeGuard::acquire();
+        _home_guard.set(home_dir.path());
+
+        let mission = load_mission(&conn, "cleanup-test").unwrap();
+
+        // Create the worktree first.
+        let wt_path = ensure_agent_worktree(&conn, &mission, "codex").unwrap();
+        assert!(wt_path.exists(), "worktree must exist before cleanup");
+
+        // Call cleanup with new_state=complete.
+        let cleaned = cleanup_mission_worktrees(&conn, &mission, "complete", false).unwrap();
+        assert_eq!(cleaned.len(), 1, "one worktree should be cleaned");
+        assert!(!wt_path.exists(), "worktree dir must not exist after cleanup");
+
+        // worktree_cleaned event must be written.
+        let cleaned_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-cl' AND kind = 'worktree_cleaned'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(cleaned_count, 1, "one worktree_cleaned event must be written");
+
+        // Clean up remaining test worktree branch.
+        std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap(), "branch", "-D", "ato/mission/cleanup-test/codex"])
+            .output().ok();
     }
 }

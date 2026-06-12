@@ -617,6 +617,8 @@ fn run_review(
             false, // no streaming for review (we want the full reply)
             false, // no JSONL
             true,  // Tier 2 — reviewers get function-calling tools when their flavor supports it
+            crate::review_tools::registry().into_iter().map(|t| t.name).collect(), // full registry
+            None, // workspace_root — review dispatches use process CWD
             db_path,
             opts,
         );
@@ -715,6 +717,8 @@ fn run_consensus_pass(
             false,
             false,
             true, // tools enabled — consensus reviewers may want to re-check claims
+            crate::review_tools::registry().into_iter().map(|t| t.name).collect(), // full registry
+            None, // workspace_root — consensus dispatches use process CWD
             db_path,
             opts,
         );

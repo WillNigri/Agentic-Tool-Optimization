@@ -1803,6 +1803,12 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.16 PR-3 — per-agent worktree lifecycle. repo_root captures the
+    // absolute path to the git repo at mission creation time so the
+    // worktree creation code can resolve base_sha against the right repo
+    // even when the process cwd has changed. NULL on single_cwd missions.
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
+
     // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
     // codex audit verdict: "one execution_logs row per dispatch,
     // plus retry_count and a compact JSON attempt summary column").

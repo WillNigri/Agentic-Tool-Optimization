@@ -181,7 +181,10 @@ pub fn dispatch_with_history(
         }));
         let body = serde_json::json!({
             "contents": contents,
-            "generationConfig": { "maxOutputTokens": 8192 },
+            // v2.x — raised from 8192 to 16384: gemini-3 thinking models
+            // consume the output budget with hidden thought tokens, leaving
+            // zero space for visible text. 16384 gives enough headroom.
+            "generationConfig": { "maxOutputTokens": 16384 },
         });
         (url, body, false, false)
     } else if provider.flavor == "anthropic" {
@@ -609,7 +612,7 @@ where
     })
 }
 
-fn parse_response(
+pub(crate) fn parse_response(
     provider: &ApiProvider,
     payload: serde_json::Value,
     model: String,
@@ -649,19 +652,47 @@ fn parse_response(
         let response = match text {
             Some(s) => s,
             None => {
+                // Build an actionable error for gemini-3 / thinking models.
+                // Common cause: hidden thought parts consumed all the output
+                // budget and left no visible text parts.
+                let finish_reason = payload["candidates"][0]["finishReason"]
+                    .as_str()
+                    .unwrap_or("?");
+                let thoughts_tokens = payload["usageMetadata"]["thoughtsTokenCount"]
+                    .as_i64();
+                let has_thought_parts = payload["candidates"][0]["content"]["parts"]
+                    .as_array()
+                    .map(|parts| parts.iter().any(|p| p.get("thoughtSignature").is_some()))
+                    .unwrap_or(false);
+
+                let thoughts_str = match thoughts_tokens {
+                    Some(n) => n.to_string(),
+                    None => "?".to_string(),
+                };
+                let thought_parts_str = if has_thought_parts { "present" } else { "absent" };
+
+                let mut hint = String::new();
+                if finish_reason == "MAX_TOKENS" || has_thought_parts {
+                    hint = " — thinking likely consumed the output budget; raise maxOutputTokens or lower thinking effort".to_string();
+                }
+
                 return Ok(ApiDispatchOutcome {
                     response: None,
                     error_message: Some(format!(
-                        "no candidates[0].content.parts[].text in Gemini response: {}",
-                        truncate_for_audit(&payload.to_string(), 600)
+                        "Gemini returned no visible text (finishReason={}, thoughtsTokenCount={}, thought-parts {}){}.  Raw: {}",
+                        finish_reason,
+                        thoughts_str,
+                        thought_parts_str,
+                        hint,
+                        truncate_for_audit(&payload.to_string(), 300)
                     )),
                     model_used: model,
                     duration_ms,
                     tokens_in: None,
                     tokens_out: None,
-            tool_calls: None,
-            retry_count: 0,
-            attempt_summary_json: None,
+                    tool_calls: None,
+                    retry_count: 0,
+                    attempt_summary_json: None,
                 });
             }
         };
@@ -1012,5 +1043,110 @@ mod gemini_usage_tests {
         });
         let (tin, _) = parse_gemini_usage(&usage);
         assert_eq!(tin, Some(1000), "tokens_in is the full prompt — cache breakdown stays out");
+    }
+}
+
+#[cfg(test)]
+mod gemini_parse_tests {
+    use super::*;
+    use ato_api_providers::ApiProvider;
+    use serde_json::json;
+
+    fn gemini_provider() -> ApiProvider {
+        ApiProvider {
+            slug: "test-gemini",
+            base_url: "https://example.com",
+            path: "/v1beta/models/{model}:generateContent",
+            default_model: "gemini-3-test",
+            env_var: "TEST_KEY",
+            flavor: "gemini",
+        }
+    }
+
+    /// Task 4a: only a thought part (empty text + thoughtSignature) plus
+    /// finishReason "MAX_TOKENS" and usageMetadata.thoughtsTokenCount 9000
+    /// must produce an error_message containing "finishReason=MAX_TOKENS"
+    /// and "thoughtsTokenCount=9000".
+    #[test]
+    fn thought_only_part_produces_actionable_error() {
+        let payload = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "text": "", "thoughtSignature": "opaque-blob" }
+                    ]
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 1000,
+                "candidatesTokenCount": 0,
+                "thoughtsTokenCount": 9000,
+                "totalTokenCount": 10000
+            }
+        });
+        let outcome = parse_response(
+            &gemini_provider(),
+            payload,
+            "gemini-3-flash".to_string(),
+            42,
+        )
+        .expect("parse_response should return Ok even on error path");
+
+        assert!(
+            outcome.error_message.is_some(),
+            "expected an error_message for thought-only response"
+        );
+        let msg = outcome.error_message.unwrap();
+        assert!(
+            msg.contains("finishReason=MAX_TOKENS"),
+            "error must contain finishReason=MAX_TOKENS; got: {msg}"
+        );
+        assert!(
+            msg.contains("thoughtsTokenCount=9000"),
+            "error must contain thoughtsTokenCount=9000; got: {msg}"
+        );
+        assert!(outcome.response.is_none());
+    }
+
+    /// Task 4b: mixed parts [thought-only, visible text] must parse
+    /// successfully to the visible text, skipping the empty thought part.
+    #[test]
+    fn mixed_thought_and_text_parts_parses_to_visible_text() {
+        let payload = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "text": "", "thoughtSignature": "x" },
+                        { "text": "actual answer" }
+                    ]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 500,
+                "candidatesTokenCount": 20,
+                "thoughtsTokenCount": 300,
+                "totalTokenCount": 820
+            }
+        });
+        let outcome = parse_response(
+            &gemini_provider(),
+            payload,
+            "gemini-3-flash".to_string(),
+            10,
+        )
+        .expect("parse_response should return Ok");
+
+        assert!(
+            outcome.error_message.is_none(),
+            "expected no error for mixed-parts response; got: {:?}",
+            outcome.error_message
+        );
+        assert_eq!(
+            outcome.response.as_deref(),
+            Some("actual answer"),
+            "response must be the non-empty text part"
+        );
     }
 }

@@ -119,6 +119,11 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         [],
     );
 
+    // v2.16 PR-3 — repo_root column on missions (per_agent_worktree
+    // support). Same CLI-only guard pattern: fails silently when the
+    // column already exists (desktop migration applied it first).
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
+
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT
     // EXISTS` is a no-op after the first run, so applying on every

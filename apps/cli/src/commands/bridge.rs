@@ -401,6 +401,8 @@ pub fn run_loop(
             false, // bridge doesn't stream individual turns
             false, // no JSONL output during bridge loop
             false, // no tools — bridge participants generate convos, not deep-dive reviews
+            vec![], // require_tools — bridge doesn't require specific tools
+            None, // workspace_root — bridge dispatches use process CWD
             db_path,
             opts,
         ) {

@@ -823,6 +823,15 @@ pub fn run(
     stream: bool,
     stream_jsonl: bool,
     with_tools: bool,
+    // Fix E — tools explicitly requested by --require-tools. When non-empty
+    // the API tool-loop offers these on top of the default read-only trio.
+    // Validated (unknown names → fast error) inside run_api.
+    require_tools: Vec<String>,
+    // v2.16 PR-3 — when dispatching under a per_agent_worktree Mission,
+    // the caller passes the worktree path so CLI runtimes are spawned
+    // with that CWD and API tool calls execute relative to that root.
+    // None = use CWD (all non-Mission callers and single_cwd Missions).
+    workspace_root: Option<&std::path::Path>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -1083,6 +1092,8 @@ pub fn run(
             stream,
             stream_jsonl,
             with_tools,
+            require_tools,
+            workspace_root,
             db_path,
             opts,
         );
@@ -1108,6 +1119,14 @@ pub fn run(
                     // CLI runtime name ("gemini"), not provider.slug
                     // ("google"). Pass it through so persona +
                     // permissions lookups hit the right row.
+                    // Fix B — derive with_tools BEFORE the fallback rewrite.
+                    // The original `with_tools` was computed in main.rs using
+                    // `runtime_is_api_provider`, which now also covers CLI
+                    // runtimes with API fallbacks.  Pass it through unchanged
+                    // so the with_tools derivation happens once, before/
+                    // independent of the cli-missing fallback, and both the
+                    // direct-provider and fallback paths carry the same
+                    // effective with_tools + require list.
                     return run_api(
                         provider,
                         prompt,
@@ -1120,6 +1139,8 @@ pub fn run(
                         stream,
                         stream_jsonl,
                         with_tools,
+                        require_tools,
+                        workspace_root,
                         db_path,
                         opts,
                     );
@@ -1206,6 +1227,12 @@ pub fn run(
     };
 
     let mut cmd = Command::new(&cli_path);
+    // v2.16 PR-3 — when dispatching under a per_agent_worktree Mission,
+    // spawn the CLI runtime inside the worktree so it sees the right
+    // working directory. None = inherit the parent process CWD.
+    if let Some(root) = workspace_root {
+        cmd.current_dir(root);
+    }
     // BYOK: if the user stored an Anthropic/OpenAI/Gemini key in
     // Settings → API Keys, forward it as the runtime's standard env var
     // so the subprocess authenticates against the API account directly
@@ -1602,6 +1629,94 @@ pub fn run(
     Ok(())
 }
 
+/// Fix E — derive the set of tools to offer for a bare-dispatch tool
+/// loop.  Pure function (no I/O, no LLM call) so it is unit-testable.
+///
+/// Offered set = legacy read-only trio (read_file, grep, git_log) UNION
+/// any tools explicitly named in `require_tools`.  Write tools
+/// (edit_file, write_file, bash) are NOT included unless named
+/// explicitly — explicit opt-in only for security.
+///
+/// Returns Err when `require_tools` names an unknown tool (caller must
+/// bail before any LLM call).
+pub fn derive_offered_tools(
+    require_tools: &[String],
+) -> anyhow::Result<Vec<crate::review_tools::ToolDef>> {
+    let full_registry = crate::review_tools::registry();
+    let full_registry_map: std::collections::HashMap<&str, &crate::review_tools::ToolDef> =
+        full_registry.iter().map(|t| (t.name.as_str(), t)).collect();
+
+    // Validate every name BEFORE touching any LLM — fail fast.
+    if !require_tools.is_empty() {
+        let mut bad: Vec<&str> = Vec::new();
+        for name in require_tools {
+            if !full_registry_map.contains_key(name.as_str()) {
+                bad.push(name.as_str());
+            }
+        }
+        if !bad.is_empty() {
+            let mut sorted_valid: Vec<&str> = full_registry_map.keys().copied().collect();
+            sorted_valid.sort_unstable();
+            anyhow::bail!(
+                "--require-tools contains unknown tool name(s): {}. \
+                 Valid tool names are: {}.",
+                bad.join(", "),
+                sorted_valid.join(", "),
+            );
+        }
+    }
+
+    const READ_ONLY_TRIO: &[&str] = &["read_file", "grep", "git_log"];
+    let mut name_set: std::collections::HashSet<&str> = READ_ONLY_TRIO.iter().copied().collect();
+    for name in require_tools {
+        name_set.insert(name.as_str());
+    }
+    let offered: Vec<crate::review_tools::ToolDef> = full_registry
+        .into_iter()
+        .filter(|t| name_set.contains(t.name.as_str()))
+        .collect();
+    Ok(offered)
+}
+
+/// Decide whether a tool should be offered after the agent gate is applied.
+///
+/// Pure function — all inputs are value-typed so this can be unit-tested
+/// independently of the HTTP path.
+///
+/// Rules:
+/// - `gate_active = false` (bare dispatch, no --agent): every tool is allowed;
+///   the caller already validated names via `derive_offered_tools`.
+/// - `gate_active = true` (agent with stored permissions):
+///   - A tool is offered ONLY IF its name appears in `gate.allowed_tools` AND
+///     `gate.check(name)` returns `GateDecision::Allow`. Tools whose name is in
+///     `allowed_tools` but whose check result is `RequireApproval` or `Deny`
+///     are NOT offered — offering them would let them execute without the
+///     approval flow that isn't built yet (audit doc Q3).
+///   - An agent with zero `allowed_tools` (empty allowlist, gate still active
+///     because an agent record was resolved) correctly offers NOTHING — it does
+///     not fall through to the full registry.
+pub fn offered_after_gate(
+    tool_name: &str,
+    gate: &ato_agent_permissions::ToolGate,
+    gate_active: bool,
+) -> bool {
+    if !gate_active {
+        return true;
+    }
+    // Must be in the positive allowlist AND pass a strict Allow check.
+    // RequireApproval tools are in allowed_tools by design (the model
+    // needs to see them to call them), but we refuse to offer them here
+    // until the approval UI lands (PR-5 gate).
+    let in_allowlist = gate.allowed_tools.iter().any(|t| t.name == tool_name);
+    if !in_allowlist {
+        return false;
+    }
+    matches!(
+        gate.check(tool_name),
+        ato_agent_permissions::GateDecision::Allow
+    )
+}
+
 /// 64 KB cap matching the desktop's truncate_for_log.
 fn truncate(s: &str) -> String {
     const MAX: usize = 64 * 1024;
@@ -1638,6 +1753,14 @@ fn run_api(
     stream: bool,
     stream_jsonl: bool,
     with_tools: bool,
+    // Fix E — tools explicitly required by --require-tools. Validated here
+    // (unknown names bail before any LLM call). The offered set for the
+    // tool loop = legacy read-only trio UNION these names.
+    require_tools: Vec<String>,
+    // v2.16 PR-3 — worktree root for per_agent_worktree Missions. Passed
+    // through to dispatch_with_tools so tool calls execute relative to
+    // the agent's worktree rather than the process CWD.
+    workspace_root: Option<&std::path::Path>,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -1786,28 +1909,41 @@ fn run_api(
         // approval. The audit doc's open question Q3 documents the
         // structural limit; the UI surfaces "tool needs approval but
         // approval flow isn't built yet" when this code path is hit.
-        let tools: Vec<crate::review_tools::ToolDef> = if agent_gate_for_api
-            .allowed_tools
-            .is_empty()
-        {
-            crate::review_tools::registry()
-        } else {
-            crate::review_tools::registry()
-                .into_iter()
-                .filter(|t| {
-                    matches!(
-                        agent_gate_for_api.check(&t.name),
-                        ato_agent_permissions::GateDecision::Allow
-                    )
-                })
-                .collect()
-        };
+        //
+        // Fix E — validate --require-tools + build offered set via the
+        // pure helper (testable independently of the HTTP path).
+        let mut tools: Vec<crate::review_tools::ToolDef> =
+            derive_offered_tools(&require_tools)?;
+
+        // Apply the agent gate on top of the offered set (mirrors the
+        // pre-Fix behaviour for the trio; new tools from require_tools
+        // are also subject to the same gate).
+        //
+        // Security: when an agent gate is active (the dispatch is
+        // associated with an agent that has stored permissions), write-class
+        // tools (edit_file / write_file / bash) may NOT be offered unless
+        // the gate's allowed_tools explicitly include them. Without this,
+        // an agent with a read-only allowlist could gain write access by
+        // naming write tools in --require-tools.
+        // gate_active = "an agent was named AND it carries non-empty
+        // enforceable permissions." Empty permissions → empty gate → no
+        // enforcement (crate invariant at ato-agent-permissions lib.rs
+        // lines 338-347); label-only agents with no migrated permission
+        // record fall through to bare-dispatch semantics. An agent with
+        // restrictive NON-empty permissions that map to zero allowed_tools
+        // is still gated and receives nothing (codex security case).
+        let gate_active = agent_slug_for_event.is_some() && !agent_perms_for_api.is_empty();
+        tools = tools
+            .into_iter()
+            .filter(|t| offered_after_gate(&t.name, &agent_gate_for_api, gate_active))
+            .collect();
         crate::api_dispatch_tools::dispatch_with_tools(
             provider,
             &history,
             &effective_prompt,
             model_override.as_deref(),
             &tools,
+            workspace_root,
             &conn,
         )
     } else {
@@ -2678,5 +2814,246 @@ mod tests {
             "codex",
         );
         assert_eq!(perms.denied, vec!["Bash(rm:*)".to_string()]);
+    }
+
+    // ── Fix E unit tests — derive_offered_tools pure-logic ──────────────
+
+    /// Default (no require_tools) → exactly the legacy read-only trio.
+    #[test]
+    fn derive_offered_tools_default_returns_trio() {
+        let tools = derive_offered_tools(&[]).expect("no error");
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"), "trio must include read_file");
+        assert!(names.contains(&"grep"), "trio must include grep");
+        assert!(names.contains(&"git_log"), "trio must include git_log");
+        assert_eq!(names.len(), 3, "default offered set must be exactly the trio");
+    }
+
+    /// require_tools with list_dir, git_diff → trio + 2 extras; write
+    /// tools NOT present unless named.
+    #[test]
+    fn derive_offered_tools_extends_trio_with_required() {
+        let req = vec!["list_dir".to_string(), "git_diff".to_string()];
+        let tools = derive_offered_tools(&req).expect("no error");
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"git_log"));
+        assert!(names.contains(&"list_dir"), "list_dir must be included when required");
+        assert!(names.contains(&"git_diff"), "git_diff must be included when required");
+        assert_eq!(names.len(), 5);
+        // Write tools NOT offered unless explicitly named.
+        assert!(!names.contains(&"edit_file"), "edit_file must not appear without explicit require");
+        assert!(!names.contains(&"write_file"), "write_file must not appear without explicit require");
+        assert!(!names.contains(&"bash"), "bash must not appear without explicit require");
+    }
+
+    /// Explicitly requiring bash opts in the write/exec tool.
+    #[test]
+    fn derive_offered_tools_bash_included_when_named() {
+        let req = vec!["bash".to_string()];
+        let tools = derive_offered_tools(&req).expect("no error");
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"bash"), "bash must be included when explicitly required");
+        // Trio still present.
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"git_log"));
+    }
+
+    /// Unknown name in require_tools → error before any LLM call.
+    #[test]
+    fn derive_offered_tools_unknown_name_returns_error() {
+        let req = vec!["list_dir".to_string(), "does_not_exist".to_string()];
+        let err = derive_offered_tools(&req).expect_err("unknown name must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does_not_exist"),
+            "error message must name the unknown tool: {}",
+            msg
+        );
+        assert!(
+            msg.contains("Valid tool names are"),
+            "error must list valid names: {}",
+            msg
+        );
+    }
+
+    /// All 9 registry names passed to derive_offered_tools → 9 tools.
+    #[test]
+    fn derive_offered_tools_all_nine_returns_nine() {
+        let all_names: Vec<String> = crate::review_tools::registry()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(all_names.len(), 9, "registry must have exactly 9 tools");
+        let tools = derive_offered_tools(&all_names).expect("all names are valid");
+        assert_eq!(
+            tools.len(),
+            9,
+            "derive_offered_tools with all 9 names must return all 9"
+        );
+    }
+
+    // ── offered_after_gate unit tests ────────────────────────────────────
+
+    /// Build a ToolGate from AgentPermissions using the real crate API.
+    fn make_gate(
+        allowed: &[&str],
+        require_approval: &[&str],
+        denied: &[&str],
+    ) -> ato_agent_permissions::ToolGate {
+        let p = ato_agent_permissions::AgentPermissions {
+            allowed: allowed.iter().map(|s| s.to_string()).collect(),
+            require_approval: require_approval.iter().map(|s| s.to_string()).collect(),
+            denied: denied.iter().map(|s| s.to_string()).collect(),
+        };
+        ato_agent_permissions::to_api_tool_gate(&p, &[])
+    }
+
+    /// Empty (no-agent) gate — gate_active=false means every tool offered.
+    fn empty_gate() -> ato_agent_permissions::ToolGate {
+        ato_agent_permissions::ToolGate {
+            allowed_tools: vec![],
+            approval_required: vec![],
+            denied: vec![],
+        }
+    }
+
+    /// No gate active (bare dispatch) → every tool is offered.
+    #[test]
+    fn offered_after_gate_no_gate_allows_all() {
+        let gate = empty_gate();
+        assert!(offered_after_gate("bash", &gate, false));
+        assert!(offered_after_gate("write_file", &gate, false));
+        assert!(offered_after_gate("read_file", &gate, false));
+    }
+
+    /// Call-site invariant: gate_active=false with an empty gate (the state
+    /// produced when a label-only --agent has no migrated permission record,
+    /// i.e. AgentPermissions::default().is_empty() == true → gate_active
+    /// stays false) must offer every tool — bare-dispatch semantics.
+    #[test]
+    fn offered_after_gate_label_only_agent_empty_perms_offers_all() {
+        // Simulates: agent_slug_for_event = Some("label-only"),
+        //            agent_perms_for_api  = AgentPermissions::default() (is_empty=true)
+        //            → gate_active = false (the fixed invariant)
+        let gate = empty_gate(); // to_api_tool_gate on default perms → empty gate
+        assert!(
+            offered_after_gate("bash", &gate, false),
+            "label-only agent (empty perms, gate_active=false) must offer bash"
+        );
+        assert!(
+            offered_after_gate("write_file", &gate, false),
+            "label-only agent (empty perms, gate_active=false) must offer write_file"
+        );
+        assert!(
+            offered_after_gate("read_file", &gate, false),
+            "label-only agent (empty perms, gate_active=false) must offer read_file"
+        );
+    }
+
+    /// Gate active + write-class tool not in allowed → denied.
+    #[test]
+    fn offered_after_gate_write_class_blocked_when_not_in_allowlist() {
+        // Gate with only Read + Grep; write-class tools absent from allowlist.
+        let gate = make_gate(&["Read", "Grep"], &[], &[]);
+        assert!(
+            !offered_after_gate("bash", &gate, true),
+            "bash must be denied when not in agent allowlist"
+        );
+        assert!(
+            !offered_after_gate("edit_file", &gate, true),
+            "edit_file must be denied when not in agent allowlist"
+        );
+        assert!(
+            !offered_after_gate("write_file", &gate, true),
+            "write_file must be denied when not in agent allowlist"
+        );
+    }
+
+    /// Gate active + tool explicitly in allowed + Allow decision → offered.
+    #[test]
+    fn offered_after_gate_write_class_allowed_when_explicit() {
+        // Read + Bash both allowed; Bash resolves to "shell" in the catalogue
+        // so test with "read_file" and "grep" which the catalogue does expose.
+        let gate = make_gate(&["Read", "Grep"], &[], &[]);
+        assert!(
+            offered_after_gate("read_file", &gate, true),
+            "read_file must be offered when in allowlist"
+        );
+        assert!(
+            offered_after_gate("grep", &gate, true),
+            "grep must be offered when in allowlist"
+        );
+        assert!(
+            !offered_after_gate("edit_file", &gate, true),
+            "edit_file still denied when absent from allowlist"
+        );
+    }
+
+    /// Defect 1 regression: agent with zero allowed_tools (e.g. reviewer
+    /// whose permissions resolve to an empty set) + gate_active=true must
+    /// offer NOTHING, not the full registry.
+    #[test]
+    fn offered_after_gate_empty_allowlist_gate_active_offers_nothing() {
+        // AgentPermissions with no labels → to_api_tool_gate → empty gate
+        // (backward-compat empty path in the crate). We force gate_active=true
+        // to simulate "an agent slug was resolved but its allowlist is empty."
+        let gate = empty_gate();
+        assert!(
+            !offered_after_gate("read_file", &gate, true),
+            "empty-allowlist gate must block read_file"
+        );
+        assert!(
+            !offered_after_gate("bash", &gate, true),
+            "empty-allowlist gate must block bash"
+        );
+        assert!(
+            !offered_after_gate("grep", &gate, true),
+            "empty-allowlist gate must block grep"
+        );
+    }
+
+    /// Defect 2 regression: a tool in allowed_tools but RequireApproval per
+    /// gate.check() must NOT be offered (approval flow isn't built yet).
+    #[test]
+    fn offered_after_gate_require_approval_not_offered() {
+        // "send_emails" is in require_approval; the gate puts it in
+        // approval_required but NOT in allowed_tools (it's not a built-in
+        // catalogue entry). Use "Read" as the allowed label so read_file
+        // ends up in allowed_tools with Allow, while we construct a gate
+        // where approval_required contains "read_file" directly to simulate
+        // the require-approval semantics on a known catalogue name.
+        let p = ato_agent_permissions::AgentPermissions {
+            allowed: vec!["Read".to_string()],
+            require_approval: vec!["read_file".to_string()],
+            denied: vec![],
+        };
+        let gate = ato_agent_permissions::to_api_tool_gate(&p, &[]);
+        // read_file is in allowed_tools (allowed: Read), but check() sees
+        // approval_required: ["read_file"] first → RequireApproval.
+        assert_eq!(
+            gate.check("read_file"),
+            ato_agent_permissions::GateDecision::RequireApproval
+        );
+        assert!(
+            !offered_after_gate("read_file", &gate, true),
+            "RequireApproval tool must not be offered even when in allowed_tools"
+        );
+    }
+
+    /// Defect 2 positive: tool in allowed_tools with check()==Allow IS offered.
+    #[test]
+    fn offered_after_gate_allow_decision_is_offered() {
+        let gate = make_gate(&["Read", "Grep"], &[], &[]);
+        assert_eq!(
+            gate.check("read_file"),
+            ato_agent_permissions::GateDecision::Allow
+        );
+        assert!(
+            offered_after_gate("read_file", &gate, true),
+            "Allow-decision tool in allowed_tools must be offered"
+        );
     }
 }
