@@ -1361,27 +1361,28 @@ async fn prompt_agent_inner(
             // agent-save time (queued for v2.7.9+).
             let claude_flags = ato_agent_permissions::to_claude(&agent_perms);
             c.arg("--allowedTools").arg(&claude_flags.allowed_tools);
-            // Felipe P3 — pre-trust ATO-registered projects so claude
-            // does not re-prompt on every dispatch. See module-level
-            // doc above prompt_agent for the rationale + storage
-            // contract. Opens its own read-only connection; failure
-            // (DB missing, locked, etc.) silently degrades to the
-            // pre-Felipe behaviour (claude shows its trust prompt),
-            // matching the agent-permissions plumbing's "observability
-            // never breaks dispatch" guarantee.
-            let trust_db = rusqlite::Connection::open_with_flags(
-                &crate::get_db_path(),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            );
-            if let Ok(conn) = trust_db {
-                if should_pretrust_workspace(
-                    workspace.as_deref(),
-                    &conn,
-                    &ato_settings_path(),
-                ) {
-                    c.arg("--dangerously-skip-permissions");
-                }
-            }
+            // v2.15.6 (task #33) — pretrust via --dangerously-skip-permissions
+            // is DROPPED for the chat-panel path. Claude CLI 2.1.175 (and
+            // likely all 2.1.x) requires --allow-dangerously-skip-permissions
+            // to be enabled first, otherwise the second flag fails the
+            // dispatch with exit status 1 in --print mode. Sessions and
+            // war-rooms work fine because they spawn the prod CLI subprocess
+            // which doesn't pass this flag.
+            //
+            // Cost of dropping: claude shows its trust prompt on the FIRST
+            // dispatch into a new workspace; "Always Allow" makes future
+            // dispatches into that workspace silent. One-time per-workspace
+            // friction, not a hard block.
+            //
+            // The "real" fix the original code anticipated (line 1360-1363
+            // pre-edit) was writing trust to ~/.claude/settings.local.json
+            // at agent-save time — queued for v2.7.9+ originally, not yet
+            // landed. When it does land, the pretrust UX comes back
+            // without depending on claude CLI flag behavior.
+            //
+            // Felipe P3 / should_pretrust_workspace logic preserved in
+            // history (git blame this block) — bring it back when the
+            // settings.local.json path ships.
             c
         }
         "codex" => {
