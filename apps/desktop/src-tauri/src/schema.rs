@@ -1727,6 +1727,80 @@ pub fn init_database(conn: &Connection) {
     // assert it has the right "old key" before destructive ops.
     let _ = conn.execute("ALTER TABLE master_key_ledger ADD COLUMN canary_ciphertext TEXT", []);
 
+    // ── v2.16 PR-1 — Missions (proactive coordinator class) ───────────────
+    //
+    // Mission is a goal-driven coordinator that may spawn Loops (workers)
+    // to make progress over time. See docs/v2.16-missions.md for the full
+    // design. War-room F16E28F0-2E9A-4260-8A2E-02F0F3CF49E7 — codex 2x +
+    // gemini 1x rounds. All three architectural decisions (Q1/Q2/Q3)
+    // agreed on, 5 schema refinements from gemini round-3 adopted:
+    //   - cleanup_policy (worktree pruning policy)
+    //   - check_command in success_criteria JSON (verifiable completion)
+    //   - max_loops + token_budget_usd (bounded resource consumption)
+    //   - result_metadata JSON (declarative outputs)
+    //   - nullable mission_id on related rows (preserves standalone Loop)
+    //
+    // No-subdelegation rule: missions spawn loops; loops spawn dispatches.
+    // Dispatches CANNOT spawn missions. Loops CANNOT spawn sub-loops.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS missions (
+            id                  TEXT PRIMARY KEY,
+            slug                TEXT NOT NULL UNIQUE,
+            name                TEXT NOT NULL,
+            goal                TEXT NOT NULL,
+            success_criteria    TEXT NOT NULL,
+            escalation_policy   TEXT,
+            workspace_strategy  TEXT NOT NULL DEFAULT 'single_cwd',
+            base_sha            TEXT,
+            cleanup_policy      TEXT NOT NULL DEFAULT 'delete_on_success',
+            merge_strategy      TEXT NOT NULL DEFAULT 'human_approves_each',
+            category            TEXT NOT NULL DEFAULT 'autonomous',
+            state               TEXT NOT NULL DEFAULT 'open',
+            max_loops           INTEGER,
+            token_budget_usd    REAL,
+            result_metadata     TEXT,
+            narrative_md_path   TEXT NOT NULL,
+            created_at          TEXT NOT NULL,
+            updated_at          TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_missions_state_category
+            ON missions(state, category)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_missions_updated
+            ON missions(updated_at DESC)",
+        [],
+    );
+
+    // mission_events — append-only event log per mission. The Mission ↔
+    // Loop relationship lives in payload.loop_run_id when kind='loop_run_
+    // completed', NOT in a separate join table (codex round-1 "B-lite").
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS mission_events (
+            id              TEXT PRIMARY KEY,
+            mission_id      TEXT NOT NULL,
+            kind            TEXT NOT NULL,
+            payload         TEXT,
+            occurred_at     TEXT NOT NULL,
+            FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_time
+            ON mission_events(mission_id, occurred_at DESC)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mission_events_kind
+            ON mission_events(kind, occurred_at DESC)",
+        [],
+    );
+
     // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
     // codex audit verdict: "one execution_logs row per dispatch,
     // plus retry_count and a compact JSON attempt summary column").

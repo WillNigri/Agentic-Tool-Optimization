@@ -60,3 +60,8 @@ pub mod observe;
 // and the desktop Tauri commands write to the same `loops` /
 // `loop_runs` / `loop_run_steps` tables in ~/.ato/local.db.
 pub mod loops;
+
+// v2.16 PR-1 — `ato missions` (proactive coordinator class). Mission is
+// a goal-driven primitive that spawns Loops as workers. See
+// docs/v2.16-missions.md for the war-room-locked design.
+pub mod missions;

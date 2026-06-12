@@ -138,6 +138,11 @@ enum Commands {
     /// Reframed from the v2.13 Automations tab. See Loop Composer
     /// plan: ~/.claude/plans/eager-yawning-crane.md.
     Loop(commands::loops::LoopArgs),
+    /// v2.16 — Missions: proactive goal-driven coordinator. Spawns Loops
+    /// (workers) over time toward a stated goal with verifiable success
+    /// criteria. See `docs/v2.16-missions.md` for the design.
+    #[command(name = "missions")]
+    Missions(commands::missions::MissionArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1268,6 +1273,10 @@ fn main() -> Result<()> {
         }
         Commands::Loop(args) => {
             commands::loops::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Missions(args) => {
+            commands::missions::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {
