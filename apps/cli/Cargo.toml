@@ -63,7 +63,7 @@ keyring = "2"
 # rand_core / rand = keygen entropy. Pinned via dalek's feature flags.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "fs"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
+rand = "0.9"
 sha2 = "0.10"
 # v2.4.4 Phase 7.0 step 2 — mDNS discovery on _ato._tcp.local.
 mdns-sd = "0.11"
