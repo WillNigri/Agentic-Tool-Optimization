@@ -119,6 +119,30 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         [],
     );
 
+    // v2.15.5 — fallback-chain receipt (war_room CC9DBD0E). CLI-only
+    // guard: fails silently when the column already exists (desktop
+    // migration applied it first via schema.rs). Must appear before any
+    // run_api INSERT that binds this column.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN fallback_of TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_fallback_of \
+            ON execution_logs(fallback_of) \
+            WHERE fallback_of IS NOT NULL",
+        [],
+    );
+    // v2.15.1 — retry receipt columns (CLI-only guard, mirrors schema.rs).
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN attempt_summary TEXT",
+        [],
+    );
+
     // v2.16 PR-3 — repo_root column on missions (per_agent_worktree
     // support). Same CLI-only guard pattern: fails silently when the
     // column already exists (desktop migration applied it first).

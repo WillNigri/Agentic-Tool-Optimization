@@ -1844,6 +1844,23 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.15.5 — post-retry fallback-chain receipt (war_room CC9DBD0E).
+    // fallback_of: the execution_logs.id of the failed dispatch this
+    // row replaces. NULL for all non-fallback rows (i.e. the overwhelming
+    // majority). The original failed row keeps status=error untouched;
+    // the fallback row carries a new id and links back here so the UI
+    // can show the chain of attempts.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN fallback_of TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_fallback_of \
+            ON execution_logs(fallback_of) \
+            WHERE fallback_of IS NOT NULL",
+        [],
+    );
+
     // v2.15.4 — pause-and-wake scheduler (war_room E063A89E).
     //
     // Codex's amendments to the initial design:

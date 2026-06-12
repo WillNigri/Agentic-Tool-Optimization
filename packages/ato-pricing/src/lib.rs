@@ -26,10 +26,13 @@ use serde::Serialize;
 /// NULL as "$? (pricing missing)" specifically so this misses are
 /// visible rather than silently free.
 ///
-/// **Rates last verified: 2026-05-16.** Treat as estimates — vendor
+/// **Rates last verified: 2026-06-12.** Treat as estimates — vendor
 /// rates drift. Cross-check against the provider's own dashboard for
 /// billing-grade numbers. The `(0.30, 2.50)` Gemini 2.5 Flash entry,
-/// for example, came from Google AI Studio pricing as of that date.
+/// for example, came from Google AI Studio pricing as of 2026-05-16.
+/// 2026-06-12: added gemini-3 family (flash-preview, flash, 3.5-flash,
+/// pro-preview, pro, 3.1-pro-preview, 3.1-pro) — root cause of 7x
+/// undercount bug where unknown models returned None → NULL cost.
 pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
         // ---- Anthropic ----
@@ -54,6 +57,18 @@ pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
         "o3-mini" => Some((1.1, 4.4)),
 
         // ---- Google (Gemini API on AI Studio) ----
+        // gemini-3 family — added 2026-06-12 (web-verified). Longer/more-specific
+        // names listed first so any future prefix-based matching won't short-circuit.
+        // Pro rows priced at the base tier (≤200K context); the >200K tier is
+        // $4.00/$18.00 — callers needing that tier must handle it upstream.
+        "gemini-3.5-flash"           => Some((1.50,  9.00)),  // launched 2026-05-19
+        "gemini-3.1-pro-preview"     => Some((2.00, 12.00)),
+        "gemini-3.1-pro"             => Some((2.00, 12.00)),
+        "gemini-3-flash-preview"     => Some((0.50,  3.00)),
+        "gemini-3-flash"             => Some((0.50,  3.00)),
+        "gemini-3-pro-preview"       => Some((2.00, 12.00)),
+        "gemini-3-pro"               => Some((2.00, 12.00)),
+        // gemini-2.x and older
         "gemini-2.5-pro" => Some((1.25, 10.0)),
         "gemini-2.5-flash" => Some((0.30, 2.50)),
         "gemini-2.5-flash-lite" => Some((0.1, 0.4)),
@@ -96,7 +111,13 @@ pub fn models_for_provider(provider: &str) -> &'static [&'static str] {
     match provider {
         "anthropic" => &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
         "openai" => &["gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1-mini", "o3-mini", "gpt-4.1", "o3", "gpt-4o", "gpt-5"],
-        "google" => &["gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-2.5-pro"],
+        "google" => &[
+            "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-2.0-flash",
+            "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3-flash",
+            "gemini-1.5-pro", "gemini-2.5-pro",
+            "gemini-3.5-flash", "gemini-3-pro-preview", "gemini-3-pro",
+            "gemini-3.1-pro-preview", "gemini-3.1-pro",
+        ],
         "deepseek" => &["deepseek-chat", "deepseek-reasoner"],
         "qwen" => &["qwen-turbo", "qwen-plus", "qwen-max"],
         "minimax" => &["MiniMax-Text-01", "MiniMax-M2", "MiniMax-M2.7-highspeed"],
@@ -273,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn cost_from_tokens_gemini3_flash_preview() {
+        // 1,000,000 input @ $0.50/M + 1,000,000 output @ $3.00/M = $3.50
+        let cost = cost_from_tokens("gemini-3-flash-preview", 1_000_000, 1_000_000)
+            .expect("gemini-3-flash-preview must be in pricing table");
+        assert!(
+            (cost - 3.5).abs() < 1e-9,
+            "expected $3.50, got ${cost}"
+        );
+    }
+
+    #[test]
     fn billing_mode_classifies() {
         assert_eq!(billing_mode("claude"), BillingMode::Subscription);
         assert_eq!(billing_mode("google"), BillingMode::ApiKey);
@@ -334,6 +366,14 @@ mod tests {
             ("gemini-2.5-flash", 0.30,  2.50),
             ("gemini-2.5-pro",   1.25, 10.0),
             ("gemini-1.5-flash", 0.075, 0.3),
+            // gemini-3 family — added 2026-06-12; was causing 7x undercount (NULL cost)
+            ("gemini-3-flash-preview",  0.50,  3.00),
+            ("gemini-3-flash",          0.50,  3.00),
+            ("gemini-3.5-flash",        1.50,  9.00),
+            ("gemini-3-pro-preview",    2.00, 12.00),
+            ("gemini-3-pro",            2.00, 12.00),
+            ("gemini-3.1-pro-preview",  2.00, 12.00),
+            ("gemini-3.1-pro",          2.00, 12.00),
             // MiniMax — CLI had these, desktop didn't
             ("MiniMax-M2.7-highspeed", 1.0, 3.0),
             // DeepSeek
