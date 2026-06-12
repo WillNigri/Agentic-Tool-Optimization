@@ -56,7 +56,7 @@ base64 = "0.22"
 # first access). Master key lives in the OS keychain; both binaries
 # look at the same service+account name.
 aes-gcm = "0.10"
-keyring = "2"
+keyring = "4"
 # v2.4.4 Phase 7.0 — daemon for LAN mesh.
 # tokio = async runtime for the WS server + peer connections.
 # ed25519-dalek = peer identity / signed messages.
