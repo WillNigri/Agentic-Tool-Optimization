@@ -382,9 +382,46 @@ pub fn rekey_inner(
     let (canary_v1, stored_probe) = match row {
         Some((c, p)) => (c, p),
         None => {
-            return Err(RekeyError::LedgerWrite(
-                "no active v1 ledger row found — refusing to rekey from an empty ledger".to_string(),
-            ));
+            // v2.15.6 (Will dogfood 2026-06-12) — improved diagnostics.
+            // Distinguish three sub-states so the UI can give an actionable
+            // message instead of "ledger update failed."
+            let (any_v1, v1_retired_at, active_version): (
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+            ) = tx
+                .query_row(
+                    "SELECT
+                        (SELECT COUNT(*) FROM master_key_ledger WHERE version='v1'),
+                        (SELECT retired_at FROM master_key_ledger WHERE version='v1' LIMIT 1),
+                        (SELECT version FROM master_key_ledger WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap_or((None, None, None));
+
+            let msg = match (any_v1.unwrap_or(0), v1_retired_at, active_version) {
+                (0, _, Some(active)) => format!(
+                    "no v1 ledger row exists, but '{active}' is the active version. \
+                     Your install has already migrated past v1; the v1→v2 rekey flow does not apply. \
+                     If you're seeing the identity-probe banner, dismiss it — the rekey here cannot help."
+                ),
+                (n, Some(retired_at), Some(active)) if n > 0 => format!(
+                    "v1 was already retired on {retired_at}; '{active}' is the current active ledger row. \
+                     The v1→v2 rekey flow only applies BEFORE retirement. \
+                     If you're seeing the identity-probe banner repeatedly, the probe mismatch is between \
+                     this binary signature and the {active} entry — a separate issue from v1→v2 migration. \
+                     Re-entering API keys via Settings → API Keys is the recovery path for that state."
+                ),
+                (0, _, None) => "master_key_ledger is empty — no rekey possible. \
+                                 Launch ATO and trigger a path that resolves the master key \
+                                 (Settings → API Keys → reveal a stored key) to seed the ledger first."
+                    .to_string(),
+                _ => "no active v1 ledger row, and the ledger is in an unexpected state. \
+                     Inspect master_key_ledger contents and file a bug."
+                    .to_string(),
+            };
+            return Err(RekeyError::LedgerWrite(msg));
         }
     };
 
@@ -657,6 +694,69 @@ fn delete_old_keychain_entry() -> bool {
             false
         }
     }
+}
+
+/// v2.15.6 — surface the ledger state to the React banner so the
+/// "Re-key now" affordance can be suppressed in states where the
+/// v1→v2 rekey can't possibly help (most commonly: install already
+/// migrated to v2, banner is firing because of a probe mismatch
+/// between this binary and the v2 entry — a different problem).
+///
+/// Returns enough state for the banner to decide:
+/// - `v1_active`: there's a v1 row with retired_at IS NULL
+/// - `v1_retired_at`: if v1 exists and is retired, the timestamp
+/// - `active_version`: the current active ledger version (v1, v2, …)
+/// - `applicable`: shorthand for v1_active && active_version == "v1"
+///   — only TRUE state where the rekey UI button should be the
+///   recommended next action.
+#[derive(serde::Serialize, Debug)]
+pub struct RekeyApplicability {
+    pub v1_active: bool,
+    pub v1_retired_at: Option<String>,
+    pub active_version: Option<String>,
+    pub applicable: bool,
+}
+
+#[tauri::command]
+pub fn get_rekey_applicability(
+    db: tauri::State<'_, crate::DbState>,
+) -> Result<RekeyApplicability, String> {
+    let conn = db.0.lock().map_err(|e| format!("db lock poisoned: {}", e))?;
+    let v1_active: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM master_key_ledger
+              WHERE version = 'v1' AND retired_at IS NULL",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    let v1_retired_at: Option<String> = conn
+        .query_row(
+            "SELECT retired_at FROM master_key_ledger
+              WHERE version = 'v1' AND retired_at IS NOT NULL
+              LIMIT 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap_or(None);
+    let active_version: Option<String> = conn
+        .query_row(
+            "SELECT version FROM master_key_ledger
+              WHERE retired_at IS NULL
+              ORDER BY created_at DESC
+              LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    let applicable = v1_active && active_version.as_deref() == Some("v1");
+    Ok(RekeyApplicability {
+        v1_active,
+        v1_retired_at,
+        active_version,
+        applicable,
+    })
 }
 
 /// Tauri command — the frontend's entry point. Refuses to rekey

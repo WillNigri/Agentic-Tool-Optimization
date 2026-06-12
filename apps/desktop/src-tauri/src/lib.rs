@@ -286,6 +286,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             identity_probe::get_identity_probe_status,
             rekey::rekey_master_key,
+            rekey::get_rekey_applicability,
             rekey::resolve_master_key_drift,
             // v2.10 PR-8 — Methodology Insights tab read APIs
             list_methodology_definitions,
