@@ -83,6 +83,12 @@ pub struct LoopRun {
     pub error: Option<String>,
     pub triggered_by: Option<String>,
     pub variables: Option<serde_json::Value>,
+    /// Attribution PR (2026-06-13) — initiator provenance so the Loop
+    /// Composer run-history list can render an InitiatorBadge per run.
+    /// NULL on runs recorded before the attribution backfill.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -442,7 +448,8 @@ pub fn list_loop_runs(
     let cap = limit.unwrap_or(50).clamp(1, 500);
     let sql = format!(
         "SELECT lr.id, lr.loop_id, lr.status, lr.started_at, lr.finished_at,
-                lr.error, lr.triggered_by, lr.variables
+                lr.error, lr.triggered_by, lr.variables,
+                lr.initiator_kind, lr.client_surface, lr.initiator_id
            FROM loop_runs lr
            JOIN loops l ON lr.loop_id = l.id
           WHERE l.{} = ?1
@@ -463,13 +470,27 @@ pub fn list_loop_runs(
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 raw_vars,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for r in rows {
-        let (id, loop_id, status, started_at, finished_at, error, triggered_by, raw_vars) =
-            r.map_err(|e| e.to_string())?;
+        let (
+            id,
+            loop_id,
+            status,
+            started_at,
+            finished_at,
+            error,
+            triggered_by,
+            raw_vars,
+            initiator_kind,
+            client_surface,
+            initiator_id,
+        ) = r.map_err(|e| e.to_string())?;
         let variables = parse_json("variables", raw_vars)?;
         out.push(LoopRun {
             id,
@@ -480,6 +501,9 @@ pub fn list_loop_runs(
             error,
             triggered_by,
             variables,
+            initiator_kind,
+            client_surface,
+            initiator_id,
         });
     }
     Ok(out)

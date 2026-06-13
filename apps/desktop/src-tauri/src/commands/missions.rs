@@ -68,6 +68,12 @@ pub struct MissionDetail {
     pub updated_at: String,
     pub repo_root: Option<String>,
     pub worker_config: Option<serde_json::Value>,
+    /// Attribution PR (2026-06-13) — initiator provenance for the
+    /// mission-detail header InitiatorBadge. NULL on missions created
+    /// before the attribution mission backfilled the columns.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
     /// Computed fields.
     pub spent_usd: f64,
     pub dispatch_count: i64,
@@ -88,6 +94,14 @@ pub struct MissionEvent {
     pub kind: String,
     pub payload: Option<serde_json::Value>,
     pub occurred_at: String,
+    /// Attribution PR (2026-06-13) — initiator provenance of the
+    /// execution_log this event links to (via payload.execution_log_id).
+    /// Populated by a LEFT JOIN in load_events; NULL for events with no
+    /// linked log or whose log predates the attribution backfill. The
+    /// InitiatorBadge on the event row reads these.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 // ── SELECT constant — matches CLI MISSION_SELECT column order ─────────
@@ -96,7 +110,8 @@ const MISSION_COLS: &str =
     "id, slug, name, goal, success_criteria, escalation_policy,
      workspace_strategy, base_sha, cleanup_policy, merge_strategy,
      category, state, max_loops, token_budget_usd, result_metadata,
-     narrative_md_path, created_at, updated_at, repo_root, worker_config";
+     narrative_md_path, created_at, updated_at, repo_root, worker_config,
+     initiator_kind, client_surface, initiator_id";
 
 // ── Internal helpers ──────────────────────────────────────────────────
 
@@ -173,12 +188,19 @@ fn load_events(
     mission_id: &str,
     limit: i64,
 ) -> Result<Vec<MissionEvent>, String> {
+    // Attribution PR (2026-06-13) — LEFT JOIN the linked execution_log
+    // (events carry the id inside payload.execution_log_id) so each
+    // event row can render an InitiatorBadge for the run it points at.
+    // Events with no linked log (e.g. state_changed) keep NULL columns.
     let mut stmt = conn
         .prepare(
-            "SELECT id, mission_id, kind, payload, occurred_at
-               FROM mission_events
-              WHERE mission_id = ?1
-           ORDER BY occurred_at DESC
+            "SELECT me.id, me.mission_id, me.kind, me.payload, me.occurred_at,
+                    el.initiator_kind, el.client_surface, el.initiator_id
+               FROM mission_events me
+               LEFT JOIN execution_logs el
+                 ON json_extract(me.payload, '$.execution_log_id') = el.id
+              WHERE me.mission_id = ?1
+           ORDER BY me.occurred_at DESC
               LIMIT ?2",
         )
         .map_err(|e| e.to_string())?;
@@ -191,6 +213,9 @@ fn load_events(
                 kind: r.get(2)?,
                 payload: parse_json_opt(payload_raw),
                 occurred_at: r.get(4)?,
+                initiator_kind: r.get(5)?,
+                client_surface: r.get(6)?,
+                initiator_id: r.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -211,10 +236,13 @@ fn pending_escalations(
     // a correlated sub-query (avoids SQLite quirks with correlated EXISTS on text dates).
     let mut stmt = conn
         .prepare(
-            "SELECT id, mission_id, kind, payload, occurred_at
-               FROM mission_events
-              WHERE mission_id = ?1
-           ORDER BY occurred_at ASC",
+            "SELECT me.id, me.mission_id, me.kind, me.payload, me.occurred_at,
+                    el.initiator_kind, el.client_surface, el.initiator_id
+               FROM mission_events me
+               LEFT JOIN execution_logs el
+                 ON json_extract(me.payload, '$.execution_log_id') = el.id
+              WHERE me.mission_id = ?1
+           ORDER BY me.occurred_at ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -226,6 +254,9 @@ fn pending_escalations(
                 kind: r.get(2)?,
                 payload: parse_json_opt(payload_raw),
                 occurred_at: r.get(4)?,
+                initiator_kind: r.get(5)?,
+                client_surface: r.get(6)?,
+                initiator_id: r.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -403,6 +434,9 @@ pub fn mission_detail(db: State<'_, DbState>, slug_or_id: String) -> Result<Miss
                 updated_at: r.get(17)?,
                 repo_root: r.get(18).ok().unwrap_or(None),
                 worker_config,
+                initiator_kind: r.get(20).ok().unwrap_or(None),
+                client_surface: r.get(21).ok().unwrap_or(None),
+                initiator_id: r.get(22).ok().unwrap_or(None),
                 spent_usd: 0.0,
                 dispatch_count: 0,
                 events: Vec::new(),

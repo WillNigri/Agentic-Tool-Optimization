@@ -26,6 +26,7 @@ import {
   formatTime,
 } from "./_helpers";
 import type { SingleRunDetail } from "./SingleRunDetailView";
+import InitiatorBadge from "@/components/InitiatorBadge";
 import CloseConversationModal from "./CloseConversationModal";
 
 interface WarRoomDispatchResult {
@@ -478,6 +479,13 @@ export default function WarRoomDetailView({
                   <span className="text-xs text-cs-muted font-mono">
                     {d.model}
                   </span>
+                )}
+                {(d.initiatorKind || d.clientSurface) && (
+                  <InitiatorBadge
+                    initiatorKind={d.initiatorKind}
+                    clientSurface={d.clientSurface}
+                    initiatorId={d.initiatorId}
+                  />
                 )}
                 <span className="text-xs text-cs-muted ml-auto">
                   {formatTime(d.createdAt)}

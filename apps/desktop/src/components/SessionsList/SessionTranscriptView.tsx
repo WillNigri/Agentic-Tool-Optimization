@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { listAgents, type Agent } from "@/lib/agents";
 import CloseConversationModal from "./CloseConversationModal";
+import InitiatorBadge from "@/components/InitiatorBadge";
 import {
   runtimeBadge,
   formatTime,
@@ -658,6 +659,13 @@ export default function SessionTranscriptView({
                       <span className={runtimeBadge(turn.runtime)}>
                         {turn.runtime}
                       </span>
+                    )}
+                    {(turn.initiatorKind || turn.clientSurface) && (
+                      <InitiatorBadge
+                        initiatorKind={turn.initiatorKind}
+                        clientSurface={turn.clientSurface}
+                        initiatorId={turn.initiatorId}
+                      />
                     )}
                     <span className="text-[10px] text-cs-muted">
                       {formatTime(turn.createdAt)}

@@ -24,6 +24,8 @@ import {
   formatTime,
 } from "./_helpers";
 import PermissionEventsPanel from "./PermissionEventsPanel";
+import InitiatorBadge from "@/components/InitiatorBadge";
+import ClickablePath from "@/components/ClickablePath";
 
 export interface SingleRunDetail {
   id: string;
@@ -51,6 +53,13 @@ export interface SingleRunDetail {
   // to include it yet; PermissionEventsPanel renders nothing when
   // the field is absent so the field is forward-compatible.
   toolCallsSummary?: string | null;
+  // v2.17 — git provenance and initiator attribution. Optional
+  // because pre-attribution / pre-git-linkage rows have NULLs in
+  // these columns; the badges render nothing when undefined.
+  gitCommitSha?: string | null;
+  initiatorKind?: string | null;
+  clientSurface?: string | null;
+  initiatorId?: string | null;
 }
 
 export default function SingleRunDetailView({
@@ -125,10 +134,25 @@ export default function SingleRunDetailView({
           {d.model && (
             <span className="text-xs text-cs-muted font-mono">{d.model}</span>
           )}
+          {(d.initiatorKind || d.clientSurface) && (
+            <InitiatorBadge
+              initiatorKind={d.initiatorKind}
+              clientSurface={d.clientSurface}
+              initiatorId={d.initiatorId}
+            />
+          )}
           <span className="text-xs text-cs-muted ml-auto">
             {formatTime(d.createdAt)}
           </span>
         </div>
+        {d.gitCommitSha && (
+          <div className="flex items-center gap-2 text-[11px] text-cs-muted">
+            <span>commit:</span>
+            <span className="font-mono text-cs-text">
+              {d.gitCommitSha.slice(0, 12)}
+            </span>
+          </div>
+        )}
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-cs-muted">
           {d.durationMs !== null && (
             <span>

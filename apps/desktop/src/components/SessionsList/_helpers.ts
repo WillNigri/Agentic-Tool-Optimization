@@ -219,6 +219,13 @@ export interface SessionTurn {
   createdAt: string;
   // 2026-05-16 — null for generalist dispatches, slug otherwise.
   agentSlug: string | null;
+  // v2.17 — per-message attribution. Each turn stamps its own
+  // initiator at send time so live-attached agents that take over
+  // mid-conversation surface correctly per-turn rather than
+  // inheriting the session-open initiator.
+  initiatorKind?: string | null;
+  clientSurface?: string | null;
+  initiatorId?: string | null;
 }
 
 // 2026-05-16 — cost-receipts panel data shape, mirrors the backend
