@@ -584,13 +584,16 @@ fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> 
         .transpose()
         .context("serialize escalation_policy")?;
 
+    // v2.16 attribution — resolve initiator provenance for the mission row.
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
         "INSERT INTO missions (
             id, slug, name, goal, success_criteria, escalation_policy,
             workspace_strategy, base_sha, cleanup_policy, merge_strategy,
             category, state, max_loops, token_budget_usd, result_metadata,
-            narrative_md_path, created_at, updated_at, repo_root
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?13, NULL, ?14, ?15, ?15, ?16)",
+            narrative_md_path, created_at, updated_at, repo_root,
+            initiator_kind, client_surface, initiator_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?13, NULL, ?14, ?15, ?15, ?16, ?17, ?18, ?19)",
         params![
             id,
             slug,
@@ -608,6 +611,9 @@ fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> 
             narrative_md_path.to_string_lossy().to_string(),
             now,
             input.repo_root,
+            attribution.kind,
+            attribution.surface,
+            attribution.id,
         ],
     )
     .context("insert mission")?;

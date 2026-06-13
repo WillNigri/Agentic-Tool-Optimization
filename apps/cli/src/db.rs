@@ -166,6 +166,33 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         [],
     );
 
+    // Attribution PR-A (2026-06-13) — initiator provenance columns
+    // (initiator_kind / client_surface / initiator_id) on every
+    // conversation/run-bearing table. CLI-only guard mirroring the
+    // desktop migration in schema.rs: a user dispatching from the CLI
+    // without ever opening the desktop needs these columns so the
+    // dispatch INSERTs that bind them don't hit "no such column". Each
+    // ALTER fails silently when the column already exists.
+    for table in [
+        "execution_logs",
+        "sessions",
+        "war_rooms",
+        "chat_threads",
+        "loop_runs",
+        "missions",
+        "methodology_runs",
+        "session_turns",
+        "chat_messages",
+        "loop_run_steps",
+    ] {
+        for col in ["initiator_kind", "client_surface", "initiator_id"] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {col} TEXT"),
+                [],
+            );
+        }
+    }
+
     // ato_meta: tiny key/value table for migration markers.
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS ato_meta (key TEXT PRIMARY KEY, value TEXT)",

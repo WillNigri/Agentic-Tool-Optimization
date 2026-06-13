@@ -888,6 +888,9 @@ pub fn run(
     // Best-effort: None when not in a git repo, NEVER blocks dispatch.
     let git_commit_sha: Option<String> =
         capture_git_head(workspace_root.map(std::path::Path::to_path_buf));
+    // v2.16 attribution — resolve initiator provenance once at entry,
+    // same shape as git_commit_sha. Bound into the execution_logs INSERT.
+    let attribution = crate::attribution::Attribution::detect();
     // v2.15.2 — capture runtime_name as a mutable owned String for
     // the exhaustion-policy fallback-chain branch. After the gate
     // block we shadow back to &str so the rest of the function
@@ -1535,7 +1538,7 @@ pub fn run(
     // can group multi-turn conversations under one header.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode, agent_slug) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode, agent_slug, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             id,
             runtime_name,
@@ -1552,6 +1555,9 @@ pub fn run(
             effective_model,
             auth_mode,
             agent_slug_for_event.as_deref(),
+            attribution.kind,
+            attribution.surface,
+            attribution.id,
         ],
     ).context("Failed to write execution_logs row")?;
     // v2.17 git provenance — stamp the git HEAD SHA captured at run()
@@ -1919,6 +1925,8 @@ fn run_api(
     // stamp the execution_logs row regardless of success/failure path.
     let git_commit_sha: Option<String> =
         capture_git_head(workspace_root.map(std::path::Path::to_path_buf));
+    // v2.16 attribution — resolve initiator provenance once at entry.
+    let attribution = crate::attribution::Attribution::detect();
     let agent_lookup_runtime = agent_runtime_override.unwrap_or(provider.slug);
     // Quota pre-flight (same shape as the CLI-runtime path).
     // TODO(unify-fallback-engine): pre-flight and post-retry fallback
@@ -2274,7 +2282,7 @@ fn run_api(
     // so History grouping works for cross-runtime conversations.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug, retry_count, attempt_summary, fallback_of, cache_creation_tokens, cache_read_tokens, reasoning_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug, retry_count, attempt_summary, fallback_of, cache_creation_tokens, cache_read_tokens, reasoning_tokens, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         rusqlite::params![
             id,
             provider.slug,
@@ -2299,6 +2307,9 @@ fn run_api(
             cache_creation_tokens_val,
             cache_read_tokens_val,
             reasoning_tokens_val,
+            attribution.kind,
+            attribution.surface,
+            attribution.id,
         ],
     )
     .context("Failed to write execution_logs row")?;
@@ -2644,6 +2655,8 @@ fn run_remote(
     // remote machine's repo state is orthogonal; what we want is the
     // SHA the operator dispatched FROM).
     let git_commit_sha: Option<String> = capture_git_head(None);
+    // v2.16 attribution — resolve initiator provenance once at entry.
+    let attribution = crate::attribution::Attribution::detect();
     let live_run_id = uuid::Uuid::new_v4().to_string();
     let _ = crate::live_runs::insert(
         db_path,
@@ -2725,8 +2738,8 @@ fn run_remote(
 
     let conn = db::open_readwrite(db_path)?;
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, agent_slug)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, agent_slug, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             id,
             remote.slug,
@@ -2742,6 +2755,9 @@ fn run_remote(
             effective_model,
             auth_mode,
             agent_slug_for_event.as_deref(),
+            attribution.kind,
+            attribution.surface,
+            attribution.id,
         ],
     )
     .context("Failed to write execution_logs row (remote)")?;

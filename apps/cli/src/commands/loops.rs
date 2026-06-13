@@ -803,10 +803,13 @@ pub fn execute_loop(
         .unwrap_or_else(|_| "unknown".into());
     let triggered_by = format!("manual:{}", username);
     let vars_str = serde_json::to_string(&variables).unwrap_or_else(|_| "{}".into());
+    // v2.16 attribution — resolve once; shared by the loop_runs row and
+    // every loop_run_steps row this run mints below.
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
-        "INSERT INTO loop_runs (id, loop_id, status, started_at, triggered_by, variables)
-         VALUES (?1, ?2, 'running', ?3, ?4, ?5)",
-        params![run_id, loop_row.id, started_at, triggered_by, vars_str],
+        "INSERT INTO loop_runs (id, loop_id, status, started_at, triggered_by, variables, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![run_id, loop_row.id, started_at, triggered_by, vars_str, attribution.kind, attribution.surface, attribution.id],
     )
     .context("insert loop_run")?;
 
@@ -831,9 +834,9 @@ pub fn execute_loop(
         conn.execute(
             "INSERT INTO loop_run_steps (
                 id, loop_run_id, node_id, node_type, status,
-                started_at, input
-             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6)",
-            params![step_id, run_id, node.id, node.node_type, step_started, input_json],
+                started_at, input, initiator_kind, client_surface, initiator_id
+             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9)",
+            params![step_id, run_id, node.id, node.node_type, step_started, input_json, attribution.kind, attribution.surface, attribution.id],
         )
         .context("insert loop_run_step")?;
 

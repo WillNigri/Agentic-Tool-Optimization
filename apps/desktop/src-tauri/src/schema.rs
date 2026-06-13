@@ -2017,6 +2017,35 @@ pub fn init_database(conn: &Connection) {
         "CREATE TABLE IF NOT EXISTS ato_meta (key TEXT PRIMARY KEY, value TEXT)",
         [],
     );
+
+    // Attribution PR-A (2026-06-13) — initiator provenance on every
+    // conversation/run-bearing table. Three nullable TEXT columns:
+    //   initiator_kind:  who/what started it (human, agent, schedule, hook, ...)
+    //   client_surface:  where it came in from (desktop, cli, mcp, cloud, ...)
+    //   initiator_id:    stable id of the initiator within that kind
+    // All NULL on existing rows; populated by the dispatch paths going
+    // forward. Each ALTER fails silently when the column already exists
+    // (idempotent migration pattern). Mirrored in apps/cli/src/db.rs so
+    // CLI-only users (desktop never opened) get the columns too.
+    for table in [
+        "execution_logs",
+        "sessions",
+        "war_rooms",
+        "chat_threads",
+        "loop_runs",
+        "missions",
+        "methodology_runs",
+        "session_turns",
+        "chat_messages",
+        "loop_run_steps",
+    ] {
+        for col in ["initiator_kind", "client_surface", "initiator_id"] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {col} TEXT"),
+                [],
+            );
+        }
+    }
 }
 
 #[cfg(test)]

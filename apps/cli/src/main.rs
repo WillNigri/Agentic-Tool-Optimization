@@ -35,6 +35,10 @@ mod tier;
 // binary for keychain-bound API providers.
 mod cli_path;
 mod review_tools;
+// v2.16 PR-B — initiator attribution detection (kind / surface / id).
+// Env-first resolution of who/what started a dispatch; populates the
+// PR-A schema columns at the edge. See module header.
+mod attribution;
 // v2.15.4 — pause-and-wake persistence + lifecycle (war_room E063A89E).
 // Authoritative storage for paused_dispatches table; loop_runs has
 // mirror columns for fast queries. See module header for the full design.

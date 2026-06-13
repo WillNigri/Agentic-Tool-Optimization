@@ -351,8 +351,9 @@ fn run_replay_dispatch(
     // Persist the dispatch row too — the replay's output is itself a
     // first-class dispatch in execution_logs (closes the loop).
     let conn = db::open_readwrite(&db::default_db_path())?;
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             id,
             runtime_name,
@@ -365,6 +366,9 @@ fn run_replay_dispatch(
             error_persisted,
             now,
             cost_usd,
+            attribution.kind,
+            attribution.surface,
+            attribution.id,
         ],
     )?;
 
