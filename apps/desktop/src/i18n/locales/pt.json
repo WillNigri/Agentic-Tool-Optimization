@@ -146,15 +146,23 @@
     "openWizard": "Abrir Criar Agente"
   },
   "common": {
-    "send": "Enviar",
+    "save": "Salvar",
     "cancel": "Cancelar",
     "close": "Fechar",
-    "copy": "Copiar",
-    "copied": "Copiado",
-    "back": "Voltar",
+    "create": "Criar",
+    "update": "Atualizar",
     "delete": "Excluir",
-    "remove": "Remover",
-    "save": "Salvar"
+    "confirm": "Confirmar",
+    "loading": "Carregando...",
+    "error": "Erro",
+    "success": "Sucesso",
+    "retry": "Tentar novamente",
+    "search": "Buscar...",
+    "noResults": "Nenhum resultado encontrado",
+    "language": "Idioma",
+    "english": "Ingles",
+    "portuguese": "Portugues",
+    "spanish": "Espanhol"
   },
   "tier": {
     "lockedTitle": "Recurso {{tier}}",
@@ -724,25 +732,6 @@
     "override": "Sobrescrito pelas configuracoes do projeto",
     "noConfig": "Nenhum arquivo de configuracao encontrado"
   },
-  "common": {
-    "save": "Salvar",
-    "cancel": "Cancelar",
-    "close": "Fechar",
-    "create": "Criar",
-    "update": "Atualizar",
-    "delete": "Excluir",
-    "confirm": "Confirmar",
-    "loading": "Carregando...",
-    "error": "Erro",
-    "success": "Sucesso",
-    "retry": "Tentar novamente",
-    "search": "Buscar...",
-    "noResults": "Nenhum resultado encontrado",
-    "language": "Idioma",
-    "english": "Ingles",
-    "portuguese": "Portugues",
-    "spanish": "Espanhol"
-  },
   "projects": {
     "backToProjects": "Projetos",
     "memory": "Memoria",
@@ -945,6 +934,36 @@
       "tokensIn": "Tokens entrada",
       "tokensOut": "Tokens saida",
       "spend": "Gasto"
+    }
+  },
+  "clickablePath": {
+    "reveal": "Revelar",
+    "open": "Abrir",
+    "exists": "✓ existe",
+    "gone": "✗ removido"
+  },
+  "initiatorBadge": {
+    "via": "via {{surface}}",
+    "kind": {
+      "unknown": "Desconhecido",
+      "human": "Humano",
+      "agent": "Agente",
+      "claude": "Claude",
+      "codex": "Codex",
+      "gemini": "Gemini",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes",
+      "coordinator": "Coordenador",
+      "scheduler": "Agendador",
+      "hook": "Hook"
+    },
+    "surface": {
+      "cli": "CLI",
+      "desktop": "Desktop",
+      "mcp": "MCP",
+      "cloud": "Nuvem",
+      "tick": "Tick",
+      "web": "Web"
     }
   }
 }

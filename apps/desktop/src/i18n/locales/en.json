@@ -153,15 +153,23 @@
     "openWizard": "Open Create Agent"
   },
   "common": {
-    "send": "Send",
+    "save": "Save",
     "cancel": "Cancel",
     "close": "Close",
-    "copy": "Copy",
-    "copied": "Copied",
-    "back": "Back",
+    "create": "Create",
+    "update": "Update",
     "delete": "Delete",
-    "remove": "Remove",
-    "save": "Save"
+    "confirm": "Confirm",
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success",
+    "retry": "Retry",
+    "search": "Search...",
+    "noResults": "No results found",
+    "language": "Language",
+    "english": "English",
+    "portuguese": "Portuguese",
+    "spanish": "Spanish"
   },
   "tier": {
     "lockedTitle": "{{tier}} feature",
@@ -911,25 +919,6 @@
     "keepLocal": "Keep Local (Upload)",
     "keepCloud": "Keep Cloud (Download)"
   },
-  "common": {
-    "save": "Save",
-    "cancel": "Cancel",
-    "close": "Close",
-    "create": "Create",
-    "update": "Update",
-    "delete": "Delete",
-    "confirm": "Confirm",
-    "loading": "Loading...",
-    "error": "Error",
-    "success": "Success",
-    "retry": "Retry",
-    "search": "Search...",
-    "noResults": "No results found",
-    "language": "Language",
-    "english": "English",
-    "portuguese": "Portuguese",
-    "spanish": "Spanish"
-  },
   "projects": {
     "backToProjects": "Projects",
     "memory": "Memory",
@@ -1132,6 +1121,36 @@
       "tokensIn": "Tokens in",
       "tokensOut": "Tokens out",
       "spend": "Spend"
+    }
+  },
+  "clickablePath": {
+    "reveal": "Reveal",
+    "open": "Open",
+    "exists": "✓ exists",
+    "gone": "✗ gone"
+  },
+  "initiatorBadge": {
+    "via": "via {{surface}}",
+    "kind": {
+      "unknown": "Unknown",
+      "human": "Human",
+      "agent": "Agent",
+      "claude": "Claude",
+      "codex": "Codex",
+      "gemini": "Gemini",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes",
+      "coordinator": "Coordinator",
+      "scheduler": "Scheduler",
+      "hook": "Hook"
+    },
+    "surface": {
+      "cli": "CLI",
+      "desktop": "Desktop",
+      "mcp": "MCP",
+      "cloud": "Cloud",
+      "tick": "Tick",
+      "web": "Web"
     }
   }
 }

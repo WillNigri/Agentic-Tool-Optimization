@@ -146,15 +146,23 @@
     "openWizard": "Abrir Crear Agente"
   },
   "common": {
-    "send": "Enviar",
+    "save": "Guardar",
     "cancel": "Cancelar",
     "close": "Cerrar",
-    "copy": "Copiar",
-    "copied": "Copiado",
-    "back": "Atras",
+    "create": "Crear",
+    "update": "Actualizar",
     "delete": "Eliminar",
-    "remove": "Quitar",
-    "save": "Guardar"
+    "confirm": "Confirmar",
+    "loading": "Cargando...",
+    "error": "Error",
+    "success": "Exito",
+    "retry": "Reintentar",
+    "search": "Buscar...",
+    "noResults": "No se encontraron resultados",
+    "language": "Idioma",
+    "english": "Ingles",
+    "portuguese": "Portugues",
+    "spanish": "Espanol"
   },
   "tier": {
     "lockedTitle": "Funcion {{tier}}",
@@ -724,25 +732,6 @@
     "override": "Sobrescrito por la configuracion del proyecto",
     "noConfig": "No se encontraron archivos de configuracion"
   },
-  "common": {
-    "save": "Guardar",
-    "cancel": "Cancelar",
-    "close": "Cerrar",
-    "create": "Crear",
-    "update": "Actualizar",
-    "delete": "Eliminar",
-    "confirm": "Confirmar",
-    "loading": "Cargando...",
-    "error": "Error",
-    "success": "Exito",
-    "retry": "Reintentar",
-    "search": "Buscar...",
-    "noResults": "No se encontraron resultados",
-    "language": "Idioma",
-    "english": "Ingles",
-    "portuguese": "Portugues",
-    "spanish": "Espanol"
-  },
   "projects": {
     "backToProjects": "Proyectos",
     "memory": "Memoria",
@@ -916,6 +905,36 @@
       "tokensIn": "Tokens entrada",
       "tokensOut": "Tokens salida",
       "spend": "Gasto"
+    }
+  },
+  "clickablePath": {
+    "reveal": "Mostrar",
+    "open": "Abrir",
+    "exists": "✓ existe",
+    "gone": "✗ eliminado"
+  },
+  "initiatorBadge": {
+    "via": "vía {{surface}}",
+    "kind": {
+      "unknown": "Desconocido",
+      "human": "Humano",
+      "agent": "Agente",
+      "claude": "Claude",
+      "codex": "Codex",
+      "gemini": "Gemini",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes",
+      "coordinator": "Coordinador",
+      "scheduler": "Programador",
+      "hook": "Hook"
+    },
+    "surface": {
+      "cli": "CLI",
+      "desktop": "Escritorio",
+      "mcp": "MCP",
+      "cloud": "Nube",
+      "tick": "Tick",
+      "web": "Web"
     }
   }
 }
