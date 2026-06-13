@@ -134,6 +134,42 @@ pub fn apply_byok_env(cmd: &mut Command, db_path: &Path, runtime_name: &str) {
     }
 }
 
+/// True iff a BYOK key is configured for an API PROVIDER slug (not the
+/// runtime name — that's `has_byok_key` below). Recognized provider slugs:
+/// `anthropic`, `openai`, `google`, `minimax`, `grok`, `deepseek`, `qwen`,
+/// `openrouter` (must stay in sync with packages/ato-api-providers).
+/// Used by the post-retry fallback chain to skip candidates that have no
+/// usable auth — otherwise the chain would attempt them and crash on
+/// "No active API key for X".
+///
+/// QA-found 2026-06-13: during the dev-team build, gemini's google 503
+/// triggered the chain → anthropic, which had no key, ending the
+/// dispatch entirely. The chain should walk past providers with no auth.
+pub fn has_byok_key_for_provider(db_path: &Path, provider_slug: &str) -> bool {
+    // Codex 2026-06-13: map must stay in sync with the env_var column
+    // of every provider in packages/ato-api-providers/src/lib.rs. If a
+    // provider here returns false, the post-retry fallback walk will
+    // skip it even when a key IS configured — silent ineligibility bug.
+    let env_var = match provider_slug {
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "openai" => "OPENAI_API_KEY",
+        "google" => "GEMINI_API_KEY",
+        "minimax" => "MINIMAX_API_KEY",
+        "grok" => "GROK_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "qwen" => "DASHSCOPE_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        _ => return false,
+    };
+    if std::env::var(env_var)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    read_active_key(db_path, provider_slug).is_ok()
+}
+
 /// True iff a BYOK key is configured for the given runtime (either via
 /// env var or stored in llm_api_keys). Used by UI badges and `ato
 /// runtimes status` to surface auth mode without exposing the key.

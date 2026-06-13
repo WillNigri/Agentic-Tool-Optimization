@@ -930,9 +930,14 @@ pub fn run(
             if matches!(p, crate::quota::ExhaustionPolicy::FallbackChain) {
                 // TODO(unify-fallback-engine): pre-flight and post-retry
                 // fallback both call select_fallback_runtime; unify.
-                if let Ok(Some(swap_to)) =
-                    crate::quota::select_fallback_runtime(&c, runtime_name)
-                {
+                // QA-found 2026-06-13: pass db_path so the auth filter
+                // skips candidates without a configured key (otherwise
+                // the chain swaps in a provider that immediately fails).
+                if let Ok(Some(swap_to)) = crate::quota::select_fallback_runtime_with_auth(
+                    &c,
+                    runtime_name,
+                    Some(db_path),
+                ) {
                     fallback_chosen = Some(swap_to);
                 }
             }
@@ -2385,6 +2390,15 @@ fn run_api(
                         Some(p) => p,
                         None => continue, // unresolvable slug — skip, don't stop
                     };
+                    // QA-found 2026-06-13: skip providers without auth
+                    // configured. Without this, the chain attempts the
+                    // candidate and crashes on "No active API key for X",
+                    // losing the dispatch entirely. Surfaced during the
+                    // dev-team build when gemini's google 503 → anthropic
+                    // (no key) ended the whole run. See FOLLOWUPS #5.
+                    if !crate::byok::has_byok_key_for_provider(db_path, api_slug) {
+                        continue;
+                    }
                     // Skip if this provider is currently quota-exhausted.
                     let is_exhausted = rusqlite::Connection::open(db_path)
                         .ok()

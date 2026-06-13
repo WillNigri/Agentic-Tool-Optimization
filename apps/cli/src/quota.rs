@@ -461,9 +461,27 @@ pub fn select_fallback_runtime(
     conn: &Connection,
     target_runtime: &str,
 ) -> Result<Option<String>> {
+    select_fallback_runtime_with_auth(conn, target_runtime, None)
+}
+
+/// As `select_fallback_runtime`, but additionally filters out candidates
+/// whose API provider has no auth configured (env var or stored key).
+/// Pass `Some(db_path)` to enable the check; `None` is equivalent to the
+/// legacy behavior. QA-found 2026-06-13.
+pub fn select_fallback_runtime_with_auth(
+    conn: &Connection,
+    target_runtime: &str,
+    db_path_for_auth: Option<&Path>,
+) -> Result<Option<String>> {
+    // Codex 2026-06-13: compare on the normalized API-provider slug so
+    // `gemini` vs `google` (and `claude` vs `anthropic`, `codex` vs
+    // `openai`) are treated as the same provider. Otherwise the chain
+    // can pick the original provider under an alias.
+    let target_api_slug = crate::commands::dispatch::cli_slug_to_api_slug(target_runtime);
     let order = read_fallback_order(conn)?;
     for slug in order {
-        if slug == target_runtime {
+        let slug_api = crate::commands::dispatch::cli_slug_to_api_slug(&slug);
+        if slug == target_runtime || slug_api == target_api_slug {
             continue;
         }
         // Use the same future-only lookup the pre-flight gate uses.
@@ -483,9 +501,16 @@ pub fn select_fallback_runtime(
         } else {
             false
         };
-        if !exhausted {
-            return Ok(Some(slug));
+        if exhausted {
+            continue;
         }
+        // Skip candidates without usable auth.
+        if let Some(db_path) = db_path_for_auth {
+            if !crate::byok::has_byok_key_for_provider(db_path, slug_api) {
+                continue;
+            }
+        }
+        return Ok(Some(slug));
     }
     Ok(None)
 }
