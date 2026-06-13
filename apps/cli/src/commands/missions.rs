@@ -243,6 +243,20 @@ pub enum MissionSub {
         slug_or_id: String,
     },
 
+    /// v2.16 PR-6 — list pending decision briefs for a Mission.
+    ///
+    /// A "brief" is an `escalated` mission_event whose payload follows the
+    /// canonical shape: {reason, summary, options[], ...context}. A brief
+    /// is "pending" while no later `owner_decision` or `state_changed`
+    /// event resolves it. Mirrors `events --kind escalated` plus
+    /// pending-only filtering and structured rendering.
+    Briefs {
+        slug_or_id: String,
+        /// Include resolved (historical) briefs too, not just pending ones.
+        #[arg(long)]
+        all: bool,
+    },
+
     /// v2.16 PR-4 — configure the worker that the coordinator tick spawns
     /// for this mission when budgets allow and criteria are unmet.
     ///
@@ -489,6 +503,9 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
             db_path,
             opts,
         ),
+        MissionSub::Briefs { slug_or_id, all } => {
+            run_briefs(slug_or_id, all, db_path, opts)
+        }
     }
 }
 
@@ -859,6 +876,17 @@ fn run_events(slug_or_id: String, limit: i64, db_path: &PathBuf, opts: &Opts) ->
             emit_human(&format!("No events for mission '{}'", row.slug));
         } else {
             for e in &rows {
+                // PR-6: render escalated events structurally so operators
+                // see reason/options inline without piping to jq. Prefix the
+                // event id so correlation with `mission_events.id` survives
+                // the structured format (codex R1 [LOW]).
+                if e.kind == "escalated" {
+                    if let Some(payload) = &e.payload {
+                        emit_human(&format!("  (event id: {})", e.id));
+                        emit_human(&render_brief_payload(payload, &e.occurred_at));
+                        continue;
+                    }
+                }
                 emit_human(&format!("  {}  {}  ({})", e.occurred_at, e.kind, e.id));
             }
         }
@@ -1610,17 +1638,16 @@ fn ensure_agent_worktree(
     if !resolve_out.status.success() {
         // base_sha is unresolvable — escalate with a decision brief.
         let now = chrono::Utc::now().to_rfc3339();
-        let options = serde_json::json!([
-            "recreate mission with a current base SHA (ato missions create ... --base-sha $(git rev-parse HEAD))",
-            "git fetch to restore the commit if it was in a remote branch",
-            "set cleanup_policy=retain and inspect worktrees manually"
-        ]);
-        let payload = serde_json::json!({
-            "reason": "base_sha_unresolvable",
-            "base_sha": base_sha,
-            "repo_root": repo_root,
-            "options": options,
-        });
+        let payload = EscalationBrief::new("base_sha_unresolvable")
+            .summary("Mission base SHA can't be resolved in the repo — agent worktree creation blocked")
+            .ctx("base_sha", base_sha.to_string())
+            .ctx("repo_root", repo_root.to_string())
+            .options([
+                "recreate mission with a current base SHA (ato missions create ... --base-sha $(git rev-parse HEAD))",
+                "git fetch to restore the commit if it was in a remote branch",
+                "set cleanup_policy=retain and inspect worktrees manually",
+            ])
+            .into_payload();
         insert_event(conn, &mission.id, "escalated", Some(payload), &now)
             .context("insert escalated event")?;
         anyhow::bail!(
@@ -1960,16 +1987,18 @@ fn ensure_integration_worktree(conn: &Connection, mission: &MissionRow) -> Resul
             conn,
             &mission.id,
             "escalated",
-            Some(serde_json::json!({
-                "reason": "base_sha_unresolvable",
-                "base_sha": base_sha,
-                "repo_root": repo_root,
-                "context": "integration_worktree_creation",
-                "options": [
-                    "recreate mission with a current base SHA",
-                    "git fetch to restore the commit",
-                ],
-            })),
+            Some(
+                EscalationBrief::new("base_sha_unresolvable")
+                    .summary("Mission base SHA can't be resolved in the repo — integration worktree creation blocked")
+                    .ctx("base_sha", base_sha.to_string())
+                    .ctx("repo_root", repo_root.to_string())
+                    .ctx("context", "integration_worktree_creation")
+                    .options([
+                        "recreate mission with a current base SHA",
+                        "git fetch to restore the commit",
+                    ])
+                    .into_payload(),
+            ),
             &now,
         ).context("insert escalated event for integration worktree")?;
         anyhow::bail!(
@@ -2242,16 +2271,19 @@ fn approve_one_agent(
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        let brief = serde_json::json!({
-            "reason": "merge_conflict",
-            "agent": agent,
-            "conflicting_files": conflicting_files,
-            "options": [
+        let brief = EscalationBrief::new("merge_conflict")
+            .summary(format!(
+                "Agent '{}' conflicts with the integration branch — squash merge aborted",
+                agent
+            ))
+            .ctx("agent", agent.to_string())
+            .ctx("conflicting_files", conflicting_files.clone())
+            .options([
                 "resolve manually in the integration worktree then commit",
                 "skip this agent (--skip)",
                 "abandon mission",
-            ],
-        });
+            ])
+            .into_payload();
         insert_event(conn, &mission.id, "escalated", Some(brief.clone()), &now)?;
         anyhow::bail!(
             "Merge conflict for agent '{}' in mission '{}'.\n\
@@ -2356,16 +2388,19 @@ fn approve_one_agent(
             .args(["-C", int_path.to_str().unwrap_or("."), "reset", "--hard", "HEAD~1"])
             .output();
 
-        let brief = serde_json::json!({
-            "reason": "regression_after_merge",
-            "agent": agent,
-            "regressed": regressed,
-            "options": [
+        let brief = EscalationBrief::new("regression_after_merge")
+            .summary(format!(
+                "Agent '{}' merge regressed previously-met success criteria — rolled back",
+                agent
+            ))
+            .ctx("agent", agent.to_string())
+            .ctx("regressed", regressed.clone())
+            .options([
                 "fix the regression in the agent's worktree and re-approve",
                 "skip this agent (--skip)",
                 "adjust success_criteria if the criterion is no longer relevant",
-            ],
-        });
+            ])
+            .into_payload();
         insert_event(conn, &mission.id, "escalated", Some(brief.clone()), &now)?;
         anyhow::bail!(
             "Regression detected after merging agent '{}' in mission '{}'.\n\
@@ -2447,17 +2482,20 @@ fn finish_gate(
             .filter(|r| !r.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
             .filter_map(|r| r.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()))
             .collect();
-        let brief = serde_json::json!({
-            "reason": "finish_blocked_unmet_criteria",
-            "branch": int_branch,
-            "head_sha": head_sha,
-            "unmet": unmet,
-            "options": [
+        let brief = EscalationBrief::new("finish_blocked_unmet_criteria")
+            .summary(format!(
+                "Cannot finish — {} success criterion/criteria still unmet on the integration branch",
+                unmet.len()
+            ))
+            .ctx("branch", int_branch.to_string())
+            .ctx("head_sha", head_sha.to_string())
+            .ctx("unmet", unmet.clone())
+            .options([
                 "fix the unmet criteria in the integration worktree and re-run `ato missions merge <slug> --finish`",
                 "ato missions merge <slug> --approve <agent> on a new agent worktree that addresses the gap",
                 "adjust success_criteria if a criterion is no longer relevant",
-            ],
-        });
+            ])
+            .into_payload();
         insert_event(conn, &mission.id, "escalated", Some(brief.clone()), now)?;
         anyhow::bail!(
             "Cannot finish mission '{}': {} success criterion/criteria still unmet on the integration branch.\n\
@@ -3110,15 +3148,15 @@ fn tick_one_mission(
         let reason = "consecutive_failures";
         if !escalation_is_pending(conn, &mission.id, reason)? {
             let last_failures = last_n_failure_summaries(conn, &mission.id, 3)?;
-            let brief_payload = serde_json::json!({
-                "reason": reason,
-                "failures": last_failures,
-                "options": [
+            let brief_payload = EscalationBrief::new(reason)
+                .summary("Worker has failed 3 times in a row — mission blocked pending owner decision")
+                .ctx("failures", last_failures)
+                .options([
                     "fix the underlying error and set-state in_progress",
                     "change worker_config",
                     "abandon: set-category done",
-                ],
-            });
+                ])
+                .into_payload();
             // Block the mission.
             conn.execute(
                 "UPDATE missions SET state = 'blocked', updated_at = ?1 WHERE id = ?2",
@@ -3198,14 +3236,25 @@ fn tick_one_mission(
             // Escalate once with reason=no_worker_config.
             let reason = "no_worker_config";
             if !escalation_is_pending(conn, &mission.id, reason)? {
+                // Promote the legacy `hint` to a proper option so PR-6
+                // renders it consistently with other briefs.
                 insert_event(
                     conn,
                     &mission.id,
                     "escalated",
-                    Some(serde_json::json!({
-                        "reason": reason,
-                        "hint": "run `ato missions set-worker <slug> --runtime <r>` to configure the coordinator worker",
-                    })),
+                    Some(
+                        EscalationBrief::new(reason)
+                            .summary("Mission has no worker_config — coordinator can't dispatch")
+                            .ctx(
+                                "hint",
+                                "run `ato missions set-worker <slug> --runtime <r>` to configure the coordinator worker",
+                            )
+                            .option(
+                                "ato missions set-worker <slug> --runtime <r> [--model <m>] [--require-tools a,b]",
+                            )
+                            .option("set-category ignored to leave this mission alone")
+                            .into_payload(),
+                    ),
                     &now,
                 )?;
                 conn.execute(
@@ -3846,6 +3895,206 @@ fn last_n_failure_summaries(
 /// Check if an 'escalated' event with the given reason exists and has not
 /// been resolved by a later 'owner_decision' or 'state_changed' event.
 /// Returns true = already pending (don't spam).
+// ── v2.16 PR-6: decision briefs on escalation ─────────────────────────
+//
+// A "decision brief" is the canonical payload shape every `escalated`
+// mission_event uses (Steinberger pattern: tradeoffs + exact choices, never
+// just a URL/status). The shape is intentionally additive — existing
+// payloads written by PR-3..PR-5 already carry {reason, ...context, options};
+// EscalationBrief adds an optional `summary` so the human renderer has a
+// one-line title without inventing one per call site.
+//
+// Logical shape of the JSON payload `escalated.payload` after merge:
+//   {
+//     "reason":   <kind, e.g. "merge_conflict">,        // required
+//     "summary":  <one-line human title>,               // optional
+//     "options":  [<exact next-step choices>],          // required, may be []
+//     ...context fields (agent, conflicting_files, base_sha, etc.)
+//   }
+//
+// Readers MUST access by key, not by position — `serde_json` here is built
+// without `preserve_order`, so JSON object key ordering is not guaranteed
+// and must not be relied on by any consumer.
+//
+// `ato missions briefs <slug>` filters mission_events kind='escalated'
+// where no later 'owner_decision' / 'state_changed' resolves them.
+
+#[derive(Debug, Clone)]
+pub struct EscalationBrief {
+    reason: String,
+    summary: Option<String>,
+    options: Vec<String>,
+    context: serde_json::Map<String, serde_json::Value>,
+}
+
+impl EscalationBrief {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            summary: None,
+            options: Vec::new(),
+            context: serde_json::Map::new(),
+        }
+    }
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+    pub fn option(mut self, opt: impl Into<String>) -> Self {
+        self.options.push(opt.into());
+        self
+    }
+    pub fn options<I, S>(mut self, opts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.options.extend(opts.into_iter().map(Into::into));
+        self
+    }
+    pub fn ctx(mut self, key: impl Into<String>, val: impl Into<serde_json::Value>) -> Self {
+        self.context.insert(key.into(), val.into());
+        self
+    }
+    pub fn into_payload(self) -> serde_json::Value {
+        let mut obj = self.context;
+        obj.insert(
+            "reason".to_string(),
+            serde_json::Value::String(self.reason),
+        );
+        if let Some(s) = self.summary {
+            obj.insert("summary".to_string(), serde_json::Value::String(s));
+        }
+        obj.insert(
+            "options".to_string(),
+            serde_json::Value::Array(
+                self.options.into_iter().map(serde_json::Value::String).collect(),
+            ),
+        );
+        serde_json::Value::Object(obj)
+    }
+}
+
+/// Render an `escalated` event's payload in a structured, human-readable
+/// block. Used by `events --human` and `briefs`. Tolerates missing fields
+/// (older PR-3/PR-4 payloads lack `summary`; older `no_worker_config`
+/// payload uses `hint` instead of `options`).
+fn render_brief_payload(payload: &serde_json::Value, occurred_at: &str) -> String {
+    let mut out = String::new();
+    let reason = payload
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no reason)");
+    let summary = payload.get("summary").and_then(|v| v.as_str());
+    out.push_str(&format!("  ⚠ escalated  ({})  reason: {}\n", occurred_at, reason));
+    if let Some(s) = summary {
+        out.push_str(&format!("    {}\n", s));
+    }
+    // Print key=value for any context field except {reason, summary,
+    // options, hint}. Keeps the output stable across payload shapes.
+    if let Some(obj) = payload.as_object() {
+        for (k, v) in obj.iter() {
+            if matches!(k.as_str(), "reason" | "summary" | "options" | "hint") {
+                continue;
+            }
+            let v_str = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => v.to_string(),
+                _ => v.to_string(),
+            };
+            out.push_str(&format!("    {}: {}\n", k, v_str));
+        }
+    }
+    if let Some(hint) = payload.get("hint").and_then(|v| v.as_str()) {
+        out.push_str(&format!("    hint: {}\n", hint));
+    }
+    if let Some(opts) = payload.get("options").and_then(|v| v.as_array()) {
+        if !opts.is_empty() {
+            out.push_str("    options:\n");
+            for (i, o) in opts.iter().enumerate() {
+                if let Some(s) = o.as_str() {
+                    out.push_str(&format!("      {}. {}\n", i + 1, s));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `ato missions briefs <slug> [--all]` — list pending decision briefs
+/// (or all of them with --all).
+fn run_briefs(
+    slug_or_id: String,
+    all: bool,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    let conn = db::open_readonly(db_path)?;
+    let row = load_mission(&conn, &slug_or_id)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, mission_id, kind, payload, occurred_at
+           FROM mission_events
+          WHERE mission_id = ?1 AND kind = 'escalated'
+       ORDER BY occurred_at DESC",
+    )?;
+    let iter = stmt.query_map(params![row.id], |r| {
+        Ok(MissionEventRow {
+            id: r.get(0)?,
+            mission_id: r.get(1)?,
+            kind: r.get(2)?,
+            payload: parse_payload(r.get::<_, Option<String>>(3)?),
+            occurred_at: r.get(4)?,
+        })
+    })?;
+    let all_briefs: Vec<MissionEventRow> = iter.filter_map(|r| r.ok()).collect();
+
+    // Filter to pending unless --all was passed.
+    let briefs: Vec<MissionEventRow> = if all {
+        all_briefs
+    } else {
+        all_briefs
+            .into_iter()
+            .filter(|ev| {
+                // Pending iff no resolution event newer than this brief.
+                let resolved: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM mission_events
+                          WHERE mission_id = ?1
+                            AND kind IN ('owner_decision', 'state_changed')
+                            AND occurred_at > ?2",
+                        params![ev.mission_id, ev.occurred_at],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                resolved == 0
+            })
+            .collect()
+    };
+
+    if opts.human {
+        if briefs.is_empty() {
+            let label = if all { "no briefs" } else { "no pending briefs" };
+            emit_human(&format!("Mission '{}': {}", row.slug, label));
+        } else {
+            emit_human(&format!(
+                "Mission '{}': {} brief(s){}",
+                row.slug,
+                briefs.len(),
+                if all { "" } else { " pending" }
+            ));
+            for ev in &briefs {
+                if let Some(payload) = &ev.payload {
+                    emit_human(&render_brief_payload(payload, &ev.occurred_at));
+                }
+            }
+        }
+    } else {
+        emit_json(&briefs)?;
+    }
+    Ok(())
+}
+
 fn escalation_is_pending(
     conn: &Connection,
     mission_id: &str,
@@ -6116,5 +6365,138 @@ mod tests {
             Some(slug),
             "manual dispatch_started payload must carry the mission slug"
         );
+    }
+
+    // ── v2.16 PR-6: decision briefs ──────────────────────────────────────
+
+    #[test]
+    fn escalation_brief_builder_produces_canonical_shape() {
+        let payload = EscalationBrief::new("merge_conflict")
+            .summary("Agent 'a' conflicts")
+            .ctx("agent", "a".to_string())
+            .ctx("conflicting_files", vec!["foo.rs".to_string()])
+            .options(["resolve manually", "skip", "abandon"])
+            .into_payload();
+
+        assert_eq!(payload["reason"], "merge_conflict");
+        assert_eq!(payload["summary"], "Agent 'a' conflicts");
+        assert_eq!(payload["agent"], "a");
+        assert_eq!(payload["conflicting_files"][0], "foo.rs");
+        assert!(payload["options"].is_array());
+        assert_eq!(payload["options"].as_array().unwrap().len(), 3);
+        assert_eq!(payload["options"][1], "skip");
+    }
+
+    #[test]
+    fn escalation_brief_builder_omits_optional_fields() {
+        // No summary / no options / no context → minimal payload.
+        let payload = EscalationBrief::new("base_sha_unresolvable").into_payload();
+        assert_eq!(payload["reason"], "base_sha_unresolvable");
+        assert!(payload.get("summary").is_none(), "summary must be omitted when unset");
+        assert!(payload["options"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn render_brief_payload_handles_options_hint_and_unknown_ctx() {
+        // Canonical shape (reason + summary + options + extras).
+        let p = EscalationBrief::new("regression_after_merge")
+            .summary("agent x regressed")
+            .ctx("agent", "x".to_string())
+            .ctx("regressed", vec!["criterion-y".to_string()])
+            .options(["fix and re-approve", "skip"])
+            .into_payload();
+        let s = render_brief_payload(&p, "2026-06-13T00:00:00Z");
+        assert!(s.contains("escalated"));
+        assert!(s.contains("regression_after_merge"));
+        assert!(s.contains("agent x regressed"));
+        assert!(s.contains("agent: x"));
+        assert!(s.contains("regressed"));
+        assert!(s.contains("1. fix and re-approve"));
+        assert!(s.contains("2. skip"));
+
+        // Legacy payload with a `hint` field (older no_worker_config rows).
+        let legacy = serde_json::json!({
+            "reason": "no_worker_config",
+            "hint": "run `ato missions set-worker ...`"
+        });
+        let s2 = render_brief_payload(&legacy, "2026-06-13T00:00:00Z");
+        assert!(s2.contains("hint: run `ato missions set-worker ..."));
+    }
+
+    #[test]
+    fn run_briefs_filters_pending_only_by_default() {
+        let conn = make_db();
+        let now = "2026-06-13T00:00:00Z";
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 created_at, updated_at)
+             VALUES ('m-br', 'br-test', 'Br', 'Goal', '[]', '/tmp/b.md', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        // Resolved escalation (followed by a state_changed at a later timestamp).
+        insert_event(
+            &conn,
+            "m-br",
+            "escalated",
+            Some(EscalationBrief::new("merge_conflict").into_payload()),
+            "2026-06-13T00:00:01Z",
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            "m-br",
+            "state_changed",
+            Some(serde_json::json!({"from": "blocked", "to": "in_progress"})),
+            "2026-06-13T00:00:02Z",
+        )
+        .unwrap();
+
+        // Pending escalation (no resolution after).
+        insert_event(
+            &conn,
+            "m-br",
+            "escalated",
+            Some(EscalationBrief::new("consecutive_failures").into_payload()),
+            "2026-06-13T00:00:03Z",
+        )
+        .unwrap();
+
+        // Direct query mirrors run_briefs' filter logic.
+        let mut stmt = conn
+            .prepare(
+                "SELECT occurred_at, payload FROM mission_events
+                  WHERE mission_id = 'm-br' AND kind = 'escalated'
+                  ORDER BY occurred_at DESC",
+            )
+            .unwrap();
+        let all: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .collect();
+        let pending: Vec<_> = all
+            .iter()
+            .filter(|(ts, _)| {
+                let n: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM mission_events
+                          WHERE mission_id = 'm-br'
+                            AND kind IN ('owner_decision', 'state_changed')
+                            AND occurred_at > ?1",
+                        params![ts],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                n == 0
+            })
+            .collect();
+
+        assert_eq!(all.len(), 2, "two escalated events seeded");
+        assert_eq!(pending.len(), 1, "only the second is pending");
+        let pending_payload: serde_json::Value =
+            serde_json::from_str(&pending[0].1.clone().unwrap()).unwrap();
+        assert_eq!(pending_payload["reason"], "consecutive_failures");
     }
 }

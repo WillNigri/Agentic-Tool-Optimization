@@ -234,19 +234,25 @@ fn pending_escalations(
         events.push(r.map_err(|e| e.to_string())?);
     }
 
-    // Walk forward: after each 'escalated', any 'owner_decision' or
-    // 'state_changed' that follows clears it.
-    let mut pending: Vec<MissionEvent> = Vec::new();
-    for ev in &events {
-        if ev.kind == "escalated" {
-            pending.push(ev.clone());
-        } else if ev.kind == "owner_decision" || ev.kind == "state_changed" {
-            // Resolve the oldest unresolved escalated event.
-            if !pending.is_empty() {
-                pending.remove(0);
-            }
-        }
-    }
+    // PR-6 R1 alignment: an escalated event is pending iff there is NO
+    // later 'owner_decision' or 'state_changed' resolution event AT ALL —
+    // any single resolution clears every prior brief regardless of count.
+    // Mirrors the CLI `ato missions briefs` filter and `escalation_is_pending`
+    // semantics so CLI and desktop never disagree on the pending set.
+    let last_resolution_ts: Option<&str> = events
+        .iter()
+        .filter(|ev| ev.kind == "owner_decision" || ev.kind == "state_changed")
+        .map(|ev| ev.occurred_at.as_str())
+        .max();
+    let pending: Vec<MissionEvent> = events
+        .iter()
+        .filter(|ev| ev.kind == "escalated")
+        .filter(|ev| match last_resolution_ts {
+            None => true,
+            Some(ts) => ev.occurred_at.as_str() > ts,
+        })
+        .cloned()
+        .collect();
     Ok(pending)
 }
 
@@ -759,6 +765,15 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_event_row_at(conn: &Connection, mission_id: &str, kind: &str, ts: &str) {
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO mission_events (id, mission_id, kind, occurred_at) VALUES (?1,?2,?3,?4)",
+            params![id, mission_id, kind, ts],
+        )
+        .unwrap();
+    }
+
     // Wrap Connection in DbState shape for testing helpers directly.
     fn wrap(conn: Connection) -> tauri::State<'static, DbState> {
         // We test the SQL logic directly against Connection, not via Tauri State,
@@ -844,6 +859,44 @@ mod tests {
         insert_event_row(&conn, "m1", "escalated");
         let pending = pending_escalations(&conn, "m1").unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    /// PR-6 R1 codex-flagged scenario: two escalated events followed by a
+    /// single resolution event must yield ZERO pending (any later
+    /// owner_decision/state_changed clears ALL prior briefs — matches the
+    /// CLI `ato missions briefs` filter so the two surfaces never disagree).
+    /// Locks down the alignment fix.
+    #[test]
+    fn test_pending_escalations_two_briefs_one_resolution_clears_all() {
+        let conn = make_db();
+        insert_mission(&conn, "m1", "slug-1", "open", "autonomous");
+        // Use distinct timestamps so the ORDER BY occurred_at chain is stable.
+        insert_event_row_at(&conn, "m1", "escalated", "2026-06-13T00:00:01Z");
+        insert_event_row_at(&conn, "m1", "escalated", "2026-06-13T00:00:02Z");
+        insert_event_row_at(&conn, "m1", "state_changed", "2026-06-13T00:00:03Z");
+        let pending = pending_escalations(&conn, "m1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "any later resolution must clear ALL prior briefs (got {} pending)",
+            pending.len(),
+        );
+    }
+
+    /// And the inverse: a brief AFTER the most recent resolution must
+    /// stay pending. Catches a future regression that would over-clear.
+    #[test]
+    fn test_pending_escalations_brief_after_last_resolution_stays_pending() {
+        let conn = make_db();
+        insert_mission(&conn, "m1", "slug-1", "open", "autonomous");
+        insert_event_row_at(&conn, "m1", "escalated", "2026-06-13T00:00:01Z");
+        insert_event_row_at(&conn, "m1", "state_changed", "2026-06-13T00:00:02Z");
+        insert_event_row_at(&conn, "m1", "escalated", "2026-06-13T00:00:03Z");
+        let pending = pending_escalations(&conn, "m1").unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "the brief after the latest resolution must still be pending",
+        );
     }
 
     #[test]
