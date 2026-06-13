@@ -1775,6 +1775,24 @@ pub fn init_database(conn: &Connection) {
             ON missions(updated_at DESC)",
         [],
     );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS inputs (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            kind          TEXT NOT NULL DEFAULT 'markdown',
+            tags          TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inputs_updated
+            ON inputs(updated_at DESC)",
+        [],
+    );
 
     // mission_events — append-only event log per mission. The Mission ↔
     // Loop relationship lives in payload.loop_run_id when kind='loop_run_

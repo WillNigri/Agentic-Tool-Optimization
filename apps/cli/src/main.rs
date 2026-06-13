@@ -149,6 +149,10 @@ enum Commands {
     /// Exportable as a tarball for sharing externally.
     #[command(name = "bundles")]
     Bundles(commands::bundles::BundlesArgs),
+    /// v2.17 — Inputs: stored markdown / text / json context bundles
+    /// addressable by slug, so agent / loop / methodology configs can
+    /// reference a named prompt scaffold instead of duplicating it.
+    Inputs(commands::inputs::InputsArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1287,6 +1291,10 @@ fn main() -> Result<()> {
         }
         Commands::Bundles(args) => {
             commands::bundles::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Inputs(args) => {
+            commands::inputs::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

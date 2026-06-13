@@ -242,6 +242,27 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
     // JSON shape: {"runtime":"...","model":null|"...","require_tools":["..."]}.
     // NULL = tick will escalate with reason="no_worker_config".
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
+    // inputs bundle storage (OSS). CLI mirrors the desktop schema so a
+    // write from `ato inputs` works even if the user has not opened the
+    // desktop since upgrading.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS inputs (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            kind          TEXT NOT NULL DEFAULT 'markdown',
+            tags          TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inputs_updated
+            ON inputs(updated_at DESC)",
+        [],
+    );
 
     // v2.17 — Output bundles. Idempotent backfill so CLI-only users get
     // the table even if the desktop schema migration hasn't run yet.

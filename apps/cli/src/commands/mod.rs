@@ -2,6 +2,7 @@ pub mod agents;
 pub mod auth;
 pub mod bridge;
 pub mod evaluators;
+pub mod inputs;
 pub mod chats;
 // v2.8.x Phase A chunk 6 — `ato pro enable` / `ato pro status`
 // (war-room 87E6CADF round 3, DevEx AMEND: smooth OSS→Pro upgrade).
