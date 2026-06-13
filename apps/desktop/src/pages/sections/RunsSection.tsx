@@ -7,6 +7,7 @@ import {
   Webhook,
   MessagesSquare,
   MessageSquare,
+  Target,
 } from "lucide-react";
 import SectionTabs, { type TabDef } from "./SectionTabs";
 
@@ -29,6 +30,8 @@ const ActivityFeed = lazy(() => import("@/components/ActivityFeed"));
 // feature removal, not "in a follow-up PR"). AgentDetail has its own
 // per-agent HistoryTab which is unrelated and stays.
 const SessionsList = lazy(() => import("@/components/SessionsList"));
+// v2.16 PR-7 — local Mission-control board (OSS single-machine view).
+const MissionBoard = lazy(() => import("@/components/Missions/MissionBoard"));
 
 export default function RunsSection() {
   const { t } = useTranslation();
@@ -68,6 +71,12 @@ export default function RunsSection() {
       label: t("subnav.runsHooks", "Hooks"),
       icon: Webhook,
       Component: HooksManager,
+    },
+    {
+      id: "missions",
+      label: t("subnav.runsMissions", "Missions"),
+      icon: Target,
+      Component: MissionBoard,
     },
   ];
   return <SectionTabs storageKey="ato.subtab.runs" tabs={tabs} />;

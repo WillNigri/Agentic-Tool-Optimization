@@ -45,6 +45,8 @@ pub mod mcp_install;
 pub mod telemetry;
 // v2.14 Loop Composer — reframed Automations w/ SQLite persistence.
 pub mod loops;
+// v2.16 PR-7 — Mission-control board (local OSS single-machine view).
+pub mod missions;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
@@ -77,6 +79,7 @@ pub use mcp::*;
 pub use mcp_install::*;
 pub use telemetry::*;
 pub use loops::*;
+pub use missions::*;
 
 use crate::*;
 use std::collections::HashMap;
