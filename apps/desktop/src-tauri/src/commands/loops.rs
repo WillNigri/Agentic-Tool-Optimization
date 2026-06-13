@@ -48,6 +48,10 @@ pub struct LoopCreateInput {
     pub description: Option<String>,
     /// Optional — if omitted, derived from name.
     pub slug: Option<String>,
+    /// Codex R4: optional override for the default-enabled behavior.
+    /// None means "use the default" (enabled=true); Some(false) lets
+    /// the caller persist a newly-created disabled workflow correctly.
+    pub enabled: Option<bool>,
     pub graph: serde_json::Value,
     pub variables: Option<serde_json::Value>,
     pub trigger_kind: Option<String>,
@@ -279,18 +283,23 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         None => None,
     };
     let source = input.source.unwrap_or_else(|| "manual".to_string());
+    // Codex R4: honor an explicit `enabled=false` on create. Default
+    // remains true so existing callers see no change.
+    let enabled = input.enabled.unwrap_or(true);
+    let enabled_int: i32 = if enabled { 1 } else { 0 };
 
     conn.execute(
         "INSERT INTO loops (
             id, slug, name, description, enabled, graph, variables,
             trigger_kind, trigger_config, source, source_ref,
             created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         params![
             id,
             slug,
             name,
             input.description,
+            enabled_int,
             graph_str,
             variables_str,
             trigger_kind,
@@ -307,7 +316,7 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         slug,
         name,
         description: input.description,
-        enabled: true,
+        enabled,
         graph: input.graph,
         variables: input.variables,
         trigger_kind,

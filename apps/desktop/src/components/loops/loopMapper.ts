@@ -51,6 +51,28 @@ function parseGraph(graph: unknown): CanvasGraph {
   }
 }
 
+/**
+ * Map a persisted Loop row's `source` (free-form text in the DB) to one
+ * of the Workflow.source enum values the UI distinguishes for filtering
+ * and source-aware behavior. Codex R4 caught the regression: the
+ * previous shape collapsed every row to "manual" on read, so
+ * skill/cron/hook origin was silently lost in the client.
+ */
+function loopSourceToWorkflowSource(raw?: string | null): Workflow["source"] {
+  switch (raw) {
+    case "skill":
+    case "cron":
+    case "hook":
+    case "agent_group":
+    case "group":
+    case "external":
+    case "manual":
+      return raw as Workflow["source"];
+    default:
+      return "manual";
+  }
+}
+
 export function loopToWorkflow(loop: Loop): Workflow {
   const graph = parseGraph(loop.graph);
   return {
@@ -62,7 +84,9 @@ export function loopToWorkflow(loop: Loop): Workflow {
     errorCount: 0,
     nodes: graph.nodes,
     edges: graph.edges,
-    source: "manual",
+    // Codex R4: preserve provenance from the DB row instead of
+    // collapsing every loop to "manual".
+    source: loopSourceToWorkflowSource(loop.source),
   };
 }
 
@@ -71,7 +95,11 @@ export function workflowToLoopCreateInput(workflow: Workflow): LoopCreateInput {
     name: workflow.name,
     description: workflow.description || null,
     graph: JSON.parse(JSON.stringify({ nodes: workflow.nodes, edges: workflow.edges })),
-    source: "manual",
+    // Codex R4: honor the workflow's actual enabled state instead of
+    // letting the Rust default (enabled=1) win for newly-created
+    // disabled workflows. Same for source.
+    enabled: workflow.enabled,
+    source: workflow.source ?? "manual",
     triggerKind: "manual",
   };
 }

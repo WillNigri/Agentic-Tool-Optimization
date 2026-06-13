@@ -20,6 +20,10 @@ export interface LoopCreateInput {
   name: string;
   description?: string | null;
   slug?: string | null;
+  /** Codex R4 — expose enabled on create so the Rust default
+   *  (enabled=true) can be overridden when the user creates a
+   *  disabled workflow. */
+  enabled?: boolean | null;
   graph: unknown;
   variables?: unknown | null;
   triggerKind?: string | null;
