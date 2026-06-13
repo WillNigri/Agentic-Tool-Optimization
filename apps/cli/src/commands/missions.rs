@@ -2697,8 +2697,35 @@ fn finish_gate(
     now: &str,
 ) -> Result<()> {
     let criteria = mission.success_criteria.as_array().cloned().unwrap_or_default();
-    if criteria.is_empty() || !int_path.exists() {
+    if criteria.is_empty() {
+        // No criteria to verify — nothing to gate on.
         return Ok(());
+    }
+    // QA-found 2026-06-13: if criteria are non-empty but no agents were ever
+    // merged, the integration worktree never got materialized — the prior
+    // short-circuit on `!int_path.exists()` let the mission finish without
+    // ever checking the criteria. Refuse instead.
+    if !int_path.exists() {
+        let unmet: Vec<String> = criteria
+            .iter()
+            .filter_map(|c| c.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()))
+            .collect();
+        let brief = EscalationBrief::new("finish_blocked_no_integration_workspace")
+            .summary("Cannot finish — no agents have been merged, so success criteria were never verified")
+            .ctx("branch", int_branch.to_string())
+            .ctx("unmet", unmet.clone())
+            .options([
+                "ato missions merge <slug> --approve <agent> on at least one agent worktree first",
+                "adjust success_criteria if a criterion is no longer relevant",
+                "set-category ignored to close the mission without verification",
+            ])
+            .into_payload();
+        insert_event(conn, &mission.id, "escalated", Some(brief.clone()), now)?;
+        anyhow::bail!(
+            "Cannot finish mission '{}': no integration workspace exists (no agents merged) and {} success criterion/criteria are defined.\n\
+             Approve at least one agent (or skip them all) so the integration branch materializes, then re-run --finish.",
+            mission.slug, criteria.len(),
+        );
     }
     let (all_met, results) = run_checks_in_dir(&criteria, int_path);
     insert_event(
@@ -6365,6 +6392,54 @@ mod tests {
     /// when any success_criterion is unmet in the integration workspace.
     /// Per-agent rollback can only catch regressions against a prior baseline,
     /// so this gate must independently fail-closed.
+    #[test]
+    /// QA-found 2026-06-13: finish_gate must also refuse when criteria are
+    /// defined but the integration worktree was never created (no agents
+    /// merged). Previously the `!int_path.exists()` short-circuit let the
+    /// mission finish without verification — worse than the codex R1 case.
+    #[test]
+    fn finish_gate_blocks_when_no_integration_workspace_and_criteria_present() {
+        let conn = make_db();
+        let mission_id = "m-fg2";
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 created_at, updated_at)
+             VALUES (?1, 'fg2-test', 'Fg2', 'Goal',
+                 '[{\"description\":\"keep.txt exists\",\"check_command\":\"test -f keep.txt\"}]',
+                 '/tmp/x.md', '2026-06-13T00:00:00Z', '2026-06-13T00:00:00Z')",
+            params![mission_id],
+        ).unwrap();
+        let mission = load_mission(&conn, "fg2-test").unwrap();
+
+        let nonexistent_int = std::path::PathBuf::from("/tmp/__fg2-never-existed__");
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = finish_gate(&conn, &mission, &nonexistent_int, "ato/mission/fg2-test/integration", "", &now);
+        assert!(result.is_err(), "must refuse when criteria defined but no integration workspace");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("no integration workspace") || err.contains("no agents merged"),
+            "error must explain the cause: {}", err);
+
+        // escalated brief written with the no-integration reason.
+        let esc: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1
+             AND kind = 'escalated'
+             AND json_extract(payload, '$.reason') = 'finish_blocked_no_integration_workspace'",
+            params![mission_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(esc, 1, "one finish_blocked_no_integration_workspace escalation");
+
+        // No merge_check should be written (since no checks ran).
+        let mc: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = ?1
+             AND kind = 'merge_check'",
+            params![mission_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(mc, 0, "no merge_check event — we couldn't run criteria");
+    }
+
+    /// Original finish_gate test: refuses when criteria are unmet in an
+    /// existing integration worktree. Kept intact alongside the new test
+    /// above for the no-workspace case.
     #[test]
     fn finish_gate_blocks_on_unmet_criteria() {
         if std::process::Command::new("git").arg("--version").output().is_err() {
