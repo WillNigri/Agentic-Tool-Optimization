@@ -1,13 +1,24 @@
 ---
 name: ato-review
-version: 1.0.0
+version: 1.1.0
 description: |
   Before committing any non-trivial change, dispatch the diff to a reviewer
   runtime via ATO (`ato dispatch <reviewer> --session <id>`), parse the
   numbered/severity-tagged findings, apply or defer each one with a
   recorded justification, then commit. Fights the "build passes therefore
   ship it" failure mode — what Garry Tan calls the AI agent complexity
-  ratchet. Fires automatically before commits touching public surface
+  ratchet.
+
+  Place in the v2.16 stack: this skill is the LAST gate. `ato-warroom`
+  decides the design; `ato-mission` runs the multi-step work and
+  produces the diff; `ato-review` checks the diff before commit. When
+  the review is part of a Mission, dispatch the review with
+  `--require-tools read_file,grep,git_diff,git_log` so the reviewer can
+  walk the source itself instead of reasoning from a paraphrase
+  (PR-1.5 tool surface). Receipts land in `execution_logs` and the
+  Mission narrative.
+
+  Fires automatically before commits touching public surface
   (CLI subcommands, Tauri commands, MCP tools, schema migrations, security
   boundaries) or whenever a diff exceeds ~50 LOC of behavior change.
 allowed-tools:

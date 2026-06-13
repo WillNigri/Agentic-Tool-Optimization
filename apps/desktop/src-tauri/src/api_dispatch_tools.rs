@@ -130,6 +130,9 @@ pub async fn dispatch_with_tools(
                 tool_calls: Some(audit),
                 retry_count: 0,
                 attempt_summary_json: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
             });
         }
         let payload: serde_json::Value =
@@ -229,6 +232,9 @@ pub async fn dispatch_with_tools(
                 tool_calls: Some(audit),
                 retry_count: 0,
                 attempt_summary_json: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
             });
         }
         return Ok(ApiDispatchOutcome {
@@ -241,6 +247,9 @@ pub async fn dispatch_with_tools(
             tool_calls: Some(audit),
             retry_count: 0,
             attempt_summary_json: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
         });
     }
 }

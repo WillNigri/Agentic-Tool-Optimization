@@ -333,6 +333,11 @@ pub fn run() {
             get_chat_messages,
             append_chat_message,
             delete_chat_message,
+            // v2.16 PR-7 — Mission-control board
+            missions_list,
+            mission_detail,
+            mission_set_category,
+            mission_set_state,
             // v2.14 Loop Composer — SQLite-backed CRUD for loops.
             list_loops,
             get_loop,

@@ -1809,6 +1809,11 @@ pub fn init_database(conn: &Connection) {
     // even when the process cwd has changed. NULL on single_cwd missions.
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
 
+    // v2.16 PR-4 — coordinator tick worker config. JSON shape:
+    // {"runtime": "...", "model": null|"...", "require_tools": [...]}
+    // NULL means the tick will escalate with reason="no_worker_config".
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
+
     // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
     // codex audit verdict: "one execution_logs row per dispatch,
     // plus retry_count and a compact JSON attempt summary column").
@@ -1836,6 +1841,23 @@ pub fn init_database(conn: &Connection) {
     // policy_chosen, fallback_runtime, raw_message }.
     let _ = conn.execute(
         "ALTER TABLE execution_logs ADD COLUMN exhaustion_audit TEXT",
+        [],
+    );
+
+    // v2.15.5 — post-retry fallback-chain receipt (war_room CC9DBD0E).
+    // fallback_of: the execution_logs.id of the failed dispatch this
+    // row replaces. NULL for all non-fallback rows (i.e. the overwhelming
+    // majority). The original failed row keeps status=error untouched;
+    // the fallback row carries a new id and links back here so the UI
+    // can show the chain of attempts.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN fallback_of TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_fallback_of \
+            ON execution_logs(fallback_of) \
+            WHERE fallback_of IS NOT NULL",
         [],
     );
 
@@ -1897,6 +1919,36 @@ pub fn init_database(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE loop_runs ADD COLUMN paused_dispatch_id TEXT",
+        [],
+    );
+
+    // cost-accounting fix cluster (2026-06-12) — cache + reasoning token
+    // observability columns on execution_logs. Each ALTER fails silently
+    // when the column already exists (idempotent migration pattern).
+    //
+    // cache_creation_tokens: Anthropic 5-min cache WRITE tokens, billed at
+    //   1.25× input rate. None for all non-Anthropic dispatches.
+    // cache_read_tokens: Anthropic 5-min cache READ tokens, billed at 0.10×
+    //   input rate. None for all non-Anthropic dispatches.
+    // reasoning_tokens: OpenAI/DeepSeek reasoning breakdown of output tokens.
+    //   IMPORTANT: completion_tokens already includes these — do NOT add to
+    //   cost formula. Stored for UI observability only.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN cache_creation_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN cache_read_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN reasoning_tokens INTEGER",
+        [],
+    );
+
+    // ato_meta key/value table for migration markers (used by CLI recompute).
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS ato_meta (key TEXT PRIMARY KEY, value TEXT)",
         [],
     );
 }
