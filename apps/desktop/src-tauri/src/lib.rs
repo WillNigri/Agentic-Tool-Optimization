@@ -284,6 +284,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // v2.17 — inputs read-only commands for the InputPicker UI.
+            commands::inputs::list_inputs,
+            commands::inputs::get_input,
             identity_probe::get_identity_probe_status,
             rekey::rekey_master_key,
             rekey::get_rekey_applicability,

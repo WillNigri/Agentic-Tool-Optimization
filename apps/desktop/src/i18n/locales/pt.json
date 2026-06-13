@@ -942,6 +942,16 @@
     "exists": "✓ existe",
     "gone": "✗ removido"
   },
+  "inputPicker": {
+    "contextInput": "Entrada de contexto",
+    "buttonTitle": "Escolher uma entrada salva",
+    "placeholder": "Selecione uma entrada de contexto",
+    "searchPlaceholder": "Buscar entradas…",
+    "none": "Sem entrada de contexto",
+    "loading": "Carregando entradas…",
+    "error": "Nao foi possivel carregar as entradas",
+    "empty": "Nenhuma entrada corresponde a esta busca"
+  },
   "initiatorBadge": {
     "via": "via {{surface}}",
     "kind": {

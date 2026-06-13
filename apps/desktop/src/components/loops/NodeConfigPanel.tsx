@@ -3,6 +3,7 @@ import { Trash2, Globe, Activity, Terminal, Cpu, Server } from "lucide-react";
 import { CONFIG_PANEL_W, TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./constants";
 import { SERVICE_ACTIONS } from "./service-catalog";
 import { useAutomationStore } from "@/stores/useLoopStore";
+import InputPicker from "@/components/inputs/InputPicker";
 import type { FlowNode, AgentRuntime, LoopStepKind } from "./types";
 
 // ── v2.14 — per-kind field schemas for the LLM-aware Loop Composer ──────
@@ -38,6 +39,7 @@ const LLM_KIND_FIELDS: Record<LoopStepKind, LlmKindField[]> = {
     { key: "slug", label: "Methodology slug", type: "text", required: true, placeholder: "weekly-security-eval" },
     { key: "models", label: "Models (comma-separated)", type: "text", placeholder: "claude-sonnet-4.6, gpt-4o" },
     { key: "reps", label: "Reps per cell", type: "text", placeholder: "10" },
+    { key: "context_input", label: "Context input", type: "text" },
   ],
   diagnose: [
     { key: "input_ref", label: "Source run reference", type: "text", required: true, placeholder: "{{steps.run.output.run_id}}" },
@@ -53,6 +55,7 @@ const LLM_KIND_FIELDS: Record<LoopStepKind, LlmKindField[]> = {
   war_room: [
     { key: "seats", label: "Seats (comma-separated runtimes/agents)", type: "text", required: true, placeholder: "codex, gemini, minimax …" },
     { key: "framing", label: "Framing prompt", type: "textarea", required: true, placeholder: "Decision under debate: A vs B …" },
+    { key: "context_input", label: "Context input", type: "text" },
   ],
   score: [
     { key: "rubric", label: "Rubric slug", type: "text", required: true, placeholder: "regression-watch" },
@@ -261,10 +264,18 @@ export default function NodeConfigPanel({ node, onDelete }: NodeConfigPanelProps
             {LLM_KIND_FIELDS[node.type].map((field) => (
               <div key={field.key} className="mb-3">
                 <label className="block text-[10px] text-[#8888a0] uppercase tracking-wider mb-1 font-medium">
-                  {field.label}
+                  {field.key === "context_input"
+                    ? t("inputPicker.contextInput", "Context input")
+                    : field.label}
                   {field.required && <span className="text-[#FF4466] ml-0.5">*</span>}
                 </label>
-                {field.type === "textarea" ? (
+                {field.key === "context_input" ? (
+                  <InputPicker
+                    value={node.config?.params?.[field.key] || ""}
+                    onSelect={(slug) => setParam(field.key, slug)}
+                    kindFilter="markdown"
+                  />
+                ) : field.type === "textarea" ? (
                   <textarea
                     value={node.config?.params?.[field.key] || ""}
                     onChange={(e) => setParam(field.key, e.target.value)}

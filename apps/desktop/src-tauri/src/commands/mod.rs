@@ -10,6 +10,11 @@
 // file boundary moves.
 
 pub mod shared;
+// v2.17 — inputs read-only commands for the InputPicker UI. The
+// CLI surface (ato inputs add/list/get/edit/delete) ships in
+// apps/cli/src/commands/inputs.rs; this Tauri side is the
+// component's invoke<...>() target.
+pub mod inputs;
 pub mod models;
 pub mod usage_billing;
 pub mod knowledge;

@@ -1129,6 +1129,16 @@
     "exists": "✓ exists",
     "gone": "✗ gone"
   },
+  "inputPicker": {
+    "contextInput": "Context input",
+    "buttonTitle": "Pick a saved input",
+    "placeholder": "Select a context input",
+    "searchPlaceholder": "Search inputs…",
+    "none": "No context input",
+    "loading": "Loading inputs…",
+    "error": "Could not load inputs",
+    "empty": "No inputs match this search"
+  },
   "initiatorBadge": {
     "via": "via {{surface}}",
     "kind": {

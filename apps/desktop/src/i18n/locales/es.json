@@ -913,6 +913,16 @@
     "exists": "✓ existe",
     "gone": "✗ eliminado"
   },
+  "inputPicker": {
+    "contextInput": "Entrada de contexto",
+    "buttonTitle": "Elegir una entrada guardada",
+    "placeholder": "Selecciona una entrada de contexto",
+    "searchPlaceholder": "Buscar entradas…",
+    "none": "Sin entrada de contexto",
+    "loading": "Cargando entradas…",
+    "error": "No se pudieron cargar las entradas",
+    "empty": "Ninguna entrada coincide con esta busqueda"
+  },
   "initiatorBadge": {
     "via": "vía {{surface}}",
     "kind": {
