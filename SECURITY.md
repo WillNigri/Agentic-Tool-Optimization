@@ -92,4 +92,4 @@ Out of scope:
 - The mesh daemon (Phase 7) binds 127.0.0.1 by default; LAN
   exposure is opt-in.
 
-Audit history lives under [`docs/security/`](docs/security/).
+Past security audits are kept in our internal archive (not redistributed with the OSS repo); contact the maintainers if you're evaluating ATO for a security-sensitive deployment.

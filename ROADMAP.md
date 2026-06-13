@@ -448,7 +448,6 @@ Trigger condition for STAGE 7: Railway has stabilized on `ato-cloud@3437937` (th
 - New route `POST /agent-traces` (`requireTier('pro')`) — receives traces, persists, computes aggregates.
 - Tier checks expand on existing `requireTier` middleware.
 
-**Detailed ticket-by-ticket build plan**: see `docs/V1.4.0-IMPLEMENTATION.md`.
 
 ### v1.5.0 — Daily Workspace (Released May 2026)
 **Goal: turn ATO from "control panel for agents" into "the place where you do agentic work."** The pivot from configuration GUI to daily workspace.
@@ -469,7 +468,7 @@ The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers
 - **Settings → API Keys** — Grok added in v1.5.4; wizard hint lists all 15 providers.
 
 ### v1.6.0 — Intelligence Layer (Automations canvas shipped May 2026)
-- **Automations tab repurpose — group pipelines as flow nodes** *(shipped — multi-source aggregator + click-through to Insights)* ([detailed plan](docs/V1.6.0-AUTOMATIONS-REPURPOSE.md))
+- **Automations tab repurpose — group pipelines as flow nodes** *(shipped — multi-source aggregator + click-through to Insights)*
   - Runs → Automations now visualizes **everything that runs without a human in the loop**: routed groups, sequential pipelines, scheduled cron jobs, agent hooks, and skill flows — all on the same canvas. `automationsAggregator.ts` pulls from each source; `groupsToWorkflows`, `cronsToWorkflows`, `hooksToWorkflows` plus the original `skill-to-workflow` converter normalize them into a common shape.
   - Sequential groups render left-to-right with stage pills; routed groups fan out from the router; cron jobs anchor at the left edge with a clock icon; hooks attach as input nodes.
   - Live status decorated from `getAgentMetrics` so each node carries idle / running / succeeded / errored + last-run timestamp.
@@ -486,7 +485,7 @@ The dynamic-prompt features that landed in v1.4.0 (variables, hooks, summarizers
 - **HALO integration** — feed traces from `~/.ato/agent-logs.jsonl` into Context Labs' HALO RLM engine (MIT, on PyPI), surface harness-improvement reports as one-click inline diffs *(planned)*
 
 ### v2.0.0 — External Agents / Hosted Deployment (Released May 2026)
-The strategic v2 release: ATO becomes the place where companies build customer-facing chatbots, deploy them to their own infrastructure (any LLM provider), and track their behavior — without us competing with hosting providers. ([detailed plan](docs/V2.0.0-EXTERNAL-AGENTS.md))
+The strategic v2 release: ATO becomes the place where companies build customer-facing chatbots, deploy them to their own infrastructure (any LLM provider), and track their behavior — without us competing with hosting providers.
 
 Shipped across alpha.1–alpha.5:
 - **"Internal vs External" toggle on agent create** — external agents get a Deploy tab + Knowledge tab + Raw tab, surface the relevant chat-LLM provider keys (all 9 providers), and skip Skills/MCPs/Project that don't apply.
@@ -554,7 +553,6 @@ The paid Pro/Team counterpart to the free LAN-only mesh (Phase 7.0, OSS). Same p
 - **REST endpoints** under `/api/mesh/daemons` (Pro-tier gated, JWT auth): register / list / revoke. Max 10 active daemons per user.
 - **Gateway WS upgrade** on `/api/mesh/relay` forwards to the relay service; daemons authenticate with a long-lived `mst_*` bearer token.
 - **Rate limit** 50 deliver-frames / 10s per source daemon; 64 KB payload cap; 90s idle timeout; self-loop refused.
-- Threat model + design notes in `docs/PHASE-7-CLOUD-RELAY-DESIGN.md`; multi-LLM review transcript in `docs/reviews/phase7-cloud-relay-2026-05-14.md`.
 
 Deferred to a later Phase 7 patch: offline queue, multi-instance relay (single-Railway today; horizontal scaling needs Redis or pg-LISTEN), and the OSS GUI for daemon registration.
 
@@ -567,7 +565,6 @@ Four bugs Will surfaced in the Insights panel; all four about the panel reportin
 - **"Not installed" ≠ "Down"** — Hermes (never installed) was rendering red "Down." Error messages now use "not installed on this machine" wording, which `HealthDashboard.effectiveStatus()` already maps to the neutral grey "Not configured" pill.
 - **Monitored-runtimes preference** — new `runtime_preferences` SQLite table (`runtime`, `monitored`, `updated_at`). New Tauri commands `list_runtime_preferences` + `set_runtime_monitored`. First-launch seed via `which_cli` so a fresh install only monitors detected runtimes. Health poller + `get_health_status` both filter on the toggle, so un-monitored runtimes never show up. New Settings → Runtimes → Monitoring sub-tab with per-runtime toggles.
 
-Multi-LLM review transcript + audit decisions in `docs/reviews/v2.5.1-health-panel-2026-05-14.md`.
 
 ### v2.8.x — Agent safety floor (war-roomed 2026-05-22)
 
@@ -778,11 +775,10 @@ queued for the next focused session. See the "v2.7.14 — Released
 
 **Projected scores after v2.8.0 lands:** TS 96, DB schema 87, Backend org 88, Frontend org 83, Surface 87. Weighted average ~89%. Frontend may need a second pass (`PromptBar/_helpers.ts` audit + SessionsList second cut) to clear 85.
 
-**Dropped from milestone gating** (do as housekeeping, not release-blockers): `cron.rs` unused-fn warnings (`cron_to_schtasks_xml_trigger`, `build_schtasks_xml`) → gate by `#[cfg(target_os="windows")]` opportunistically; untracked artifacts (`yc-session.md`, `codeelegancesession.txt`, two unused `Cargo.lock` files in `packages/ato-{posts,recipes}/`).
+**Dropped from milestone gating** (do as housekeeping, not release-blockers): `cron.rs` unused-fn warnings (`cron_to_schtasks_xml_trigger`, `build_schtasks_xml`) → gate by `#[cfg(target_os="windows")]` opportunistically; two unused `Cargo.lock` files in `packages/ato-{posts,recipes}/`.
 
 **Process change:** release notes claim per-front percentages only when there's a linked measurement (file LOC delta, bug count, test pass count). Stops the "85%+ across all 5" language from leaking into release notes without numbers backing it.
 
-War-room transcripts: `docs/reviews/elegance-roadmap-war-room-2026-05-19.md` (forthcoming write-up of both seats' answers).
 
 ### v2.7.14 — Close lifecycle + sessions refactor + Linux fix + v2.8.0 closing (Released 2026-05-21)
 
