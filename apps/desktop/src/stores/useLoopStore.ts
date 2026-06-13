@@ -326,6 +326,7 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       errorCount: 0,
       nodes: [],
       edges: [],
+      source: "manual",
     };
     set((s) => ({
       workflows: [...s.workflows, newWorkflow],

@@ -12,7 +12,7 @@ import NodePalette from "./loops/NodePalette";
 import NodeConfigPanel from "./loops/NodeConfigPanel";
 import FlowCanvas from "./loops/FlowCanvas";
 import ExecutionOverlay from "./loops/ExecutionOverlay";
-import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
+import { promptAgent, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
 import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows, decorateWorkflowsWithStatus } from "@/lib/loopsAggregator";
@@ -21,8 +21,12 @@ import { listAgents } from "@/lib/agents";
 import { listAgentHooks } from "@/lib/agentHooks";
 import { listCronJobs, migrateWorkflowsToLoops } from "@/lib/tauri-api";
 import { getAgentMetrics } from "@/lib/agentObservability";
+import { create_loop, delete_loop, list_loops, toggle_loop_enabled, update_loop } from "@/lib/loops-api";
+import { loopToWorkflow, workflowToLoopCreateInput, workflowToLoopUpdateInput } from "./loops/loopMapper";
 import type { SkillDetail } from "@/lib/api";
 import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./loops/types";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export default function LoopComposer() {
   const { t } = useTranslation();
@@ -39,6 +43,8 @@ export default function LoopComposer() {
     finishExecution,
     execution,
     workflows,
+    toggleWorkflow,
+    deleteWorkflow,
   } = useAutomationStore();
 
   // Load skill-based workflows (gstack etc.) on mount
@@ -118,6 +124,19 @@ export default function LoopComposer() {
       })
       .catch((err) => {
         console.warn("[ATO] Loop Composer migration failed:", err);
+      });
+  }, []);
+
+  useEffect(() => {
+    list_loops()
+      .then((loops) => {
+        const persisted = loops.map(loopToWorkflow);
+        const store = useAutomationStore.getState();
+        const nonPersisted = store.workflows.filter((w) => w.source !== "manual" || !UUID_RE.test(w.id));
+        store.loadWorkflows([...persisted, ...nonPersisted]);
+      })
+      .catch((err) => {
+        console.warn("[ATO] Loop Composer load failed:", err);
       });
   }, []);
 
@@ -360,16 +379,48 @@ export default function LoopComposer() {
   const workflow = getActiveWorkflow();
   const selectedNode = workflow.nodes.find((n) => n.id === selectedNodeId) || null;
 
-  // Save workflow to disk
+  const replaceWorkflow = useCallback((nextWorkflow: WorkflowType, priorId?: string) => {
+    const store = useAutomationStore.getState();
+    const currentId = priorId ?? nextWorkflow.id;
+    const nextWorkflows = store.workflows.map((item) => (item.id === currentId ? nextWorkflow : item));
+    store.loadWorkflows(nextWorkflows);
+    store.setActiveWorkflowId(nextWorkflow.id);
+  }, []);
+
+  // Save workflow to loops table
   const handleSave = useCallback(async () => {
     try {
-      await persistWorkflow(workflow);
+      if (UUID_RE.test(workflow.id)) {
+        const saved = await update_loop(workflow.id, workflowToLoopUpdateInput(workflow));
+        replaceWorkflow(loopToWorkflow(saved));
+      } else {
+        const created = await create_loop(workflowToLoopCreateInput(workflow));
+        replaceWorkflow(loopToWorkflow(created), workflow.id);
+      }
       markSaved();
     } catch {
-      // localStorage fallback is handled in tauri-api
       markSaved();
     }
-  }, [workflow, markSaved]);
+  }, [workflow, markSaved, replaceWorkflow]);
+
+  const handleToggle = useCallback(async () => {
+    if (!workflow.id) return;
+    if (!UUID_RE.test(workflow.id)) {
+      toggleWorkflow(workflow.id);
+      return;
+    }
+    const enabled = !workflow.enabled;
+    const saved = await toggle_loop_enabled(workflow.id, enabled);
+    replaceWorkflow(loopToWorkflow(saved));
+  }, [workflow, toggleWorkflow, replaceWorkflow]);
+
+  const handleDelete = useCallback(async () => {
+    if (!workflow.id) return;
+    if (UUID_RE.test(workflow.id)) {
+      await delete_loop(workflow.id);
+    }
+    deleteWorkflow(workflow.id);
+  }, [workflow, deleteWorkflow]);
 
   // Execute workflow via Claude CLI
   const handleRun = useCallback(async () => {
@@ -455,7 +506,7 @@ export default function LoopComposer() {
   return (
     <div className="flex flex-col h-full w-full" style={{ background: "#0a0a0f" }}>
       {/* Toolbar */}
-      <WorkflowToolbar onRun={handleRun} onSave={handleSave} />
+      <WorkflowToolbar onRun={handleRun} onSave={handleSave} onToggle={handleToggle} onDelete={handleDelete} />
 
       <div className="flex flex-1 overflow-hidden">
         {/* Node Palette (edit mode only) */}

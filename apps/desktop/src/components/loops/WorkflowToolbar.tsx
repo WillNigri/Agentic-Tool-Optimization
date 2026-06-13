@@ -20,9 +20,11 @@ import type { Workflow, BuilderMode } from "./types";
 interface WorkflowToolbarProps {
   onRun: () => void;
   onSave: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
 }
 
-export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps) {
+export default function WorkflowToolbar({ onRun, onSave, onToggle, onDelete }: WorkflowToolbarProps) {
   const { t } = useTranslation();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showNewDialog, setShowNewDialog] = useState(false);
@@ -36,10 +38,8 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
     workflows,
     activeWorkflowId,
     setActiveWorkflowId,
-    toggleWorkflow,
     dirty,
     createWorkflow,
-    deleteWorkflow,
     execution,
   } = useAutomationStore();
 
@@ -56,7 +56,7 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
 
   function handleDelete() {
     if (!confirm(t("automation.builder.confirmDeleteWorkflow", "Delete this workflow?"))) return;
-    deleteWorkflow(activeWorkflowId);
+    onDelete();
   }
 
   return (
@@ -99,7 +99,7 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
 
       {/* Enable/disable toggle */}
       <button
-        onClick={() => toggleWorkflow(activeWorkflowId)}
+        onClick={onToggle}
         className="flex items-center gap-1.5 text-xs shrink-0"
       >
         {active.enabled ? (
