@@ -133,6 +133,13 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
             WHERE fallback_of IS NOT NULL",
         [],
     );
+
+    // v2.17 — git_commit_sha provenance (CLI backfill, mirrors schema.rs).
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN git_commit_sha TEXT",
+        [],
+    );
+
     // v2.15.1 — retry receipt columns (CLI-only guard, mirrors schema.rs).
     let _ = conn.execute(
         "ALTER TABLE execution_logs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",

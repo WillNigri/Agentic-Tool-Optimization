@@ -1912,6 +1912,21 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // v2.17 — git_commit_sha provenance. Stamps the current git HEAD
+    // of the CWD at dispatch time so every receipt can answer
+    // "what run produced this commit?" — closes Collison VCS gap.
+    // NULL when the CWD isn't a git repo at dispatch time.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN git_commit_sha TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_git_commit_sha \
+            ON execution_logs(git_commit_sha) \
+            WHERE git_commit_sha IS NOT NULL",
+        [],
+    );
+
     // v2.15.4 — pause-and-wake scheduler (war_room E063A89E).
     //
     // Codex's amendments to the initial design:

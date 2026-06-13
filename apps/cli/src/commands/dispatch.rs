@@ -812,6 +812,53 @@ fn tag_war_room(
     Ok(())
 }
 
+/// v2.17 — capture the current git HEAD SHA for provenance ("what run
+/// produced this commit?"). Returns None when not in a git repo or git
+/// is unavailable. Best-effort: ANY failure → None, never blocks the
+/// dispatch. Honors a workspace_root override (Mission per_agent_worktree
+/// dispatches run in their worktree, not the operator's CWD).
+///
+/// Codex 2026-06-13: bounded with a 2s timeout via a worker thread +
+/// recv_timeout pattern (same shape as encryption.rs::read_master_key).
+/// A wedged git (NFS hang, fsck-in-flight, hung filesystem) MUST NOT
+/// hang the dispatch — this runs before any LLM work starts.
+pub(crate) fn capture_git_head(workspace_root: Option<PathBuf>) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new("git");
+        if let Some(root) = workspace_root.as_ref() {
+            cmd.arg("-C").arg(root);
+        }
+        let result = (|| -> Option<String> {
+            let out = cmd.args(["rev-parse", "HEAD"]).output().ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        })();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten()
+}
+
+/// Stamp the captured git HEAD SHA on a freshly-written execution_logs row.
+/// Best-effort UPDATE — failures are silently swallowed because the SQLite
+/// ledger is the source of truth for the dispatch itself; this is just a
+/// provenance breadcrumb.
+pub(crate) fn stamp_git_head(
+    conn: &rusqlite::Connection,
+    id: &str,
+    sha: Option<&str>,
+) {
+    if let Some(sha) = sha {
+        let _ = conn.execute(
+            "UPDATE execution_logs SET git_commit_sha = ?1 WHERE id = ?2",
+            rusqlite::params![sha, id],
+        );
+    }
+}
+
 pub fn run(
     runtime_name: &str,
     prompt: &str,
@@ -835,6 +882,12 @@ pub fn run(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
+    // v2.17 — git provenance. Capture HEAD SHA of the CWD (or the
+    // workspace_root for Mission dispatches) so every receipt can
+    // answer "what run produced this commit?" — Collison gap #2.
+    // Best-effort: None when not in a git repo, NEVER blocks dispatch.
+    let git_commit_sha: Option<String> =
+        capture_git_head(workspace_root.map(std::path::Path::to_path_buf));
     // v2.15.2 — capture runtime_name as a mutable owned String for
     // the exhaustion-policy fallback-chain branch. After the gate
     // block we shadow back to &str so the rest of the function
@@ -1501,6 +1554,9 @@ pub fn run(
             agent_slug_for_event.as_deref(),
         ],
     ).context("Failed to write execution_logs row")?;
+    // v2.17 git provenance — stamp the git HEAD SHA captured at run()
+    // entry. Best-effort: silent failures, never blocks the dispatch.
+    stamp_git_head(&conn, &id, git_commit_sha.as_deref());
     // PR 14 — tag with war_room_id when set so the Sessions feed can
     // group this row into a war-room synthetic card.
     tag_war_room(&conn, &id, war_room_id.as_deref(), war_room_round)?;
@@ -1859,6 +1915,10 @@ fn run_api(
     // than a star. Pass None when the caller doesn't need the id.
     last_inserted_id: Option<&mut Option<String>>,
 ) -> Result<()> {
+    // v2.17 git provenance — capture HEAD SHA before any work so we can
+    // stamp the execution_logs row regardless of success/failure path.
+    let git_commit_sha: Option<String> =
+        capture_git_head(workspace_root.map(std::path::Path::to_path_buf));
     let agent_lookup_runtime = agent_runtime_override.unwrap_or(provider.slug);
     // Quota pre-flight (same shape as the CLI-runtime path).
     // TODO(unify-fallback-engine): pre-flight and post-retry fallback
@@ -2242,6 +2302,8 @@ fn run_api(
         ],
     )
     .context("Failed to write execution_logs row")?;
+    // v2.17 git provenance — same UPDATE-after-INSERT shape as run().
+    stamp_git_head(&conn, &id, git_commit_sha.as_deref());
     // Propagate the minted id to the caller (option b out-param).
     // Filled before any early-return so the fallback walk always sees
     // this row's id even when the dispatch itself ends in error.
@@ -2578,6 +2640,10 @@ fn run_remote(
         );
     }
 
+    // v2.17 git provenance — record the operator's local HEAD (the
+    // remote machine's repo state is orthogonal; what we want is the
+    // SHA the operator dispatched FROM).
+    let git_commit_sha: Option<String> = capture_git_head(None);
     let live_run_id = uuid::Uuid::new_v4().to_string();
     let _ = crate::live_runs::insert(
         db_path,
@@ -2679,6 +2745,8 @@ fn run_remote(
         ],
     )
     .context("Failed to write execution_logs row (remote)")?;
+    // v2.17 git provenance — operator's local HEAD captured at entry.
+    stamp_git_head(&conn, &id, git_commit_sha.as_deref());
     // PR 14 — war_room_id tag (remote-dispatch path).
     tag_war_room(&conn, &id, war_room_id.as_deref(), war_room_round)?;
 
