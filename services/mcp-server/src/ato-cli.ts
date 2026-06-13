@@ -22,6 +22,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const execFileAsync = promisify(execFile);
+// Spread caller env LAST so an explicitly-set ATO_CLIENT_SURFACE /
+// ATO_INITIATOR_KIND (test harness, parent process override) wins
+// over the MCP defaults — preserves PR-B's env-first contract.
+const atoCliEnv = {
+  ATO_CLIENT_SURFACE: "mcp_stdio",
+  ATO_INITIATOR_KIND: "mcp",
+  ...process.env,
+};
 
 let resolvedCliPath: string | null = null;
 
@@ -44,7 +52,7 @@ async function resolveCliPath(): Promise<string> {
   // symlink. execFile with a bare name will use PATH automatically; we
   // probe by trying `ato --version`.
   try {
-    await execFileAsync("ato", ["--version"]);
+    await execFileAsync("ato", ["--version"], { env: atoCliEnv });
     resolvedCliPath = "ato";
     return "ato";
   } catch {
@@ -84,6 +92,7 @@ export async function runAtoCli<T = unknown>(args: string[]): Promise<T> {
   const bin = await resolveCliPath();
   try {
     const { stdout } = await execFileAsync(bin, args, {
+      env: atoCliEnv,
       // 10MB is plenty; trace dumps cap at 64KB per row already.
       maxBuffer: 10 * 1024 * 1024,
       timeout: 60_000,
@@ -109,6 +118,7 @@ export async function runAtoCli<T = unknown>(args: string[]): Promise<T> {
 export async function runAtoCliRaw(args: string[]): Promise<string> {
   const bin = await resolveCliPath();
   const { stdout } = await execFileAsync(bin, args, {
+    env: atoCliEnv,
     maxBuffer: 10 * 1024 * 1024,
     timeout: 60_000,
   });

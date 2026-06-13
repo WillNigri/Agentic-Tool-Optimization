@@ -123,8 +123,8 @@ pub fn create_chat_thread(
         title.trim().chars().take(120).collect()
     };
     conn.execute(
-        "INSERT INTO chat_threads (id, title, project_id, agent_id, created_at, last_message_at, message_count, archived)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, 0)",
+        "INSERT INTO chat_threads (id, title, project_id, agent_id, created_at, last_message_at, message_count, archived, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, 0, 'human', 'desktop', NULL)",
         params![id, trimmed, project_id, agent_id, now],
     )
     .map_err(|e| e.to_string())?;
@@ -360,8 +360,8 @@ pub fn append_chat_message(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO chat_messages (id, thread_id, role, content, runtime, agent_slug, metadata, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO chat_messages (id, thread_id, role, content, runtime, agent_slug, metadata, created_at, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'human', 'desktop', NULL)",
         params![id, thread_id, role, content, runtime, agent_slug, metadata, now],
     )
     .map_err(|e| e.to_string())?;

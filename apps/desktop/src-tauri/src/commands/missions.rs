@@ -720,7 +720,10 @@ mod tests {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 repo_root TEXT,
-                worker_config TEXT
+                worker_config TEXT,
+                initiator_kind TEXT,
+                client_surface TEXT,
+                initiator_id TEXT
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY,
@@ -733,12 +736,18 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 runtime TEXT,
                 cost_usd_estimated REAL,
-                created_at TEXT
+                created_at TEXT,
+                initiator_kind TEXT,
+                client_surface TEXT,
+                initiator_id TEXT
             );
             CREATE TABLE loop_run_steps (
                 id TEXT PRIMARY KEY,
                 loop_run_id TEXT,
-                execution_log_id TEXT
+                execution_log_id TEXT,
+                initiator_kind TEXT,
+                client_surface TEXT,
+                initiator_id TEXT
             );",
         )
         .unwrap();
