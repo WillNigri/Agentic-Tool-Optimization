@@ -137,6 +137,7 @@ interface AutomationStore {
   setActiveWorkflowId: (id: string) => void;
   toggleWorkflow: (id: string) => void;
   dirty: boolean;
+  updateActiveWorkflow: (updates: Partial<Workflow>) => void;
 
   // Active workflow accessors
   getActiveWorkflow: () => Workflow;
@@ -208,6 +209,16 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   activeWorkflowId: "",
   dirty: false,
 
+  updateActiveWorkflow: (updates) =>
+    set((s) => ({
+      dirty: true,
+      workflows: s.workflows.map((w) =>
+        w.id === s.activeWorkflowId
+          ? { ...w, ...updates }
+          : w
+      ),
+    })),
+
   setActiveWorkflowId: (id) =>
     set({ activeWorkflowId: id, selectedNodeId: null, selectedEdgeKey: null }),
 
@@ -229,6 +240,9 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       errorCount: 0,
       nodes: [],
       edges: [],
+      triggerKind: "manual",
+      triggerConfig: null,
+      variables: {},
     };
   },
 
@@ -327,6 +341,9 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       nodes: [],
       edges: [],
       source: "manual",
+      triggerKind: "manual",
+      triggerConfig: null,
+      variables: {},
     };
     set((s) => ({
       workflows: [...s.workflows, newWorkflow],
@@ -436,6 +453,9 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
         to: `${e.to}-${Date.now()}`,
       })),
       fromTemplateId: templateId,
+      triggerKind: "manual",
+      triggerConfig: null,
+      variables: {},
     };
 
     set((s) => ({

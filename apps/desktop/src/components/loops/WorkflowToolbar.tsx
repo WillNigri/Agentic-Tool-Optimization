@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { SERVICE_COLORS, SERVICE_ICONS } from "./constants";
 import { useAutomationStore } from "@/stores/useLoopStore";
-import type { Workflow, BuilderMode } from "./types";
+import type { WorkflowTriggerKind } from "./types";
 
 interface WorkflowToolbarProps {
   onRun: () => void;
@@ -38,6 +38,7 @@ export default function WorkflowToolbar({ onRun, onSave, onToggle, onDelete }: W
     workflows,
     activeWorkflowId,
     setActiveWorkflowId,
+    updateActiveWorkflow,
     dirty,
     createWorkflow,
     execution,
@@ -59,6 +60,25 @@ export default function WorkflowToolbar({ onRun, onSave, onToggle, onDelete }: W
     onDelete();
   }
 
+  function setTriggerKind(triggerKind: WorkflowTriggerKind) {
+    const nextConfig: Record<string, string> | null =
+      triggerKind === "manual"
+        ? null
+        : triggerKind === "cron"
+          ? { cron: active.triggerConfig?.cron ?? "" }
+          : { event: active.triggerConfig?.event ?? "" };
+    updateActiveWorkflow({ triggerKind, triggerConfig: nextConfig });
+  }
+
+  function setTriggerField(key: "cron" | "event", value: string) {
+    updateActiveWorkflow({
+      triggerConfig: {
+        ...(active.triggerConfig ?? {}),
+        [key]: value,
+      },
+    });
+  }
+
   return (
     <div className="relative flex items-center gap-3 px-4 py-2.5 border-b border-[#2a2a3a]" style={{ background: "#0e0e16" }}>
       {/* Workflow dropdown */}
@@ -72,6 +92,37 @@ export default function WorkflowToolbar({ onRun, onSave, onToggle, onDelete }: W
       </button>
 
       <p className="text-xs text-[#8888a0] flex-1 truncate">{active.description}</p>
+
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-[11px] text-[#8888a0]">{t("loopComposer.trigger.label")}</span>
+        <select
+          value={active.triggerKind ?? "manual"}
+          onChange={(e) => setTriggerKind(e.target.value as WorkflowTriggerKind)}
+          className="rounded-md border border-[#2a2a3a] bg-[#16161e] px-2 py-1 text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+        >
+          <option value="manual">{t("loopComposer.trigger.manual")}</option>
+          <option value="cron">{t("loopComposer.trigger.cron")}</option>
+          <option value="event">{t("loopComposer.trigger.event")}</option>
+        </select>
+        {active.triggerKind === "cron" && (
+          <input
+            type="text"
+            value={active.triggerConfig?.cron ?? ""}
+            onChange={(e) => setTriggerField("cron", e.target.value)}
+            placeholder={t("loopComposer.trigger.cronPlaceholder")}
+            className="w-40 rounded-md border border-[#2a2a3a] bg-[#16161e] px-2 py-1 text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+          />
+        )}
+        {active.triggerKind === "event" && (
+          <input
+            type="text"
+            value={active.triggerConfig?.event ?? ""}
+            onChange={(e) => setTriggerField("event", e.target.value)}
+            placeholder={t("loopComposer.trigger.eventPlaceholder")}
+            className="w-40 rounded-md border border-[#2a2a3a] bg-[#16161e] px-2 py-1 text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+          />
+        )}
+      </div>
 
       {/* Mode toggle */}
       <div className="flex items-center rounded-lg border border-[#2a2a3a] overflow-hidden" style={{ background: "#16161e" }}>

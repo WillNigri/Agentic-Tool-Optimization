@@ -803,6 +803,33 @@
       "closeBranding": "ATO. Local-first. Licencia MIT. agentictool.ai"
     }
   },
+  "loopComposer": {
+    "trigger": {
+      "label": "Disparador:",
+      "manual": "Manual",
+      "cron": "Cron",
+      "event": "Evento",
+      "cronPlaceholder": "0 9 * * 1-5",
+      "eventPlaceholder": "pull_request.opened",
+      "validationCron": "El disparador cron requiere una expresion cron.",
+      "validationEvent": "El disparador de evento requiere un nombre de evento."
+    },
+    "variables": {
+      "title": "Variables",
+      "description": "Define variables del workflow como clave=valor.",
+      "add": "Agregar variable",
+      "remove": "Quitar variable",
+      "empty": "Aun no hay variables de workflow.",
+      "emptyHint": "Selecciona un nodo para editar su configuracion o agrega variables del workflow abajo.",
+      "keyPlaceholder": "clave",
+      "valuePlaceholder": "valor"
+    },
+    "migration": {
+      "banner": "Tienes {{count}} workflows heredados en el almacenamiento del navegador.",
+      "migrate": "Migrar a Loops",
+      "dismiss": "Descartar"
+    }
+  },
   "providerKeys": {
     "title": "Claves de proveedor",
     "intro": "Registra claves de API para los proveedores que usas. El poller en la nube obtiene tu uso diario para que la pestana Uso muestre totales autoritativos — incluyendo actividad de apps moviles y UIs web que el watcher local no ve. Las claves se cifran en reposo con AES-256-GCM y AAD por usuario; el texto plano solo viaja en el registro y nunca se devuelve.",

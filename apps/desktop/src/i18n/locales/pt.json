@@ -832,6 +832,33 @@
       "closeBranding": "ATO. Local-first. Licenca MIT. agentictool.ai"
     }
   },
+  "loopComposer": {
+    "trigger": {
+      "label": "Gatilho:",
+      "manual": "Manual",
+      "cron": "Cron",
+      "event": "Evento",
+      "cronPlaceholder": "0 9 * * 1-5",
+      "eventPlaceholder": "pull_request.opened",
+      "validationCron": "O gatilho cron exige uma expressao cron.",
+      "validationEvent": "O gatilho de evento exige um nome de evento."
+    },
+    "variables": {
+      "title": "Variaveis",
+      "description": "Defina variaveis de workflow como chave=valor.",
+      "add": "Adicionar variavel",
+      "remove": "Remover variavel",
+      "empty": "Nenhuma variavel de workflow ainda.",
+      "emptyHint": "Selecione um no para editar as configuracoes dele ou adicione variaveis do workflow abaixo.",
+      "keyPlaceholder": "chave",
+      "valuePlaceholder": "valor"
+    },
+    "migration": {
+      "banner": "Voce tem {{count}} workflows legados no armazenamento do navegador.",
+      "migrate": "Migrar para Loops",
+      "dismiss": "Dispensar"
+    }
+  },
   "providerKeys": {
     "title": "Chaves de provedor",
     "intro": "Cadastre chaves de API dos provedores que voce usa. O poller na nuvem busca o uso diario para que a aba Uso mostre totais autoritativos — incluindo atividade de apps mobile e UIs web que o watcher local nao ve. As chaves sao criptografadas em repouso com AES-256-GCM e AAD por usuario; o texto puro so trafega no cadastro e nunca e devolvido.",

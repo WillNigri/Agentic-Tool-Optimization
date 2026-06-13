@@ -31,7 +31,7 @@ pub struct Loop {
     /// Canonical loop graph as JSON: { nodes: LoopStep[], edges: LoopEdge[] }.
     pub graph: serde_json::Value,
     pub variables: Option<serde_json::Value>,
-    /// "manual" | "schedule" | "webhook"
+    /// "manual" | "cron" | "event"
     pub trigger_kind: String,
     pub trigger_config: Option<serde_json::Value>,
     /// "manual" | "migrated-from-automations" | "skill" | "group"
@@ -263,7 +263,7 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         .unwrap_or_else(|| "manual".to_string());
     if !matches!(
         trigger_kind.as_str(),
-        "manual" | "schedule" | "webhook"
+        "manual" | "cron" | "event" | "schedule" | "webhook"
     ) {
         return Err(format!("invalid trigger_kind: {}", trigger_kind));
     }
@@ -379,7 +379,7 @@ pub fn update_loop(
     if let Some(trigger_kind) = input.trigger_kind {
         if !matches!(
             trigger_kind.as_str(),
-            "manual" | "schedule" | "webhook"
+            "manual" | "cron" | "event" | "schedule" | "webhook"
         ) {
             return Err(format!("invalid trigger_kind: {}", trigger_kind));
         }
@@ -576,6 +576,81 @@ pub fn get_loop_run_steps(
         });
     }
     Ok(out)
+}
+
+// ── v2.14 step 3: run_loop_by_slug ──────────────────────────────────────
+//
+// Tauri command that the LoopComposer's Run button calls. Shells out to
+// the prod ato CLI binary (`ato loop run <slug>`) — the CLI is the
+// execution engine (v2.14 MVP wired in apps/cli/src/commands/loops.rs).
+// The CLI writes the loop_runs + loop_run_steps rows; this command just
+// returns the loop_run id so the desktop can poll get_loop_run_steps
+// for status updates.
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopRunStarted {
+    pub run_id: String,
+    pub status: String,
+}
+
+#[tauri::command]
+pub async fn run_loop_by_slug(slug_or_id: String) -> Result<LoopRunStarted, String> {
+    // Resolve the ato binary — prefer the prod app's sibling path so
+    // we hit the same keychain ACL identity the GUI uses for everything
+    // else (the dev `cargo run` binary has a different signature and
+    // gets refused by the master_key keychain item).
+    let ato_path = resolve_ato_cli_path()?;
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&ato_path)
+            .args(["loop", "run", &slug_or_id])
+            .env("ATO_CLIENT_SURFACE", "desktop")
+            .env("ATO_INITIATOR_KIND", "human")
+            .output()
+    })
+    .await
+    .map_err(|e| format!("spawn join error: {e}"))?
+    .map_err(|e| format!("Failed to spawn ato CLI: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!(
+            "ato loop run exited with status {} — {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    // The CLI emits JSON on success: {"run_id": "...", "status": "...", ...}.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    #[derive(serde::Deserialize)]
+    struct CliRunResult {
+        run_id: String,
+        status: String,
+    }
+    let parsed: CliRunResult = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("CLI returned non-JSON output: {e} — stdout was: {stdout}"))?;
+
+    Ok(LoopRunStarted {
+        run_id: parsed.run_id,
+        status: parsed.status,
+    })
+}
+
+/// Best-effort resolve the prod ato CLI binary. The desktop is always
+/// installed alongside the CLI at /Applications/ATO.app/Contents/MacOS/ato
+/// on macOS; on other platforms we fall back to the PATH-resolved `ato`.
+fn resolve_ato_cli_path() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let prod = "/Applications/ATO.app/Contents/MacOS/ato";
+        if std::path::Path::new(prod).exists() {
+            return Ok(prod.to_string());
+        }
+    }
+    // Fallback: PATH lookup — let the OS spawn handle resolution.
+    Ok("ato".to_string())
 }
 
 // Tests for slug derivation + update partial-write semantics live in

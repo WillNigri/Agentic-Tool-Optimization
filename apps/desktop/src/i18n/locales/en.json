@@ -716,6 +716,33 @@
     "addSkill": "Add Skill",
     "removeSkill": "Remove"
   },
+  "loopComposer": {
+    "trigger": {
+      "label": "Trigger:",
+      "manual": "Manual",
+      "cron": "Cron",
+      "event": "Event",
+      "cronPlaceholder": "0 9 * * 1-5",
+      "eventPlaceholder": "pull_request.opened",
+      "validationCron": "Cron trigger requires a cron expression.",
+      "validationEvent": "Event trigger requires an event name."
+    },
+    "variables": {
+      "title": "Variables",
+      "description": "Define workflow-level key/value variables.",
+      "add": "Add variable",
+      "remove": "Remove variable",
+      "empty": "No workflow variables yet.",
+      "emptyHint": "Select a node to edit node settings, or add workflow variables below.",
+      "keyPlaceholder": "key",
+      "valuePlaceholder": "value"
+    },
+    "migration": {
+      "banner": "You have {{count}} legacy workflows in browser storage.",
+      "migrate": "Migrate to Loops",
+      "dismiss": "Dismiss"
+    }
+  },
   "cron": {
     "title": "Cron Monitor",
     "subtitle": "Visual monitoring of scheduled agent jobs",

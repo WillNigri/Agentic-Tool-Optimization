@@ -349,6 +349,9 @@ pub fn run() {
             delete_loop,
             list_loop_runs,
             get_loop_run_steps,
+            // v2.14 step 3 — execution wrapper that fires the prod ato
+            // CLI's `loop run` engine and returns the loop_runs id.
+            commands::loops::run_loop_by_slug,
             prompt_agent_stream,
             prompt_agent_with_history_stream,
             prompt_claude,

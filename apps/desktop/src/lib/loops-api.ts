@@ -1,5 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export interface LoopRunStarted {
+  runId: string;
+  status: string;
+}
+
+/**
+ * v2.14 step 3 — fire the prod `ato loop run <slug>` CLI from the
+ * desktop. The CLI writes loop_runs + loop_run_steps with attribution
+ * (initiator=human, surface=desktop) and returns the run id so the
+ * caller can poll get_loop_run_steps for live status.
+ */
+export function run_loop_by_slug(slugOrId: string): Promise<LoopRunStarted> {
+  return invoke<LoopRunStarted>("run_loop_by_slug", { slugOrId });
+}
+
 export interface Loop {
   id: string;
   slug: string;
@@ -38,7 +53,7 @@ export interface LoopUpdateInput {
   enabled?: boolean;
   graph?: unknown;
   variables?: unknown | null;
-  triggerKind?: string;
+  triggerKind?: string | null;
   triggerConfig?: unknown | null;
 }
 

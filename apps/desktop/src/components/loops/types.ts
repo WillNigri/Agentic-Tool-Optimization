@@ -84,6 +84,8 @@ export interface FlowNode {
 // that runs without a human in the loop, not just skill-derived flows.
 export type WorkflowSource = "skill" | "cron" | "manual" | "group-routed" | "group-sequential" | "hook";
 
+export type WorkflowTriggerKind = "manual" | "cron" | "event";
+
 export interface NodeConfig {
   params: Record<string, string>;
   condition?: string; // for decision nodes
@@ -172,6 +174,9 @@ export interface Workflow {
   nodes: FlowNode[];
   edges: FlowEdge[];
   source?: WorkflowSource;
+  triggerKind?: WorkflowTriggerKind;
+  triggerConfig?: Record<string, string> | null;
+  variables?: Record<string, string>;
   // v0.8.0: Webhook trigger endpoint
   webhookId?: string;     // Unique webhook identifier
   webhookPath?: string;   // Generated webhook path
