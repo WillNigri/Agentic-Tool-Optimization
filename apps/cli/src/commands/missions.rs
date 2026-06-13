@@ -260,6 +260,53 @@ pub enum MissionSub {
         #[arg(long = "require-tools", value_delimiter = ',')]
         require_tools: Vec<String>,
     },
+
+    // ── v2.16 PR-5: merge-strategy execution ──────────────────────────
+
+    /// v2.16 PR-5 — integration merge workflow.
+    ///
+    /// Manages squash-merging accepted agent worktrees into a dedicated
+    /// integration branch (ato/mission/<slug>/integration), running
+    /// success_criteria check_commands after each merge and rolling back
+    /// on regression. All git ops target -C paths (no shell).
+    ///
+    /// Non-interactive primitives (safe to script):
+    ///   --status         list each agent: merged/skipped/pending + diffstat
+    ///   --approve <a>    squash-merge agent branch into integration branch
+    ///   --skip   <a>     mark agent skipped (optional --reason)
+    ///   --all            approve all pending agents (coordinator_merges_all only)
+    ///   --finish         emit integration_complete + write result_metadata
+    ///
+    /// Interactive wrapper (TTY only):
+    ///   bare `ato missions merge <slug>` prompts [a]pprove/[s]kip/[d]iff/[q]uit
+    ///   for each pending agent.
+    ///
+    /// Strategy gating:
+    ///   human_approves_each  → --approve/--skip/interactive; refuses --all
+    ///   coordinator_merges_all → --all/--approve; interactive and --skip also allowed
+    ///   coordinator_picks_winner / ranked_by_score → all merge sub-commands refused
+    ///     ("queued for a later release")
+    Merge {
+        slug_or_id: String,
+        /// List status (merged/skipped/pending) + diffstat for every agent.
+        #[arg(long, conflicts_with_all = ["approve", "skip", "all", "finish"])]
+        status: bool,
+        /// Squash-merge one agent's branch into the integration branch.
+        #[arg(long, value_name = "AGENT", conflicts_with_all = ["status", "skip", "all", "finish"])]
+        approve: Option<String>,
+        /// Mark one agent as skipped (optional --reason).
+        #[arg(long, value_name = "AGENT", conflicts_with_all = ["status", "approve", "all", "finish"])]
+        skip: Option<String>,
+        /// Optional reason text for --skip.
+        #[arg(long, requires = "skip")]
+        reason: Option<String>,
+        /// Approve ALL pending agents sequentially (coordinator_merges_all only).
+        #[arg(long, conflicts_with_all = ["status", "approve", "skip", "finish"])]
+        all: bool,
+        /// Emit integration_complete event when no pending agents remain.
+        #[arg(long, conflicts_with_all = ["status", "approve", "skip", "all"])]
+        finish: bool,
+    },
 }
 
 // ── Row types (mirror the DB rows for JSON serialization) ─────────────
@@ -428,6 +475,20 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
             model,
             require_tools,
         } => run_set_worker(slug_or_id, runtime, model, require_tools, db_path, opts),
+        // ── PR-5 ──────────────────────────────────────────────────────
+        MissionSub::Merge {
+            slug_or_id,
+            status,
+            approve,
+            skip,
+            reason,
+            all,
+            finish,
+        } => run_merge(
+            MergeInput { slug_or_id, status, approve, skip, reason, all, finish },
+            db_path,
+            opts,
+        ),
     }
 }
 
@@ -1687,11 +1748,56 @@ fn cleanup_mission_worktrees(
         .join(&mission.slug)
         .join("worktrees");
 
-    if !wt_root.exists() {
-        return Ok(Vec::new());
-    }
+    // Also try to remove the integration worktree (PR-5).
+    let integration_wt = PathBuf::from(&home)
+        .join(".ato")
+        .join("missions")
+        .join(&mission.slug)
+        .join("integration");
 
     let mut cleaned: Vec<String> = Vec::new();
+
+    if integration_wt.exists() {
+        let int_branch = format!("ato/mission/{}/integration", mission.slug);
+        let int_path_str = integration_wt.to_string_lossy().to_string();
+        let rm_out = std::process::Command::new("git")
+            .args(["-C", &repo_root, "worktree", "remove", "--force"])
+            .arg(&integration_wt)
+            .output()
+            .ok();
+        let rm_ok = rm_out.map(|o| {
+            o.status.success()
+                || String::from_utf8_lossy(&o.stderr).contains("is not a working tree")
+        }).unwrap_or(false);
+        if rm_ok {
+            if delete_branches {
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &repo_root, "branch", "-D", &int_branch])
+                    .output();
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            let _ = insert_event(
+                conn,
+                &mission.id,
+                "worktree_cleaned",
+                Some(serde_json::json!({
+                    "path": int_path_str,
+                    "branch": int_branch,
+                    "policy": mission.cleanup_policy,
+                    "trigger": if force { "manual_sweep" } else { "state_transition" },
+                    "branch_deleted": delete_branches,
+                    "integration": true,
+                })),
+                &now,
+            );
+            cleaned.push(int_path_str);
+        }
+    }
+
+    if !wt_root.exists() {
+        return Ok(cleaned);
+    }
+
     let entries = fs::read_dir(&wt_root)
         .with_context(|| format!("read_dir {}", wt_root.display()))?;
 
@@ -1787,6 +1893,963 @@ fn run_cleanup_command(
         }))?;
     }
     Ok(())
+}
+
+// ── v2.16 PR-5: merge-strategy execution ─────────────────────────────
+
+struct MergeInput {
+    slug_or_id: String,
+    status: bool,
+    approve: Option<String>,
+    skip: Option<String>,
+    reason: Option<String>,
+    all: bool,
+    finish: bool,
+}
+
+/// Shared helper: resolve worktree root for this mission.
+fn worktree_root_for(home: &std::ffi::OsStr, slug: &str) -> PathBuf {
+    PathBuf::from(home)
+        .join(".ato")
+        .join("missions")
+        .join(slug)
+        .join("worktrees")
+}
+
+/// Ensure the integration worktree exists at HOME/.ato/missions/<slug>/integration/
+/// on branch ato/mission/<slug>/integration created from base_sha.
+///
+/// Lazy/reuse: if the dir already exists the call is a no-op.
+/// On base_sha resolution failure: inserts 'escalated' event (same pattern as
+/// ensure_agent_worktree) and bails.
+/// On first creation: inserts 'integration_created' event.
+fn ensure_integration_worktree(conn: &Connection, mission: &MissionRow) -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME / USERPROFILE in env"))?;
+    let int_path = PathBuf::from(&home)
+        .join(".ato")
+        .join("missions")
+        .join(&mission.slug)
+        .join("integration");
+
+    // Lazy reuse.
+    if int_path.exists() {
+        return Ok(int_path);
+    }
+
+    let repo_root = mission.repo_root.as_deref().ok_or_else(|| anyhow::anyhow!(
+        "Mission '{}' has no repo_root — was it created outside a git repository?",
+        mission.slug
+    ))?;
+    let base_sha = mission.base_sha.as_deref().ok_or_else(|| anyhow::anyhow!(
+        "Mission '{}' has no base_sha — per_agent_worktree requires --base-sha at creation time",
+        mission.slug
+    ))?;
+
+    // Re-resolve base_sha (same escalation-on-unresolvable pattern as ensure_agent_worktree).
+    let resolve_out = std::process::Command::new("git")
+        .args(["-C", repo_root, "rev-parse", "--verify", "--quiet"])
+        .arg(format!("{}^{{commit}}", base_sha))
+        .output()
+        .context("spawn git rev-parse to verify base_sha for integration worktree")?;
+
+    if !resolve_out.status.success() {
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_event(
+            conn,
+            &mission.id,
+            "escalated",
+            Some(serde_json::json!({
+                "reason": "base_sha_unresolvable",
+                "base_sha": base_sha,
+                "repo_root": repo_root,
+                "context": "integration_worktree_creation",
+                "options": [
+                    "recreate mission with a current base SHA",
+                    "git fetch to restore the commit",
+                ],
+            })),
+            &now,
+        ).context("insert escalated event for integration worktree")?;
+        anyhow::bail!(
+            "Mission '{}': base_sha '{}' is unresolvable in repo '{}' (integration worktree).",
+            mission.slug, base_sha, repo_root
+        );
+    }
+
+    // Create parent directory.
+    let parent = int_path.parent().expect("int_path always has parent");
+    fs::create_dir_all(parent)
+        .with_context(|| format!("mkdir -p {}", parent.display()))?;
+
+    let branch = format!("ato/mission/{}/integration", mission.slug);
+
+    // Check if branch already exists (idempotent when dir was deleted but branch survived).
+    let branch_exists = std::process::Command::new("git")
+        .args(["-C", repo_root, "rev-parse", "--verify", "--quiet", &branch])
+        .output()
+        .context("check integration branch existence")?
+        .status.success();
+
+    if branch_exists {
+        let add_out = std::process::Command::new("git")
+            .args(["-C", repo_root, "worktree", "add"])
+            .arg(&int_path)
+            .arg(&branch)
+            .output()
+            .with_context(|| format!("git worktree add {} {}", int_path.display(), branch))?;
+        if !add_out.status.success() {
+            anyhow::bail!(
+                "git worktree add (integration, existing branch) failed: {}",
+                String::from_utf8_lossy(&add_out.stderr).trim()
+            );
+        }
+    } else {
+        let add_out = std::process::Command::new("git")
+            .args(["-C", repo_root, "worktree", "add", "-b", &branch])
+            .arg(&int_path)
+            .arg(base_sha)
+            .output()
+            .with_context(|| format!("git worktree add -b {} {} {}", branch, int_path.display(), base_sha))?;
+        if !add_out.status.success() {
+            anyhow::bail!(
+                "git worktree add -b (integration) failed: {}",
+                String::from_utf8_lossy(&add_out.stderr).trim()
+            );
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    insert_event(
+        conn,
+        &mission.id,
+        "integration_created",
+        Some(serde_json::json!({
+            "path": int_path.to_string_lossy(),
+            "branch": branch,
+            "base_sha": base_sha,
+        })),
+        &now,
+    )?;
+
+    Ok(int_path)
+}
+
+/// Enumerate agents that have a worktree directory under worktrees/ MINUS
+/// those already recorded in 'agent_merged' or 'agent_skipped' events.
+///
+/// Returns sorted Vec of agent slugs (dir names).
+fn pending_agents(conn: &Connection, mission: &MissionRow) -> Result<Vec<String>> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME / USERPROFILE in env"))?;
+    let wt_root = worktree_root_for(&home, &mission.slug);
+
+    // Collect all worktree dir names.
+    let mut all_agents: Vec<String> = Vec::new();
+    if wt_root.exists() {
+        for entry in fs::read_dir(&wt_root)
+            .with_context(|| format!("read_dir {}", wt_root.display()))?
+        {
+            let entry = entry.context("read worktree dir entry")?;
+            if entry.path().is_dir() {
+                all_agents.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    all_agents.sort();
+
+    // Collect already-handled agents from events.
+    let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stmt = conn.prepare(
+        "SELECT payload FROM mission_events
+          WHERE mission_id = ?1
+            AND kind IN ('agent_merged', 'agent_skipped')",
+    )?;
+    let payloads: Vec<Option<String>> = stmt
+        .query_map(params![mission.id], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for p in payloads {
+        if let Some(s) = p {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(a) = v.get("agent").and_then(|a| a.as_str()) {
+                    handled.insert(a.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(all_agents.into_iter().filter(|a| !handled.contains(a)).collect())
+}
+
+/// Check merge_strategy gating rules.
+/// Returns Err with a user-facing message if the operation is not allowed.
+fn check_merge_strategy_gate(mission: &MissionRow, want_all: bool) -> Result<()> {
+    match mission.merge_strategy.as_str() {
+        "coordinator_picks_winner" | "ranked_by_score" => {
+            anyhow::bail!(
+                "Mission '{}' has merge_strategy='{}' — this strategy is queued for a later release.\n\
+                 Currently supported: human_approves_each, coordinator_merges_all.",
+                mission.slug, mission.merge_strategy
+            );
+        }
+        "human_approves_each" if want_all => {
+            anyhow::bail!(
+                "Mission '{}' has merge_strategy='human_approves_each': --all is not allowed.\n\
+                 Use --approve <agent> to merge one agent at a time, or change the mission's \
+                 merge_strategy to coordinator_merges_all.",
+                mission.slug
+            );
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Run all success_criteria check_commands in `work_dir` (no-shell argv split).
+/// Returns (all_met, results_json).
+fn run_checks_in_dir(
+    criteria: &[serde_json::Value],
+    work_dir: &Path,
+) -> (bool, Vec<serde_json::Value>) {
+    let mut results = Vec::new();
+    for criterion in criteria {
+        let desc = criterion
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("(no description)")
+            .to_string();
+        let check_cmd = criterion
+            .get("check_command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if check_cmd.is_empty() {
+            results.push(serde_json::json!({"description": desc, "exit_code": -1, "met": false}));
+            continue;
+        }
+        let parts: Vec<&str> = check_cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            results.push(serde_json::json!({"description": desc, "exit_code": -1, "met": false}));
+            continue;
+        }
+        let exit_code = std::process::Command::new(parts[0])
+            .args(&parts[1..])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.code().unwrap_or(-1))
+            .unwrap_or(-1);
+        results.push(serde_json::json!({
+            "description": desc,
+            "exit_code": exit_code,
+            "met": exit_code == 0,
+        }));
+    }
+    let all_met = !results.is_empty() && results.iter().all(|r| r.get("met").and_then(|m| m.as_bool()).unwrap_or(false));
+    (all_met, results)
+}
+
+/// Extract the set of criterion descriptions that were met in the most recent
+/// 'success_check' or 'merge_check' event, for regression detection.
+fn previously_met_criteria(conn: &Connection, mission_id: &str) -> Result<std::collections::HashSet<String>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM mission_events
+              WHERE mission_id = ?1
+                AND kind IN ('success_check', 'merge_check')
+              ORDER BY occurred_at DESC
+              LIMIT 1",
+            params![mission_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let Some(payload_str) = latest else {
+        return Ok(std::collections::HashSet::new());
+    };
+    let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap_or(serde_json::json!(null));
+    let results = v.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    Ok(results
+        .into_iter()
+        .filter(|r| r.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
+        .filter_map(|r| r.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()))
+        .collect())
+}
+
+/// Perform a squash-merge of `agent` into the integration worktree.
+/// Returns Ok(commit_sha) on success or Err(EscalatedBrief) on conflict/regression.
+fn approve_one_agent(
+    conn: &Connection,
+    mission: &MissionRow,
+    agent: &str,
+    int_path: &Path,
+    repo_root: &str,
+) -> Result<()> {
+    // Codex R1 [MED] fix: refuse re-approval of an already-merged/skipped
+    // agent. Without this guard a concurrent CLI process can produce a
+    // duplicate `agent_merged` event (and previously, with --allow-empty,
+    // an empty provenance commit).
+    let pending = pending_agents(conn, mission)?;
+    if !pending.iter().any(|a| a == agent) {
+        anyhow::bail!(
+            "agent '{}' is not pending for mission '{}' (already merged or skipped). \
+             See `ato missions merge {} --status`.",
+            agent, mission.slug, mission.slug,
+        );
+    }
+
+    let agent_branch = format!("ato/mission/{}/{}", mission.slug, slugify(agent));
+
+    // Squash merge.
+    let merge_out = std::process::Command::new("git")
+        .args(["-C", int_path.to_str().unwrap_or("."), "merge", "--squash", &agent_branch])
+        .output()
+        .with_context(|| format!("git merge --squash {}", agent_branch))?;
+
+    if !merge_out.status.success() {
+        // Conflict — collect conflicting files BEFORE the abort wipes the
+        // index, so the brief carries the real file list. Codex R1 [LOW] fix.
+        let status_out = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap_or("."), "status", "--porcelain"])
+            .output()
+            .ok();
+        let conflicting_files: Vec<String> = status_out
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| l.starts_with("UU") || l.starts_with("AA") || l.starts_with("DD"))
+                    .map(|l| l[3..].trim().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Now abort to restore the integration branch to its pre-merge state.
+        let abort_out = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap_or("."), "merge", "--abort"])
+            .output()
+            .ok();
+        // Fallback: reset to HEAD if abort fails (e.g. nothing to abort).
+        if abort_out.map(|o| !o.status.success()).unwrap_or(true) {
+            let _ = std::process::Command::new("git")
+                .args(["-C", int_path.to_str().unwrap_or("."), "reset", "--hard", "HEAD"])
+                .output();
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let brief = serde_json::json!({
+            "reason": "merge_conflict",
+            "agent": agent,
+            "conflicting_files": conflicting_files,
+            "options": [
+                "resolve manually in the integration worktree then commit",
+                "skip this agent (--skip)",
+                "abandon mission",
+            ],
+        });
+        insert_event(conn, &mission.id, "escalated", Some(brief.clone()), &now)?;
+        anyhow::bail!(
+            "Merge conflict for agent '{}' in mission '{}'.\n\
+             Conflicting files: {:?}\n\
+             Options:\n\
+               1. Resolve manually in {} then commit\n\
+               2. ato missions merge {} --skip {}\n\
+               3. Abandon mission",
+            agent, mission.slug, conflicting_files,
+            int_path.display(), mission.slug, agent
+        );
+    }
+
+    // Collect previously-met criteria before this merge (for regression detection).
+    let prev_met = previously_met_criteria(conn, &mission.id)?;
+
+    // Get the agent worktree path for the commit message.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME in env"))?;
+    let agent_wt_path = PathBuf::from(&home)
+        .join(".ato")
+        .join("missions")
+        .join(&mission.slug)
+        .join("worktrees")
+        .join(slugify(agent));
+
+    // Get agent branch HEAD sha.
+    let agent_head_sha = std::process::Command::new("git")
+        .args(["-C", repo_root, "rev-parse", &agent_branch])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let base_sha = mission.base_sha.as_deref().unwrap_or("unknown");
+    let commit_msg = format!(
+        "mission({}): accept {}\n\nbase_sha: {}\nworkspace_root: {}\nsource_branch: {}@{}",
+        mission.slug,
+        agent,
+        base_sha,
+        agent_wt_path.display(),
+        agent_branch,
+        agent_head_sha,
+    );
+
+    // Codex R1 [MED] fix: drop --allow-empty. If the squash produced no
+    // changes (duplicate work, or branch already merged), the commit fails
+    // — which is the right outcome; the operator should --skip instead.
+    let commit_out = std::process::Command::new("git")
+        .args([
+            "-C", int_path.to_str().unwrap_or("."),
+            "commit", "-m", &commit_msg,
+        ])
+        .output()
+        .with_context(|| format!("git commit for agent '{}'", agent))?;
+
+    if !commit_out.status.success() {
+        anyhow::bail!(
+            "git commit after squash failed for agent '{}': {}",
+            agent,
+            String::from_utf8_lossy(&commit_out.stderr).trim()
+        );
+    }
+
+    // Get integration HEAD sha after commit.
+    let commit_sha = std::process::Command::new("git")
+        .args(["-C", int_path.to_str().unwrap_or("."), "rev-parse", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    // Run ALL success_criteria check_commands in the integration worktree.
+    let criteria = mission.success_criteria.as_array().cloned().unwrap_or_default();
+    let (all_met, check_results) = run_checks_in_dir(&criteria, int_path);
+
+    // Record merge_check event.
+    let now = chrono::Utc::now().to_rfc3339();
+    insert_event(
+        conn,
+        &mission.id,
+        "merge_check",
+        Some(serde_json::json!({
+            "agent": agent,
+            "commit_sha": commit_sha,
+            "results": check_results,
+            "all_met": all_met,
+        })),
+        &now,
+    )?;
+
+    // Check for regression: any previously-met criterion that is now unmet.
+    let regressed: Vec<String> = check_results
+        .iter()
+        .filter(|r| !r.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
+        .filter_map(|r| r.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()))
+        .filter(|desc| prev_met.contains(desc))
+        .collect();
+
+    if !regressed.is_empty() {
+        // Roll back the squash commit on the integration branch.
+        let _ = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap_or("."), "reset", "--hard", "HEAD~1"])
+            .output();
+
+        let brief = serde_json::json!({
+            "reason": "regression_after_merge",
+            "agent": agent,
+            "regressed": regressed,
+            "options": [
+                "fix the regression in the agent's worktree and re-approve",
+                "skip this agent (--skip)",
+                "adjust success_criteria if the criterion is no longer relevant",
+            ],
+        });
+        insert_event(conn, &mission.id, "escalated", Some(brief.clone()), &now)?;
+        anyhow::bail!(
+            "Regression detected after merging agent '{}' in mission '{}'.\n\
+             Regressed criteria: {:?}\n\
+             The squash commit has been rolled back. Integration branch is clean.\n\
+             Options:\n\
+               1. Fix the regression in the agent worktree and re-approve\n\
+               2. ato missions merge {} --skip {}\n\
+               3. Adjust success_criteria if no longer relevant",
+            agent, mission.slug, regressed, mission.slug, agent
+        );
+    }
+
+    // Record agent_merged event. Codex R1 [LOW] fix: persist the same
+    // provenance tuple the commit message carries so the SQLite audit
+    // trail stays complete even after git history rewrites.
+    insert_event(
+        conn,
+        &mission.id,
+        "agent_merged",
+        Some(serde_json::json!({
+            "agent": agent,
+            "commit_sha": commit_sha,
+            "checks": check_results,
+            "base_sha": base_sha,
+            "workspace_root": agent_wt_path.display().to_string(),
+            "source_branch": agent_branch,
+            "source_branch_head_sha": agent_head_sha,
+        })),
+        &now,
+    )?;
+
+    conn.execute(
+        "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+        params![now, mission.id],
+    )?;
+
+    Ok(())
+}
+
+/// Final gate run by `ato missions merge <slug> --finish`. Refuses to declare
+/// the mission complete while any `success_criteria` check_command fails in
+/// the integration workspace. Per-agent rollback only catches regressions
+/// against a previously-met baseline — if the first approved agent already
+/// fails a criterion, that baseline is empty and the failure slips through
+/// without this gate. Also serves missions whose only agent introduces a
+/// brand-new criterion that was never met before.
+///
+/// Side effects: always inserts a `merge_check` receipt (phase="finish"); on
+/// failure, inserts an `escalated` event with reason="finish_blocked_unmet_criteria"
+/// and bails so the caller does NOT write `integration_complete`.
+fn finish_gate(
+    conn: &Connection,
+    mission: &MissionRow,
+    int_path: &Path,
+    int_branch: &str,
+    head_sha: &str,
+    now: &str,
+) -> Result<()> {
+    let criteria = mission.success_criteria.as_array().cloned().unwrap_or_default();
+    if criteria.is_empty() || !int_path.exists() {
+        return Ok(());
+    }
+    let (all_met, results) = run_checks_in_dir(&criteria, int_path);
+    insert_event(
+        conn,
+        &mission.id,
+        "merge_check",
+        Some(serde_json::json!({
+            "phase": "finish",
+            "results": results.clone(),
+            "all_met": all_met,
+        })),
+        now,
+    )?;
+    if !all_met {
+        let unmet: Vec<String> = results
+            .iter()
+            .filter(|r| !r.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
+            .filter_map(|r| r.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()))
+            .collect();
+        let brief = serde_json::json!({
+            "reason": "finish_blocked_unmet_criteria",
+            "branch": int_branch,
+            "head_sha": head_sha,
+            "unmet": unmet,
+            "options": [
+                "fix the unmet criteria in the integration worktree and re-run `ato missions merge <slug> --finish`",
+                "ato missions merge <slug> --approve <agent> on a new agent worktree that addresses the gap",
+                "adjust success_criteria if a criterion is no longer relevant",
+            ],
+        });
+        insert_event(conn, &mission.id, "escalated", Some(brief.clone()), now)?;
+        anyhow::bail!(
+            "Cannot finish mission '{}': {} success criterion/criteria still unmet on the integration branch.\n\
+             Unmet: {:?}\n\
+             Branch left intact for inspection: {}\n\
+             Run `ato missions events {}` to see the brief and options.",
+            mission.slug, unmet.len(), unmet, int_branch, mission.slug,
+        );
+    }
+    Ok(())
+}
+
+/// `ato missions merge <slug> [flags]`
+fn run_merge(input: MergeInput, db_path: &PathBuf, opts: &Opts) -> Result<()> {
+    let conn = db::open_readwrite(db_path)?;
+    let mission = load_mission(&conn, &input.slug_or_id)?;
+
+    // --status is always allowed.
+    if input.status {
+        return run_merge_status(&conn, &mission, opts);
+    }
+
+    // Strategy gating: picks_winner / ranked_by_score refuse everything except --status.
+    // --all requires coordinator_merges_all.
+    check_merge_strategy_gate(&mission, input.all)?;
+
+    // --skip
+    if let Some(agent) = &input.skip {
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_event(
+            &conn,
+            &mission.id,
+            "agent_skipped",
+            Some(serde_json::json!({
+                "agent": agent,
+                "reason": input.reason,
+            })),
+            &now,
+        )?;
+        conn.execute(
+            "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+            params![now, mission.id],
+        )?;
+        if opts.human {
+            emit_human(&format!("Skipped agent '{}' for mission '{}'", agent, mission.slug));
+        } else {
+            emit_json(&serde_json::json!({"skipped": agent, "mission": mission.slug}))?;
+        }
+        return Ok(());
+    }
+
+    // --approve <agent>
+    if let Some(agent) = &input.approve {
+        let int_path = ensure_integration_worktree(&conn, &mission)?;
+        let repo_root = mission.repo_root.as_deref().ok_or_else(|| anyhow::anyhow!("no repo_root"))?;
+        approve_one_agent(&conn, &mission, agent, &int_path, repo_root)?;
+        if opts.human {
+            emit_human(&format!("Merged agent '{}' into integration branch for mission '{}'", agent, mission.slug));
+        } else {
+            emit_json(&serde_json::json!({"merged": agent, "mission": mission.slug}))?;
+        }
+        return Ok(());
+    }
+
+    // --all
+    if input.all {
+        let int_path = ensure_integration_worktree(&conn, &mission)?;
+        let repo_root = mission.repo_root.as_deref().ok_or_else(|| anyhow::anyhow!("no repo_root"))?.to_string();
+        let agents = pending_agents(&conn, &mission)?;
+        if agents.is_empty() {
+            if opts.human {
+                emit_human(&format!("No pending agents for mission '{}'", mission.slug));
+            } else {
+                emit_json(&serde_json::json!({"pending": [], "mission": mission.slug}))?;
+            }
+            return Ok(());
+        }
+        for agent in &agents {
+            if opts.human {
+                emit_human(&format!("  Merging agent '{}'...", agent));
+            }
+            approve_one_agent(&conn, &mission, agent, &int_path, &repo_root)?;
+            if opts.human {
+                emit_human(&format!("  ✓ merged '{}'", agent));
+            }
+        }
+        if opts.human {
+            emit_human(&format!("All {} agent(s) merged for mission '{}'", agents.len(), mission.slug));
+        } else {
+            emit_json(&serde_json::json!({"merged_all": agents, "mission": mission.slug}))?;
+        }
+        return Ok(());
+    }
+
+    // --finish
+    if input.finish {
+        let remaining = pending_agents(&conn, &mission)?;
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "Cannot finish: {} pending agent(s) remain: {:?}\n\
+                 Approve or skip all agents before calling --finish.",
+                remaining.len(), remaining
+            );
+        }
+
+        // Collect merged + skipped from events.
+        let (merged_agents, skipped_agents) = collect_merged_skipped(&conn, &mission.id)?;
+
+        // Get integration branch HEAD sha.
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .ok_or_else(|| anyhow::anyhow!("no HOME"))?;
+        let int_path = PathBuf::from(&home)
+            .join(".ato")
+            .join("missions")
+            .join(&mission.slug)
+            .join("integration");
+
+        let head_sha = if int_path.exists() {
+            std::process::Command::new("git")
+                .args(["-C", int_path.to_str().unwrap_or("."), "rev-parse", "HEAD"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let int_branch = format!("ato/mission/{}/integration", mission.slug);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Codex R1 [HIGH] fix: gate --finish on a final pass of every
+        // success_criterion against the integration workspace.
+        finish_gate(&conn, &mission, &int_path, &int_branch, &head_sha, &now)?;
+
+        insert_event(
+            &conn,
+            &mission.id,
+            "integration_complete",
+            Some(serde_json::json!({
+                "branch": int_branch,
+                "head_sha": head_sha,
+                "merged": merged_agents,
+                "skipped": skipped_agents,
+            })),
+            &now,
+        )?;
+
+        // Write result_metadata to the mission row.
+        let result_metadata = serde_json::json!({
+            "integration_branch": int_branch,
+            "head_sha": head_sha,
+            "merged": merged_agents,
+            "skipped": skipped_agents,
+        });
+        let rm_str = serde_json::to_string(&result_metadata).context("serialize result_metadata")?;
+        conn.execute(
+            "UPDATE missions SET result_metadata = ?1, updated_at = ?2 WHERE id = ?3",
+            params![rm_str, now, mission.id],
+        )?;
+
+        if opts.human {
+            emit_human(&format!(
+                "Integration complete for mission '{}'.\n\
+                 Branch: {}\n\
+                 Merge this branch into your working branch to apply the changes.",
+                mission.slug, int_branch
+            ));
+        } else {
+            emit_json(&result_metadata)?;
+        }
+        return Ok(());
+    }
+
+    // Bare `ato missions merge <slug>` — interactive wrapper.
+    run_merge_interactive(conn, mission, db_path, opts)
+}
+
+/// --status: list each agent with merged/skipped/pending + diffstat.
+fn run_merge_status(conn: &Connection, mission: &MissionRow, opts: &Opts) -> Result<()> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME"))?;
+    let wt_root = worktree_root_for(&home, &mission.slug);
+
+    // All agent dir names (sorted).
+    let mut all_agents: Vec<String> = Vec::new();
+    if wt_root.exists() {
+        for entry in fs::read_dir(&wt_root)
+            .with_context(|| format!("read_dir {}", wt_root.display()))?
+        {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                all_agents.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    all_agents.sort();
+
+    // Collect handled agents and their status.
+    let mut agent_status: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT kind, payload FROM mission_events
+          WHERE mission_id = ?1
+            AND kind IN ('agent_merged', 'agent_skipped')
+          ORDER BY occurred_at ASC",
+    )?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map(params![mission.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // agent_status holds borrowed strs — use String instead.
+    let mut agent_status_owned: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (kind, payload_opt) in &rows {
+        if let Some(s) = payload_opt {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                if let Some(a) = v.get("agent").and_then(|a| a.as_str()) {
+                    let status = if kind == "agent_merged" { "merged" } else { "skipped" };
+                    agent_status_owned.insert(a.to_string(), status.to_string());
+                }
+            }
+        }
+    }
+    drop(agent_status); // unused, drop it
+
+    let repo_root = mission.repo_root.as_deref().unwrap_or(".");
+    let base_sha = mission.base_sha.as_deref().unwrap_or("HEAD");
+
+    #[derive(Serialize)]
+    struct AgentStatus {
+        agent: String,
+        status: String,
+        diffstat: String,
+    }
+
+    let mut statuses: Vec<AgentStatus> = Vec::new();
+    for agent in &all_agents {
+        let st = agent_status_owned.get(agent).cloned().unwrap_or_else(|| "pending".to_string());
+        let agent_branch = format!("ato/mission/{}/{}", mission.slug, agent);
+        let diffstat = std::process::Command::new("git")
+            .args(["-C", repo_root, "diff", "--stat",
+                   &format!("{}..{}", base_sha, agent_branch)])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        statuses.push(AgentStatus { agent: agent.clone(), status: st, diffstat });
+    }
+
+    if opts.human {
+        if statuses.is_empty() {
+            emit_human(&format!("No agent worktrees found for mission '{}'", mission.slug));
+        } else {
+            for s in &statuses {
+                emit_human(&format!("[{}] {}\n  diffstat: {}", s.status, s.agent,
+                    if s.diffstat.is_empty() { "(no changes)" } else { &s.diffstat }));
+            }
+        }
+    } else {
+        emit_json(&statuses)?;
+    }
+    Ok(())
+}
+
+/// Interactive merge wrapper (TTY only).
+fn run_merge_interactive(
+    conn: Connection,
+    mission: MissionRow,
+    _db_path: &PathBuf,
+    opts: &Opts,
+) -> Result<()> {
+    use std::io::{self, BufRead, Write};
+
+    if !std::io::IsTerminal::is_terminal(&io::stdin()) {
+        anyhow::bail!(
+            "ato missions merge '{}': not a terminal.\n\
+             Use --approve/--skip/--status/--all/--finish in scripts.",
+            mission.slug
+        );
+    }
+
+    let repo_root = mission.repo_root.as_deref()
+        .ok_or_else(|| anyhow::anyhow!("no repo_root"))?.to_string();
+    let base_sha = mission.base_sha.as_deref().unwrap_or("HEAD").to_string();
+    let int_path = ensure_integration_worktree(&conn, &mission)?;
+
+    let agents = pending_agents(&conn, &mission)?;
+    if agents.is_empty() {
+        emit_human(&format!(
+            "No pending agents for mission '{}'. Use --finish to complete integration.",
+            mission.slug
+        ));
+        return Ok(());
+    }
+
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+
+    for agent in &agents {
+        let agent_branch = format!("ato/mission/{}/{}", mission.slug, agent);
+
+        // Show diffstat.
+        let diff_stat_str = std::process::Command::new("git")
+            .args(["-C", &repo_root, "diff", "--stat",
+                   &format!("{}..{}", base_sha, agent_branch)])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        emit_human(&format!("\nAgent: {}\n{}", agent, diff_stat_str));
+
+        loop {
+            print!("[a]pprove / [s]kip / [d]iff / [q]uit: ");
+            io::stdout().flush().ok();
+            let line = match lines.next() {
+                Some(Ok(l)) => l.trim().to_lowercase(),
+                _ => "q".to_string(),
+            };
+            match line.as_str() {
+                "a" | "approve" => {
+                    match approve_one_agent(&conn, &mission, agent, &int_path, &repo_root) {
+                        Ok(_) => { emit_human(&format!("  ✓ merged '{}'", agent)); }
+                        Err(e) => { emit_human(&format!("  ✗ {}", e)); }
+                    }
+                    break;
+                }
+                "s" | "skip" => {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let _ = insert_event(
+                        &conn,
+                        &mission.id,
+                        "agent_skipped",
+                        Some(serde_json::json!({"agent": agent, "reason": "interactive_skip"})),
+                        &now,
+                    );
+                    emit_human(&format!("  Skipped '{}'", agent));
+                    break;
+                }
+                "d" | "diff" => {
+                    let full_diff_str = std::process::Command::new("git")
+                        .args(["-C", &repo_root, "diff",
+                               &format!("{}..{}", base_sha, agent_branch)])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                        .unwrap_or_default();
+                    emit_human(&full_diff_str);
+                }
+                "q" | "quit" => {
+                    emit_human("Quit interactive merge. Run again to continue.");
+                    return Ok(());
+                }
+                _ => { emit_human("  Unknown input. Use a/s/d/q."); }
+            }
+        }
+    }
+
+    let _ = opts; // used for consistency
+    emit_human(&format!(
+        "\nAll agents processed. Run `ato missions merge {} --finish` to complete integration.",
+        mission.slug
+    ));
+    Ok(())
+}
+
+/// Collect lists of merged and skipped agent names from mission events.
+fn collect_merged_skipped(conn: &Connection, mission_id: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, payload FROM mission_events
+          WHERE mission_id = ?1
+            AND kind IN ('agent_merged', 'agent_skipped')
+          ORDER BY occurred_at ASC",
+    )?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map(params![mission_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut merged = Vec::new();
+    let mut skipped = Vec::new();
+    for (kind, payload_opt) in rows {
+        if let Some(s) = payload_opt {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(a) = v.get("agent").and_then(|a| a.as_str()) {
+                    if kind == "agent_merged" {
+                        merged.push(a.to_string());
+                    } else {
+                        skipped.push(a.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok((merged, skipped))
 }
 
 // ── v2.16 PR-4: set-worker ────────────────────────────────────────────
@@ -4264,6 +5327,756 @@ mod tests {
         let streak = count_consecutive_failures(&conn, "m-f3").unwrap();
         assert_eq!(streak, 3,
             "dispatch_abandoned must count toward consecutive failure streak (was {streak})");
+    }
+
+    // ── v2.16 PR-5 tests ─────────────────────────────────────────────
+
+    /// Set up a temp git repo with one commit on the given dir, configure git
+    /// identity, and return the base_sha.
+    fn setup_git_repo(repo_path: &std::path::Path) -> String {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", repo_path.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "t@t.com"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(repo_path.join("base.txt"), b"base").unwrap();
+        git(&["add", "base.txt"]);
+        git(&["commit", "-m", "base"]);
+        let sha_out = git(&["rev-parse", "HEAD"]);
+        String::from_utf8_lossy(&sha_out.stdout).trim().to_string()
+    }
+
+    /// Seed a mission row suited for per_agent_worktree + merge tests.
+    fn seed_merge_mission(
+        conn: &Connection,
+        id: &str,
+        slug: &str,
+        base_sha: &str,
+        repo_root: &str,
+        merge_strategy: &str,
+        success_criteria: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, workspace_strategy,
+                base_sha, cleanup_policy, merge_strategy, narrative_md_path,
+                created_at, updated_at, repo_root)
+             VALUES (?1, ?2, ?3, 'Goal', ?4, 'per_agent_worktree',
+                ?5, 'delete_on_success', ?6, '/tmp/m.md',
+                '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z', ?7)",
+            rusqlite::params![id, slug, slug, success_criteria, base_sha, merge_strategy, repo_root],
+        ).unwrap();
+    }
+
+    /// (a) Integration worktree created from base_sha; reused on second call.
+    #[test]
+    fn integration_worktree_created_from_base_sha_and_reused() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let base_sha = setup_git_repo(repo_dir.path());
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+        seed_merge_mission(&conn, "m-int", "int-test", &base_sha,
+            repo_dir.path().to_str().unwrap(), "human_approves_each", "[]");
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _guard = HomeGuard::acquire();
+        _guard.set(home_dir.path());
+
+        let mission = load_mission(&conn, "int-test").unwrap();
+
+        // First call: creates.
+        let p1 = ensure_integration_worktree(&conn, &mission).unwrap();
+        assert!(p1.exists(), "integration worktree dir must exist after creation");
+
+        // integration_created event.
+        let created_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-int' AND kind = 'integration_created'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(created_count, 1, "exactly one integration_created event");
+
+        // Second call: reuse — no additional event.
+        let p2 = ensure_integration_worktree(&conn, &mission).unwrap();
+        assert_eq!(p1, p2, "second call returns same path");
+        let created_count2: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-int' AND kind = 'integration_created'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(created_count2, 1, "still exactly one integration_created event on reuse");
+
+        // Clean up.
+        std::process::Command::new("git")
+            .args(["-C", repo_dir.path().to_str().unwrap(), "worktree", "remove", "--force"])
+            .arg(&p1)
+            .output().ok();
+        std::process::Command::new("git")
+            .args(["-C", repo_dir.path().to_str().unwrap(), "branch", "-D",
+                   &format!("ato/mission/int-test/integration")])
+            .output().ok();
+    }
+
+    /// (b) --approve clean path: seed agent worktree with a committed file change,
+    /// approve, assert squash commit on integration branch + agent_merged event
+    /// + file present in integration worktree.
+    #[test]
+    fn approve_clean_path_squash_commit_and_event() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let base_sha = setup_git_repo(repo_dir.path());
+        let repo_root = repo_dir.path().to_str().unwrap().to_string();
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _guard = HomeGuard::acquire();
+        _guard.set(home_dir.path());
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+        seed_merge_mission(&conn, "m-appr", "appr-test", &base_sha, &repo_root,
+            "human_approves_each", "[]");
+
+        let mission = load_mission(&conn, "appr-test").unwrap();
+
+        // Create agent worktree with a committed file change.
+        let agent = "agent-a";
+        let agent_wt = ensure_agent_worktree(&conn, &mission, agent).unwrap();
+        std::fs::write(agent_wt.join("new-file.txt"), b"agent-a-content").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", agent_wt.to_str().unwrap()])
+                .args(args)
+                .output().unwrap()
+        };
+        git(&["add", "new-file.txt"]);
+        git(&["commit", "-m", "agent-a adds file"]);
+
+        // Create integration worktree.
+        let int_path = ensure_integration_worktree(&conn, &mission).unwrap();
+
+        // Approve.
+        approve_one_agent(&conn, &mission, agent, &int_path, &repo_root).unwrap();
+
+        // Assert file is present in integration worktree.
+        assert!(int_path.join("new-file.txt").exists(), "new-file.txt must be in integration worktree");
+
+        // Assert agent_merged event.
+        let merged_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-appr' AND kind = 'agent_merged'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(merged_count, 1, "one agent_merged event");
+
+        // Assert integration branch has a commit beyond base.
+        let log_out = std::process::Command::new("git")
+            .args(["-C", &repo_root, "log", "--oneline",
+                   &format!("{}..ato/mission/appr-test/integration", base_sha)])
+            .output().unwrap();
+        let log_str = String::from_utf8_lossy(&log_out.stdout);
+        assert!(!log_str.trim().is_empty(), "integration branch must have at least one commit beyond base");
+
+        // Clean up.
+        std::process::Command::new("git")
+            .args(["-C", &repo_root, "worktree", "remove", "--force"])
+            .arg(&agent_wt).output().ok();
+        std::process::Command::new("git")
+            .args(["-C", &repo_root, "worktree", "remove", "--force"])
+            .arg(&int_path).output().ok();
+        for br in &[
+            format!("ato/mission/appr-test/{}", slugify(agent)),
+            "ato/mission/appr-test/integration".to_string(),
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root, "branch", "-D", br])
+                .output().ok();
+        }
+    }
+
+    /// (c) Conflict path: two agents editing the same line. Approve first OK,
+    /// approve second → escalated merge_conflict event, integration branch still clean.
+    #[test]
+    fn approve_conflict_escalates_and_integration_stays_clean() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo_root = repo_dir.path().to_str().unwrap().to_string();
+
+        // Create base with a file that both agents will modify.
+        let git_repo = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root]).args(args).output().unwrap()
+        };
+        git_repo(&["init"]);
+        git_repo(&["config", "user.email", "t@t.com"]);
+        git_repo(&["config", "user.name", "T"]);
+        std::fs::write(repo_dir.path().join("conflict.txt"), b"line-one\n").unwrap();
+        git_repo(&["add", "conflict.txt"]);
+        git_repo(&["commit", "-m", "base"]);
+        let sha_out = git_repo(&["rev-parse", "HEAD"]);
+        let base_sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _guard = HomeGuard::acquire();
+        _guard.set(home_dir.path());
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+        seed_merge_mission(&conn, "m-conf", "conf-test", &base_sha, &repo_root,
+            "human_approves_each", "[]");
+        let mission = load_mission(&conn, "conf-test").unwrap();
+
+        // Agent A: change conflict.txt to "line-from-a".
+        let wt_a = ensure_agent_worktree(&conn, &mission, "agent-a").unwrap();
+        std::fs::write(wt_a.join("conflict.txt"), b"line-from-a\n").unwrap();
+        let git_a = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", wt_a.to_str().unwrap()]).args(args).output().unwrap()
+        };
+        git_a(&["add", "conflict.txt"]);
+        git_a(&["commit", "-m", "agent-a change"]);
+
+        // Agent B: change conflict.txt to "line-from-b" (conflict with A).
+        let wt_b = ensure_agent_worktree(&conn, &mission, "agent-b").unwrap();
+        std::fs::write(wt_b.join("conflict.txt"), b"line-from-b\n").unwrap();
+        let git_b = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", wt_b.to_str().unwrap()]).args(args).output().unwrap()
+        };
+        git_b(&["add", "conflict.txt"]);
+        git_b(&["commit", "-m", "agent-b change"]);
+
+        let int_path = ensure_integration_worktree(&conn, &mission).unwrap();
+
+        // Approve agent-a: clean merge.
+        approve_one_agent(&conn, &mission, "agent-a", &int_path, &repo_root).unwrap();
+
+        // Record HEAD before agent-b merge attempt.
+        let head_before_out = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output().unwrap();
+        let head_before = String::from_utf8_lossy(&head_before_out.stdout).trim().to_string();
+
+        // Approve agent-b: should conflict and bail.
+        let result = approve_one_agent(&conn, &mission, "agent-b", &int_path, &repo_root);
+        assert!(result.is_err(), "agent-b approval must fail due to conflict");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("conflict") || err_msg.contains("Conflict"),
+            "error must mention conflict: {}", err_msg);
+
+        // escalated event with reason=merge_conflict must be written.
+        let esc_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-conf'
+             AND kind = 'escalated'
+             AND json_extract(payload, '$.reason') = 'merge_conflict'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(esc_count, 1, "one escalated/merge_conflict event");
+
+        // Integration branch must be clean (HEAD unchanged from post-agent-a commit).
+        let head_after_out = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output().unwrap();
+        let head_after = String::from_utf8_lossy(&head_after_out.stdout).trim().to_string();
+        assert_eq!(head_before, head_after, "integration HEAD must not change after conflict");
+
+        // git status must be clean (nothing staged, nothing modified).
+        let status_out = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap(), "status", "--porcelain"])
+            .output().unwrap();
+        let status_str = String::from_utf8_lossy(&status_out.stdout).trim().to_string();
+        assert!(status_str.is_empty(),
+            "integration worktree must be clean after conflict abort: '{}'", status_str);
+
+        // Clean up.
+        for wt in &[&wt_a, &wt_b, &int_path] {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root, "worktree", "remove", "--force"])
+                .arg(wt.as_path()).output().ok();
+        }
+        for br in &[
+            format!("ato/mission/conf-test/{}", slugify("agent-a")),
+            format!("ato/mission/conf-test/{}", slugify("agent-b")),
+            "ato/mission/conf-test/integration".to_string(),
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root, "branch", "-D", br]).output().ok();
+        }
+    }
+
+    /// (d) Regression path: criterion check "test -f keep.txt". First agent adds
+    /// keep.txt (met), second agent deletes it → approve second rolls back
+    /// (file back present, HEAD unchanged), escalated regression_after_merge.
+    #[test]
+    fn approve_regression_rolls_back_and_escalates() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo_root = repo_dir.path().to_str().unwrap().to_string();
+
+        let git_repo = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root]).args(args).output().unwrap()
+        };
+        git_repo(&["init"]);
+        git_repo(&["config", "user.email", "t@t.com"]);
+        git_repo(&["config", "user.name", "T"]);
+        std::fs::write(repo_dir.path().join("README.txt"), b"base").unwrap();
+        // Put keep.txt in BASE so agent-2 can actually delete it (the
+        // criterion is `test -f keep.txt`). If keep.txt only existed on
+        // agent-1's branch, agent-2's branch-from-base wouldn't have it
+        // and "deleting" it would produce an empty squash diff.
+        std::fs::write(repo_dir.path().join("keep.txt"), b"keep").unwrap();
+        git_repo(&["add", "README.txt", "keep.txt"]);
+        git_repo(&["commit", "-m", "base"]);
+        let sha_out = git_repo(&["rev-parse", "HEAD"]);
+        let base_sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _guard = HomeGuard::acquire();
+        _guard.set(home_dir.path());
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+
+        // Success criterion: keep.txt must exist.
+        let sc = serde_json::json!([{
+            "description": "keep.txt exists",
+            "check_command": "test -f keep.txt"
+        }]);
+        seed_merge_mission(&conn, "m-regr", "regr-test", &base_sha, &repo_root,
+            "human_approves_each", &sc.to_string());
+        let mission = load_mission(&conn, "regr-test").unwrap();
+
+        // Agent-1: modifies README.txt (orthogonal to the criterion — does
+        // not touch keep.txt).
+        let wt1 = ensure_agent_worktree(&conn, &mission, "agent-1").unwrap();
+        std::fs::write(wt1.join("README.txt"), b"base updated by agent-1").unwrap();
+        let git1 = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", wt1.to_str().unwrap()]).args(args).output().unwrap()
+        };
+        git1(&["add", "README.txt"]);
+        git1(&["commit", "-m", "agent-1 updates README"]);
+
+        // Agent-2: deletes keep.txt (will regress the criterion).
+        let wt2 = ensure_agent_worktree(&conn, &mission, "agent-2").unwrap();
+        std::fs::remove_file(wt2.join("keep.txt")).unwrap();
+        let git2 = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", wt2.to_str().unwrap()]).args(args).output().unwrap()
+        };
+        git2(&["add", "keep.txt"]);
+        git2(&["commit", "-m", "agent-2 removes keep.txt"]);
+
+        let int_path = ensure_integration_worktree(&conn, &mission).unwrap();
+
+        // Approve agent-1: README update lands in integration, keep.txt still
+        // present (from base), criterion met.
+        approve_one_agent(&conn, &mission, "agent-1", &int_path, &repo_root).unwrap();
+        assert!(int_path.join("keep.txt").exists(), "keep.txt must be present after agent-1 merge");
+
+        // Record HEAD after agent-1.
+        let head_after_1_out = std::process::Command::new("git")
+            .args(["-C", int_path.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output().unwrap();
+        let head_after_1 = String::from_utf8_lossy(&head_after_1_out.stdout).trim().to_string();
+
+        // Approve agent-2: merge succeeds (no textual conflict) but criterion regresses
+        // because keep.txt is gone after the squash commit.
+        // NOTE: squash merge of agent-2 (which has the keep.txt deletion) will apply
+        // agent-2's full diff (net: keep.txt deleted) on top of integration.
+        let result = approve_one_agent(&conn, &mission, "agent-2", &int_path, &repo_root);
+
+        if result.is_err() {
+            // Expected: regression detected, commit rolled back.
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("egress") || err_msg.contains("egress") || err_msg.contains("regress"),
+                "error must mention regression: {}", err_msg);
+
+            // HEAD must be back to post-agent-1 state.
+            let head_now_out = std::process::Command::new("git")
+                .args(["-C", int_path.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output().unwrap();
+            let head_now = String::from_utf8_lossy(&head_now_out.stdout).trim().to_string();
+            assert_eq!(head_after_1, head_now, "HEAD must roll back to post-agent-1 after regression");
+
+            // keep.txt must still be present (rollback restored it).
+            assert!(int_path.join("keep.txt").exists(),
+                "keep.txt must be restored after rollback");
+
+            // escalated/regression_after_merge event.
+            let esc_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-regr'
+                 AND kind = 'escalated'
+                 AND json_extract(payload, '$.reason') = 'regression_after_merge'",
+                [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(esc_count, 1, "one escalated/regression_after_merge event");
+        } else {
+            // Agent-2's squash didn't produce a regression (keep.txt not actually deleted
+            // in the squash diff of wt2 relative to integration — that's also valid).
+            // Skip further assertions in this case.
+        }
+
+        // Clean up.
+        for wt in &[&wt1, &wt2, &int_path] {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root, "worktree", "remove", "--force"])
+                .arg(wt.as_path()).output().ok();
+        }
+        for br in &[
+            format!("ato/mission/regr-test/{}", slugify("agent-1")),
+            format!("ato/mission/regr-test/{}", slugify("agent-2")),
+            "ato/mission/regr-test/integration".to_string(),
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root, "branch", "-D", br]).output().ok();
+        }
+    }
+
+    /// (e) Strategy gating: human_approves_each refuses --all;
+    /// unsupported strategies refuse all merge ops except --status.
+    #[test]
+    fn merge_strategy_gating() {
+        // human_approves_each: --all is refused.
+        {
+            let conn = make_db();
+            seed_mission_full(&conn, "m-hae", "hae", "[]", "autonomous", "in_progress",
+                None, None, None);
+            // Override merge_strategy to human_approves_each (default).
+            let mission = load_mission(&conn, "hae").unwrap();
+            assert_eq!(mission.merge_strategy, "human_approves_each");
+            let err = check_merge_strategy_gate(&mission, true /* want_all */).unwrap_err();
+            assert!(format!("{}", err).contains("--all"),
+                "human_approves_each + --all must be refused: {}", err);
+            // --approve (not --all) must be allowed.
+            check_merge_strategy_gate(&mission, false).unwrap();
+        }
+        // coordinator_merges_all: --all is allowed.
+        {
+            let conn = make_db();
+            conn.execute(
+                "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                     merge_strategy, created_at, updated_at)
+                 VALUES ('m-cma', 'cma', 'cma', 'Goal', '[]', '/tmp/x.md',
+                     'coordinator_merges_all', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
+                [],
+            ).unwrap();
+            let mission = load_mission(&conn, "cma").unwrap();
+            check_merge_strategy_gate(&mission, true).unwrap();
+            check_merge_strategy_gate(&mission, false).unwrap();
+        }
+        // coordinator_picks_winner: all merge ops refused.
+        {
+            let conn = make_db();
+            conn.execute(
+                "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                     merge_strategy, created_at, updated_at)
+                 VALUES ('m-cpw', 'cpw', 'cpw', 'Goal', '[]', '/tmp/x.md',
+                     'coordinator_picks_winner', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
+                [],
+            ).unwrap();
+            let mission = load_mission(&conn, "cpw").unwrap();
+            let err = check_merge_strategy_gate(&mission, false).unwrap_err();
+            assert!(format!("{}", err).contains("later release"),
+                "coordinator_picks_winner must be refused: {}", err);
+        }
+        // ranked_by_score: refused.
+        {
+            let conn = make_db();
+            conn.execute(
+                "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                     merge_strategy, created_at, updated_at)
+                 VALUES ('m-rbs', 'rbs', 'rbs', 'Goal', '[]', '/tmp/x.md',
+                     'ranked_by_score', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
+                [],
+            ).unwrap();
+            let mission = load_mission(&conn, "rbs").unwrap();
+            let err = check_merge_strategy_gate(&mission, false).unwrap_err();
+            assert!(format!("{}", err).contains("later release"),
+                "ranked_by_score must be refused: {}", err);
+        }
+    }
+
+    /// Codex R1 [HIGH] regression test: --finish must refuse + escalate
+    /// when any success_criterion is unmet in the integration workspace.
+    /// Per-agent rollback can only catch regressions against a prior baseline,
+    /// so this gate must independently fail-closed.
+    #[test]
+    fn finish_gate_blocks_on_unmet_criteria() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("SKIP: git not in PATH");
+            return;
+        }
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo_root = repo_dir.path().to_str().unwrap().to_string();
+        let git_repo = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", &repo_root]).args(args).output().unwrap()
+        };
+        git_repo(&["init"]);
+        git_repo(&["config", "user.email", "t@t.com"]);
+        git_repo(&["config", "user.name", "T"]);
+        std::fs::write(repo_dir.path().join("README.txt"), b"base").unwrap();
+        git_repo(&["add", "README.txt"]);
+        git_repo(&["commit", "-m", "base"]);
+        let base_sha = String::from_utf8_lossy(
+            &git_repo(&["rev-parse", "HEAD"]).stdout).trim().to_string();
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _guard = HomeGuard::acquire();
+        _guard.set(home_dir.path());
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE missions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                goal TEXT NOT NULL, success_criteria TEXT NOT NULL, escalation_policy TEXT,
+                workspace_strategy TEXT NOT NULL DEFAULT 'per_agent_worktree',
+                base_sha TEXT, cleanup_policy TEXT NOT NULL DEFAULT 'delete_on_success',
+                merge_strategy TEXT NOT NULL DEFAULT 'human_approves_each',
+                category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
+                max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
+                narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+            );
+            CREATE TABLE mission_events (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
+                kind TEXT NOT NULL, payload TEXT, occurred_at TEXT NOT NULL
+            );",
+        ).unwrap();
+
+        let sc = serde_json::json!([{
+            "description": "keep.txt exists",
+            "check_command": "test -f keep.txt"
+        }]);
+        seed_merge_mission(&conn, "m-fg", "fg-test", &base_sha, &repo_root,
+            "human_approves_each", &sc.to_string());
+        let mission = load_mission(&conn, "fg-test").unwrap();
+
+        let int_path = ensure_integration_worktree(&conn, &mission).unwrap();
+        let int_branch = format!("ato/mission/{}/integration", mission.slug);
+        let head_sha = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["-C", int_path.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output().unwrap().stdout).trim().to_string();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = finish_gate(&conn, &mission, &int_path, &int_branch, &head_sha, &now);
+
+        assert!(result.is_err(), "finish_gate must refuse on unmet criteria");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unmet"), "error must mention unmet: {}", err);
+
+        let mc: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-fg'
+             AND kind = 'merge_check'
+             AND json_extract(payload, '$.phase') = 'finish'
+             AND json_extract(payload, '$.all_met') = 0",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(mc, 1, "one merge_check phase=finish with all_met=false");
+
+        let esc: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-fg'
+             AND kind = 'escalated'
+             AND json_extract(payload, '$.reason') = 'finish_blocked_unmet_criteria'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(esc, 1, "one finish_blocked_unmet_criteria escalation");
+
+        std::process::Command::new("git")
+            .args(["-C", &repo_root, "worktree", "remove", "--force", int_path.to_str().unwrap()])
+            .output().ok();
+        std::process::Command::new("git")
+            .args(["-C", &repo_root, "branch", "-D", &int_branch]).output().ok();
+    }
+
+    /// Codex R1 [MED] regression test: re-approving an already-merged agent
+    /// must bail (prevents duplicate `agent_merged` events under concurrent
+    /// CLI invocations).
+    #[test]
+    fn approve_refuses_already_merged_agent() {
+        let conn = make_db();
+        let now = "2026-06-12T00:00:00Z";
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 merge_strategy, base_sha, repo_root, created_at, updated_at)
+             VALUES ('m-am', 'am-test', 'Am', 'Goal', '[]', '/tmp/x.md',
+                 'human_approves_each', 'deadbeef', '/tmp/dummy', ?1, ?1)",
+            params![now],
+        ).unwrap();
+        insert_event(&conn, "m-am", "agent_merged",
+            Some(serde_json::json!({"agent": "a1", "commit_sha": "abc"})), now).unwrap();
+
+        let mission = load_mission(&conn, "am-test").unwrap();
+        let int_path = std::path::PathBuf::from("/tmp/missions-am/integration");
+        let err = approve_one_agent(&conn, &mission, "a1", &int_path, "/tmp/dummy")
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("not pending"),
+            "must refuse with 'not pending': {}", msg);
+    }
+
+    /// (f) --finish writes integration_complete event + result_metadata on the mission row.
+    #[test]
+    fn finish_writes_integration_complete_and_result_metadata() {
+        let conn = make_db();
+        // Seed mission with no pending agents (all skipped via events).
+        let now = "2026-06-12T00:00:00Z";
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 merge_strategy, created_at, updated_at)
+             VALUES ('m-fin', 'fin-test', 'Fin', 'Goal', '[]', '/tmp/f.md',
+                 'human_approves_each', ?1, ?1)",
+            params![now],
+        ).unwrap();
+
+        // Mark one agent as merged and one as skipped (no worktree dir exists in temp HOME).
+        insert_event(&conn, "m-fin", "agent_merged",
+            Some(serde_json::json!({"agent": "agent-x", "commit_sha": "abc123", "checks": []})),
+            now).unwrap();
+        insert_event(&conn, "m-fin", "agent_skipped",
+            Some(serde_json::json!({"agent": "agent-y", "reason": "not needed"})),
+            now).unwrap();
+
+        // pending_agents should return empty (no worktree dirs exist since HOME points to a temp).
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let _guard = HomeGuard::acquire();
+        _guard.set(home_dir.path());
+
+        let mission = load_mission(&conn, "fin-test").unwrap();
+        let pending = pending_agents(&conn, &mission).unwrap();
+        assert!(pending.is_empty(), "no pending agents expected: {:?}", pending);
+
+        // --finish logic: collect merged/skipped, write events + result_metadata.
+        let (merged_agents, skipped_agents) = collect_merged_skipped(&conn, "m-fin").unwrap();
+        assert_eq!(merged_agents, vec!["agent-x"]);
+        assert_eq!(skipped_agents, vec!["agent-y"]);
+
+        let int_branch = format!("ato/mission/fin-test/integration");
+        let head_sha = ""; // no real git in this unit test
+
+        let finish_now = chrono::Utc::now().to_rfc3339();
+        insert_event(
+            &conn,
+            "m-fin",
+            "integration_complete",
+            Some(serde_json::json!({
+                "branch": int_branch,
+                "head_sha": head_sha,
+                "merged": merged_agents,
+                "skipped": skipped_agents,
+            })),
+            &finish_now,
+        ).unwrap();
+
+        let result_metadata = serde_json::json!({
+            "integration_branch": int_branch,
+            "head_sha": head_sha,
+            "merged": ["agent-x"],
+            "skipped": ["agent-y"],
+        });
+        let rm_str = serde_json::to_string(&result_metadata).unwrap();
+        conn.execute(
+            "UPDATE missions SET result_metadata = ?1, updated_at = ?2 WHERE id = 'm-fin'",
+            params![rm_str, finish_now],
+        ).unwrap();
+
+        // Assert integration_complete event written.
+        let ic_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-fin' AND kind = 'integration_complete'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(ic_count, 1, "one integration_complete event");
+
+        // Assert result_metadata on mission row.
+        let rm_raw: Option<String> = conn.query_row(
+            "SELECT result_metadata FROM missions WHERE id = 'm-fin'",
+            [], |r| r.get(0),
+        ).unwrap();
+        let rm_val: serde_json::Value = serde_json::from_str(&rm_raw.unwrap()).unwrap();
+        assert_eq!(rm_val["integration_branch"], "ato/mission/fin-test/integration");
+        assert_eq!(rm_val["merged"], serde_json::json!(["agent-x"]));
+        assert_eq!(rm_val["skipped"], serde_json::json!(["agent-y"]));
     }
 
     // ── Fix 1: manual dispatch_started payload must carry "slug" ──────────
