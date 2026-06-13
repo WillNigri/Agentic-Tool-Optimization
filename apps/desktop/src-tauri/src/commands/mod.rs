@@ -2037,10 +2037,21 @@ pub async fn prompt_api_provider(
             // `model` column entirely. EVERY desktop BYOK dispatch
             // recorded $0 cost — strictly worse than the CLI's
             // partial coverage. Now we compute cost the same way
-            // CLI run_api does: prefer real provider tokens via
-            // cost_from_tokens; fall back to chars-heuristic.
+            // CLI run_api does: use cost_from_token_classes so
+            // Anthropic cache classes (cache_creation at 1.25×,
+            // cache_read at 0.10×) are billed correctly. For
+            // non-Anthropic providers both cache fields are None
+            // and the function degrades to flat in×rate + out×rate.
             let cost_usd: Option<f64> = match (o.tokens_in, o.tokens_out) {
-                (Some(ti), Some(to)) => ato_pricing::cost_from_tokens(&o.model_used, ti, to),
+                (Some(ti), Some(to)) => {
+                    let tc = ato_pricing::TokenClasses {
+                        tokens_in: ti,
+                        tokens_out: to,
+                        cache_creation_in: o.cache_creation_tokens,
+                        cache_read_in: o.cache_read_tokens,
+                    };
+                    ato_pricing::cost_from_token_classes(&o.model_used, &tc)
+                }
                 _ => estimate_cost_usd(
                     &o.model_used,
                     &prompt,
@@ -2051,8 +2062,8 @@ pub async fn prompt_api_provider(
             // of swallowing them. The dispatch still succeeds; the
             // log row just doesn't exist, and the user sees why.
             if let Err(e) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary, cache_creation_tokens, cache_read_tokens, reasoning_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -2071,6 +2082,9 @@ pub async fn prompt_api_provider(
                     "api_key",
                     o.retry_count,
                     o.attempt_summary_json.as_ref(),
+                    o.cache_creation_tokens,
+                    o.cache_read_tokens,
+                    o.reasoning_tokens,
                 ],
             ) {
                 eprintln!("prompt_api_provider: execution_logs write failed: {}", e);

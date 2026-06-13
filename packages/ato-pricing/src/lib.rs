@@ -192,14 +192,68 @@ pub fn cheaper_cross_provider(current_model: &str) -> Vec<&'static str> {
     alts.into_iter().map(|(m, _)| m).collect()
 }
 
+/// Token-class breakdown for accurate Anthropic cache billing.
+///
+/// Anthropic's Messages API returns three separate billing classes:
+///   - `tokens_in`           — regular (non-cached) input tokens
+///   - `cache_creation_in`   — tokens written into the 5-min prompt cache;
+///                             billed at 1.25× the input rate
+///   - `cache_read_in`       — tokens served from the 5-min cache;
+///                             billed at 0.10× the input rate
+///
+/// Note: `input_tokens` in the Anthropic response does NOT include
+/// cache_creation_input_tokens or cache_read_input_tokens — they are
+/// separate billing classes. Total billed input =
+///   input_tokens * rate_in
+///   + cache_creation_input_tokens * 1.25 * rate_in
+///   + cache_read_input_tokens * 0.10 * rate_in
+///
+/// For non-Anthropic providers both cache fields stay `None`.
+#[derive(Debug, Clone, Default)]
+pub struct TokenClasses {
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// Anthropic 5-min cache WRITE tokens (billed at 1.25× input rate).
+    pub cache_creation_in: Option<i64>,
+    /// Anthropic 5-min cache READ tokens (billed at 0.10× input rate).
+    pub cache_read_in: Option<i64>,
+}
+
+/// Compute cost from a `TokenClasses` breakdown.
+///
+/// Formula (all per-million):
+///   cost = tokens_in * rate_in
+///        + tokens_out * rate_out
+///        + cache_creation_in * 1.25 * rate_in   (5-min cache write)
+///        + cache_read_in * 0.10 * rate_in        (5-min cache read)
+///
+/// Returns `None` when the model is not in the pricing table.
+pub fn cost_from_token_classes(model: &str, tc: &TokenClasses) -> Option<f64> {
+    let (in_per_m, out_per_m) = pricing_for_model(model)?;
+    let base = (tc.tokens_in as f64 / 1_000_000.0) * in_per_m
+        + (tc.tokens_out as f64 / 1_000_000.0) * out_per_m;
+    let cache_write = tc.cache_creation_in
+        .map(|n| (n as f64 / 1_000_000.0) * 1.25 * in_per_m)
+        .unwrap_or(0.0);
+    let cache_read = tc.cache_read_in
+        .map(|n| (n as f64 / 1_000_000.0) * 0.10 * in_per_m)
+        .unwrap_or(0.0);
+    let cost = base + cache_write + cache_read;
+    Some((cost * 1_000_000.0).round() / 1_000_000.0)
+}
+
 /// Estimate cost from real token counts (preferred over chars/4
 /// when the provider returned a usage block). Returns `None` if the
 /// model isn't in the pricing table.
+///
+/// Delegates to `cost_from_token_classes` with no cache fields.
 pub fn cost_from_tokens(model: &str, tokens_in: i64, tokens_out: i64) -> Option<f64> {
-    let (in_per_m, out_per_m) = pricing_for_model(model)?;
-    let cost = (tokens_in as f64 / 1_000_000.0) * in_per_m
-        + (tokens_out as f64 / 1_000_000.0) * out_per_m;
-    Some((cost * 1_000_000.0).round() / 1_000_000.0)
+    cost_from_token_classes(model, &TokenClasses {
+        tokens_in,
+        tokens_out,
+        cache_creation_in: None,
+        cache_read_in: None,
+    })
 }
 
 /// 4-chars-per-token heuristic for estimating tokens from raw text.
@@ -291,6 +345,56 @@ mod tests {
         // 1,000,000 input tokens @ $3/M = $3.00; 1,000,000 output @ $15/M = $15.00 → $18.00
         let cost = cost_from_tokens("claude-sonnet-4-6", 1_000_000, 1_000_000).unwrap();
         assert!((cost - 18.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_from_token_classes_cache_arithmetic() {
+        // claude-sonnet-4-6: $3/M in, $15/M out
+        // 1M input      → $3.00
+        // 1M output     → $15.00
+        // 1M cache_write→ 1.25 × $3 = $3.75
+        // 1M cache_read → 0.10 × $3 = $0.30
+        // total         → $22.05
+        let tc = TokenClasses {
+            tokens_in: 1_000_000,
+            tokens_out: 1_000_000,
+            cache_creation_in: Some(1_000_000),
+            cache_read_in: Some(1_000_000),
+        };
+        let cost = cost_from_token_classes("claude-sonnet-4-6", &tc).unwrap();
+        assert!(
+            (cost - 22.05).abs() < 1e-5,
+            "expected $22.05, got ${cost}"
+        );
+    }
+
+    #[test]
+    fn cost_from_token_classes_none_cache_equals_cost_from_tokens() {
+        // With no cache fields, the two functions must agree exactly.
+        let tc = TokenClasses {
+            tokens_in: 500_000,
+            tokens_out: 200_000,
+            cache_creation_in: None,
+            cache_read_in: None,
+        };
+        let via_classes = cost_from_token_classes("claude-sonnet-4-6", &tc).unwrap();
+        let via_tokens  = cost_from_tokens("claude-sonnet-4-6", 500_000, 200_000).unwrap();
+        assert!(
+            (via_classes - via_tokens).abs() < 1e-12,
+            "cache-None should equal cost_from_tokens: {} vs {}",
+            via_classes, via_tokens
+        );
+    }
+
+    #[test]
+    fn cost_from_token_classes_unknown_model_returns_none() {
+        let tc = TokenClasses {
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_creation_in: Some(10),
+            cache_read_in: Some(5),
+        };
+        assert!(cost_from_token_classes("not-a-real-model", &tc).is_none());
     }
 
     #[test]

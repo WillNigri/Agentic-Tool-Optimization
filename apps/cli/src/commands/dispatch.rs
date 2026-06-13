@@ -1445,9 +1445,17 @@ pub fn run(
     // Cost estimate populated whenever we can resolve the model — the
     // credit-burn meter needs values on both subscription and api_key
     // rows. effective_model below is what dispatch actually used.
-    let cost_usd: Option<f64> = effective_model
-        .as_deref()
-        .and_then(|m| runtime::estimate_cost_usd(m, prompt, response_for_cost));
+    // Section 4: if the model is known but pricing is absent, warn the operator.
+    let cost_usd: Option<f64> = effective_model.as_deref().and_then(|m| {
+        let cost = runtime::estimate_cost_usd(m, prompt, response_for_cost);
+        if cost.is_none() && !m.is_empty() && opts.human {
+            emit_human(&format!(
+                "[cost] model '{}' has no pricing entry — cost recorded as unknown (see ato-pricing)",
+                m
+            ));
+        }
+        cost
+    });
     // Record which auth path this dispatch took so the meter can
     // split api_key (real billing) from subscription (Agent SDK
     // credit pool after 2026-06-15). hermes/openclaw have no BYOK
@@ -2054,6 +2062,10 @@ fn run_api(
         model_used,
         tokens_in,
         tokens_out,
+        // cost-accounting: Anthropic cache classes + OpenAI reasoning
+        cache_creation_tokens_val,
+        cache_read_tokens_val,
+        reasoning_tokens_val,
         tool_calls_count,
         tool_calls_summary,
         // v2.15.1 — retry accounting columns (codex-found gap).
@@ -2096,6 +2108,9 @@ fn run_api(
                 Some(o.model_used),
                 o.tokens_in,
                 o.tokens_out,
+                o.cache_creation_tokens,
+                o.cache_read_tokens,
+                o.reasoning_tokens,
                 tc_count,
                 tc_summary,
                 o.retry_count,
@@ -2124,8 +2139,11 @@ fn run_api(
                 Some(truncate(&e.to_string())),
                 0_i64,
                 Some(requested_model),
-                None,
-                None,
+                None::<i64>,
+                None::<i64>,
+                None::<i64>,
+                None::<i64>,
+                None::<i64>,
                 None,
                 None,
                 0_i64,
@@ -2146,9 +2164,42 @@ fn run_api(
     // auth_mode is unconditionally "api_key" here. Cost: prefer real
     // tokens from the provider's usage block over the chars/4
     // heuristic — these are the billable numbers. (claude #1, minimax #1)
-    let cost_usd: Option<f64> = model_used.as_deref().and_then(|m| match (tokens_in, tokens_out) {
-        (Some(ti), Some(to)) => runtime::cost_from_tokens(m, ti, to),
-        _ => runtime::estimate_cost_usd(m, prompt, response_for_cost),
+    //
+    // Use cost_from_token_classes so Anthropic cache classes are billed
+    // correctly: cache_creation at 1.25× and cache_read at 0.10×.
+    // For non-Anthropic providers both cache fields are None and the
+    // function degrades to the flat input×rate + output×rate formula.
+    let cost_usd: Option<f64> = model_used.as_deref().and_then(|m| {
+        if let (Some(ti), Some(to)) = (tokens_in, tokens_out) {
+            let tc = ato_pricing::TokenClasses {
+                tokens_in: ti,
+                tokens_out: to,
+                cache_creation_in: cache_creation_tokens_val,
+                cache_read_in: cache_read_tokens_val,
+            };
+            let cost = ato_pricing::cost_from_token_classes(m, &tc);
+            if cost.is_none() && !m.is_empty() && opts.human {
+                // Section 4: unknown model visibility — warn the operator.
+                // Silenced in JSON mode; the NULL cost field is the
+                // machine-readable signal (a free-text line would break
+                // downstream parsers reading stdout).
+                crate::output::emit_human(&format!(
+                    "[cost] model '{}' has no pricing entry — cost recorded as unknown (see ato-pricing)",
+                    m
+                ));
+            }
+            cost
+        } else {
+            let cost = runtime::estimate_cost_usd(m, prompt, response_for_cost);
+            if cost.is_none() && !m.is_empty() && opts.human {
+                // Same JSON-mode gate as above.
+                crate::output::emit_human(&format!(
+                    "[cost] model '{}' has no pricing entry — cost recorded as unknown (see ato-pricing)",
+                    m
+                ));
+            }
+            cost
+        }
     });
     let auth_mode = "api_key";
 
@@ -2158,7 +2209,7 @@ fn run_api(
     // so History grouping works for cross-runtime conversations.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug, retry_count, attempt_summary, fallback_of) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug, retry_count, attempt_summary, fallback_of, cache_creation_tokens, cache_read_tokens, reasoning_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         rusqlite::params![
             id,
             provider.slug,
@@ -2180,6 +2231,9 @@ fn run_api(
             retry_count_val,
             attempt_summary_val,
             fallback_of.as_deref(),
+            cache_creation_tokens_val,
+            cache_read_tokens_val,
+            reasoning_tokens_val,
         ],
     )
     .context("Failed to write execution_logs row")?;

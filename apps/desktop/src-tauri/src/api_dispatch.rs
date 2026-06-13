@@ -35,6 +35,22 @@ pub struct ApiDispatchOutcome {
     pub duration_ms: i64,
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
+    /// Anthropic 5-min prompt-cache WRITE tokens. Billed at 1.25× input
+    /// rate. None for non-Anthropic providers.
+    ///
+    /// IMPORTANT: Anthropic `input_tokens` does NOT include this class.
+    /// Total billed input = input_tokens + cache_creation*1.25 + cache_read*0.10
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i64>,
+    /// Anthropic 5-min prompt-cache READ tokens. Billed at 0.10× input rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    /// OpenAI/DeepSeek reasoning tokens (informational breakdown only).
+    ///
+    /// IMPORTANT: completion_tokens ALREADY INCLUDES reasoning_tokens.
+    /// Do NOT add this to cost. Purely for observability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<i64>,
     /// v2.7.8 PR-3b — tool-call audit populated by
     /// `api_dispatch_tools::dispatch_with_tools` when the dispatch
     /// engaged the tool-call loop. None for legacy text-only
@@ -273,6 +289,9 @@ pub async fn dispatch(
                 duration_ms: final_attempt_duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count,
                 attempt_summary_json,
@@ -292,6 +311,9 @@ pub async fn dispatch(
             duration_ms: final_attempt_duration_ms,
             tokens_in: None,
             tokens_out: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count,
             attempt_summary_json,
@@ -327,6 +349,9 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count: 0,
                 attempt_summary_json: None,
@@ -352,6 +377,14 @@ fn parse_response(
                     .join("")
             })
             .unwrap_or_default();
+        let usage = &payload["usage"];
+        // Anthropic billing: input_tokens, cache_creation_input_tokens, and
+        // cache_read_input_tokens are SEPARATE billing classes. input_tokens
+        // does NOT include the cache classes.
+        let tokens_in = usage["input_tokens"].as_i64();
+        let tokens_out = usage["output_tokens"].as_i64();
+        let cache_creation_tokens = usage["cache_creation_input_tokens"].as_i64();
+        let cache_read_tokens = usage["cache_read_input_tokens"].as_i64();
         let stop_reason = payload["stop_reason"].as_str().unwrap_or("");
         let error_message = if stop_reason == "max_tokens" {
             Some(
@@ -365,8 +398,11 @@ fn parse_response(
             error_message,
             model_used: model,
             duration_ms,
-            tokens_in: payload["usage"]["input_tokens"].as_i64(),
-            tokens_out: payload["usage"]["output_tokens"].as_i64(),
+            tokens_in,
+            tokens_out,
+            cache_creation_tokens,
+            cache_read_tokens,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -390,6 +426,9 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count: 0,
                 attempt_summary_json: None,
@@ -423,6 +462,9 @@ fn parse_response(
             duration_ms,
             tokens_in,
             tokens_out,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -446,6 +488,9 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count: 0,
                 attempt_summary_json: None,
@@ -470,6 +515,9 @@ fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count: 0,
                 attempt_summary_json: None,
@@ -479,6 +527,10 @@ fn parse_response(
     let usage = &payload["usage"];
     let tokens_in = usage["prompt_tokens"].as_i64();
     let tokens_out = usage["completion_tokens"].as_i64();
+    // Reasoning tokens: informational breakdown of completion_tokens.
+    // COST NOTE: completion_tokens ALREADY INCLUDES reasoning_tokens —
+    // do NOT add to cost. Record for observability only.
+    let reasoning_tokens = usage["completion_tokens_details"]["reasoning_tokens"].as_i64();
     Ok(ApiDispatchOutcome {
         response: Some(response),
         error_message: None,
@@ -486,6 +538,9 @@ fn parse_response(
         duration_ms,
         tokens_in,
         tokens_out,
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
+        reasoning_tokens,
         tool_calls: None,
         retry_count: 0,
         attempt_summary_json: None,
