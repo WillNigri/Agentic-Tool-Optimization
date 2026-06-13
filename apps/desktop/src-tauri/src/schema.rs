@@ -1814,6 +1814,39 @@ pub fn init_database(conn: &Connection) {
     // NULL means the tick will escalate with reason="no_worker_config".
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
 
+    // v2.17 — Output bundles. Packaged inference results addressable by slug,
+    // exportable as a tarball. A bundle captures (source row, dispatches,
+    // judge scores, artifact files) at creation time so it can be shared
+    // externally even after the underlying tables change. Closes the Collison
+    // "shareable results" gap. signed_url is populated by the Pro
+    // cloud-sync layer; OSS just stores the value if set externally.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_bundles (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            description   TEXT,
+            source_kind   TEXT NOT NULL,
+            source_id     TEXT NOT NULL,
+            manifest      TEXT NOT NULL,
+            export_path   TEXT,
+            signed_url    TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_output_bundles_source
+            ON output_bundles(source_kind, source_id)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_output_bundles_created
+            ON output_bundles(created_at DESC)",
+        [],
+    );
+
     // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
     // codex audit verdict: "one execution_logs row per dispatch,
     // plus retry_count and a compact JSON attempt summary column").

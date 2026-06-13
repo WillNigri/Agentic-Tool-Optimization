@@ -65,3 +65,8 @@ pub mod loops;
 // a goal-driven primitive that spawns Loops as workers. See
 // docs/v2.16-missions.md for the war-room-locked design.
 pub mod missions;
+
+// v2.17 — `ato bundles` (output bundles, packaged inference results).
+// A bundle = run + dispatches + judge scores + artifact files + manifest.
+// Closes the Collison "shareable results" gap.
+pub mod bundles;

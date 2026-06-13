@@ -143,6 +143,12 @@ enum Commands {
     /// criteria. See `docs/v2.16-missions.md` for the design.
     #[command(name = "missions")]
     Missions(commands::missions::MissionArgs),
+    /// v2.17 — Bundles: packaged inference results. A bundle = a source
+    /// row (mission / methodology run / loop run / session / dispatch) +
+    /// its dispatches + judge scores + artifact files + manifest.
+    /// Exportable as a tarball for sharing externally.
+    #[command(name = "bundles")]
+    Bundles(commands::bundles::BundlesArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -1277,6 +1283,10 @@ fn main() -> Result<()> {
         }
         Commands::Missions(args) => {
             commands::missions::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Bundles(args) => {
+            commands::bundles::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {

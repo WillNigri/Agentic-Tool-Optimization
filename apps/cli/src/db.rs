@@ -243,6 +243,25 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
     // NULL = tick will escalate with reason="no_worker_config".
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
 
+    // v2.17 — Output bundles. Idempotent backfill so CLI-only users get
+    // the table even if the desktop schema migration hasn't run yet.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_bundles (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            description   TEXT,
+            source_kind   TEXT NOT NULL,
+            source_id     TEXT NOT NULL,
+            manifest      TEXT NOT NULL,
+            export_path   TEXT,
+            signed_url    TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT
     // EXISTS` is a no-op after the first run, so applying on every
