@@ -2391,17 +2391,17 @@ fn run_checks_in_dir(
             .unwrap_or("")
             .to_string();
 
-        if check_cmd.is_empty() {
+        // QA-found 2026-06-13: run check_command via `sh -c` so users can
+        // write natural shell expressions (pipes, &&, $(...)). check_command
+        // is trusted mission-config — distinct from the PR-1.5 LLM-callable
+        // `bash` tool which IS parsed argv with an allowlist.
+        if check_cmd.trim().is_empty() {
             results.push(serde_json::json!({"description": desc, "exit_code": -1, "met": false}));
             continue;
         }
-        let parts: Vec<&str> = check_cmd.split_whitespace().collect();
-        if parts.is_empty() {
-            results.push(serde_json::json!({"description": desc, "exit_code": -1, "met": false}));
-            continue;
-        }
-        let exit_code = std::process::Command::new(parts[0])
-            .args(&parts[1..])
+        let exit_code = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&check_cmd)
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -4015,14 +4015,20 @@ fn run_success_evaluation(
             continue;
         }
 
-        // Parse argv — no shell.
-        let parts: Vec<&str> = check_cmd.split_whitespace().collect();
-        if parts.is_empty() {
+        // QA-found 2026-06-13: run check_command via `sh -c` so users can
+        // write natural shell expressions (pipes, &&, $(...)). check_command
+        // is trusted mission-config (same threat model as crontab) — this is
+        // distinct from the PR-1.5 LLM-callable `bash` tool which IS parsed
+        // argv with an allowlist because the LLM is untrusted. Previously the
+        // raw-argv split meant `head -1 X | grep -q Y` failed because `|`
+        // was passed as a literal arg.
+        if check_cmd.trim().is_empty() {
             results.push(CriterionResult { description: desc, exit_code: -1, met: false });
             continue;
         }
-        let exit_code = std::process::Command::new(parts[0])
-            .args(&parts[1..])
+        let exit_code = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&check_cmd)
             .current_dir(&work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -6440,6 +6446,60 @@ mod tests {
     /// Original finish_gate test: refuses when criteria are unmet in an
     /// existing integration worktree. Kept intact alongside the new test
     /// above for the no-workspace case.
+    #[test]
+    /// QA-found 2026-06-13: check_command must run via `sh -c` so users
+    /// can write natural shell expressions (pipes, &&, $(...)). The previous
+    /// raw-argv split passed `|` as a literal arg to `head`, making any
+    /// non-trivial check fail silently.
+    #[test]
+    fn run_checks_supports_shell_pipes_and_logical_operators() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Seed a target file with content "done" so a pipe-based check should pass.
+        std::fs::write(tmp.path().join("team-goal.txt"), b"done\n").unwrap();
+
+        // Pipe — the bug scenario.
+        let pipe_check = serde_json::json!([{
+            "description": "first line equals 'done'",
+            "check_command": "head -1 team-goal.txt | grep -qx done"
+        }]);
+        let (all_met_pipe, results_pipe) = run_checks_in_dir(
+            pipe_check.as_array().unwrap().as_slice(),
+            tmp.path(),
+        );
+        assert!(all_met_pipe, "pipe check must pass: {:?}", results_pipe);
+
+        // && logical operator.
+        let and_check = serde_json::json!([{
+            "description": "file exists AND contains done",
+            "check_command": "test -f team-goal.txt && grep -qx done team-goal.txt"
+        }]);
+        let (all_met_and, results_and) = run_checks_in_dir(
+            and_check.as_array().unwrap().as_slice(),
+            tmp.path(),
+        );
+        assert!(all_met_and, "&& check must pass: {:?}", results_and);
+
+        // Failure case: pipe yields non-matching exit.
+        std::fs::write(tmp.path().join("team-goal.txt"), b"nope\n").unwrap();
+        let (all_met_fail, _) = run_checks_in_dir(
+            pipe_check.as_array().unwrap().as_slice(),
+            tmp.path(),
+        );
+        assert!(!all_met_fail, "non-matching content must fail");
+
+        // Backward compat: the canonical simple form still works.
+        std::fs::write(tmp.path().join("keep.txt"), b"x").unwrap();
+        let simple = serde_json::json!([{
+            "description": "keep.txt exists",
+            "check_command": "test -f keep.txt"
+        }]);
+        let (all_met_simple, _) = run_checks_in_dir(
+            simple.as_array().unwrap().as_slice(),
+            tmp.path(),
+        );
+        assert!(all_met_simple, "test -f baseline must still pass");
+    }
+
     #[test]
     fn finish_gate_blocks_on_unmet_criteria() {
         if std::process::Command::new("git").arg("--version").output().is_err() {
