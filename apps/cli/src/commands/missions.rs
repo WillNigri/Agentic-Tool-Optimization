@@ -1566,7 +1566,243 @@ fn insert_event(
         params![id, mission_id, kind, payload_str, occurred_at],
     )
     .context("insert mission_event")?;
+
+    // v2.16 PR-8 — narrative auto-population. After every successful event
+    // INSERT, append a deterministic markdown paragraph to the mission's
+    // narrative sidecar. This is best-effort: missing path, missing file,
+    // or fs errors are silently swallowed (the SQLite ledger is the
+    // source of truth; the narrative is a human-readable mirror).
+    let _ = append_narrative_for_event(conn, mission_id, kind, payload.as_ref(), occurred_at);
+
     Ok(())
+}
+
+/// Look up the mission's narrative_md_path and append a per-kind paragraph
+/// for the just-inserted event. Failure to look up or write the file is
+/// silently dropped — the event itself is already committed to SQLite.
+///
+/// Concurrency posture (best-effort, NOT a hard atomicity guarantee).
+/// `PIPE_BUF` is a pipe/FIFO contract, not a POSIX guarantee for regular
+/// files, and `Write::write_all` is a loop that may issue multiple
+/// `write(2)` syscalls if the kernel returns a partial write. On a local
+/// filesystem the kernel almost always completes a sub-2KB `O_APPEND`
+/// write in a single syscall, so in practice cross-process appends from
+/// `tick`, manual `dispatch`, and `merge` flows do not interleave — but
+/// that's a property of the implementation, not the spec. We mitigate as
+/// far as we can without a runtime lock:
+///   - one single `write_all` of a fully-built buffer (so the most-likely
+///     case is one `write(2)` per event)
+///   - SAFE_MAX truncation keeps every buffer well under any plausible
+///     atomicity envelope (4 KiB)
+///   - newlines stripped from interpolated payload strings
+/// The SQLite ledger remains the source of truth; the markdown mirror is
+/// a human-readable convenience that must never block event recording.
+/// Codex PR-8 R1 [HIGH] / R2 [MED].
+fn append_narrative_for_event(
+    conn: &Connection,
+    mission_id: &str,
+    kind: &str,
+    payload: Option<&serde_json::Value>,
+    occurred_at: &str,
+) -> Result<()> {
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT narrative_md_path FROM missions WHERE id = ?1",
+            params![mission_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(path) = path else { return Ok(()) };
+    let path = PathBuf::from(path);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut line = format_event_narrative(kind, payload, occurred_at);
+    line.push('\n');
+    // Belt-and-suspenders: cap the line at PIPE_BUF/2 so even with multi-byte
+    // codepoints we stay well within atomic-write bounds. Truncation point is
+    // a char boundary (find_char_boundary walks back to one).
+    const SAFE_MAX: usize = 2048;
+    if line.len() > SAFE_MAX {
+        let mut cut = SAFE_MAX;
+        while cut > 0 && !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+        line.push_str("…\n");
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+    f.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// Pure, deterministic formatter — turns a (kind, payload) pair into the
+/// markdown paragraph appended to the narrative. The output is always a
+/// single line so successive events stay readable when the file is `cat`-ed.
+/// Unknown kinds fall back to a generic "{kind}" line so future event kinds
+/// still leave a trace even without a template.
+fn format_event_narrative(
+    kind: &str,
+    payload: Option<&serde_json::Value>,
+    occurred_at: &str,
+) -> String {
+    let p = payload.cloned().unwrap_or(serde_json::Value::Null);
+    // Sanitize interpolated string values: newlines (and carriage returns)
+    // would otherwise break the single-line-per-event invariant — at least
+    // one producer (`worktree_cleanup_failed.error`) uses `format!("{:#}", e)`
+    // which routinely embeds newlines. Codex/Gemini PR-8 R1 [MED].
+    fn sanitize(raw: &str) -> String {
+        raw.replace(['\n', '\r'], " ")
+    }
+    let s = |k: &str| -> Option<String> {
+        p.get(k).and_then(|v| v.as_str()).map(sanitize)
+    };
+    let i = |k: &str| -> Option<i64> { p.get(k).and_then(|v| v.as_i64()) };
+    let short = |sha: &str| -> String {
+        sha.chars().take(8).collect::<String>()
+    };
+
+    let body: String = match kind {
+        "state_changed" => {
+            let from = s("from").unwrap_or_else(|| "?".into());
+            let to = s("to").unwrap_or_else(|| "?".into());
+            let reason = s("reason").map(|r| format!(" — {}", r)).unwrap_or_default();
+            format!("**State changed:** `{}` → `{}`{}", from, to, reason)
+        }
+        "category_changed" => {
+            let from = s("from").unwrap_or_else(|| "?".into());
+            let to = s("to").unwrap_or_else(|| "?".into());
+            format!("**Category changed:** `{}` → `{}`", from, to)
+        }
+        "dispatched" => {
+            let runtime = s("runtime").unwrap_or_else(|| "?".into());
+            let model = s("model").map(|m| format!("/{}", m)).unwrap_or_default();
+            let status = s("status").unwrap_or_else(|| "?".into());
+            let cost = p
+                .get("cost_usd")
+                .and_then(|v| v.as_f64())
+                .map(|c| format!(", cost ${:.4}", c))
+                .unwrap_or_default();
+            let log = s("execution_log_id")
+                .map(|id| format!(", log `{}`", short(&id)))
+                .unwrap_or_default();
+            format!("**Dispatched** to `{}{}` — status `{}`{}{}", runtime, model, status, cost, log)
+        }
+        "dispatch_started" => {
+            let runtime = s("runtime").unwrap_or_else(|| "?".into());
+            let pid = i("pid").map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+            format!("**Dispatch started** — runtime `{}`, pid {}", runtime, pid)
+        }
+        "dispatch_abandoned" => {
+            let aid = s("attempt_id").unwrap_or_else(|| "?".into());
+            format!("**Dispatch abandoned** — attempt `{}` (pid terminated)", aid)
+        }
+        "loop_run_started" => {
+            let slug = s("loop_slug").unwrap_or_else(|| "?".into());
+            format!("**Loop started:** `{}`", slug)
+        }
+        "loop_run_completed" => {
+            let slug = s("loop_slug").unwrap_or_else(|| "?".into());
+            let status = s("status").unwrap_or_else(|| "?".into());
+            let exec = i("steps_executed").unwrap_or(0);
+            let succ = i("steps_succeeded").unwrap_or(0);
+            let plan = i("steps_planned").unwrap_or(0);
+            format!(
+                "**Loop completed:** `{}` — status `{}` ({}/{} succeeded, {} executed)",
+                slug, status, succ, plan, exec
+            )
+        }
+        "success_check" => {
+            let total = p
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let met = p
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter(|r| r.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
+            let all_met = p.get("all_met").and_then(|v| v.as_bool()).unwrap_or(false);
+            let marker = if all_met { "✓" } else { "·" };
+            format!("**Success check** {} — {}/{} criteria met", marker, met, total)
+        }
+        "merge_check" => {
+            let phase = s("phase").map(|p| format!("phase `{}`, ", p)).unwrap_or_default();
+            let agent = s("agent").map(|a| format!("agent `{}`, ", a)).unwrap_or_default();
+            let total = p
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let met = p
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter(|r| r.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
+            let all_met = p.get("all_met").and_then(|v| v.as_bool()).unwrap_or(false);
+            let marker = if all_met { "✓" } else { "·" };
+            format!("**Merge check** {} — {}{}{}/{} met", marker, phase, agent, met, total)
+        }
+        "escalated" => {
+            let reason = s("reason").unwrap_or_else(|| "(no reason)".into());
+            let summary = s("summary").map(|s| format!(" — {}", s)).unwrap_or_default();
+            format!("**⚠ Escalated** — reason `{}`{}", reason, summary)
+        }
+        "worktree_created" => {
+            let agent = s("agent").unwrap_or_else(|| "?".into());
+            let branch = s("branch").unwrap_or_else(|| "?".into());
+            format!("**Worktree created** for agent `{}` on branch `{}`", agent, branch)
+        }
+        "worktree_cleaned" => {
+            let path = s("path").unwrap_or_else(|| "?".into());
+            let policy = s("policy").unwrap_or_else(|| "?".into());
+            format!("**Worktree cleaned:** `{}` (policy `{}`)", path, policy)
+        }
+        "worktree_cleanup_failed" => {
+            let err = s("error").unwrap_or_else(|| "(no message)".into());
+            format!("**⚠ Worktree cleanup failed:** {}", err)
+        }
+        "worker_config_changed" => "**Worker config changed**".to_string(),
+        "agent_merged" => {
+            let agent = s("agent").unwrap_or_else(|| "?".into());
+            let commit = s("commit_sha")
+                .map(|c| format!(" (commit `{}`)", short(&c)))
+                .unwrap_or_default();
+            format!("**Agent `{}` merged** into integration{}", agent, commit)
+        }
+        "agent_skipped" => {
+            let agent = s("agent").unwrap_or_else(|| "?".into());
+            let reason = s("reason").map(|r| format!(" — {}", r)).unwrap_or_default();
+            format!("**Agent `{}` skipped**{}", agent, reason)
+        }
+        "integration_created" => {
+            let branch = s("branch").unwrap_or_else(|| "?".into());
+            let base = s("base_sha").map(|b| format!(" from `{}`", short(&b))).unwrap_or_default();
+            format!("**Integration worktree created** on `{}`{}", branch, base)
+        }
+        "integration_complete" => {
+            let branch = s("branch").unwrap_or_else(|| "?".into());
+            let head = s("head_sha").map(|h| format!(", head `{}`", short(&h))).unwrap_or_default();
+            let merged = p.get("merged").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let skipped = p.get("skipped").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!(
+                "**Integration complete** — branch `{}`{}, {} merged, {} skipped",
+                branch, head, merged, skipped
+            )
+        }
+        _ => format!("Event `{}`", kind),
+    };
+    format!("- _{ts}_ — {body}", ts = occurred_at, body = body)
 }
 
 fn parse_payload(raw: Option<String>) -> Option<serde_json::Value> {
@@ -6498,5 +6734,204 @@ mod tests {
         let pending_payload: serde_json::Value =
             serde_json::from_str(&pending[0].1.clone().unwrap()).unwrap();
         assert_eq!(pending_payload["reason"], "consecutive_failures");
+    }
+
+    // ── v2.16 PR-8: narrative auto-population ───────────────────────────
+
+    #[test]
+    fn format_event_narrative_renders_known_kinds_and_falls_back_on_unknown() {
+        let ts = "2026-06-13T00:00:00Z";
+
+        // state_changed with reason
+        let s = format_event_narrative(
+            "state_changed",
+            Some(&serde_json::json!({"from": "open", "to": "in_progress", "reason": "first_dispatch"})),
+            ts,
+        );
+        assert!(s.starts_with("- _"));
+        assert!(s.contains("State changed"));
+        assert!(s.contains("`open` → `in_progress`"));
+        assert!(s.contains("first_dispatch"));
+
+        // dispatched with cost + log id (id shortened to 8 chars)
+        let s = format_event_narrative(
+            "dispatched",
+            Some(&serde_json::json!({
+                "runtime": "google", "model": "gemini-3-flash-preview",
+                "status": "success", "cost_usd": 0.0123,
+                "execution_log_id": "deadbeef-cafe-1234-5678-abcdef012345"
+            })),
+            ts,
+        );
+        assert!(s.contains("Dispatched"));
+        assert!(s.contains("`google/gemini-3-flash-preview`"));
+        assert!(s.contains("`success`"));
+        assert!(s.contains("$0.0123"));
+        assert!(s.contains("`deadbeef`"), "log id must be truncated to 8 chars: {}", s);
+
+        // success_check counts met/total
+        let s = format_event_narrative(
+            "success_check",
+            Some(&serde_json::json!({
+                "results": [{"met": true}, {"met": false}, {"met": true}],
+                "all_met": false,
+            })),
+            ts,
+        );
+        assert!(s.contains("2/3 criteria met"));
+
+        // escalated with summary
+        let s = format_event_narrative(
+            "escalated",
+            Some(&serde_json::json!({"reason": "merge_conflict", "summary": "agent a clashes"})),
+            ts,
+        );
+        assert!(s.contains("⚠ Escalated"));
+        assert!(s.contains("`merge_conflict`"));
+        assert!(s.contains("agent a clashes"));
+
+        // unknown kind falls back without panicking
+        let s = format_event_narrative("unknown_future_kind", None, ts);
+        assert!(s.contains("Event `unknown_future_kind`"));
+
+        // All paragraphs are one line.
+        assert!(!s.contains('\n'), "paragraphs must be a single line");
+    }
+
+    #[test]
+    fn insert_event_appends_to_narrative_file() {
+        let conn = make_db();
+        // Write the narrative scaffold to a temp file and point the mission at it.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "# Mission\n\n## Events\n").unwrap();
+        let path_str = tmp.path().to_string_lossy().to_string();
+
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 created_at, updated_at)
+             VALUES ('m-narr', 'narr-test', 'Narr', 'Goal', '[]', ?1, ?2, ?2)",
+            params![path_str, "2026-06-13T00:00:00Z"],
+        )
+        .unwrap();
+
+        insert_event(
+            &conn,
+            "m-narr",
+            "state_changed",
+            Some(serde_json::json!({"from": "open", "to": "in_progress"})),
+            "2026-06-13T00:00:01Z",
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            "m-narr",
+            "dispatched",
+            Some(serde_json::json!({"runtime": "google", "status": "success"})),
+            "2026-06-13T00:00:02Z",
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(body.contains("State changed"), "narrative body: {}", body);
+        assert!(body.contains("Dispatched"), "narrative body: {}", body);
+        // Order is preserved (append semantics).
+        let idx_state = body.find("State changed").unwrap();
+        let idx_disp = body.find("Dispatched").unwrap();
+        assert!(idx_state < idx_disp, "events must append in occurred order");
+    }
+
+    /// Codex/Gemini R1: payload strings with embedded newlines must NOT
+    /// break the single-line-per-event invariant.
+    #[test]
+    fn format_event_narrative_sanitizes_payload_newlines() {
+        let s = format_event_narrative(
+            "worktree_cleanup_failed",
+            Some(&serde_json::json!({
+                "error": "git failed:\nfatal: bad object\r\ncannot continue"
+            })),
+            "2026-06-13T00:00:00Z",
+        );
+        assert!(!s.contains('\n'), "no embedded newlines: {:?}", s);
+        assert!(!s.contains('\r'), "no embedded CRs: {:?}", s);
+        assert!(s.contains("git failed:"));
+        // Multi-line was joined with single spaces.
+        assert!(s.contains("git failed: fatal: bad object"));
+    }
+
+    #[test]
+    fn insert_event_atomic_write_truncates_oversized_lines() {
+        // Even with absurd payload sizes, the appended bytes stay within the
+        // atomic-write envelope. We don't assert the exact cap here — only
+        // that a multi-KB error string does not produce a multi-KB markdown
+        // line. SAFE_MAX is 2048 in the implementation.
+        let conn = make_db();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "# Mission\n\n## Events\n").unwrap();
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 created_at, updated_at)
+             VALUES ('m-big', 'big', 'Big', 'Goal', '[]', ?1, '2026-06-13T00:00:00Z', '2026-06-13T00:00:00Z')",
+            params![tmp.path().to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        let huge = "x".repeat(10_000);
+        insert_event(
+            &conn,
+            "m-big",
+            "worktree_cleanup_failed",
+            Some(serde_json::json!({"error": huge})),
+            "2026-06-13T00:00:01Z",
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(tmp.path()).unwrap();
+        // Find the appended line (the last non-empty line).
+        let appended = body
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .unwrap();
+        assert!(
+            appended.len() <= 2200,
+            "appended line must stay within atomic-write envelope, got {} bytes",
+            appended.len()
+        );
+        // The truncation marker is present when content is cut.
+        assert!(appended.ends_with('…') || appended.len() < 2048, "truncation marker missing on big line: {:?}", appended);
+    }
+
+    #[test]
+    fn insert_event_is_silent_when_narrative_path_is_missing() {
+        let conn = make_db();
+        // Mission row exists but its narrative_md_path points to a file that doesn't exist.
+        conn.execute(
+            "INSERT INTO missions (id, slug, name, goal, success_criteria, narrative_md_path,
+                 created_at, updated_at)
+             VALUES ('m-no', 'no-narr', 'No', 'Goal', '[]', '/tmp/__does-not-exist__.md',
+                 '2026-06-13T00:00:00Z', '2026-06-13T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Must NOT panic, MUST succeed — the SQLite ledger is the source of truth.
+        insert_event(
+            &conn,
+            "m-no",
+            "category_changed",
+            Some(serde_json::json!({"from": "autonomous", "to": "needs_owner"})),
+            "2026-06-13T00:00:01Z",
+        )
+        .unwrap();
+
+        // Event still recorded in SQLite.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mission_events WHERE mission_id = 'm-no'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
