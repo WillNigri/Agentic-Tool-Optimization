@@ -26,6 +26,7 @@ pub mod ratchet;
 pub mod recipes;
 pub mod review;
 pub mod sessions;
+pub mod subagent;
 pub mod regressions;
 pub mod replay;
 pub mod replays;
