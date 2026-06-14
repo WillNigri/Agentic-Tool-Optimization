@@ -43,7 +43,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -315,9 +315,13 @@ async fn run_host_loop(
     presence_token: String,
     mut cmd_rx: mpsc::Receiver<HostCmd>,
 ) {
-    // Per-connection ephemeral X25519 keypair. The privkey is consumed by
-    // the first DH exchange that uses it; a new pair is generated on reconnect.
-    let host_eph_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+    // Codex R3 fix — was EphemeralSecret which gets consumed-on-first-DH
+    // by x25519-dalek's design. That broke multi-tab / multi-browser
+    // pairing: the second pair_request silently failed because the
+    // privkey was already gone. StaticSecret lets us call diffie_hellman()
+    // once per pair_request and derive a fresh session_key per browser
+    // session. Still a per-HOST-WS-connection key: reconnect = new key.
+    let host_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let host_eph_pub = PublicKey::from(&host_eph_secret);
     let host_eph_pub_b64 = B64.encode(host_eph_pub.as_bytes());
 
@@ -357,10 +361,10 @@ async fn run_host_loop(
     // Pending decrypt responses: request_id → session_id.
     let mut pending_decrypt: HashMap<String, String> = HashMap::new();
 
-    // We need to own host_eph_secret for the DH step; after the first use it
-    // is consumed. We use an Option to allow move-out-once semantics. On
-    // reconnect the outer loop generates a fresh secret; here it's per-connection.
-    let mut eph_secret_slot: Option<EphemeralSecret> = Some(host_eph_secret);
+    // Codex R3 fix — keep the StaticSecret available for every pair_request,
+    // not just the first. Each DH call clones (cheap) the StaticSecret and
+    // derives a fresh shared_secret per browser session.
+    let host_eph_secret = host_eph_secret; // bind by-value for clarity
 
     loop {
         tokio::select! {
@@ -381,7 +385,7 @@ async fn run_host_loop(
                             &app,
                             &mut sessions,
                             &mut pending_decrypt,
-                            &mut eph_secret_slot,
+                            &host_eph_secret,
                             &machine_name,
                             &mut ws_write,
                         ).await;
@@ -435,7 +439,7 @@ async fn handle_inbound(
     app: &AppHandle,
     sessions: &mut HashMap<String, ApprovalState>,
     pending_decrypt: &mut HashMap<String, String>,
-    eph_secret_slot: &mut Option<EphemeralSecret>,
+    host_eph_secret: &StaticSecret,
     machine_name: &str,
     ws_write: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -455,7 +459,9 @@ async fn handle_inbound(
     let frame_type = frame.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match frame_type {
-        "host_ack" => {
+        // Codex follow-up — cloud sends `host_ready`, not `host_ack`.
+        // Accepting both keeps forward-compat with any spec migration.
+        "host_ack" | "host_ready" => {
             // Cloud acknowledged our hello; nothing to do here.
         }
 
@@ -490,29 +496,53 @@ async fn handle_inbound(
                 }
             };
 
-            // Consume the ephemeral secret to compute the DH shared secret, then
-            // immediately derive the session key. The EphemeralSecret is consumed
-            // here — subsequent pair_requests on the same WS connection are rejected.
-            // On WS reconnect the host loop generates a fresh ephemeral pair.
-            let session_key = match eph_secret_slot.take() {
-                Some(secret) => {
-                    let browser_pub = PublicKey::from(xb_pub_bytes);
-                    // DH returns a SharedSecret whose bytes are the raw 32-byte output.
-                    let shared = secret.diffie_hellman(&browser_pub);
-                    // Derive the session key before the shared secret bytes go out of scope.
-                    let sk = derive_session_key(shared.as_bytes(), &session_id);
-                    // shared drops here; the 32-byte DH output is gone from memory.
-                    sk
-                }
-                None => {
-                    eprintln!(
-                        "[tether_host] ephemeral secret already consumed; \
-                         cannot derive session key for {}",
-                        session_id
-                    );
-                    return;
-                }
+            // Codex R3 fix — StaticSecret lets us re-derive a fresh
+            // session key per browser session without consuming the
+            // host's privkey. Each browser ends up with a DIFFERENT
+            // session_key (different browser ephemeral pubkey → different
+            // shared_secret → different HKDF output) so multi-tab is safe.
+            let session_key = {
+                let browser_pub = PublicKey::from(xb_pub_bytes);
+                let shared = host_eph_secret.diffie_hellman(&browser_pub);
+                derive_session_key(shared.as_bytes(), &session_id)
             };
+
+            // Codex R4 fix — when cloud auto-approves on a persistent-
+            // prior-approval match, it now ALWAYS routes through the
+            // desktop with an `auto_approved: true` hint. The desktop
+            // derives session_key, inserts an Approved entry directly
+            // (no modal), and emits approval_decision back to cloud so
+            // the browser gets tether_ready. Pre-fix shape skipped the
+            // desktop entirely on auto-approve, so the desktop never
+            // had a session_key for that session_id.
+            let auto_approved = frame
+                .get("auto_approved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if auto_approved {
+                sessions.insert(
+                    session_id.clone(),
+                    ApprovalState::Approved {
+                        session_key,
+                        persistent: true,
+                        send_seq: 0,
+                        recv_seq: 0,
+                    },
+                );
+                // Emit the approval_decision back to cloud so it sends
+                // tether_ready to the browser. The DB row was already
+                // INSERTed by cloud at approval_state='approved'.
+                let decision_frame = json!({
+                    "type": "approval_decision",
+                    "session_id": session_id,
+                    "approved": true,
+                    "persistent": true,
+                });
+                let _ = ws_write
+                    .send(Message::Text(decision_frame.to_string()))
+                    .await;
+                return;
+            }
             // Spec: "discard ephemeral privkeys after HKDF derive" — done above.
             // The session_key is held in memory only for the duration of the approved
             // session; it is removed from `sessions` when the client disconnects or
@@ -558,10 +588,6 @@ async fn handle_inbound(
                 Some(s) => s.to_string(),
                 None => return,
             };
-            let frame_seq = frame
-                .get("frame_seq")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
 
             let state = match sessions.get_mut(&session_id) {
                 Some(s @ ApprovalState::Approved { .. }) => s,
@@ -572,14 +598,14 @@ async fn handle_inbound(
             };
 
             if let ApprovalState::Approved { session_key, recv_seq, .. } = state {
-                // Replay guard: frame_seq must equal recv_seq.
-                if frame_seq != *recv_seq {
-                    eprintln!(
-                        "[tether_host] frame_seq mismatch for {}: got {} expected {}",
-                        session_id, frame_seq, recv_seq
-                    );
-                    return;
-                }
+                // Codex R5 fix — drop the outer frame_seq enforcement.
+                // Pre-fix shape required browser to send a separate
+                // `frame_seq` field, but the browser only ever sent
+                // session_id + payload_b64, AND the cloud relay strips
+                // extra fields anyway. The packed nonce already binds
+                // the seq via HKDF — if browser used the wrong seq, the
+                // nonce won't match what aead_open re-derives. The
+                // local recv_seq counter is the source of truth.
                 let sk = *session_key;
                 let seq = *recv_seq;
                 match aead_open(&sk, seq, &payload_b64) {

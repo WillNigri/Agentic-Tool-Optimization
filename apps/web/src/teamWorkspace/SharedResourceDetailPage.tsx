@@ -17,7 +17,7 @@ import {
   startTether,
   stopTether,
   subscribeTetherState,
-  listTetherSessions,
+  listOnlineHosts,
   type TetherState,
   type TetherInfo,
 } from '../lib/tether/client';
@@ -499,22 +499,23 @@ function E2EBranch({ teamId, kind, resourceId, lastSeq }: E2EBranchProps) {
   useEffect(() => {
     let cancelled = false;
 
-    void listTetherSessions().then((sessions) => {
+    // Codex R6 fix — use /api/tether/hosts (live host registry from
+    // mesh-relay) instead of /api/tether/sessions (historical approval
+    // rows). The old query showed fresh users zero hosts and stale
+    // users a desktop that had disconnected.
+    void listOnlineHosts().then((hosts) => {
       if (cancelled) return;
 
-      const approved = sessions
-        .filter((s) => s.approval_state === 'approved' || s.approval_state === 'pending')
-        .map((s) => s.desktop_machine_name);
+      // Each machine appears at most once in tether_hosts_online (PK is
+      // (user_id, machine_name)) so no dedupe needed.
+      const machines = hosts.map((h) => h.machine_name);
+      setAvailableMachines(machines);
 
-      // Deduplicate.
-      const unique = [...new Set(approved)];
-      setAvailableMachines(unique);
-
-      if (unique.length === 1) {
+      if (machines.length === 1) {
         // Single host — auto-pair immediately.
-        setPickedMachine(unique[0]);
-        void startTether(unique[0]);
-      } else if (unique.length === 0) {
+        setPickedMachine(machines[0]);
+        void startTether(machines[0]);
+      } else if (machines.length === 0) {
         // No hosts online — stay in host_offline visual.
         setTetherInfo({ state: 'host_offline', machineName: null, sessionId: null });
       }

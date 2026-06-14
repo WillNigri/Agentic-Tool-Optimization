@@ -118,6 +118,28 @@ export async function listTetherSessions(): Promise<TetherSession[]> {
   }
 }
 
+// Codex R6 fix — GET /api/tether/hosts returns LIVE hosts from the
+// mesh-relay's hostsByUser registry (mirrored into the
+// tether_hosts_online table on connect/disconnect). Use this instead
+// of listTetherSessions() for host discovery: the sessions list
+// returns historical approval rows, which fresh users have zero of
+// (causing the "no hosts" empty state) and stale entries that look
+// live when the desktop has disconnected.
+export interface OnlineHost {
+  machine_name: string;
+  host_xd_pubkey_b64: string;
+  connected_at: string;
+  last_heartbeat_at: string;
+}
+
+export async function listOnlineHosts(): Promise<OnlineHost[]> {
+  try {
+    return await apiRequest<OnlineHost[]>("/tether/hosts");
+  } catch {
+    return [];
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────
 // startTether / stopTether
 // ──────────────────────────────────────────────────────────────────
@@ -249,9 +271,12 @@ export async function tetherRpc<TReq, TResp>(
   packed.set(nonce, 0);
   packed.set(ciphertext, nonce.length);
 
+  // Codex R1 fix — cloud relay's `forward` handler reads `session_id`,
+  // not `browser_session_id`. Pre-fix shape sent the wrong field name
+  // and every RPC was rejected with "session_id mismatch".
   const frame = {
     type: "forward",
-    browser_session_id: BROWSER_SESSION_ID,
+    session_id: singleton.sessionId,
     payload_b64: toBase64(packed),
   };
 
@@ -292,7 +317,10 @@ function handleFrame(
     case "pair_pending": {
       // Cloud relayed the host_hello from the desktop: complete DH.
       const hostPubB64 = frame.host_xd_pub_b64 as string | undefined;
-      const sessionId = frame.tether_session_id as string | undefined;
+      // Codex R2 fix — cloud emits `pair_pending.session_id`, not
+      // `tether_session_id`. Pre-fix shape never derived the
+      // session_key because this read returned undefined.
+      const sessionId = frame.session_id as string | undefined;
       if (!hostPubB64 || !sessionId) break;
 
       const hostPub = fromBase64(hostPubB64);
