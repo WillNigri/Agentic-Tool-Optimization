@@ -511,6 +511,26 @@ export async function getSharedSessionDetail(teamId: string, sessionId: string):
   return apiRequest<SharedSessionDetail>(`/api/teams/${teamId}/sessions/${sessionId}`);
 }
 
+// v2.14 #14 — team activity feed entry. The cloud route exposes a
+// generic activity log; the feed UI filters for share-related actions.
+export interface TeamActivityEntry {
+  id: string;
+  team_id: string;
+  user_id: string;
+  user_email?: string | null;
+  user_name?: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  resource_name: string | null;
+  changes: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export async function getTeamActivity(teamId: string, limit = 50): Promise<TeamActivityEntry[]> {
+  return apiRequest<TeamActivityEntry[]>(`/api/teams/${teamId}/activity?limit=${limit}`);
+}
+
 export async function getSharedWarRoomDetail(teamId: string, warRoomId: string): Promise<SharedWarRoomDetail> {
   return apiRequest<SharedWarRoomDetail>(`/api/teams/${teamId}/war-rooms/${warRoomId}`);
 }
