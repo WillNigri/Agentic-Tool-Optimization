@@ -42,6 +42,17 @@ lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+# v2.17 Wave 2 — tether-host: end-to-end browser↔desktop crypto.
+# x25519-dalek 2.x uses EphemeralSecret (consumes-on-DH, no copy) which
+# enforces forward-secrecy at the type level.
+x25519-dalek = { version = "2", features = ["getrandom", "static_secrets"] }
+hkdf = "0.12"
+# chacha20poly1305 0.10 is the RustCrypto AEAD implementation.  No FFI,
+# audited, compatible with the existing sha2 + hkdf deps.
+chacha20poly1305 = "0.10"
+# whoami returns the human-visible device name ("Will's MacBook Pro")
+# which is friendlier than the raw hostname for the approval modal.
+whoami = "1"
 which = "6"
 # v2.4.8 security — AES-256-GCM for llm_api_keys.encrypted_key.
 # Pre-2.4.8 the column was plain base64 (no cipher); a master key

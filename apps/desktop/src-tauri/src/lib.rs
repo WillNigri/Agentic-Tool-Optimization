@@ -38,6 +38,8 @@ pub mod recipes_engine;
 mod schema;
 mod identity_probe;
 mod rekey;
+// v2.17 Wave 2 — desktop tether-host (browser ↔ desktop E2E relay).
+pub mod tether_host;
 
 use rusqlite::{Connection, params};
 use schema::init_database;
@@ -256,6 +258,8 @@ pub fn run() {
         // on every poll. PR-5's UI can poll cheap or subscribe to
         // the `identity-probe-status` event emitted in .setup below.
         .manage(identity_probe::IdentityProbeState::new(initial_probe_status.clone()))
+        // v2.17 Wave 2 — tether host channel (None until start_tether_host is called).
+        .manage(tether_host::TetherHostState::new())
         .setup(move |app| {
             // PR-3 — fire the identity-probe-status event so any
             // frontend listener installed at app boot sees the state
@@ -706,6 +710,11 @@ pub fn run() {
             anon_telemetry::anon_telemetry_clear_ids,
             anon_telemetry::set_share_telemetry_pref,
             anon_telemetry::get_share_telemetry_pref,
+            // v2.17 Wave 2 — browser↔desktop tether host.
+            tether_host::start_tether_host,
+            tether_host::stop_tether_host,
+            tether_host::tether_resolve_approval,
+            tether_host::tether_decrypt_response,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
