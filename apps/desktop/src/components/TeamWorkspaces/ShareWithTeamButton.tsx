@@ -290,6 +290,24 @@ export default function ShareWithTeamButton({
                     <div className="min-w-0">
                       <div className="truncate text-sm text-cs-text">{team.name}</div>
                     </div>
+                    <div className="flex items-center gap-1.5">
+                    {alreadyShared && (
+                      // v2.14 #7 — Refresh re-uploads the latest snapshot
+                      // without changing the share row's permissions. The
+                      // server-side POST /share is idempotent (ON CONFLICT
+                      // updates the snapshot + bumps shared_at) so the
+                      // "refresh" verb is just a re-share with a fresh
+                      // getSnapshot() payload.
+                      <button
+                        type="button"
+                        title={t("teamShare.refresh", "Refresh snapshot")}
+                        onClick={() => void handleToggleShare(team.id, false)}
+                        disabled={isPending || sharedStateLoading}
+                        className="shrink-0 rounded-md border border-cs-border px-2 py-1 text-xs text-cs-muted hover:text-cs-text hover:bg-cs-border/30 transition-colors disabled:opacity-50"
+                      >
+                        {t("teamShare.refreshShort", "↻")}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => void handleToggleShare(team.id, alreadyShared)}
@@ -314,6 +332,7 @@ export default function ShareWithTeamButton({
                         t("teamShare.share", "Share")
                       )}
                     </button>
+                    </div>
                   </div>
                 );
               })}
