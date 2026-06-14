@@ -1002,5 +1002,11 @@
       "tick": "Tick",
       "web": "Web"
     }
+  },
+  "livePresence": {
+    "tooltip": "{{count}} colega visualizando",
+    "tooltip_other": "{{count}} colegas visualizando",
+    "andOthers": " +{{count}} mais",
+    "viewingNow": "visualizando"
   }
 }

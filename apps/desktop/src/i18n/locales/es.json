@@ -973,5 +973,11 @@
       "tick": "Tick",
       "web": "Web"
     }
+  },
+  "livePresence": {
+    "tooltip": "{{count}} compañero viendo",
+    "tooltip_other": "{{count}} compañeros viendo",
+    "andOthers": " +{{count}} más",
+    "viewingNow": "viendo"
   }
 }

@@ -1189,5 +1189,11 @@
       "tick": "Tick",
       "web": "Web"
     }
+  },
+  "livePresence": {
+    "tooltip": "{{count}} teammate viewing",
+    "tooltip_other": "{{count}} teammates viewing",
+    "andOthers": " +{{count}} more",
+    "viewingNow": "viewing"
   }
 }
