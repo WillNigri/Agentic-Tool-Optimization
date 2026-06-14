@@ -8,10 +8,15 @@ import {
   Activity,
   LogOut,
   Crown,
+  Users,
 } from 'lucide-react';
 import CostDashboard from './CostDashboard';
 import ApiKeysPanel from './ApiKeysPanel';
 import Onboarding from './Onboarding';
+import TeamsListPage from './teamWorkspace/TeamsListPage';
+import TeamWorkspacePage from './teamWorkspace/TeamWorkspacePage';
+import SharedResourceDetailPage from './teamWorkspace/SharedResourceDetailPage';
+import { type SharedResourceKind, type TeamRow } from './lib/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'https://api.agentictool.ai/api';
 
@@ -97,17 +102,28 @@ function useAuth() {
   return { user, token, login, register, logout, loginWithGithub, isAuthenticated: !!token };
 }
 
-type Panel = 'costs' | 'api-keys' | 'settings';
+type Panel = 'costs' | 'api-keys' | 'workspaces' | 'settings';
 
 const NAV_ITEMS: { id: Panel; label: string; icon: typeof BarChart3 }[] = [
   { id: 'costs', label: 'Cost Dashboard', icon: BarChart3 },
   { id: 'api-keys', label: 'API Keys', icon: Key },
+  { id: 'workspaces', label: 'Team Workspaces', icon: Users },
 ];
+
+// ──────────────────────────────────────────────────────────────────
+// Workspace sub-router types
+// ──────────────────────────────────────────────────────────────────
+
+type WSRoute =
+  | { view: 'teams' }
+  | { view: 'workspace'; teamId: string; teamName: string }
+  | { view: 'detail'; teamId: string; teamName: string; kind: SharedResourceKind; resourceId: string };
 
 export default function WebDashboard() {
   const { user, token, login, register, logout, loginWithGithub, isAuthenticated } = useAuth();
   const [panel, setPanel] = useState<Panel>('costs');
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [wsRoute, setWsRoute] = useState<WSRoute>({ view: 'teams' });
 
   // Show onboarding for new users who haven't completed it
   useEffect(() => {
@@ -124,7 +140,57 @@ export default function WebDashboard() {
     return <Onboarding onComplete={() => setShowOnboarding(false)} />;
   }
 
-  const PanelComponent = panel === 'api-keys' ? ApiKeysPanel : CostDashboard;
+  /** Reset workspace sub-route whenever user clicks away and comes back. */
+  const handlePanelChange = (next: Panel) => {
+    if (next === 'workspaces') setWsRoute({ view: 'teams' });
+    setPanel(next);
+  };
+
+  function renderMainPanel() {
+    if (panel === 'api-keys') return <ApiKeysPanel />;
+    if (panel === 'workspaces') {
+      if (wsRoute.view === 'teams') {
+        return (
+          <TeamsListPage
+            onSelectTeam={(team: TeamRow) =>
+              setWsRoute({ view: 'workspace', teamId: team.id, teamName: team.name })
+            }
+          />
+        );
+      }
+      if (wsRoute.view === 'workspace') {
+        return (
+          <TeamWorkspacePage
+            teamId={wsRoute.teamId}
+            teamName={wsRoute.teamName}
+            onBack={() => setWsRoute({ view: 'teams' })}
+            onOpenDetail={(kind: SharedResourceKind, resourceId: string) =>
+              setWsRoute({
+                view: 'detail',
+                teamId: wsRoute.teamId,
+                teamName: wsRoute.teamName,
+                kind,
+                resourceId,
+              })
+            }
+          />
+        );
+      }
+      if (wsRoute.view === 'detail') {
+        return (
+          <SharedResourceDetailPage
+            teamId={wsRoute.teamId}
+            kind={wsRoute.kind}
+            resourceId={wsRoute.resourceId}
+            onBack={() =>
+              setWsRoute({ view: 'workspace', teamId: wsRoute.teamId, teamName: wsRoute.teamName })
+            }
+          />
+        );
+      }
+    }
+    return <CostDashboard />;
+  }
 
   return (
     <div className="flex h-screen bg-[#0a0a0f]">
@@ -141,7 +207,7 @@ export default function WebDashboard() {
             return (
               <button
                 key={item.id}
-                onClick={() => setPanel(item.id)}
+                onClick={() => handlePanelChange(item.id)}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                   panel === item.id
                     ? 'bg-[#00FFB2]/15 text-[#00FFB2]'
@@ -176,7 +242,7 @@ export default function WebDashboard() {
 
       {/* Main */}
       <main className="flex-1 overflow-y-auto p-6">
-        <PanelComponent />
+        {renderMainPanel()}
       </main>
     </div>
   );
