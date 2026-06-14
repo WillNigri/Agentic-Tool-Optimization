@@ -39,6 +39,8 @@ import {
 } from "@/lib/missions";
 import { formatRelativeTime } from "@/lib/cron-utils";
 import MarkdownContent from "@/components/MarkdownContent";
+import LiveCursors from "@/components/livePresence/LiveCursors";
+import PresencePills from "@/components/livePresence/PresencePills";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -419,13 +421,15 @@ function MissionDetailPanel({
 
   return (
     <>
-      <div className="fixed inset-y-0 right-0 z-40 w-[480px] max-w-full flex flex-col border-l border-cs-border bg-cs-bg shadow-2xl">
+      <div className="fixed inset-y-0 right-0 z-40 w-[480px] max-w-full flex flex-col border-l border-cs-border bg-cs-bg shadow-2xl relative">
+        <LiveCursors resourceKind="mission" resourceId={slugOrId} />
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-cs-border shrink-0">
           <h2 className="text-sm font-semibold text-cs-text truncate">
             {detail?.name ?? slugOrId}
           </h2>
           <div className="flex items-center gap-2">
+            <PresencePills resourceKind="mission" resourceId={slugOrId} />
             <button
               type="button"
               onClick={() => void refetch()}

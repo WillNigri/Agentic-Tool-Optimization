@@ -31,6 +31,8 @@ import { useProjectStore } from "@/stores/useProjectStore";
 import { listAgents, type Agent } from "@/lib/agents";
 import CloseConversationModal from "./CloseConversationModal";
 import InitiatorBadge from "@/components/InitiatorBadge";
+import LiveCursors from "@/components/livePresence/LiveCursors";
+import PresencePills from "@/components/livePresence/PresencePills";
 import {
   runtimeBadge,
   formatTime,
@@ -330,7 +332,8 @@ export default function SessionTranscriptView({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="relative space-y-4">
+      <LiveCursors resourceKind="session" resourceId={sessionId} />
       <div className="flex items-center gap-3 flex-wrap">
         <button
           onClick={onBack}
@@ -345,6 +348,7 @@ export default function SessionTranscriptView({
                 <span className="text-cs-muted italic">untitled</span>
               )}
             </span>
+            <PresencePills resourceKind="session" resourceId={sessionId} />
             {isClosed && (
               <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted">
                 <Lock size={10} /> closed

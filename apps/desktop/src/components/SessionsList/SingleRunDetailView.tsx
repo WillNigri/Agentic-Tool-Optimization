@@ -26,6 +26,8 @@ import {
 import PermissionEventsPanel from "./PermissionEventsPanel";
 import InitiatorBadge from "@/components/InitiatorBadge";
 import ClickablePath from "@/components/ClickablePath";
+import LiveCursors from "@/components/livePresence/LiveCursors";
+import PresencePills from "@/components/livePresence/PresencePills";
 
 export interface SingleRunDetail {
   id: string;
@@ -102,7 +104,8 @@ export default function SingleRunDetailView({
   const d = q.data;
   const isErr = d.status !== "success";
   return (
-    <div className="space-y-4">
+    <div className="relative space-y-4">
+      <LiveCursors resourceKind="session" resourceId={d.id} />
       <div className="flex items-center justify-between gap-3">
         <button
           onClick={onBack}
@@ -110,7 +113,10 @@ export default function SingleRunDetailView({
         >
           ← Back to Sessions
         </button>
-        <div className="text-xs text-cs-muted font-mono">{d.id}</div>
+        <div className="flex items-center gap-2">
+          <PresencePills resourceKind="session" resourceId={d.id} />
+          <div className="text-xs text-cs-muted font-mono">{d.id}</div>
+        </div>
       </div>
 
       <div className="rounded-lg border border-cs-border bg-cs-card p-4 space-y-3">

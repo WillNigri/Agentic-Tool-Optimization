@@ -27,6 +27,8 @@ import {
 } from "./_helpers";
 import type { SingleRunDetail } from "./SingleRunDetailView";
 import InitiatorBadge from "@/components/InitiatorBadge";
+import LiveCursors from "@/components/livePresence/LiveCursors";
+import PresencePills from "@/components/livePresence/PresencePills";
 import CloseConversationModal from "./CloseConversationModal";
 
 interface WarRoomDispatchResult {
@@ -274,7 +276,8 @@ export default function WarRoomDetailView({
   );
 
   return (
-    <div className="space-y-4">
+    <div className="relative space-y-4">
+      <LiveCursors resourceKind="war_room" resourceId={warRoomId} />
       <div className="flex items-center justify-between gap-3">
         <button
           onClick={onBack}
@@ -283,6 +286,7 @@ export default function WarRoomDetailView({
           ← Back to Sessions
         </button>
         <div className="flex items-center gap-2">
+          <PresencePills resourceKind="war_room" resourceId={warRoomId} />
           <div className="text-xs text-cs-muted font-mono">{warRoomId}</div>
           {/* v2.7.13 — close + reopen buttons (mirrors the session
               detail view's lifecycle controls). Disabled while a
