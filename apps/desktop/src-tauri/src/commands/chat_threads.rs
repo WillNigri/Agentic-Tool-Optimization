@@ -54,6 +54,9 @@ pub struct ChatMessage {
     pub agent_slug: Option<String>,
     pub metadata: Option<String>,
     pub created_at: String,
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 #[tauri::command]
@@ -319,7 +322,8 @@ pub fn get_chat_messages(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at
+            "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at,
+                    initiator_kind, client_surface, initiator_id
              FROM chat_messages
              WHERE thread_id = ?1
              ORDER BY created_at ASC",
@@ -336,6 +340,9 @@ pub fn get_chat_messages(
                 agent_slug: row.get(5)?,
                 metadata: row.get(6)?,
                 created_at: row.get(7)?,
+                initiator_kind: row.get(8)?,
+                client_surface: row.get(9)?,
+                initiator_id: row.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -383,6 +390,9 @@ pub fn append_chat_message(
         agent_slug,
         metadata,
         created_at: now,
+        initiator_kind: Some("human".into()),
+        client_surface: Some("desktop".into()),
+        initiator_id: None,
     })
 }
 
