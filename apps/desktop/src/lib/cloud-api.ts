@@ -832,4 +832,101 @@ export async function getTeamKeyEnvelope(teamKeyId: string): Promise<{
   );
 }
 
+// ============================================================
+// v2.15 Wave 2 — Team Event Log API
+// ============================================================
+
+/**
+ * A single event row from a team_shared_<kind>_events table.
+ * Plaintext shares populate payload_json; E2E shares (Wave 3)
+ * populate ciphertext_b64 + nonce_b64 instead.
+ */
+export interface TeamEvent {
+  seq_num: number;
+  event_kind: string;
+  payload_json: unknown | null;
+  ciphertext_b64: string | null;
+  nonce_b64: string | null;
+  signature_b64: string | null;
+  signer_key_id: string | null;
+  initiator_user_id: string | null;
+  initiator_runtime: string | null;
+  initiator_agent_slug: string | null;
+  surface: 'desktop' | 'cli' | 'web' | 'mcp' | 'cron';
+  created_at: string;
+}
+
+/**
+ * The five resource kinds that have per-kind event tables.
+ * URL segment uses hyphens (war-room → /war-rooms/:id/events).
+ */
+export type SharedResourceKind =
+  | 'session'
+  | 'war-room'
+  | 'chat'
+  | 'loop'
+  | 'mission';
+
+/** Map a SharedResourceKind to its URL path segment (plural). */
+function kindToPathSegment(kind: SharedResourceKind): string {
+  const map: Record<SharedResourceKind, string> = {
+    session: 'sessions',
+    'war-room': 'war-rooms',
+    chat: 'chats',
+    loop: 'loops',
+    mission: 'missions',
+  };
+  return map[kind];
+}
+
+/**
+ * Append a new event to a team-shared resource.
+ * On success the server returns the assigned seq_num (monotonically
+ * increasing per resource, assigned under a row-locked counter) and
+ * the server-side created_at timestamp.
+ */
+export async function appendTeamEvent(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  body: {
+    event_kind: string;
+    payload_json?: unknown;
+    ciphertext_b64?: string;
+    nonce_b64?: string;
+    signature_b64?: string;
+    signer_key_id?: string;
+    initiator_runtime?: string;
+    initiator_agent_slug?: string;
+    surface: 'desktop' | 'cli' | 'web' | 'mcp' | 'cron';
+  },
+): Promise<{ seq_num: number; created_at: string }> {
+  const segment = kindToPathSegment(kind);
+  return apiRequest<{ seq_num: number; created_at: string }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/**
+ * Backfill events for a resource since a given seq_num (exclusive).
+ * Used on WS reconnect and on the initial SharedDetailView mount to
+ * fetch events that arrived after the REST snapshot was taken.
+ */
+export async function backfillTeamEvents(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  since: number,
+  limit = 200,
+): Promise<TeamEvent[]> {
+  const segment = kindToPathSegment(kind);
+  return apiRequest<TeamEvent[]>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events?since=${since}&limit=${limit}`,
+  );
+}
+
 export { CloudApiError };
