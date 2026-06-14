@@ -771,6 +771,48 @@ export default function SessionsList() {
               });
             })()}
           </div>
+          {/* 2026-06-14 fix — status chips (All / Open / Closed) were
+              lost in an IA refactor; the filter state existed but no
+              UI control flipped it. Mirrors the kind-chip pattern and
+              uses the same counting strategy via filterFields. Single-
+              runs have no lifecycle so they're excluded when Open or
+              Closed is selected. */}
+          <div className="flex items-center gap-2 text-xs">
+            {(() => {
+              const statusChips: { key: StatusFilter; label: string }[] = [
+                { key: "all", label: "All" },
+                { key: "open", label: "Open" },
+                { key: "closed", label: "Closed" },
+              ];
+              return statusChips.map(({ key, label }) => {
+                // Count rows that would be visible if statusFilter === key,
+                // holding the other filters constant. The actual filter
+                // logic is at line ~140 (status: 'open' / 'closed' only
+                // matches rows with that lifecycle; single_runs are
+                // excluded from those buckets).
+                const count = nonEmptyData!.filter((row) => {
+                  if (key === "open" && row.status !== "open") return false;
+                  if (key === "closed" && row.status !== "closed") return false;
+                  return true;
+                }).length;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setStatusFilter(key)}
+                    className={cn(
+                      "px-2 py-1 rounded-md border transition-colors",
+                      statusFilter === key
+                        ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
+                        : "border-cs-border bg-cs-card text-cs-muted hover:text-cs-text"
+                    )}
+                  >
+                    {label}
+                    <span className="ml-1 opacity-60">({count})</span>
+                  </button>
+                );
+              });
+            })()}
+          </div>
           {/* PR 6 — taxonomy filters: category dropdown + team
               dropdown. Both implicitly scope to sessions (single-runs
               have neither). Counts shown next to each option reflect

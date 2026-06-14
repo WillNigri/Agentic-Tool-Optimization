@@ -147,6 +147,14 @@ enum Commands {
     /// criteria. See `docs/v2.16-missions.md` for the design.
     #[command(name = "missions")]
     Missions(commands::missions::MissionArgs),
+    /// Log a Claude Code subagent (code-writer / cso / pr-reviewer /
+    /// etc.) run so it appears in the same Sessions feed as `ato
+    /// dispatch` runs. Bracket each Agent tool invocation:
+    /// `ato subagent log create` before, `ato subagent log finish` after.
+    /// Multi-agent fan-outs share a `--war-room-id` and can be summarized
+    /// via `ato war-rooms close <id>`.
+    #[command(name = "subagent")]
+    Subagent(commands::subagent::SubagentArgs),
     /// v2.17 — Bundles: packaged inference results. A bundle = a source
     /// row (mission / methodology run / loop run / session / dispatch) +
     /// its dispatches + judge scores + artifact files + manifest.
@@ -1435,6 +1443,10 @@ fn main() -> Result<()> {
         }
         Commands::Missions(args) => {
             commands::missions::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Subagent(args) => {
+            commands::subagent::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Bundles(args) => {
