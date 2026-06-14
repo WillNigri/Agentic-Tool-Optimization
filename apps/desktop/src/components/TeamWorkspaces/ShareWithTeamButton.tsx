@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils";
 import { useTier } from "@/lib/tier";
 import {
   getSharedChats,
+  getSharedLoops,
+  getSharedMissions,
   getSharedSessions,
   getSharedWarRooms,
   getTeamSharedAgents,
@@ -14,12 +16,16 @@ import {
   getTeams,
   shareAgentWithTeam,
   shareChatWithTeam,
+  shareLoopWithTeam,
   shareMethodologyWithTeam,
+  shareMissionWithTeam,
   shareSessionWithTeam,
   shareWarRoomWithTeam,
   unshareAgentFromTeam,
   unshareChatFromTeam,
+  unshareLoopFromTeam,
   unshareMethodologyFromTeam,
+  unshareMissionFromTeam,
   unshareSessionFromTeam,
   unshareWarRoomFromTeam,
   type Team,
@@ -30,7 +36,9 @@ type ShareableResourceKind =
   | "war_room"
   | "chat"
   | "agent"
-  | "methodology";
+  | "methodology"
+  | "loop"
+  | "mission";
 
 interface ShareWithTeamButtonProps {
   resourceKind: ShareableResourceKind;
@@ -56,6 +64,10 @@ async function getSharedIdsForTeam(
       return (await getTeamSharedMethodologies(teamId)).map(
         (row) => row.methodology_id,
       );
+    case "loop":
+      return (await getSharedLoops(teamId)).map((row) => row.loop_id);
+    case "mission":
+      return (await getSharedMissions(teamId)).map((row) => row.mission_id);
     default:
       return [];
   }
@@ -93,6 +105,12 @@ async function shareResourceWithTeam(
         config: unknown;
       });
       return;
+    case "loop":
+      await shareLoopWithTeam(teamId, resourceId, payload ?? { snapshot: null });
+      return;
+    case "mission":
+      await shareMissionWithTeam(teamId, resourceId, payload ?? { snapshot: null });
+      return;
   }
 }
 
@@ -116,6 +134,12 @@ async function unshareResourceFromTeam(
       return;
     case "methodology":
       await unshareMethodologyFromTeam(teamId, resourceId);
+      return;
+    case "loop":
+      await unshareLoopFromTeam(teamId, resourceId);
+      return;
+    case "mission":
+      await unshareMissionFromTeam(teamId, resourceId);
       return;
   }
 }

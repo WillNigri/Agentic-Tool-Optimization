@@ -511,6 +511,76 @@ export async function getSharedSessionDetail(teamId: string, sessionId: string):
   return apiRequest<SharedSessionDetail>(`/api/teams/${teamId}/sessions/${sessionId}`);
 }
 
+// v2.14 #12 — loops + missions sharing. Same shape as the other
+// shared resources; the desktop cloud-api wrappers mirror the cloud
+// routes added in migrations 033.
+export interface SharedTeamLoop {
+  team_id: string;
+  loop_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  title?: string | null;
+  expires_at?: string | null;
+}
+
+export interface SharedTeamMission {
+  team_id: string;
+  mission_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  title?: string | null;
+  expires_at?: string | null;
+}
+
+export interface SharedLoopDetail extends SharedTeamLoop {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+export interface SharedMissionDetail extends SharedTeamMission {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+
+export async function shareLoopWithTeam(teamId: string, loopId: string, payload: unknown): Promise<{ team_id: string; loop_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/loops/share`, {
+    method: 'POST',
+    body: JSON.stringify({ loop_id: loopId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function shareMissionWithTeam(teamId: string, missionId: string, payload: unknown): Promise<{ team_id: string; mission_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/missions/share`, {
+    method: 'POST',
+    body: JSON.stringify({ mission_id: missionId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function unshareLoopFromTeam(teamId: string, loopId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/loops/${loopId}/share`, { method: 'DELETE' });
+}
+
+export async function unshareMissionFromTeam(teamId: string, missionId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/missions/${missionId}/share`, { method: 'DELETE' });
+}
+
+export async function getSharedLoops(teamId: string): Promise<SharedTeamLoop[]> {
+  return apiRequest<SharedTeamLoop[]>(`/api/teams/${teamId}/loops`);
+}
+
+export async function getSharedMissions(teamId: string): Promise<SharedTeamMission[]> {
+  return apiRequest<SharedTeamMission[]>(`/api/teams/${teamId}/missions`);
+}
+
+export async function getSharedLoopDetail(teamId: string, loopId: string): Promise<SharedLoopDetail> {
+  return apiRequest<SharedLoopDetail>(`/api/teams/${teamId}/loops/${loopId}`);
+}
+
+export async function getSharedMissionDetail(teamId: string, missionId: string): Promise<SharedMissionDetail> {
+  return apiRequest<SharedMissionDetail>(`/api/teams/${teamId}/missions/${missionId}`);
+}
+
 // v2.14 #14 — team activity feed entry. The cloud route exposes a
 // generic activity log; the feed UI filters for share-related actions.
 export interface TeamActivityEntry {

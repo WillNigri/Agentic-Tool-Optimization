@@ -348,3 +348,167 @@ export async function buildChatSnapshot(
   };
   return withTruncation(snapshot, "messages", "createdAt");
 }
+
+
+// v2.14 #12 — loop + mission snapshot builders.
+//
+// Loops are best-effort: we fetch the loop row (canvas + metadata) and
+// the recent loop_runs. Truncate recent_runs from oldest when over the
+// cap. Missions: fetch the mission row + the trailing chunk of the
+// narrative markdown sidecar; recent_events from oldest first.
+
+interface LoopRowSnapshot {
+  id: string;
+  name: string;
+  description: string | null;
+  bodyJson: unknown;
+  triggerKind: string | null;
+  triggerConfig: unknown;
+  enabled: boolean;
+  source: string | null;
+  sourceRef: string | null;
+  variables: unknown;
+}
+
+interface LoopRunSnapshot {
+  id: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  stepCount: number;
+  error?: string | null;
+}
+
+export async function buildLoopSnapshot(
+  loopId: string,
+): Promise<SnapshotResult<{
+  kind: "loop";
+  id: string;
+  name: string;
+  description: string | null;
+  body_json: unknown;
+  trigger_kind: string | null;
+  trigger_config: unknown;
+  enabled: boolean;
+  source: string | null;
+  source_ref: string | null;
+  variables: unknown;
+  recent_runs: Array<{
+    id: string;
+    status: string;
+    started_at: string;
+    finished_at: string | null;
+    step_count: number;
+    error?: string | null;
+  }>;
+}>> {
+  const [loop, runs] = await Promise.all([
+    invoke<LoopRowSnapshot>("get_loop", { id: loopId }),
+    invoke<LoopRunSnapshot[]>("list_loop_runs", {
+      loopIdOrSlug: loopId,
+      limit: 25,
+    }).catch(() => []),
+  ]);
+  const snapshot = {
+    kind: "loop" as const,
+    id: loop.id,
+    name: loop.name,
+    description: loop.description,
+    body_json: loop.bodyJson,
+    trigger_kind: loop.triggerKind,
+    trigger_config: loop.triggerConfig,
+    enabled: loop.enabled,
+    source: loop.source,
+    source_ref: loop.sourceRef,
+    variables: loop.variables,
+    recent_runs: runs.map((run) => ({
+      id: run.id,
+      status: run.status,
+      started_at: run.startedAt,
+      finished_at: run.finishedAt,
+      step_count: run.stepCount,
+      error: run.error ?? null,
+    })),
+  };
+  return withTruncation(snapshot as unknown as Record<string, unknown> & {
+    recent_runs: Array<Record<string, unknown>>;
+  }, "recent_runs" as never, "createdAt") as unknown as SnapshotResult<typeof snapshot>;
+}
+
+interface MissionDetailSnapshot {
+  id: string;
+  slug: string;
+  name: string;
+  goal: string;
+  state: string;
+  category: string | null;
+  successCriteria: unknown;
+  resultMetadata: unknown;
+  maxLoops: number | null;
+  tokenBudgetUsd: number | null;
+  spentUsd: number;
+  dispatchCount: number;
+}
+
+interface MissionEventSnapshot {
+  id: string;
+  kind: string;
+  payload: unknown;
+  occurredAt: string;
+}
+
+export async function buildMissionSnapshot(
+  slugOrId: string,
+): Promise<SnapshotResult<{
+  kind: "mission";
+  id: string;
+  slug: string;
+  name: string;
+  goal: string;
+  state: string;
+  category: string | null;
+  success_criteria: unknown;
+  result_metadata: unknown;
+  max_loops: number | null;
+  token_budget_usd: number | null;
+  spent_usd: number;
+  dispatch_count: number;
+  recent_events: Array<{
+    id: string;
+    kind: string;
+    payload: unknown;
+    occurred_at: string;
+  }>;
+}>> {
+  const detail = await invoke<MissionDetailSnapshot>("mission_detail", {
+    slugOrId,
+  });
+  const events = await invoke<MissionEventSnapshot[]>("mission_events", {
+    slugOrId,
+    limit: 50,
+  }).catch(() => []);
+  const snapshot = {
+    kind: "mission" as const,
+    id: detail.id,
+    slug: detail.slug,
+    name: detail.name,
+    goal: detail.goal,
+    state: detail.state,
+    category: detail.category,
+    success_criteria: detail.successCriteria,
+    result_metadata: detail.resultMetadata,
+    max_loops: detail.maxLoops,
+    token_budget_usd: detail.tokenBudgetUsd,
+    spent_usd: detail.spentUsd,
+    dispatch_count: detail.dispatchCount,
+    recent_events: events.map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      payload: event.payload,
+      occurred_at: event.occurredAt,
+    })),
+  };
+  return withTruncation(snapshot as unknown as Record<string, unknown> & {
+    recent_events: Array<Record<string, unknown>>;
+  }, "recent_events" as never, "createdAt") as unknown as SnapshotResult<typeof snapshot>;
+}
