@@ -40,6 +40,7 @@ import {
 import { formatRelativeTime } from "@/lib/cron-utils";
 import MarkdownContent from "@/components/MarkdownContent";
 import LiveCursors from "@/components/livePresence/LiveCursors";
+import InitiatorBadge from "@/components/InitiatorBadge";
 import PresencePills from "@/components/livePresence/PresencePills";
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -207,10 +208,19 @@ function MissionCard({
         </div>
       )}
 
-      {/* Updated-at */}
-      <p className="text-[10px] text-cs-muted/70">
-        {formatRelativeTime(mission.updatedAt)}
-      </p>
+      {/* Initiator + updated-at */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        {(mission.initiatorKind || mission.clientSurface) && (
+          <InitiatorBadge
+            initiatorKind={mission.initiatorKind}
+            clientSurface={mission.clientSurface}
+            initiatorId={mission.initiatorId}
+          />
+        )}
+        <p className="text-[10px] text-cs-muted/70 ml-auto">
+          {formatRelativeTime(mission.updatedAt)}
+        </p>
+      </div>
     </button>
   );
 }

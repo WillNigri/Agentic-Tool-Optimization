@@ -21,6 +21,9 @@ export interface MissionSummary {
   spentUsd: number;
   dispatchCount: number;
   updatedAt: string;
+  initiatorKind?: string | null;
+  clientSurface?: string | null;
+  initiatorId?: string | null;
 }
 
 export interface MissionEvent {

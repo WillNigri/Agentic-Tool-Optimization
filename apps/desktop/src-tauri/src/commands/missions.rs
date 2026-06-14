@@ -42,6 +42,9 @@ pub struct MissionSummary {
     /// Count of dispatched + loop_run_completed events.
     pub dispatch_count: i64,
     pub updated_at: String,
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 /// Full mission detail row (mirrors MissionRow in CLI).
@@ -361,6 +364,9 @@ pub fn missions_list(
         let max_loops: Option<i64> = r.get(12)?;
         let token_budget_usd: Option<f64> = r.get(13)?;
         let updated_at: String = r.get(17)?;
+        let initiator_kind: Option<String> = r.get(20)?;
+        let client_surface: Option<String> = r.get(21)?;
+        let initiator_id: Option<String> = r.get(22)?;
         Ok(MissionSummary {
             id,
             slug,
@@ -375,6 +381,9 @@ pub fn missions_list(
             spent_usd: 0.0,    // filled below
             dispatch_count: 0, // filled below
             updated_at,
+            initiator_kind,
+            client_surface,
+            initiator_id,
         })
     };
 
