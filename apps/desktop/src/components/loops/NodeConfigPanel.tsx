@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Trash2, Globe, Activity, Terminal, Cpu, Server } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { CONFIG_PANEL_W, TYPE_COLORS, SERVICE_COLORS, SERVICE_ICONS, NODE_ICONS } from "./constants";
 import { SERVICE_ACTIONS } from "./service-catalog";
 import { useAutomationStore } from "@/stores/useLoopStore";
@@ -196,8 +197,29 @@ export default function NodeConfigPanel({ node, workflow, onDelete }: NodeConfig
       );
     }
 
+    // Validation hints — required LLM-kind fields left empty. The bar at
+    // the top of the panel lists them; each offending field also gets a red
+    // border (rendered below).
+    const llmFields = isLlmKind(currentNode.type) ? LLM_KIND_FIELDS[currentNode.type] : [];
+    const missingRequired = llmFields.filter(
+      (f) => f.required && !(currentNode.config?.params?.[f.key] || "").trim()
+    );
+
     return (
       <>
+        {missingRequired.length > 0 && (
+          <div className="mb-3 rounded-md border border-[#FF4466]/40 bg-[#FF446610] px-3 py-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-[#FF4466] mb-1">
+              {t("loopComposer.validation.missingRequired")}
+            </p>
+            <ul className="list-disc pl-4 text-[11px] text-[#FF4466]">
+              {missingRequired.map((f) => (
+                <li key={f.key}>{f.label}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="mb-3">
           <label className="block text-[10px] text-[#8888a0] uppercase tracking-wider mb-1 font-medium">
             {t("automation.builder.label", "Label")}
@@ -303,7 +325,11 @@ export default function NodeConfigPanel({ node, workflow, onDelete }: NodeConfig
             <div className="mb-2 text-[10px] font-medium uppercase tracking-wider text-[#8888a0]">
               {currentNode.type.replace(/_/g, " ")} config
             </div>
-            {LLM_KIND_FIELDS[currentNode.type].map((field) => (
+            {LLM_KIND_FIELDS[currentNode.type].map((field) => {
+              const fieldValue = currentNode.config?.params?.[field.key] || "";
+              const invalid = Boolean(field.required) && !fieldValue.trim();
+              const borderClass = invalid ? "border-[#FF4466]" : "border-[#2a2a3a]";
+              return (
               <div key={field.key} className="mb-3">
                 <label className="block text-[10px] text-[#8888a0] uppercase tracking-wider mb-1 font-medium">
                   {field.key === "context_input"
@@ -313,23 +339,23 @@ export default function NodeConfigPanel({ node, workflow, onDelete }: NodeConfig
                 </label>
                 {field.key === "context_input" ? (
                   <InputPicker
-                    value={currentNode.config?.params?.[field.key] || ""}
+                    value={fieldValue}
                     onSelect={(slug) => setParam(field.key, slug)}
                     kindFilter="markdown"
                   />
                 ) : field.type === "textarea" ? (
                   <textarea
-                    value={currentNode.config?.params?.[field.key] || ""}
+                    value={fieldValue}
                     onChange={(e) => setParam(field.key, e.target.value)}
                     placeholder={field.placeholder}
                     rows={3}
-                    className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors resize-none font-mono"
+                    className={cn("w-full rounded-md border bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors resize-none font-mono", borderClass)}
                   />
                 ) : field.type === "select" ? (
                   <select
-                    value={currentNode.config?.params?.[field.key] || ""}
+                    value={fieldValue}
                     onChange={(e) => setParam(field.key, e.target.value)}
-                    className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
+                    className={cn("w-full rounded-md border bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors", borderClass)}
                   >
                     <option value="">{t("automation.builder.selectOption", "-- select --")}</option>
                     {field.options?.map((opt) => (
@@ -339,14 +365,15 @@ export default function NodeConfigPanel({ node, workflow, onDelete }: NodeConfig
                 ) : (
                   <input
                     type="text"
-                    value={currentNode.config?.params?.[field.key] || ""}
+                    value={fieldValue}
                     onChange={(e) => setParam(field.key, e.target.value)}
                     placeholder={field.placeholder}
-                    className="w-full rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors"
+                    className={cn("w-full rounded-md border bg-[#16161e] text-[#e8e8f0] text-xs py-1.5 px-2 focus:outline-none focus:border-[#00FFB2] transition-colors", borderClass)}
                   />
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 

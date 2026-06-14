@@ -742,6 +742,24 @@
       "banner": "You have {{count}} legacy workflows in browser storage.",
       "migrate": "Migrate to Loops",
       "dismiss": "Dismiss"
+    },
+    "pasteJson": {
+      "button": "Paste JSON",
+      "title": "Paste workflow JSON",
+      "description": "Paste a workflow with \"nodes\" and \"edges\" arrays. This replaces the current canvas.",
+      "placeholder": "{ \"nodes\": [], \"edges\": [] }",
+      "submit": "Replace canvas",
+      "cancel": "Cancel",
+      "errorJson": "Could not parse JSON — check the syntax.",
+      "errorShape": "Workflow must be an object with \"nodes\" and \"edges\" arrays.",
+      "errorNode": "Each node needs a non-empty string \"id\".",
+      "errorEdge": "Each edge needs string \"from\" and \"to\" fields."
+    },
+    "autoLayout": {
+      "button": "Auto-layout"
+    },
+    "validation": {
+      "missingRequired": "Missing required fields:"
     }
   },
   "cron": {

@@ -829,6 +829,24 @@
       "banner": "Tienes {{count}} workflows heredados en el almacenamiento del navegador.",
       "migrate": "Migrar a Loops",
       "dismiss": "Descartar"
+    },
+    "pasteJson": {
+      "button": "Pegar JSON",
+      "title": "Pegar JSON del workflow",
+      "description": "Pega un workflow con arreglos \"nodes\" y \"edges\". Esto reemplaza el lienzo actual.",
+      "placeholder": "{ \"nodes\": [], \"edges\": [] }",
+      "submit": "Reemplazar lienzo",
+      "cancel": "Cancelar",
+      "errorJson": "No se pudo analizar el JSON — revisa la sintaxis.",
+      "errorShape": "El workflow debe ser un objeto con arreglos \"nodes\" y \"edges\".",
+      "errorNode": "Cada nodo necesita un \"id\" string no vacio.",
+      "errorEdge": "Cada conexion necesita los campos string \"from\" y \"to\"."
+    },
+    "autoLayout": {
+      "button": "Auto-organizar"
+    },
+    "validation": {
+      "missingRequired": "Campos obligatorios faltantes:"
     }
   },
   "providerKeys": {

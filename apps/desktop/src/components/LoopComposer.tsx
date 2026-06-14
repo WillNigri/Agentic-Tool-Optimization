@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -42,6 +42,8 @@ export default function LoopComposer() {
     selectNode,
     deleteNode,
     saveWorkflow: markSaved,
+    undo,
+    redo,
     startExecution,
     updateNodeExecStatus,
     appendOutput,
@@ -529,6 +531,22 @@ export default function LoopComposer() {
     }
   }, [workflow, execution.running, isMigrating, startExecution, updateNodeExecStatus, appendOutput, finishExecution]);
 
+  // Undo/redo keybinds — scoped to the composer. The handler lives on the
+  // root container (tabIndex below) so it only fires when focus is inside
+  // the composer, never globally. We let native field-level undo win while
+  // the user is typing in an input/textarea/select.
+  const composerRef = useRef<HTMLDivElement>(null);
+  const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod || e.key.toLowerCase() !== "z") return;
+    const target = e.target as HTMLElement;
+    const tag = target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return;
+    e.preventDefault();
+    if (e.shiftKey) redo();
+    else undo();
+  }, [undo, redo]);
+
   if (workflows.length === 0) {
     return (
       <div className="flex flex-col h-full w-full items-center justify-center" style={{ background: "#0a0a0f" }}>
@@ -558,7 +576,13 @@ export default function LoopComposer() {
   }
 
   return (
-    <div className="flex flex-col h-full w-full" style={{ background: "#0a0a0f" }}>
+    <div
+      ref={composerRef}
+      tabIndex={0}
+      onKeyDown={handleComposerKeyDown}
+      className="flex flex-col h-full w-full outline-none"
+      style={{ background: "#0a0a0f" }}
+    >
       {legacyWorkflowCount !== null && (
         <div className="flex items-center justify-between gap-3 border-b border-[#2a2a3a] bg-[#16161e] px-4 py-2">
           <p className="text-sm text-[#e8e8f0]">

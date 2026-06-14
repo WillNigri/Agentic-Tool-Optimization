@@ -858,6 +858,24 @@
       "banner": "Voce tem {{count}} workflows legados no armazenamento do navegador.",
       "migrate": "Migrar para Loops",
       "dismiss": "Dispensar"
+    },
+    "pasteJson": {
+      "button": "Colar JSON",
+      "title": "Colar JSON do workflow",
+      "description": "Cole um workflow com arrays \"nodes\" e \"edges\". Isso substitui o canvas atual.",
+      "placeholder": "{ \"nodes\": [], \"edges\": [] }",
+      "submit": "Substituir canvas",
+      "cancel": "Cancelar",
+      "errorJson": "Nao foi possivel analisar o JSON — verifique a sintaxe.",
+      "errorShape": "O workflow deve ser um objeto com arrays \"nodes\" e \"edges\".",
+      "errorNode": "Cada no precisa de um \"id\" string nao vazio.",
+      "errorEdge": "Cada conexao precisa dos campos string \"from\" e \"to\"."
+    },
+    "autoLayout": {
+      "button": "Organizar"
+    },
+    "validation": {
+      "missingRequired": "Campos obrigatorios ausentes:"
     }
   },
   "providerKeys": {
