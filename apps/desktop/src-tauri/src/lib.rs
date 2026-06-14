@@ -1,5 +1,6 @@
 mod openclaw_ws;
 mod byok;
+mod e2e_keychain;
 mod encryption;
 mod identity;
 mod log_watcher;
@@ -692,6 +693,10 @@ pub fn run() {
             // to the UpdateBanner so we can show a copy-pasteable
             // upgrade command instead of the failing in-place updater.
             installer_detect::get_install_method,
+            // v2.15 Wave 1 — E2E keychain commands (X25519 + Ed25519 privkeys).
+            e2e_keychain::e2e_keypair_exists,
+            e2e_keychain::e2e_store_keypair,
+            e2e_keychain::e2e_load_keypair,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

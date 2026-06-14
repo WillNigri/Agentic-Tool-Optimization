@@ -775,4 +775,61 @@ export async function rotateEmbedKey(): Promise<string> {
   return data.embedKey;
 }
 
+// ============================================================
+// v2.15 Wave 1 — E2E Key Management API
+// ============================================================
+
+import { toBase64 } from '@/lib/e2e/crypto';
+
+/**
+ * Publish (or rotate) this user's E2E public keys.
+ * The cloud stores them indexed by key_id so team admins can seal Team Keys
+ * to each member's current X25519 public key.
+ * Returns the key_id assigned by the cloud and whether a previous key was rotated.
+ */
+export async function pushE2ePublicKeys(
+  x25519PublicKey: Uint8Array,
+  ed25519PublicKey: Uint8Array,
+): Promise<{ id: string; rotated: boolean }> {
+  return apiRequest<{ id: string; rotated: boolean }>('/api/auth/me/e2e-keys', {
+    method: 'POST',
+    body: JSON.stringify({
+      x25519_pubkey: toBase64(x25519PublicKey),
+      ed25519_pubkey: toBase64(ed25519PublicKey),
+    }),
+  });
+}
+
+/**
+ * List all E2E public keys for members of a team.
+ * Used by team admins to seal the Team Key for each member.
+ */
+export async function getTeamMemberE2eKeys(
+  teamId: string,
+): Promise<
+  Array<{
+    member_user_id: string;
+    key_id: string;
+    x25519_pubkey: string;
+    ed25519_pubkey: string;
+  }>
+> {
+  return apiRequest(`/api/auth/me/e2e-keys?team_id=${encodeURIComponent(teamId)}`);
+}
+
+/**
+ * Fetch the sealed Team Key envelope for the currently-authenticated user.
+ * The cloud returns the envelope that was sealed to this user's X25519 public key.
+ */
+export async function getTeamKeyEnvelope(teamKeyId: string): Promise<{
+  team_key_id: string;
+  sealed_key: string;
+  sealed_by_user_id: string;
+  created_at: string;
+}> {
+  return apiRequest(
+    `/api/auth/me/e2e-envelope?team_key_id=${encodeURIComponent(teamKeyId)}`,
+  );
+}
+
 export { CloudApiError };
