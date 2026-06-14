@@ -404,7 +404,11 @@ export interface SharedTeamWarRoom {
 
 export interface SharedTeamChat {
   team_id: string;
-  chat_id: string;
+  // Codex final-review F2: cloud wire shape uses chat_thread_id
+  // (matches the OSS-local chat_threads table). Earlier OSS wrappers
+  // typed it as chat_id which made every share/unshare/list call
+  // fail validation server-side. Aligned to chat_thread_id.
+  chat_thread_id: string;
   shared_by_user_id: string;
   shared_at: string;
   snapshot: unknown;
@@ -460,10 +464,12 @@ export async function shareWarRoomWithTeam(teamId: string, warRoomId: string, pa
   });
 }
 
-export async function shareChatWithTeam(teamId: string, chatId: string, payload: unknown): Promise<{ team_id: string; chat_id: string; shared_at: string }> {
+export async function shareChatWithTeam(teamId: string, chatId: string, payload: unknown): Promise<{ team_id: string; chat_thread_id: string; shared_at: string }> {
+  // Codex final-review F2: cloud schema is chat_thread_id (matches
+  // OSS chat_threads.id). Use the canonical key on the wire.
   return apiRequest(`/api/teams/${teamId}/chats/share`, {
     method: 'POST',
-    body: JSON.stringify({ chat_id: chatId, ...((payload as Record<string, unknown>) ?? {}) }),
+    body: JSON.stringify({ chat_thread_id: chatId, ...((payload as Record<string, unknown>) ?? {}) }),
   });
 }
 

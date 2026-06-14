@@ -480,7 +480,7 @@ export default function SessionsList() {
                 teamId: t.id,
                 teamName: t.name,
                 rowKind: "team_shared_chat",
-                originalId: x.chat_id,
+                originalId: x.chat_thread_id,
                 sharedByUserId: x.shared_by_user_id,
                 sharedAt: x.shared_at,
                 snapshot: x.snapshot,

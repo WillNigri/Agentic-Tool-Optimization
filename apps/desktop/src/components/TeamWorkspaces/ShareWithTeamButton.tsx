@@ -4,7 +4,7 @@ import { Loader2, Share2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
-import { useTier } from "@/lib/tier";
+import { useFeatureFlag, useTier } from "@/lib/tier";
 import {
   getSharedChats,
   getSharedLoops,
@@ -57,7 +57,7 @@ async function getSharedIdsForTeam(
     case "war_room":
       return (await getSharedWarRooms(teamId)).map((row) => row.war_room_id);
     case "chat":
-      return (await getSharedChats(teamId)).map((row) => row.chat_id);
+      return (await getSharedChats(teamId)).map((row) => row.chat_thread_id);
     case "agent":
       return (await getTeamSharedAgents(teamId)).map((row) => row.agent_id);
     case "methodology":
@@ -151,6 +151,11 @@ export default function ShareWithTeamButton({
   className,
 }: ShareWithTeamButtonProps) {
   const { t } = useTranslation();
+  // Codex final-review F1: gate on the Team-tier capability rather
+  // than `tier !== "free"`. The cloud routes are gated requireTeamTier
+  // server-side, so a Pro user would see the dropdown and get a 402 on
+  // every share attempt — confusing UX.
+  const teamShareEnabled = useFeatureFlag("team-workspaces");
   const tier = useTier();
   const [open, setOpen] = useState(false);
   const [pendingTeamId, setPendingTeamId] = useState<string | null>(null);
@@ -235,7 +240,11 @@ export default function ShareWithTeamButton({
     };
   }, [open, resourceId, resourceKind, t, teams]);
 
-  if (tier === "free") {
+  if (!teamShareEnabled) {
+    // Free / Pro users without Team-tier capability: hide the button
+    // entirely. `tier` is kept in scope for the error-fallback path
+    // below (subscription downgrade between mount + click).
+    void tier;
     return null;
   }
 
