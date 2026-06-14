@@ -68,6 +68,40 @@ export function deriveSessionKey(
 // ──────────────────────────────────────────────────────────────────
 
 /**
+ * CSO #1 fix — Derive a 24-byte XChaCha20-Poly1305 nonce from
+ * (session_key, direction, frame_seq) via HKDF-SHA256. MUST match the
+ * Rust host's derive_nonce in tether_host.rs exactly, otherwise the
+ * two sides won't agree on the nonce and AEAD will fail with tag
+ * mismatch on every frame.
+ *
+ *   salt = 32 zero bytes
+ *   info = UTF8("ato-tether-nonce-v1") || direction(1 byte) || seq_be(8 bytes)
+ *   direction = 0 for host→browser, 1 for browser→host
+ *
+ * Returns 24 bytes. Used by client.ts on send (direction=1) + receive
+ * (direction=0) so the nonce is deterministic and serves as the
+ * replay guard: the receiver re-derives the expected nonce from the
+ * (session, direction, seq) tuple and rejects if the packed nonce
+ * doesn't match — same defense Rust's aead_open implements.
+ */
+export function deriveNonce(
+  sessionKey: Uint8Array,
+  direction: number,
+  frameSeq: bigint,
+): Uint8Array {
+  const prefix = new TextEncoder().encode("ato-tether-nonce-v1");
+  const info = new Uint8Array(prefix.length + 1 + 8);
+  info.set(prefix);
+  info[prefix.length] = direction & 0xff;
+  // Big-endian 8-byte sequence number.
+  const view = new DataView(info.buffer, info.byteOffset + prefix.length + 1, 8);
+  view.setBigUint64(0, frameSeq, false);
+  const salt = new Uint8Array(32);
+  const hkdf = new HKDF(SHA256, sessionKey, salt, info);
+  return hkdf.expand(24);
+}
+
+/**
  * Encrypt plaintext with XChaCha20-Poly1305.
  *
  * @param plaintext   Payload bytes.

@@ -68,6 +68,11 @@ enum ApprovalState {
         session_key: [u8; 32],
         /// How the session was approved — one-time or persistent.
         persistent: bool,
+        /// CSO #4 — carry the browser fingerprint through the approval state
+        /// so `handle_approval_decision` can persist a tether_approvals row
+        /// on the "Allow always" decision without a second lookup.
+        browser_ua_hash: String,
+        browser_ip_class: String,
     },
     Approved {
         session_key: [u8; 32],
@@ -522,6 +527,8 @@ async fn handle_inbound(
                 ApprovalState::AwaitingApproval {
                     session_key,
                     persistent: false,
+                    browser_ua_hash: browser_ua_hash.clone(),
+                    browser_ip_class: browser_ip_class.clone().unwrap_or_default(),
                 },
             );
 
@@ -646,9 +653,19 @@ async fn handle_approval_decision(
     let approved = decision == "once" || decision == "always";
     let persistent = decision == "always";
 
+    // Capture the metadata we need for the persistent-approval INSERT
+    // before we move the AwaitingApproval state out of the map.
+    let mut approval_meta: Option<(String, String)> = None; // (ua_hash, ip_class)
+
     // Promote or demote the session state.
     match sessions.remove(&session_id) {
-        Some(ApprovalState::AwaitingApproval { session_key, .. }) => {
+        Some(ApprovalState::AwaitingApproval {
+            session_key,
+            browser_ua_hash,
+            browser_ip_class,
+            ..
+        }) => {
+            approval_meta = Some((browser_ua_hash.clone(), browser_ip_class.clone()));
             if approved {
                 sessions.insert(
                     session_id.clone(),
@@ -668,6 +685,29 @@ async fn handle_approval_decision(
             sessions.insert(session_id.clone(), other);
         }
         None => {}
+    }
+
+    // CSO #4 fix — persist the "Allow always" decision locally so the
+    // desktop guard can skip the modal on next reconnect even before
+    // the cloud round-trip lands. Schema in schema.rs::tether_approvals.
+    // Best-effort: failures here log but don't break the approval flow.
+    if approved && persistent {
+        if let Some((ua_hash, ip_class)) = approval_meta {
+            let db_path = crate::get_db_path();
+            match rusqlite::Connection::open(&db_path) {
+                Ok(conn) => {
+                    let _ = conn.execute(
+                        "INSERT OR REPLACE INTO tether_approvals
+                           (browser_ua_hash, browser_ip_class, persistent, created_at)
+                         VALUES (?1, ?2, 1, datetime('now'))",
+                        rusqlite::params![ua_hash, ip_class],
+                    ).map_err(|e| {
+                        eprintln!("[tether] tether_approvals INSERT failed: {}", e);
+                    });
+                }
+                Err(e) => eprintln!("[tether] open local.db for approval persist: {}", e),
+            }
+        }
     }
 
     // Notify cloud relay of the decision.

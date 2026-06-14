@@ -13,6 +13,7 @@ import { SHA256 } from "@stablelib/sha256";
 import {
   generateTetherKeypair,
   deriveSessionKey,
+  deriveNonce,
   aeadEncrypt,
   aeadDecrypt,
   toBase64,
@@ -225,7 +226,12 @@ export async function tetherRpc<TReq, TResp>(
   const payload = JSON.stringify({ request_id: requestId, kind, ...(req as object) });
   const plaintext = new TextEncoder().encode(payload);
 
-  const nonce = buildNonce(0x01, singleton.txSeq);
+  // CSO #1 fix — derive the nonce via HKDF so both sides agree without
+  // sending it in the clear, and pack `nonce(24) || ciphertext` into a
+  // single payload_b64 field to match the Rust host's wire format.
+  // Direction 1 = browser→host (Rust host's aead_open expects dir=1 on
+  // inbound frames). txSeq is the per-direction monotonic counter.
+  const nonce = deriveNonce(singleton.sessionKey, 0x01, singleton.txSeq);
   singleton.txSeq++;
 
   let ciphertext: Uint8Array;
@@ -235,11 +241,18 @@ export async function tetherRpc<TReq, TResp>(
     throw new Error(`AEAD encrypt failed: ${String(err)}`);
   }
 
+  // Packed wire: base64(24-byte-nonce || ciphertext+tag). The receiver
+  // re-derives the expected nonce from (session, direction, seq) and
+  // rejects if the packed nonce doesn't match — same replay defense
+  // Rust's aead_open implements.
+  const packed = new Uint8Array(nonce.length + ciphertext.length);
+  packed.set(nonce, 0);
+  packed.set(ciphertext, nonce.length);
+
   const frame = {
     type: "forward",
     browser_session_id: BROWSER_SESSION_ID,
-    nonce_b64: toBase64(nonce),
-    ciphertext_b64: toBase64(ciphertext),
+    payload_b64: toBase64(packed),
   };
 
   return new Promise<TResp>((resolve, reject) => {
@@ -315,20 +328,39 @@ function handleFrame(
       // Decrypt and dispatch to pending RPC promise.
       if (!singleton.sessionKey) break;
 
-      const nonceB64 = frame.nonce_b64 as string | undefined;
-      const ctB64 = frame.ciphertext_b64 as string | undefined;
-      if (!nonceB64 || !ctB64) break;
+      // CSO #1 + H7 fix — packed wire format `base64(nonce || ct)`. The
+      // expected nonce is re-derived from (session, direction=0, rxSeq)
+      // and asserted to match the packed nonce. Any mismatch (replay,
+      // reorder, tamper) is rejected before AEAD; rxSeq increments
+      // strictly monotonically so the cloud can't replay an earlier
+      // frame to land on a stale request_id.
+      const payloadB64 = frame.payload_b64 as string | undefined;
+      if (!payloadB64) break;
 
       let plaintext: Uint8Array;
       try {
-        const nonce = fromBase64(nonceB64);
-        const ct = fromBase64(ctB64);
-
-        // Validate direction byte: host→browser = 0x02.
-        if (nonce[0] !== 0x02) {
-          console.warn("[tether] unexpected direction byte in host frame:", nonce[0]);
+        const packed = fromBase64(payloadB64);
+        if (packed.length < 24) {
+          console.warn("[tether] forwarded_from_host: packed too short");
           break;
         }
+        const nonce = packed.subarray(0, 24);
+        const ct = packed.subarray(24);
+
+        const expected = deriveNonce(singleton.sessionKey, 0x00, singleton.rxSeq);
+        let matches = nonce.length === expected.length;
+        if (matches) {
+          for (let i = 0; i < expected.length; i++) {
+            if (nonce[i] !== expected[i]) { matches = false; break; }
+          }
+        }
+        if (!matches) {
+          console.warn("[tether] nonce mismatch — replay or reorder; tearing down");
+          teardownWs();
+          setState("error", machineName, singleton.sessionId);
+          break;
+        }
+        singleton.rxSeq++;
 
         plaintext = aeadDecrypt(ct, singleton.sessionKey, nonce);
       } catch (err) {
@@ -398,29 +430,8 @@ function teardownWs(): void {
   singleton.rxSeq = 0n;
 }
 
-/**
- * Build a 24-byte frame nonce.
- *   [0]     direction_byte (0x01 = browser→host, 0x02 = host→browser)
- *   [1..8]  frame_seq as big-endian uint64
- *   [9..23] 15 random bytes
- */
-function buildNonce(directionByte: number, seq: bigint): Uint8Array {
-  const nonce = new Uint8Array(24);
-  nonce[0] = directionByte;
-
-  // Write seq as big-endian 8 bytes at offset 1.
-  const seqView = new DataView(nonce.buffer, 1, 8);
-  // DataView doesn't natively write BigInt64 on all targets; split high/low.
-  const hi = Number((seq >> 32n) & 0xFFFFFFFFn);
-  const lo = Number(seq & 0xFFFFFFFFn);
-  seqView.setUint32(0, hi, false);
-  seqView.setUint32(4, lo, false);
-
-  // 15 random bytes at offset 9.
-  crypto.getRandomValues(nonce.subarray(9));
-
-  return nonce;
-}
+// (CSO #1 fix — old buildNonce removed; nonces are now HKDF-derived in
+// crypto.ts to match the Rust host's wire format.)
 
 /**
  * SHA-256 of the raw userAgent string, returned as lowercase hex.
