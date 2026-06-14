@@ -28,9 +28,7 @@ import InitiatorBadge from "@/components/InitiatorBadge";
 import ClickablePath from "@/components/ClickablePath";
 import LiveCursors from "@/components/livePresence/LiveCursors";
 import PresencePills from "@/components/livePresence/PresencePills";
-import ShareWithTeamButton, {
-  truncateTeamShareSnapshot,
-} from "@/components/TeamWorkspaces/ShareWithTeamButton";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
 
 export interface SingleRunDetail {
   id: string;
@@ -122,9 +120,10 @@ export default function SingleRunDetailView({
             resourceKind="session"
             resourceId={d.id}
             getSnapshot={async () => ({
-              snapshot: truncateTeamShareSnapshot({
+              snapshot: {
+                kind: "single_run",
                 detail: d,
-              }),
+              },
             })}
           />
           <div className="text-xs text-cs-muted font-mono">{d.id}</div>

@@ -29,13 +29,12 @@ import {
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { listAgents, type Agent } from "@/lib/agents";
+import { buildSessionSnapshot } from "@/lib/teamShareSnapshot";
 import CloseConversationModal from "./CloseConversationModal";
 import InitiatorBadge from "@/components/InitiatorBadge";
 import LiveCursors from "@/components/livePresence/LiveCursors";
 import PresencePills from "@/components/livePresence/PresencePills";
-import ShareWithTeamButton, {
-  truncateTeamShareSnapshot,
-} from "@/components/TeamWorkspaces/ShareWithTeamButton";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
 import {
   runtimeBadge,
   formatTime,
@@ -355,12 +354,7 @@ export default function SessionTranscriptView({
             <ShareWithTeamButton
               resourceKind="session"
               resourceId={sessionId}
-              getSnapshot={async () => ({
-                snapshot: truncateTeamShareSnapshot({
-                  transcript: q.data,
-                  costBreakdown: costQ.data ?? null,
-                }),
-              })}
+              getSnapshot={() => buildSessionSnapshot(sessionId)}
             />
             {isClosed && (
               <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted">

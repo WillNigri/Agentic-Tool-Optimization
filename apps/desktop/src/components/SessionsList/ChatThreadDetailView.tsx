@@ -22,6 +22,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { cn } from "@/lib/utils";
+import { buildChatSnapshot } from "@/lib/teamShareSnapshot";
 import {
   runtimeBadge,
   personaBadge,
@@ -29,9 +30,7 @@ import {
   formatTime,
 } from "./_helpers";
 import CloseConversationModal from "./CloseConversationModal";
-import ShareWithTeamButton, {
-  truncateTeamShareSnapshot,
-} from "@/components/TeamWorkspaces/ShareWithTeamButton";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
 
 interface ChatMessage {
   id: string;
@@ -175,12 +174,7 @@ export default function ChatThreadDetailView({
           <ShareWithTeamButton
             resourceKind="chat"
             resourceId={threadId}
-            getSnapshot={async () => ({
-              snapshot: truncateTeamShareSnapshot({
-                thread: snapshotQ.data ?? null,
-                messages,
-              }),
-            })}
+            getSnapshot={() => buildChatSnapshot(threadId)}
           />
           <div className="text-xs text-cs-muted font-mono">{threadId}</div>
           {isClosed ? (

@@ -25,8 +25,6 @@ import {
   type Team,
 } from "@/lib/cloud-api";
 
-const MAX_SNAPSHOT_BYTES = 900_000;
-
 type ShareableResourceKind =
   | "session"
   | "war_room"
@@ -39,81 +37,6 @@ interface ShareWithTeamButtonProps {
   resourceId: string;
   getSnapshot?: () => Promise<unknown>;
   className?: string;
-}
-
-type SnapshotTrimLimits = {
-  maxArrayLength: number;
-  maxDepth: number;
-  maxObjectKeys: number;
-  maxStringLength: number;
-};
-
-function jsonByteLength(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value) ?? "null").length;
-}
-
-function trimSnapshotValue(
-  value: unknown,
-  limits: SnapshotTrimLimits,
-  depth = 0,
-): unknown {
-  if (value === null || value === undefined) return value ?? null;
-  if (typeof value === "string") {
-    return value.length > limits.maxStringLength
-      ? `${value.slice(0, Math.max(0, limits.maxStringLength - 1))}…`
-      : value;
-  }
-  if (
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-  if (depth >= limits.maxDepth) {
-    return "[truncated]";
-  }
-  if (Array.isArray(value)) {
-    return value
-      .slice(0, limits.maxArrayLength)
-      .map((item) => trimSnapshotValue(item, limits, depth + 1));
-  }
-  if (typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .slice(0, limits.maxObjectKeys)
-        .map(([key, entryValue]) => [
-          key,
-          trimSnapshotValue(entryValue, limits, depth + 1),
-        ]),
-    );
-  }
-  return String(value);
-}
-
-export function truncateTeamShareSnapshot(
-  value: unknown,
-  maxBytes = MAX_SNAPSHOT_BYTES,
-): unknown {
-  const attempts: SnapshotTrimLimits[] = [
-    { maxStringLength: 8_000, maxArrayLength: 200, maxObjectKeys: 100, maxDepth: 8 },
-    { maxStringLength: 4_000, maxArrayLength: 100, maxObjectKeys: 60, maxDepth: 7 },
-    { maxStringLength: 2_000, maxArrayLength: 60, maxObjectKeys: 40, maxDepth: 6 },
-    { maxStringLength: 1_000, maxArrayLength: 30, maxObjectKeys: 25, maxDepth: 5 },
-    { maxStringLength: 500, maxArrayLength: 15, maxObjectKeys: 15, maxDepth: 4 },
-  ];
-
-  let fallback: unknown = null;
-  for (const limits of attempts) {
-    fallback = trimSnapshotValue(value, limits);
-    if (jsonByteLength(fallback) <= maxBytes) {
-      return fallback;
-    }
-  }
-
-  return {
-    truncated: true,
-    preview: trimSnapshotValue(value, attempts[attempts.length - 1]),
-  };
 }
 
 async function getSharedIdsForTeam(

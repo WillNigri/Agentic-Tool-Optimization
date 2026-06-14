@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { cn } from "@/lib/utils";
+import { buildWarRoomSnapshot } from "@/lib/teamShareSnapshot";
 import {
   runtimeBadge,
   personaBadge,
@@ -30,9 +31,7 @@ import InitiatorBadge from "@/components/InitiatorBadge";
 import LiveCursors from "@/components/livePresence/LiveCursors";
 import PresencePills from "@/components/livePresence/PresencePills";
 import CloseConversationModal from "./CloseConversationModal";
-import ShareWithTeamButton, {
-  truncateTeamShareSnapshot,
-} from "@/components/TeamWorkspaces/ShareWithTeamButton";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
 
 interface WarRoomDispatchResult {
   warRoomId: string;
@@ -293,12 +292,7 @@ export default function WarRoomDetailView({
           <ShareWithTeamButton
             resourceKind="war_room"
             resourceId={warRoomId}
-            getSnapshot={async () => ({
-              snapshot: truncateTeamShareSnapshot({
-                warRoom: snapshotQ.data ?? null,
-                constituents: rows,
-              }),
-            })}
+            getSnapshot={() => buildWarRoomSnapshot(warRoomId)}
           />
           <div className="text-xs text-cs-muted font-mono">{warRoomId}</div>
           {/* v2.7.13 — close + reopen buttons (mirrors the session
