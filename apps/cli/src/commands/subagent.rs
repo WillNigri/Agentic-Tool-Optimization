@@ -28,13 +28,25 @@ use crate::output::{emit_human, emit_json, Opts};
 /// Codex R1+R2 fix — match dispatch.rs::truncate's 64KB cap so
 /// subagent rows respect the desktop's log-size assumptions and
 /// don't bloat execution_logs.
+///
+/// Codex R2 fix — slice on a UTF-8 char boundary, not a raw byte
+/// offset. Naive `&s[..MAX]` panics if MAX lands inside a multi-byte
+/// codepoint (any non-ASCII near the 64KB mark — emoji in a prompt
+/// is the realistic trigger). Walk char_indices and stop at the
+/// last boundary ≤ MAX.
 const MAX_LOG_BYTES: usize = 64 * 1024;
 fn truncate_for_log(s: &str) -> String {
     if s.len() <= MAX_LOG_BYTES {
-        s.to_string()
-    } else {
-        format!("{}…[truncated]", &s[..MAX_LOG_BYTES])
+        return s.to_string();
     }
+    let mut last_ok = 0usize;
+    for (i, _) in s.char_indices() {
+        if i > MAX_LOG_BYTES {
+            break;
+        }
+        last_ok = i;
+    }
+    format!("{}…[truncated]", &s[..last_ok])
 }
 
 /// Codex R1+R2 fix — validate persona as a slug-shape (lowercase
@@ -346,5 +358,43 @@ fn resolve_text_arg(input: &str) -> Result<String> {
         Ok(body)
     } else {
         Ok(input.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        let s = "hello world";
+        assert_eq!(truncate_for_log(s), s);
+    }
+
+    #[test]
+    fn truncate_long_ascii_string() {
+        let s = "x".repeat(MAX_LOG_BYTES + 100);
+        let out = truncate_for_log(&s);
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.len() < s.len());
+    }
+
+    /// Codex R2 fix — regression guard. Pre-fix shape used
+    /// `&s[..MAX]` which panics on a multibyte UTF-8 boundary. Build
+    /// a string of all-ASCII filler followed by a 4-byte emoji
+    /// (`💥`, U+1F4A5) straddling the byte cap; truncation must
+    /// return a clean string without panicking.
+    #[test]
+    fn truncate_multibyte_boundary_no_panic() {
+        // (MAX_LOG_BYTES - 2) chars of ASCII puts the emoji's start
+        // at byte (MAX - 2); its 4-byte UTF-8 encoding extends past
+        // MAX. A raw &s[..MAX] would slice mid-codepoint and panic.
+        let prefix = "a".repeat(MAX_LOG_BYTES - 2);
+        let s = format!("{}💥💥💥", prefix);
+        let out = truncate_for_log(&s);
+        assert!(out.ends_with("…[truncated]"));
+        // Truncated body must remain valid UTF-8 (the assertion is
+        // implicit — String requires it; the panic would have fired
+        // inside truncate_for_log if the boundary was wrong).
     }
 }
