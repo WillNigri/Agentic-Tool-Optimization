@@ -998,5 +998,16 @@
     "tooltip_other": "{{count}} compañeros viendo",
     "andOthers": " +{{count}} más",
     "viewingNow": "viendo"
+  },
+  "teamShare": {
+    "title": "Compartir con el equipo",
+    "share": "Compartir",
+    "unshare": "Quitar",
+    "shareWithTeams": "Compartir con equipos",
+    "sharedWithCount_one": "Compartido con {{count}} equipo",
+    "sharedWithCount_other": "Compartido con {{count}} equipos",
+    "free_tier_disabled": "Compartir con equipos no esta disponible en el plan gratuito",
+    "share_failed": "No se pudo compartir",
+    "noTeams": "No hay equipos disponibles"
   }
 }

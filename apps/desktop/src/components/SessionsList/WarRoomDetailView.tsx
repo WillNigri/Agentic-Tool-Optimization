@@ -30,6 +30,9 @@ import InitiatorBadge from "@/components/InitiatorBadge";
 import LiveCursors from "@/components/livePresence/LiveCursors";
 import PresencePills from "@/components/livePresence/PresencePills";
 import CloseConversationModal from "./CloseConversationModal";
+import ShareWithTeamButton, {
+  truncateTeamShareSnapshot,
+} from "@/components/TeamWorkspaces/ShareWithTeamButton";
 
 interface WarRoomDispatchResult {
   warRoomId: string;
@@ -287,6 +290,16 @@ export default function WarRoomDetailView({
         </button>
         <div className="flex items-center gap-2">
           <PresencePills resourceKind="war_room" resourceId={warRoomId} />
+          <ShareWithTeamButton
+            resourceKind="war_room"
+            resourceId={warRoomId}
+            getSnapshot={async () => ({
+              snapshot: truncateTeamShareSnapshot({
+                warRoom: snapshotQ.data ?? null,
+                constituents: rows,
+              }),
+            })}
+          />
           <div className="text-xs text-cs-muted font-mono">{warRoomId}</div>
           {/* v2.7.13 — close + reopen buttons (mirrors the session
               detail view's lifecycle controls). Disabled while a

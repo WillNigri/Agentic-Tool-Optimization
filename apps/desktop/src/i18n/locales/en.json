@@ -1214,5 +1214,16 @@
     "tooltip_other": "{{count}} teammates viewing",
     "andOthers": " +{{count}} more",
     "viewingNow": "viewing"
+  },
+  "teamShare": {
+    "title": "Share with team",
+    "share": "Share",
+    "unshare": "Unshare",
+    "shareWithTeams": "Share with teams",
+    "sharedWithCount_one": "Shared with {{count}} team",
+    "sharedWithCount_other": "Shared with {{count}} teams",
+    "free_tier_disabled": "Team sharing is unavailable on the free tier",
+    "share_failed": "Share failed",
+    "noTeams": "No teams available"
   }
 }

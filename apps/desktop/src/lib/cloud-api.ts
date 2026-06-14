@@ -376,6 +376,30 @@ export interface SharedTeamMethodology {
   shared_by_name: string | null;
 }
 
+export interface SharedTeamSession {
+  team_id: string;
+  session_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+}
+
+export interface SharedTeamWarRoom {
+  team_id: string;
+  war_room_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+}
+
+export interface SharedTeamChat {
+  team_id: string;
+  chat_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+}
+
 export async function getTeamSharedAgents(teamId: string): Promise<SharedTeamAgent[]> {
   return apiRequest<SharedTeamAgent[]>(`/api/teams/${teamId}/agents`);
 }
@@ -407,6 +431,51 @@ export async function shareMethodologyWithTeam(
 
 export async function unshareMethodologyFromTeam(teamId: string, methodologyId: string): Promise<void> {
   await apiRequest(`/api/teams/${teamId}/methodologies/${methodologyId}/share`, { method: 'DELETE' });
+}
+
+export async function shareSessionWithTeam(teamId: string, sessionId: string, payload: unknown): Promise<{ team_id: string; session_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/sessions/share`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function shareWarRoomWithTeam(teamId: string, warRoomId: string, payload: unknown): Promise<{ team_id: string; war_room_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/war-rooms/share`, {
+    method: 'POST',
+    body: JSON.stringify({ war_room_id: warRoomId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function shareChatWithTeam(teamId: string, chatId: string, payload: unknown): Promise<{ team_id: string; chat_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/chats/share`, {
+    method: 'POST',
+    body: JSON.stringify({ chat_id: chatId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function unshareSessionFromTeam(teamId: string, sessionId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/sessions/${sessionId}/share`, { method: 'DELETE' });
+}
+
+export async function unshareWarRoomFromTeam(teamId: string, warRoomId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/war-rooms/${warRoomId}/share`, { method: 'DELETE' });
+}
+
+export async function unshareChatFromTeam(teamId: string, chatId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/chats/${chatId}/share`, { method: 'DELETE' });
+}
+
+export async function getSharedSessions(teamId: string): Promise<SharedTeamSession[]> {
+  return apiRequest<SharedTeamSession[]>(`/api/teams/${teamId}/sessions`);
+}
+
+export async function getSharedWarRooms(teamId: string): Promise<SharedTeamWarRoom[]> {
+  return apiRequest<SharedTeamWarRoom[]>(`/api/teams/${teamId}/war-rooms`);
+}
+
+export async function getSharedChats(teamId: string): Promise<SharedTeamChat[]> {
+  return apiRequest<SharedTeamChat[]>(`/api/teams/${teamId}/chats`);
 }
 
 // ============================================================

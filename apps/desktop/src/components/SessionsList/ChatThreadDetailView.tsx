@@ -29,6 +29,9 @@ import {
   formatTime,
 } from "./_helpers";
 import CloseConversationModal from "./CloseConversationModal";
+import ShareWithTeamButton, {
+  truncateTeamShareSnapshot,
+} from "@/components/TeamWorkspaces/ShareWithTeamButton";
 
 interface ChatMessage {
   id: string;
@@ -169,6 +172,16 @@ export default function ChatThreadDetailView({
           ← Back to Sessions
         </button>
         <div className="flex items-center gap-2">
+          <ShareWithTeamButton
+            resourceKind="chat"
+            resourceId={threadId}
+            getSnapshot={async () => ({
+              snapshot: truncateTeamShareSnapshot({
+                thread: snapshotQ.data ?? null,
+                messages,
+              }),
+            })}
+          />
           <div className="text-xs text-cs-muted font-mono">{threadId}</div>
           {isClosed ? (
             <button
