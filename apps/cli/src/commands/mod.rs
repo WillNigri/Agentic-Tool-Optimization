@@ -71,3 +71,9 @@ pub mod missions;
 // A bundle = run + dispatches + judge scores + artifact files + manifest.
 // Closes the Collison "shareable results" gap.
 pub mod bundles;
+
+// v2.15 Wave 4 — shared HTTP helpers for team-shared resource CLI parity.
+// Provides share_resource / unshare_resource / list_shared / append_event
+// used by the Share/Unshare/ListShared/AppendEvent subcommands added to
+// sessions, war_rooms, chats, loops, and missions.
+pub mod team_shared;

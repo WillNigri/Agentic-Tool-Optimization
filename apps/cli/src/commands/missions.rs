@@ -321,6 +321,55 @@ pub enum MissionSub {
         #[arg(long, conflicts_with_all = ["status", "approve", "skip", "all"])]
         finish: bool,
     },
+
+    // ── v2.15 Wave 4 — team-shared resource CLI parity ────────────────────
+
+    /// v2.15 Wave 4 — share this mission with a team.
+    #[command(name = "share")]
+    Share {
+        /// Mission id (UUID) to share.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — remove a team share for this mission.
+    #[command(name = "unshare")]
+    Unshare {
+        /// Mission id (UUID) to unshare.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — list missions shared with this team.
+    #[command(name = "list-shared")]
+    ListShared {
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — append a new event to a team-shared mission.
+    #[command(name = "append-event")]
+    AppendEvent {
+        /// Mission id (UUID).
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+        /// Event kind, e.g. `turn_appended`, `judge_verdict`.
+        #[arg(long)]
+        kind: String,
+        /// Payload as inline JSON, or @path/to/file.json.
+        #[arg(long)]
+        json: String,
+        /// Use the E2E two-step encrypted flow.
+        /// NOTE: Refused in Wave 4 with a clear error; use the desktop
+        /// app or omit --encrypted for plaintext. Full CLI E2E support
+        /// ships in a follow-up wave.
+        #[arg(long)]
+        encrypted: bool,
+    },
 }
 
 // ── Row types (mirror the DB rows for JSON serialization) ─────────────
@@ -505,6 +554,25 @@ pub fn run(args: MissionArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
         ),
         MissionSub::Briefs { slug_or_id, all } => {
             run_briefs(slug_or_id, all, db_path, opts)
+        }
+        // v2.15 Wave 4 — team-shared resource verbs.
+        MissionSub::Share { id, team } => {
+            crate::commands::team_shared::share_resource(
+                "missions", "mission_id", &id, &team, opts,
+            )
+        }
+        MissionSub::Unshare { id, team } => {
+            crate::commands::team_shared::unshare_resource("missions", &id, &team, opts)
+        }
+        MissionSub::ListShared { team } => {
+            crate::commands::team_shared::list_shared("missions", &team, opts)
+        }
+        MissionSub::AppendEvent { id, team, kind, json, encrypted } => {
+            let payload = crate::commands::team_shared::parse_json_arg(&json)?;
+            crate::commands::team_shared::append_event(
+                "missions", &id, &team, &kind, payload, encrypted, opts,
+            )?;
+            Ok(())
         }
     }
 }
