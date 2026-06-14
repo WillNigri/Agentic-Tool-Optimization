@@ -382,6 +382,14 @@ export interface SharedTeamSession {
   shared_by_user_id: string;
   shared_at: string;
   snapshot: unknown;
+  // v2.14 — list endpoint excludes snapshot (kept for v1 back-compat
+  // typings) but DOES include the extra columns the cloud route
+  // surfaces: title / runtime / agent_slug / turn_count.
+  title?: string | null;
+  runtime?: string | null;
+  agent_slug?: string | null;
+  turn_count?: number | null;
+  expires_at?: string | null;
 }
 
 export interface SharedTeamWarRoom {
@@ -390,6 +398,8 @@ export interface SharedTeamWarRoom {
   shared_by_user_id: string;
   shared_at: string;
   snapshot: unknown;
+  title?: string | null;
+  expires_at?: string | null;
 }
 
 export interface SharedTeamChat {
@@ -398,6 +408,9 @@ export interface SharedTeamChat {
   shared_by_user_id: string;
   shared_at: string;
   snapshot: unknown;
+  title?: string | null;
+  runtime?: string | null;
+  expires_at?: string | null;
 }
 
 export async function getTeamSharedAgents(teamId: string): Promise<SharedTeamAgent[]> {
@@ -476,6 +489,34 @@ export async function getSharedWarRooms(teamId: string): Promise<SharedTeamWarRo
 
 export async function getSharedChats(teamId: string): Promise<SharedTeamChat[]> {
   return apiRequest<SharedTeamChat[]>(`/api/teams/${teamId}/chats`);
+}
+
+// v2.14 — single-share detail (snapshot blob included).
+// Used by the read-only SharedDetailView (#6) for teammates who don't
+// have the local row.
+export interface SharedSessionDetail extends SharedTeamSession {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+export interface SharedWarRoomDetail extends SharedTeamWarRoom {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+export interface SharedChatDetail extends SharedTeamChat {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+
+export async function getSharedSessionDetail(teamId: string, sessionId: string): Promise<SharedSessionDetail> {
+  return apiRequest<SharedSessionDetail>(`/api/teams/${teamId}/sessions/${sessionId}`);
+}
+
+export async function getSharedWarRoomDetail(teamId: string, warRoomId: string): Promise<SharedWarRoomDetail> {
+  return apiRequest<SharedWarRoomDetail>(`/api/teams/${teamId}/war-rooms/${warRoomId}`);
+}
+
+export async function getSharedChatDetail(teamId: string, chatId: string): Promise<SharedChatDetail> {
+  return apiRequest<SharedChatDetail>(`/api/teams/${teamId}/chats/${chatId}`);
 }
 
 // ============================================================
