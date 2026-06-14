@@ -101,7 +101,33 @@ export interface SessionListRow {
    *  which can flip per-message. NULL for sessions / war-rooms /
    *  single-runs (anchor concept only applies to chat threads). */
   anchorRuntime: string | null;
-  rowKind: "session" | "single_run" | "war_room" | "chat" | "eval_cluster";
+  rowKind:
+    | "session"
+    | "single_run"
+    | "war_room"
+    | "chat"
+    | "eval_cluster"
+    // teamfilter (#1) — cloud-shared rows merged into the feed when the
+    // Team filter chip is picked. Carried through the same SessionListRow
+    // pipeline as local rows; the team-only fields below are populated and
+    // the click handler routes them to a placeholder read-only view (#6
+    // replaces the placeholder). Synthetic id: `shared:<teamId>:<originalId>`.
+    | "team_shared_session"
+    | "team_shared_war_room"
+    | "team_shared_chat";
+  /** teamfilter (#1) — ISO timestamp the row was shared with the team.
+   *  Drives the shared_at-DESC sort for the Team feed and the relative
+   *  time on the card. NULL/undefined for local rows. */
+  sharedAt?: string | null;
+  /** teamfilter (#1) — display label for the 'Shared by X' pill. Today
+   *  the sharer's user id (no name on the shared-* payloads yet); #6 can
+   *  upgrade this to a resolved display name. */
+  sharedByLabel?: string | null;
+  /** teamfilter (#1) — the cloud team this row was shared into. Shown on
+   *  the Team badge and used to rebuild the original id from the synthetic
+   *  one. */
+  sharedTeamId?: string | null;
+  sharedTeamName?: string | null;
   /**
    * v2.10.0 PR-1 (UI) — eval-cluster only. When `rowKind === "eval_cluster"`,
    * this synthesized row stands in for N consecutive single_run rows that
