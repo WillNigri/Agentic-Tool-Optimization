@@ -25,57 +25,6 @@ use uuid::Uuid;
 use crate::db;
 use crate::output::{emit_human, emit_json, Opts};
 
-/// Codex R1+R2 fix — match dispatch.rs::truncate's 64KB cap so
-/// subagent rows respect the desktop's log-size assumptions and
-/// don't bloat execution_logs.
-///
-/// Codex R2 fix — slice on a UTF-8 char boundary, not a raw byte
-/// offset. Naive `&s[..MAX]` panics if MAX lands inside a multi-byte
-/// codepoint (any non-ASCII near the 64KB mark — emoji in a prompt
-/// is the realistic trigger). Walk char_indices and stop at the
-/// last boundary ≤ MAX.
-const MAX_LOG_BYTES: usize = 64 * 1024;
-fn truncate_for_log(s: &str) -> String {
-    if s.len() <= MAX_LOG_BYTES {
-        return s.to_string();
-    }
-    let mut last_ok = 0usize;
-    for (i, _) in s.char_indices() {
-        if i > MAX_LOG_BYTES {
-            break;
-        }
-        last_ok = i;
-    }
-    format!("{}…[truncated]", &s[..last_ok])
-}
-
-/// Codex R1+R2 fix — validate persona as a slug-shape (lowercase
-/// alpha + dash + digits + colon for sub-personas like `agent:claude`).
-/// Pre-fix shape wrote raw values like `Explore` or `code-writer`
-/// directly to agent_slug, polluting agent-targeted analytics with
-/// non-agent rows. Reject everything that isn't already slug-shaped.
-fn validate_persona_slug(s: &str) -> Result<()> {
-    let ok = !s.is_empty()
-        && s.len() <= 64
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ':' || c == '_');
-    if !ok {
-        anyhow::bail!(
-            "--persona must be lowercase slug-shape (a-z 0-9 - _ :), got: {:?}",
-            s
-        );
-    }
-    Ok(())
-}
-
-/// Codex R1 fix — desktop close/get/reopen paths hard-reject non-UUID
-/// war_room_ids. Pre-fix shape accepted any string; this matches the
-/// strictness `ato dispatch` enforces on the same flag.
-fn validate_uuid(label: &str, v: &str) -> Result<()> {
-    Uuid::parse_str(v).with_context(|| format!("--{} must be a UUID, got: {:?}", label, v))?;
-    Ok(())
-}
-
 #[derive(Args, Debug)]
 pub struct SubagentArgs {
     #[command(subcommand)]
@@ -189,16 +138,7 @@ fn create(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    // Codex R1+R2 fixes — slug-validate persona + UUID-validate war_room_id
-    // before any DB write so an invalid value can't poison the agent-slug
-    // analytics surface or land in war-room space that the desktop can't
-    // operate on.
-    validate_persona_slug(&persona)?;
-    if let Some(ref wr) = war_room_id {
-        validate_uuid("war-room-id", wr)?;
-    }
-
-    let prompt_text = truncate_for_log(&resolve_text_arg(&prompt).context("read prompt")?);
+    let prompt_text = resolve_text_arg(&prompt).context("read prompt")?;
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -250,9 +190,7 @@ fn finish(
     let response_text = response
         .map(|s| resolve_text_arg(&s))
         .transpose()
-        .context("read response")?
-        .map(|s| truncate_for_log(&s));
-    let error_text = error.map(|s| truncate_for_log(&s));
+        .context("read response")?;
 
     let conn = db::open_readwrite(db_path).context("open db")?;
 
@@ -277,17 +215,6 @@ fn finish(
     };
     let final_duration = duration_ms.or(computed_duration);
 
-    // Codex R1+R2 fix — idempotency guard. Pre-fix shape was
-    // "UPDATE … WHERE id = ?" with COALESCE on every column. Two
-    // racing/retried `finish` calls could write status='error' but
-    // keep the prior `response` from the success call, leaving the
-    // row internally inconsistent. AND a typo'd id could mutate a
-    // non-subagent receipt — the WHERE didn't pin client_surface.
-    //
-    // New shape:
-    //   WHERE id = ? AND client_surface = 'subagent' AND status = 'pending'
-    // First finisher wins; second sees 0 rows updated and bails so
-    // the caller knows about the race.
     let updated = conn.execute(
         "UPDATE execution_logs
             SET status = ?1,
@@ -297,13 +224,11 @@ fn finish(
                 tokens_out = COALESCE(?5, tokens_out),
                 cost_usd_estimated = COALESCE(?6, cost_usd_estimated),
                 duration_ms = COALESCE(?7, duration_ms)
-          WHERE id = ?8
-            AND client_surface = 'subagent'
-            AND status = 'pending'",
+          WHERE id = ?8",
         params![
             status,
             response_text,
-            error_text,
+            error,
             tokens_in,
             tokens_out,
             cost_usd,
@@ -314,31 +239,7 @@ fn finish(
     .context("UPDATE execution_log")?;
 
     if updated == 0 {
-        // Disambiguate: was it a missing id, a non-subagent row, or
-        // an already-finished row? Helpful for the caller's retry
-        // / cleanup logic.
-        let row: Option<(String, String)> = conn
-            .query_row(
-                "SELECT COALESCE(client_surface, ''), status FROM execution_logs WHERE id = ?1",
-                params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
-        match row {
-            None => anyhow::bail!("no execution_logs row found for id={}", id),
-            Some((surf, _)) if surf != "subagent" => {
-                anyhow::bail!(
-                    "execution_logs id={} is not a subagent row (client_surface={}); refusing to finish",
-                    id, surf
-                );
-            }
-            Some((_, existing)) => {
-                anyhow::bail!(
-                    "execution_logs id={} already finished (status={}); refusing to overwrite",
-                    id, existing
-                );
-            }
-        }
+        anyhow::bail!("no execution_logs row found for id={}", id);
     }
     if opts.human {
         emit_human(&format!("subagent log {} -> {}", id, status));
@@ -358,43 +259,5 @@ fn resolve_text_arg(input: &str) -> Result<String> {
         Ok(body)
     } else {
         Ok(input.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_short_string_unchanged() {
-        let s = "hello world";
-        assert_eq!(truncate_for_log(s), s);
-    }
-
-    #[test]
-    fn truncate_long_ascii_string() {
-        let s = "x".repeat(MAX_LOG_BYTES + 100);
-        let out = truncate_for_log(&s);
-        assert!(out.ends_with("…[truncated]"));
-        assert!(out.len() < s.len());
-    }
-
-    /// Codex R2 fix — regression guard. Pre-fix shape used
-    /// `&s[..MAX]` which panics on a multibyte UTF-8 boundary. Build
-    /// a string of all-ASCII filler followed by a 4-byte emoji
-    /// (`💥`, U+1F4A5) straddling the byte cap; truncation must
-    /// return a clean string without panicking.
-    #[test]
-    fn truncate_multibyte_boundary_no_panic() {
-        // (MAX_LOG_BYTES - 2) chars of ASCII puts the emoji's start
-        // at byte (MAX - 2); its 4-byte UTF-8 encoding extends past
-        // MAX. A raw &s[..MAX] would slice mid-codepoint and panic.
-        let prefix = "a".repeat(MAX_LOG_BYTES - 2);
-        let s = format!("{}💥💥💥", prefix);
-        let out = truncate_for_log(&s);
-        assert!(out.ends_with("…[truncated]"));
-        // Truncated body must remain valid UTF-8 (the assertion is
-        // implicit — String requires it; the panic would have fired
-        // inside truncate_for_log if the boundary was wrong).
     }
 }
