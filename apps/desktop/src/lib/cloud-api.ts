@@ -1037,6 +1037,28 @@ export async function getShareEncryptionMode(
 }
 
 /**
+ * Codex R1 — pre-flight check for the flip-to-E2E flow. Returns the
+ * share's encryption_mode + how many events have been appended so far.
+ * Used by FlipToE2eModal to refuse rotating the team key when the
+ * server-side flip would 409 with HAS_PLAINTEXT_HISTORY.
+ */
+export async function getShareFlipPreflight(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+): Promise<{ encryption_mode: 'plaintext' | 'e2e'; last_seq: number }> {
+  const segment = kindToPathSegment(kind);
+  const data = await apiRequest<{
+    encryption_mode?: string;
+    last_seq?: number;
+  }>(`/api/teams/${teamId}/${segment}/${resourceId}`);
+  return {
+    encryption_mode: data.encryption_mode === 'e2e' ? 'e2e' : 'plaintext',
+    last_seq: typeof data.last_seq === 'number' ? data.last_seq : 0,
+  };
+}
+
+/**
  * POST to flip a share's encryption_mode from plaintext → e2e.
  * Returns the updated encryption_mode ('e2e').
  * Server may return 409 HAS_PLAINTEXT_HISTORY if the resource already has plaintext events.
@@ -1062,11 +1084,15 @@ export async function setShareEncryptionMode(
  * Use for first-time E2E setup on a share (creates a fresh team_keys generation
  * and fans the sealed Team Key out to every member).
  */
+// Codex R1 — cloud zod schema accepts `{member_user_id, sealed_key}` only
+// (services/teams/src/keyEnvelopes.ts envelopeItemSchema). Pre-fix shape
+// posted `sealed_key_b64` plus an unused `key_id`; the rename request
+// failed validation. Inline-strip the OSS-internal `key_id` and rename
+// the b64 field on the wire to match.
 export async function pushKeyRotation(
   teamId: string,
   envelopes: Array<{
     member_user_id: string;
-    key_id: string;
     sealed_key_b64: string;
   }>,
 ): Promise<{ team_key_id: string }> {
@@ -1074,7 +1100,12 @@ export async function pushKeyRotation(
     `/api/teams/${teamId}/key-rotations`,
     {
       method: 'POST',
-      body: JSON.stringify({ envelopes }),
+      body: JSON.stringify({
+        envelopes: envelopes.map((e) => ({
+          member_user_id: e.member_user_id,
+          sealed_key: e.sealed_key_b64,
+        })),
+      }),
     },
   );
 }
@@ -1088,7 +1119,6 @@ export async function pushKeyEnvelopes(
   teamKeyId: string,
   envelopes: Array<{
     member_user_id: string;
-    key_id: string;
     sealed_key_b64: string;
   }>,
 ): Promise<void> {
@@ -1096,7 +1126,13 @@ export async function pushKeyEnvelopes(
     `/api/teams/${teamId}/key-envelopes`,
     {
       method: 'POST',
-      body: JSON.stringify({ team_key_id: teamKeyId, envelopes }),
+      body: JSON.stringify({
+        team_key_id: teamKeyId,
+        envelopes: envelopes.map((e) => ({
+          member_user_id: e.member_user_id,
+          sealed_key: e.sealed_key_b64,
+        })),
+      }),
     },
   );
 }
@@ -1109,10 +1145,27 @@ export async function pushKeyEnvelopes(
  * { __decrypt_error: true } sentinel on any failure (bad sig, wrong key, etc.).
  * Never throws — errors are swallowed to sentinel so live events don't break the stream.
  */
+// CSO H1 — require AD context from the caller. Pre-fix shape made
+// signature verification optional (skipped silently when __ad_hint
+// was absent) and decrypted with an empty AD, which trivially fails
+// AEAD but also bypassed the Ed25519 signature when the event lacked
+// a hint. New contract: caller must supply teamId + resourceId; the
+// AD is reconstructed deterministically from the event itself and
+// the signature MUST verify whenever signature_b64 is present.
+export interface DecryptContext {
+  teamId: string;
+  resourceId: string;
+}
+
+function buildDecryptAd(ctx: DecryptContext, raw: TeamEvent): string {
+  return `${ctx.teamId}|${ctx.resourceId}|${raw.seq_num}|${raw.event_kind}`;
+}
+
 export async function decryptEventPayload(
   raw: TeamEvent,
   teamKey: Uint8Array,
   memberPubkeys: Record<string, { ed25519_pubkey: string; key_id: string }>,
+  ctx: DecryptContext,
 ): Promise<TeamEvent> {
   if (!raw.ciphertext_b64 || !raw.nonce_b64) {
     // No ciphertext — already a plaintext event or a sentinel, pass through.
@@ -1124,42 +1177,33 @@ export async function decryptEventPayload(
 
     const ciphertext = fromBase64(raw.ciphertext_b64);
     const nonce = fromBase64(raw.nonce_b64);
+    const adBytes = new TextEncoder().encode(buildDecryptAd(ctx, raw));
 
-    // Verify signature before decrypting (authenticate-then-decrypt pattern).
-    if (raw.signature_b64 && raw.signer_key_id && raw.initiator_user_id) {
+    // Authenticate-then-decrypt: when a signature is present we MUST
+    // verify it. A present-but-unverifiable signature is a hard fail —
+    // we never surface decrypted plaintext alongside a bad signature.
+    if (raw.signature_b64) {
+      if (!raw.signer_key_id || !raw.initiator_user_id) {
+        return { ...raw, payload_json: { __decrypt_error: true } };
+      }
       const signerPubkey = memberPubkeys[raw.initiator_user_id];
-      if (signerPubkey) {
-        const pubkeyBytes = fromBase64(signerPubkey.ed25519_pubkey);
-        // AD must be reconstructed from known-good event metadata.
-        // seq_num, event_kind are on the raw event; teamId + resourceId must be provided
-        // at the call site. For the stream decryptor we pass via closure (see teamEventStream).
-        // Here we pass them in the raw event itself via __ad_hint if available, else skip.
-        if ((raw as TeamEvent & { __ad_hint?: string }).__ad_hint) {
-          const adBytes = new TextEncoder().encode(
-            (raw as TeamEvent & { __ad_hint?: string }).__ad_hint!,
-          );
-          const sigBytes = new Uint8Array(
-            ciphertext.length + nonce.length + adBytes.length,
-          );
-          sigBytes.set(ciphertext, 0);
-          sigBytes.set(nonce, ciphertext.length);
-          sigBytes.set(adBytes, ciphertext.length + nonce.length);
-          const sig = fromBase64(raw.signature_b64);
-          const ok = await verifyMessage(sigBytes, sig, pubkeyBytes);
-          if (!ok) {
-            return { ...raw, payload_json: { __decrypt_error: true } };
-          }
-        }
+      if (!signerPubkey) {
+        // Caller didn't preload the signer's pubkey; can't verify.
+        return { ...raw, payload_json: { __decrypt_error: true } };
+      }
+      const pubkeyBytes = fromBase64(signerPubkey.ed25519_pubkey);
+      const sigBytes = new Uint8Array(
+        ciphertext.length + nonce.length + adBytes.length,
+      );
+      sigBytes.set(ciphertext, 0);
+      sigBytes.set(nonce, ciphertext.length);
+      sigBytes.set(adBytes, ciphertext.length + nonce.length);
+      const sig = fromBase64(raw.signature_b64);
+      const ok = await verifyMessage(sigBytes, sig, pubkeyBytes);
+      if (!ok) {
+        return { ...raw, payload_json: { __decrypt_error: true } };
       }
     }
-
-    // AEAD AD = teamId|resourceId|seq_num|event_kind — must be provided at call site.
-    // Use __ad_hint if set; otherwise decrypt without AD verification (safe because
-    // the AEAD tag still covers authenticity of the ciphertext itself).
-    const adHint = (raw as TeamEvent & { __ad_hint?: string }).__ad_hint;
-    const adBytes = adHint
-      ? new TextEncoder().encode(adHint)
-      : new Uint8Array(0);
 
     const plaintext = await decryptPayload(ciphertext, nonce, teamKey, adBytes);
     const payloadJson = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;

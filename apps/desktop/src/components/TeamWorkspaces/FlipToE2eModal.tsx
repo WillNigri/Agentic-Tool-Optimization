@@ -28,6 +28,7 @@ import {
   getTeamMemberE2eKeys,
   setShareEncryptionMode,
   pushKeyRotation,
+  getShareFlipPreflight,
   CloudApiError,
   type SharedResourceKind,
 } from "@/lib/cloud-api";
@@ -59,6 +60,31 @@ export default function FlipToE2eModal({
     setErrorMsg(null);
 
     try {
+      // Codex R1 — pre-flight check BEFORE rotating the team key.
+      // Without this, a share with plaintext history would still
+      // trigger a fresh Team Key rotation (team-wide side effect)
+      // and only fail on the subsequent encryption-mode flip with
+      // 409 HAS_PLAINTEXT_HISTORY. The rotation would be wasted.
+      const preflight = await getShareFlipPreflight(teamId, kind, resourceId);
+      if (preflight.encryption_mode === "e2e") {
+        setErrorMsg(
+          t("flipE2e.error.alreadyE2e", {
+            defaultValue: "This share is already end-to-end encrypted.",
+          }),
+        );
+        return;
+      }
+      if (preflight.last_seq > 0) {
+        setErrorMsg(
+          t("flipE2e.error.hasPlaintextHistory", {
+            defaultValue:
+              "This share already has plaintext events. To use E2E encryption, " +
+              "create a new share and enable encryption from the start.",
+          }),
+        );
+        return;
+      }
+
       // Step 1: fresh Team Key.
       const teamKey = await generateTeamKey();
 
@@ -73,7 +99,6 @@ export default function FlipToE2eModal({
           const sealed = await sealTeamKey(teamKey, recipientPubkey);
           return {
             member_user_id: m.member_user_id,
-            key_id: m.key_id,
             sealed_key_b64: toBase64(sealed),
           };
         }),
@@ -82,7 +107,10 @@ export default function FlipToE2eModal({
       // Step 4: POST key-rotations to create a fresh Team Key generation.
       await pushKeyRotation(teamId, envelopes);
 
-      // Step 5: flip the share's encryption_mode to 'e2e'.
+      // Step 5: flip the share's encryption_mode to 'e2e'. The
+      // 409 HAS_PLAINTEXT_HISTORY path remains for the race-with-
+      // a-concurrent-append edge case (preflight passed, append
+      // raced in, flip rejected).
       await setShareEncryptionMode(teamId, kind, resourceId, "e2e");
 
       // Step 6: persist telemetry opt-in preference locally.

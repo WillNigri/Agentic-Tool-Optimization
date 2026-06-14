@@ -31,6 +31,7 @@ const {
   mockGetTeamMemberE2eKeys,
   mockPushKeyRotation,
   mockSetShareEncryptionMode,
+  mockGetShareFlipPreflight,
   mockInvoke,
   mockGenerateTeamKey,
   mockSealTeamKey,
@@ -47,6 +48,13 @@ const {
   ]),
   mockPushKeyRotation: vi.fn().mockResolvedValue({ team_key_id: "tk-1" }),
   mockSetShareEncryptionMode: vi.fn().mockResolvedValue(undefined),
+  // Codex R1 — pre-flight is the first cloud call now; default-mock
+  // returns a fresh plaintext share (last_seq=0) so the existing
+  // "happy path" tests still cover the flip-succeeds case.
+  mockGetShareFlipPreflight: vi.fn().mockResolvedValue({
+    encryption_mode: "plaintext",
+    last_seq: 0,
+  }),
   mockInvoke: vi.fn().mockResolvedValue(undefined),
   // Mock the crypto module to avoid needing real libsodium operations in this test.
   mockGenerateTeamKey: vi.fn().mockResolvedValue(new Uint8Array(32)),
@@ -62,6 +70,7 @@ vi.mock("@/lib/cloud-api", async (importOriginal) => {
     getTeamMemberE2eKeys: mockGetTeamMemberE2eKeys,
     pushKeyRotation: mockPushKeyRotation,
     setShareEncryptionMode: mockSetShareEncryptionMode,
+    getShareFlipPreflight: mockGetShareFlipPreflight,
     CloudApiError: actual.CloudApiError,
   };
 });
@@ -184,9 +193,11 @@ describe("FlipToE2eModal", () => {
     expect(mockPushKeyRotation).toHaveBeenCalledWith(
       "team-1",
       expect.arrayContaining([
+        // Codex R1 — the OSS envelope shape dropped the redundant
+        // key_id (cloud zod accepts only {member_user_id, sealed_key};
+        // OSS still flips _b64 to sealed_key on the wire).
         expect.objectContaining({
           member_user_id: "user-1",
-          key_id: "key-1",
           sealed_key_b64: expect.any(String),
         }),
       ]),
@@ -219,11 +230,17 @@ describe("FlipToE2eModal", () => {
     });
   });
 
-  it("shows HAS_PLAINTEXT_HISTORY error message on 409", async () => {
-    const { CloudApiError } = await import("@/lib/cloud-api");
-    mockSetShareEncryptionMode.mockRejectedValueOnce(
-      new CloudApiError("HAS_PLAINTEXT_HISTORY", "Has plaintext history"),
-    );
+  it("shows HAS_PLAINTEXT_HISTORY error message when preflight detects existing events", async () => {
+    // Codex R1 — the pre-flight check now catches plaintext history
+    // BEFORE rotating the Team Key. The flip routes are never even
+    // called when preflight refuses, which avoids a wasted team-wide
+    // key rotation. The old test mocked the 409 path on setShareEncryptionMode;
+    // that path is still wired (race-window safety) but the primary
+    // refusal lives in the preflight branch.
+    mockGetShareFlipPreflight.mockResolvedValueOnce({
+      encryption_mode: "plaintext",
+      last_seq: 5,
+    });
 
     renderModal();
     fireEvent.click(screen.getByRole("button", { name: /Enable encryption/i }));
@@ -231,5 +248,8 @@ describe("FlipToE2eModal", () => {
     await waitFor(() => {
       expect(screen.getByText(/already has plaintext events/)).toBeInTheDocument();
     });
+    // Critically: rotation must NOT have been triggered.
+    expect(mockPushKeyRotation).not.toHaveBeenCalled();
+    expect(mockSetShareEncryptionMode).not.toHaveBeenCalled();
   });
 });

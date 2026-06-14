@@ -15,7 +15,7 @@
 // Wave 3 TODO: wire encryption_mode from snapshot → isE2e prop +
 //   decrypt payload_json from live events before rendering.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, Eye, Lock, Radio } from "lucide-react";
@@ -105,16 +105,8 @@ export default function SharedDetailView({
   const teamKeyId = (q.data as (SharedDetail & { team_key_id?: string }) | undefined)
     ?.team_key_id ?? null;
 
-  // Build the AD-hint for a given raw event. The hint must match what
-  // appendTeamEventEncrypted wrote: teamId|resourceId|seq_num|event_kind.
-  const buildAdHint = useCallback(
-    (event: TeamEvent) =>
-      `${teamId}|${resourceId}|${event.seq_num}|${event.event_kind}`,
-    [teamId, resourceId],
-  );
-
   // Build a stable decryptor by lazily loading the Team Key and member pubkeys.
-  // The closure captures teamKeyId + buildAdHint; re-created when those change.
+  // The closure captures teamKeyId + teamId + resourceId.
   const decryptor = useCallback<DecryptorFn>(
     async (raw: TeamEvent) => {
       if (!teamKeyId) return { ...raw, payload_json: { __decrypt_error: true } };
@@ -129,14 +121,18 @@ export default function SharedDetailView({
             key_id: m.key_id,
           };
         }
-        // Attach AD hint for signature verification inside decryptEventPayload.
-        const withHint = { ...raw, __ad_hint: buildAdHint(raw) } as TeamEvent & { __ad_hint: string };
-        return decryptEventPayload(withHint, teamKey, memberPubkeys);
+        // CSO H1 — pass team + resource explicitly; decryptEventPayload
+        // reconstructs the AD deterministically. The old __ad_hint shape
+        // made signature verification skip-able and is gone.
+        return decryptEventPayload(raw, teamKey, memberPubkeys, {
+          teamId,
+          resourceId,
+        });
       } catch {
         return { ...raw, payload_json: { __decrypt_error: true } };
       }
     },
-    [teamKeyId, teamId, buildAdHint],
+    [teamKeyId, teamId, resourceId],
   );
 
   // For E2E shares, fetch the initial 200-event backfill (replaces snapshot).
@@ -166,24 +162,37 @@ export default function SharedDetailView({
     [isE2e, teamKeyId, teamId, resourceKind, resourceId, decryptor],
   );
 
-  // Trigger initial E2E backfill when the snapshot loads and confirms e2e.
-  // Use a ref to guard against firing twice in React Strict Mode.
-  const e2eBackfillFiredRef = { current: false };
-  if (isE2e && teamKeyId && !e2eBackfillFiredRef.current && e2eHistoryEvents.length === 0 && !e2eHistoryLoading) {
-    e2eBackfillFiredRef.current = true;
-    void loadE2eHistory(0);
-  }
+  // Codex R1 — actually use a ref. Pre-fix shape was a fresh-each-
+  // render `{ current: false }` object literal, which the React
+  // committer cleared between renders so the backfill could fire
+  // repeatedly on empty E2E shares.
+  const e2eBackfillFiredRef = useRef(false);
+  useEffect(() => {
+    if (isE2e && teamKeyId && !e2eBackfillFiredRef.current && !e2eHistoryLoading && e2eHistoryEvents.length === 0) {
+      e2eBackfillFiredRef.current = true;
+      void loadE2eHistory(0);
+    }
+  }, [isE2e, teamKeyId, e2eHistoryLoading, e2eHistoryEvents.length, loadE2eHistory]);
 
-  // Derive the initial seq for the live stream.
-  // Plaintext: use snapshot's last_seq. E2E: start after the last history event.
+  // Reset the backfill guard when the share itself changes (resourceId
+  // navigation) so we re-fetch history for the new resource.
+  useEffect(() => {
+    e2eBackfillFiredRef.current = false;
+  }, [resourceId]);
+
+  // Codex R1 — for E2E shares, do NOT open the WS until backfill has
+  // established the seq_num cutoff. Otherwise the WS opens at
+  // since=0 and the same events arrive twice (once via backfill, once
+  // via live), appearing in both "history" and "Live since you opened".
+  const liveStreamReady = isE2e ? !e2eHistoryLoading && e2eBackfillFiredRef.current : true;
   const liveStreamSince = isE2e
     ? (e2eHistoryEvents.length > 0 ? e2eHistoryEvents[e2eHistoryEvents.length - 1].seq_num : 0)
     : lastSeq;
 
   const { events: liveEvents, isConnected } = useTeamEventStream(
-    q.data ? teamId : null,
-    q.data ? resourceKind : null,
-    q.data ? resourceId : null,
+    q.data && liveStreamReady ? teamId : null,
+    q.data && liveStreamReady ? resourceKind : null,
+    q.data && liveStreamReady ? resourceId : null,
     liveStreamSince,
     // Pass decryptor only for E2E shares.
     isE2e ? { decryptor } : undefined,
