@@ -29,6 +29,40 @@ export interface Loop {
   sourceRef: string | null;
   createdAt: string;
   updatedAt: string;
+  lastRunStatus: string | null;
+  lastRunAt: string | null;
+  dispatchCount: number;
+  totalCostUsd: number;
+}
+
+export interface LoopRun {
+  id: string;
+  loopId: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  stepCount: number;
+  error: string | null;
+  triggeredBy: string | null;
+  variables: unknown | null;
+  initiatorKind: string | null;
+  clientSurface: string | null;
+  initiatorId: string | null;
+}
+
+export interface LoopRunStep {
+  id: string;
+  loopRunId: string;
+  nodeId: string;
+  nodeType: string;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  input: unknown | null;
+  output: unknown | null;
+  error: string | null;
+  executionLogId: string | null;
 }
 
 export interface LoopCreateInput {
@@ -63,6 +97,14 @@ export function list_loops(): Promise<Loop[]> {
 
 export function get_loop(id: string): Promise<Loop> {
   return invoke<Loop>("get_loop", { id });
+}
+
+export function list_loop_runs(loopId: string, limit?: number): Promise<LoopRun[]> {
+  return invoke<LoopRun[]>("list_loop_runs", { loopId, limit });
+}
+
+export function get_loop_run_steps(runId: string): Promise<LoopRunStep[]> {
+  return invoke<LoopRunStep[]>("get_loop_run_steps", { runId });
 }
 
 export function create_loop(input: LoopCreateInput): Promise<Loop> {

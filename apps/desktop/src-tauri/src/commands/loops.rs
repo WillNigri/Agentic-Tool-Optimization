@@ -39,6 +39,10 @@ pub struct Loop {
     pub source_ref: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub last_run_status: Option<String>,
+    pub last_run_at: Option<String>,
+    pub dispatch_count: i64,
+    pub total_cost_usd: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,6 +84,8 @@ pub struct LoopRun {
     pub status: String,
     pub started_at: String,
     pub finished_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub step_count: i64,
     pub error: Option<String>,
     pub triggered_by: Option<String>,
     pub variables: Option<serde_json::Value>,
@@ -168,7 +174,7 @@ fn parse_json(field: &str, raw: Option<String>) -> Result<Option<serde_json::Val
     }
 }
 
-fn row_to_loop(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String)> {
+fn row_to_loop(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, i64, f64)> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -183,13 +189,35 @@ fn row_to_loop(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, Str
         row.get(10)?,
         row.get(11)?,
         row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
+        row.get(16)?,
     ))
 }
 
 fn assemble_loop(
-    raw: (String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String),
+    raw: (String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, i64, f64),
 ) -> Result<Loop, String> {
-    let (id, slug, name, description, enabled, graph_raw, variables_raw, trigger_kind, trigger_config_raw, source, source_ref, created_at, updated_at) = raw;
+    let (
+        id,
+        slug,
+        name,
+        description,
+        enabled,
+        graph_raw,
+        variables_raw,
+        trigger_kind,
+        trigger_config_raw,
+        source,
+        source_ref,
+        created_at,
+        updated_at,
+        last_run_status,
+        last_run_at,
+        dispatch_count,
+        total_cost_usd,
+    ) = raw;
     let graph = serde_json::from_str(&graph_raw)
         .map_err(|e| format!("invalid graph json on loop {}: {}", id, e))?;
     let variables = parse_json("variables", variables_raw)?;
@@ -208,10 +236,57 @@ fn assemble_loop(
         source_ref,
         created_at,
         updated_at,
+        last_run_status,
+        last_run_at,
+        dispatch_count,
+        total_cost_usd,
     })
 }
 
-const LOOP_SELECT: &str = "SELECT id, slug, name, description, enabled, graph, variables, trigger_kind, trigger_config, source, source_ref, created_at, updated_at FROM loops";
+const LOOP_SELECT: &str = "SELECT
+    l.id,
+    l.slug,
+    l.name,
+    l.description,
+    l.enabled,
+    l.graph,
+    l.variables,
+    l.trigger_kind,
+    l.trigger_config,
+    l.source,
+    l.source_ref,
+    l.created_at,
+    l.updated_at,
+    (
+        SELECT lr.status
+          FROM loop_runs lr
+         WHERE lr.loop_id = l.id
+         ORDER BY lr.started_at DESC, lr.id DESC
+         LIMIT 1
+    ) AS last_run_status,
+    (
+        SELECT lr.started_at
+          FROM loop_runs lr
+         WHERE lr.loop_id = l.id
+         ORDER BY lr.started_at DESC, lr.id DESC
+         LIMIT 1
+    ) AS last_run_at,
+    COALESCE((
+        SELECT COUNT(*)
+          FROM loop_run_steps lrs
+         WHERE lrs.loop_run_id IN (
+             SELECT lr.id FROM loop_runs lr WHERE lr.loop_id = l.id
+         )
+           AND lrs.execution_log_id IS NOT NULL
+    ), 0) AS dispatch_count,
+    COALESCE((
+        SELECT SUM(COALESCE(el.cost_usd_estimated, 0))
+          FROM loop_run_steps lrs
+          JOIN loop_runs lr ON lr.id = lrs.loop_run_id
+          JOIN execution_logs el ON el.id = lrs.execution_log_id
+         WHERE lr.loop_id = l.id
+    ), 0) AS total_cost_usd
+FROM loops l";
 
 /// Loop identifier resolution. Callers pass either a UUID `id` or a kebab-case
 /// `slug` — we detect which by attempting a UUID parse. Without this, the
@@ -331,6 +406,10 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         source_ref: input.source_ref,
         created_at: now.clone(),
         updated_at: now,
+        last_run_status: None,
+        last_run_at: None,
+        dispatch_count: 0,
+        total_cost_usd: 0.0,
     })
 }
 
@@ -448,31 +527,38 @@ pub fn list_loop_runs(
     let cap = limit.unwrap_or(50).clamp(1, 500);
     let sql = format!(
         "SELECT lr.id, lr.loop_id, lr.status, lr.started_at, lr.finished_at,
+                CASE
+                    WHEN lr.finished_at IS NULL THEN NULL
+                    ELSE CAST((julianday(lr.finished_at) - julianday(lr.started_at)) * 86400000 AS INTEGER)
+                END AS duration_ms,
+                (SELECT COUNT(*) FROM loop_run_steps s WHERE s.loop_run_id = lr.id) AS step_count,
                 lr.error, lr.triggered_by, lr.variables,
                 lr.initiator_kind, lr.client_surface, lr.initiator_id
            FROM loop_runs lr
            JOIN loops l ON lr.loop_id = l.id
           WHERE l.{} = ?1
-          ORDER BY lr.started_at DESC
+          ORDER BY lr.started_at DESC, lr.id DESC
           LIMIT ?2",
         id_or_slug_column(&loop_id),
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![loop_id, cap], |row| {
-            let raw_vars: Option<String> = row.get(7)?;
+            let raw_vars: Option<String> = row.get(9)?;
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                raw_vars,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
+                raw_vars,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -484,6 +570,8 @@ pub fn list_loop_runs(
             status,
             started_at,
             finished_at,
+            duration_ms,
+            step_count,
             error,
             triggered_by,
             raw_vars,
@@ -498,6 +586,8 @@ pub fn list_loop_runs(
             status,
             started_at,
             finished_at,
+            duration_ms,
+            step_count,
             error,
             triggered_by,
             variables,
