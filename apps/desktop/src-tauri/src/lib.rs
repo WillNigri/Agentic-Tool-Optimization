@@ -2,6 +2,9 @@ mod openclaw_ws;
 mod byok;
 mod e2e_keychain;
 mod encryption;
+// v2.15 Wave 3 — local SQLite queue for anonymized telemetry + per-share
+// opt-in preferences. OSS-local only; the cloud POST fires from App.tsx.
+mod anon_telemetry;
 mod identity;
 mod log_watcher;
 mod passive_observer;
@@ -697,6 +700,12 @@ pub fn run() {
             e2e_keychain::e2e_keypair_exists,
             e2e_keychain::e2e_store_keypair,
             e2e_keychain::e2e_load_keypair,
+            // v2.15 Wave 3 — anon telemetry queue + per-share opt-in prefs.
+            anon_telemetry::anon_telemetry_enqueue,
+            anon_telemetry::anon_telemetry_drain_for_post,
+            anon_telemetry::anon_telemetry_clear_ids,
+            anon_telemetry::set_share_telemetry_pref,
+            anon_telemetry::get_share_telemetry_pref,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

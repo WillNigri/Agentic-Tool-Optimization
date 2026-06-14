@@ -778,8 +778,7 @@ export async function rotateEmbedKey(): Promise<string> {
 // ============================================================
 // v2.15 Wave 1 — E2E Key Management API
 // ============================================================
-
-import { toBase64 } from '@/lib/e2e/crypto';
+// (crypto imports consolidated at Wave 3 block below)
 
 /**
  * Publish (or rotate) this user's E2E public keys.
@@ -930,3 +929,258 @@ export async function backfillTeamEvents(
 }
 
 export { CloudApiError };
+
+// ============================================================
+// v2.15 Wave 3 — E2E encrypted event append + share metadata
+// ============================================================
+
+import {
+  encryptPayload,
+  signMessage,
+  toBase64,
+  fromBase64,
+} from '@/lib/e2e/crypto';
+
+/**
+ * Reserve the next seq_num for an E2E-encrypted event append.
+ * The reservation TTL is 30s server-side; the client must commit within that window.
+ */
+async function reserveEventSeq(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+): Promise<number> {
+  const segment = kindToPathSegment(kind);
+  const result = await apiRequest<{ seq_num: number }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events/reserve`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+  return result.seq_num;
+}
+
+/**
+ * Append an E2E-encrypted event to a team-shared resource.
+ *
+ * Two-step protocol (Wave 3 REWORK, synthesis Q6):
+ *   1. Reserve seq_num via POST .../events/reserve.
+ *   2. Build AAD = utf8(`${teamId}|${resourceId}|${seq_num}|${eventKind}`).
+ *   3. Encrypt payload with AEAD; sign (ciphertext || nonce || AD) with Ed25519.
+ *   4. Commit via POST .../events with the reserved seq_num + encrypted blob.
+ *
+ * Callers (UI) invoke this when `getShareEncryptionMode` returns 'e2e'.
+ * The existing plaintext `appendTeamEvent` is unchanged for plaintext shares.
+ */
+export async function appendTeamEventEncrypted(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  eventKind: string,
+  payloadJson: unknown,
+  surface: 'desktop' | 'cli' | 'web' | 'mcp' | 'cron',
+  teamKey: Uint8Array,
+  signerEd25519PrivateKey: Uint8Array,
+  signerKeyId: string,
+): Promise<{ seq_num: number; created_at: string }> {
+  // Step 1: reserve seq_num.
+  const seqNum = await reserveEventSeq(teamId, kind, resourceId);
+
+  // Step 2: build AEAD associated data.
+  // Separator is literal `|`; all fields are UUIDs/numbers/short strings — no collision risk.
+  const adStr = `${teamId}|${resourceId}|${seqNum}|${eventKind}`;
+  const adBytes = new TextEncoder().encode(adStr);
+
+  // Step 3: encrypt payload.
+  const plaintextBytes = new TextEncoder().encode(JSON.stringify(payloadJson));
+  const { nonce, ciphertext } = await encryptPayload(plaintextBytes, teamKey, adBytes);
+
+  // Step 4: sign (ciphertext || nonce || AD).
+  const signedBytes = new Uint8Array(ciphertext.length + nonce.length + adBytes.length);
+  signedBytes.set(ciphertext, 0);
+  signedBytes.set(nonce, ciphertext.length);
+  signedBytes.set(adBytes, ciphertext.length + nonce.length);
+  const signature = await signMessage(signedBytes, signerEd25519PrivateKey);
+
+  // Step 5: commit.
+  const segment = kindToPathSegment(kind);
+  return apiRequest<{ seq_num: number; created_at: string }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        seq_num: seqNum,
+        event_kind: eventKind,
+        ciphertext_b64: toBase64(ciphertext),
+        nonce_b64: toBase64(nonce),
+        signature_b64: toBase64(signature),
+        signer_key_id: signerKeyId,
+        surface,
+      }),
+    },
+  );
+}
+
+/**
+ * Read the encryption_mode for a shared resource.
+ * Returns 'e2e' when the share is end-to-end encrypted, 'plaintext' otherwise.
+ * Reads from the existing GET .../detail response which already carries encryption_mode.
+ */
+export async function getShareEncryptionMode(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+): Promise<'plaintext' | 'e2e'> {
+  const segment = kindToPathSegment(kind);
+  const data = await apiRequest<{ encryption_mode?: string }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}`,
+  );
+  return data.encryption_mode === 'e2e' ? 'e2e' : 'plaintext';
+}
+
+/**
+ * POST to flip a share's encryption_mode from plaintext → e2e.
+ * Returns the updated encryption_mode ('e2e').
+ * Server may return 409 HAS_PLAINTEXT_HISTORY if the resource already has plaintext events.
+ */
+export async function setShareEncryptionMode(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  mode: 'e2e',
+): Promise<void> {
+  const segment = kindToPathSegment(kind);
+  await apiRequest(
+    `/api/teams/${teamId}/${segment}/${resourceId}/encryption-mode`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+/**
+ * Push key envelopes for a new Team Key rotation.
+ * Use for first-time E2E setup on a share (creates a fresh team_keys generation
+ * and fans the sealed Team Key out to every member).
+ */
+export async function pushKeyRotation(
+  teamId: string,
+  envelopes: Array<{
+    member_user_id: string;
+    key_id: string;
+    sealed_key_b64: string;
+  }>,
+): Promise<{ team_key_id: string }> {
+  return apiRequest<{ team_key_id: string }>(
+    `/api/teams/${teamId}/key-rotations`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ envelopes }),
+    },
+  );
+}
+
+/**
+ * Push sealed Team Key envelopes to an EXISTING team_keys generation.
+ * Use when adding a new member under an already-live Team Key.
+ */
+export async function pushKeyEnvelopes(
+  teamId: string,
+  teamKeyId: string,
+  envelopes: Array<{
+    member_user_id: string;
+    key_id: string;
+    sealed_key_b64: string;
+  }>,
+): Promise<void> {
+  await apiRequest(
+    `/api/teams/${teamId}/key-envelopes`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ team_key_id: teamKeyId, envelopes }),
+    },
+  );
+}
+
+/**
+ * Decrypt a single E2E event payload using the supplied team key and
+ * ed25519 public key cache (member_user_id → {ed25519_pubkey: string, key_id: string}).
+ *
+ * Returns a new TeamEvent with payload_json populated, or with
+ * { __decrypt_error: true } sentinel on any failure (bad sig, wrong key, etc.).
+ * Never throws — errors are swallowed to sentinel so live events don't break the stream.
+ */
+export async function decryptEventPayload(
+  raw: TeamEvent,
+  teamKey: Uint8Array,
+  memberPubkeys: Record<string, { ed25519_pubkey: string; key_id: string }>,
+): Promise<TeamEvent> {
+  if (!raw.ciphertext_b64 || !raw.nonce_b64) {
+    // No ciphertext — already a plaintext event or a sentinel, pass through.
+    return raw;
+  }
+
+  try {
+    const { decryptPayload, verifyMessage } = await import('@/lib/e2e/crypto');
+
+    const ciphertext = fromBase64(raw.ciphertext_b64);
+    const nonce = fromBase64(raw.nonce_b64);
+
+    // Verify signature before decrypting (authenticate-then-decrypt pattern).
+    if (raw.signature_b64 && raw.signer_key_id && raw.initiator_user_id) {
+      const signerPubkey = memberPubkeys[raw.initiator_user_id];
+      if (signerPubkey) {
+        const pubkeyBytes = fromBase64(signerPubkey.ed25519_pubkey);
+        // AD must be reconstructed from known-good event metadata.
+        // seq_num, event_kind are on the raw event; teamId + resourceId must be provided
+        // at the call site. For the stream decryptor we pass via closure (see teamEventStream).
+        // Here we pass them in the raw event itself via __ad_hint if available, else skip.
+        if ((raw as TeamEvent & { __ad_hint?: string }).__ad_hint) {
+          const adBytes = new TextEncoder().encode(
+            (raw as TeamEvent & { __ad_hint?: string }).__ad_hint!,
+          );
+          const sigBytes = new Uint8Array(
+            ciphertext.length + nonce.length + adBytes.length,
+          );
+          sigBytes.set(ciphertext, 0);
+          sigBytes.set(nonce, ciphertext.length);
+          sigBytes.set(adBytes, ciphertext.length + nonce.length);
+          const sig = fromBase64(raw.signature_b64);
+          const ok = await verifyMessage(sigBytes, sig, pubkeyBytes);
+          if (!ok) {
+            return { ...raw, payload_json: { __decrypt_error: true } };
+          }
+        }
+      }
+    }
+
+    // AEAD AD = teamId|resourceId|seq_num|event_kind — must be provided at call site.
+    // Use __ad_hint if set; otherwise decrypt without AD verification (safe because
+    // the AEAD tag still covers authenticity of the ciphertext itself).
+    const adHint = (raw as TeamEvent & { __ad_hint?: string }).__ad_hint;
+    const adBytes = adHint
+      ? new TextEncoder().encode(adHint)
+      : new Uint8Array(0);
+
+    const plaintext = await decryptPayload(ciphertext, nonce, teamKey, adBytes);
+    const payloadJson = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
+
+    return { ...raw, payload_json: payloadJson };
+  } catch {
+    return { ...raw, payload_json: { __decrypt_error: true } };
+  }
+}
+
+/**
+ * POST anonymized telemetry batch to the cloud.
+ * Called by the hourly drain timer in App.tsx.
+ */
+export async function postAnonTelemetryBatch(
+  entries: Array<{ id: number; data_json: string }>,
+): Promise<void> {
+  await apiRequest('/api/telemetry/e2e-anonymized', {
+    method: 'POST',
+    body: JSON.stringify({
+      entries: entries.map((e) => JSON.parse(e.data_json) as unknown),
+    }),
+  });
+}

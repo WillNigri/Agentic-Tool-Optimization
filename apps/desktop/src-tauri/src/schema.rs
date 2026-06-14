@@ -2046,6 +2046,49 @@ pub fn init_database(conn: &Connection) {
             );
         }
     }
+
+    // v2.15 Wave 3 — Local SQLite for anonymized telemetry queue +
+    // per-share telemetry opt-in preference.
+    //
+    // anon_telemetry_queue: local staging area for anonymized aggregate
+    // metrics extracted by proLocalRun (score, confidence, event_count).
+    // Drained hourly by a background timer in App.tsx, POSTed to
+    // /api/telemetry/e2e-anonymized, then cleared by id. The queue
+    // stores raw JSON blobs; the drain timer is responsible for batching.
+    //
+    // share_telemetry_prefs: records whether the user opted in to
+    // contributing anonymized metrics for a specific share. Set at
+    // flip-to-E2E time via the FlipToE2eModal checkbox (default off).
+    // PK is (team_id, resource_kind, resource_id) — one row per share.
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS anon_telemetry_queue (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_json     TEXT NOT NULL,
+            queued_at     TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+        [],
+    ) {
+        eprintln!("WARN: failed to create anon_telemetry_queue table: {}", e);
+    }
+    if let Err(e) = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anon_telemetry_queue_queued_at
+            ON anon_telemetry_queue(queued_at ASC)",
+        [],
+    ) {
+        eprintln!("WARN: failed to create anon_telemetry_queue index: {}", e);
+    }
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS share_telemetry_prefs (
+            team_id       TEXT NOT NULL,
+            resource_kind TEXT NOT NULL,
+            resource_id   TEXT NOT NULL,
+            opt_in        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (team_id, resource_kind, resource_id)
+        )",
+        [],
+    ) {
+        eprintln!("WARN: failed to create share_telemetry_prefs table: {}", e);
+    }
 }
 
 #[cfg(test)]

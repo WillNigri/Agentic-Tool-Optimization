@@ -196,6 +196,90 @@ describe("TeamEventStream", () => {
     unsub();
   });
 
+  // ── Wave 3: decryptor hook ─────────────────────────────────
+
+  it("applies a decryptor to each delivered event when provided", async () => {
+    const received: TeamEvent[] = [];
+
+    // Decryptor replaces payload_json with a transformed version.
+    const decryptor = vi.fn(async (raw: TeamEvent): Promise<TeamEvent> => ({
+      ...raw,
+      payload_json: { decrypted: true, original: raw.payload_json },
+    }));
+
+    const unsub = teamEventStream.subscribe(
+      "team-d1",
+      "session",
+      "res-d1",
+      0,
+      (e) => received.push(e),
+      { decryptor },
+    );
+    await tick();
+
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws._fireOpen();
+    ws._fireMessage(fakeEvent(10, { ciphertext_b64: "abc==", nonce_b64: "xyz==" }));
+
+    // The decryptor runs async; wait for it to settle.
+    await new Promise<void>((r) => setTimeout(r, 20));
+
+    expect(decryptor).toHaveBeenCalledTimes(1);
+    expect(received).toHaveLength(1);
+    // payload_json should be the decryptor's transformed version.
+    expect((received[0].payload_json as { decrypted: boolean }).decrypted).toBe(true);
+
+    unsub();
+  });
+
+  it("delivers raw event unchanged when no decryptor is provided", async () => {
+    const received: TeamEvent[] = [];
+    const unsub = teamEventStream.subscribe(
+      "team-d2", "session", "res-d2", 0,
+      (e) => received.push(e),
+      // No decryptor option.
+    );
+    await tick();
+
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws._fireOpen();
+    ws._fireMessage(fakeEvent(11));
+
+    expect(received).toHaveLength(1);
+    expect((received[0].payload_json as { role: string }).role).toBe("user");
+
+    unsub();
+  });
+
+  it("decryptor returning __decrypt_error sentinel does not throw", async () => {
+    const received: TeamEvent[] = [];
+
+    const decryptor = vi.fn(async (raw: TeamEvent): Promise<TeamEvent> => ({
+      ...raw,
+      payload_json: { __decrypt_error: true },
+    }));
+
+    const unsub = teamEventStream.subscribe(
+      "team-d3", "chat", "res-d3", 0,
+      (e) => received.push(e),
+      { decryptor },
+    );
+    await tick();
+
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws._fireOpen();
+    ws._fireMessage(fakeEvent(12));
+
+    await new Promise<void>((r) => setTimeout(r, 20));
+
+    expect(received).toHaveLength(1);
+    expect(
+      (received[0].payload_json as { __decrypt_error: boolean }).__decrypt_error,
+    ).toBe(true);
+
+    unsub();
+  });
+
   it("reconnects with ?since=<last_seen_seq> after close", async () => {
     // Track the WS count before subscribing so we can wait for a new one.
     const startCount = MockWebSocket.instances.length;

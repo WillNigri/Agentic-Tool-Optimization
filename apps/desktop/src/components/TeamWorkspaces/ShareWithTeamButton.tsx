@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, Share2 } from "lucide-react";
+import { Loader2, Share2, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import FlipToE2eModal from "./FlipToE2eModal";
+import type { SharedResourceKind } from "@/lib/cloud-api";
 
 import { cn } from "@/lib/utils";
 import { useFeatureFlag, useTier } from "@/lib/tier";
@@ -164,6 +166,13 @@ export default function ShareWithTeamButton({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Wave 3: per-team E2E flip modal state.
+  const [flipE2eTeam, setFlipE2eTeam] = useState<{
+    teamId: string;
+    kind: SharedResourceKind;
+    resourceId: string;
+  } | null>(null);
+
   const teamsQuery = useQuery<Team[]>({
     queryKey: ["teams"],
     queryFn: getTeams,
@@ -278,6 +287,22 @@ export default function ShareWithTeamButton({
   };
 
   return (
+    <>
+    {/* Wave 3: FlipToE2eModal — mounted outside the dropdown so it's not
+        clipped by overflow:hidden on the parent. */}
+    {flipE2eTeam && (
+      <FlipToE2eModal
+        teamId={flipE2eTeam.teamId}
+        kind={flipE2eTeam.kind}
+        resourceId={flipE2eTeam.resourceId}
+        onClose={() => setFlipE2eTeam(null)}
+        onSuccess={() => {
+          setFlipE2eTeam(null);
+          // Reloading the shared state will re-fetch the updated encryption_mode.
+          setOpen(false);
+        }}
+      />
+    )}
     <div className={cn("relative", className)} ref={containerRef}>
       <button
         type="button"
@@ -325,12 +350,8 @@ export default function ShareWithTeamButton({
                     </div>
                     <div className="flex items-center gap-1.5">
                     {alreadyShared && (
-                      // v2.14 #7 — Refresh re-uploads the latest snapshot
-                      // without changing the share row's permissions. The
-                      // server-side POST /share is idempotent (ON CONFLICT
-                      // updates the snapshot + bumps shared_at) so the
-                      // "refresh" verb is just a re-share with a fresh
-                      // getSnapshot() payload.
+                      <>
+                      {/* v2.14 #7 — Refresh re-uploads the latest snapshot. */}
                       <button
                         type="button"
                         title={t("teamShare.refresh", "Refresh snapshot")}
@@ -340,6 +361,32 @@ export default function ShareWithTeamButton({
                       >
                         {t("teamShare.refreshShort", "↻")}
                       </button>
+                      {/* Wave 3 — Switch to E2E encryption. Only shown when the
+                          resource kind has a SharedResourceKind mapping. */}
+                      {(resourceKind === "session" ||
+                        resourceKind === "war_room" ||
+                        resourceKind === "chat" ||
+                        resourceKind === "loop" ||
+                        resourceKind === "mission") && (
+                        <button
+                          type="button"
+                          title={t("teamShare.enableE2e", "Switch to End-to-End Encryption")}
+                          onClick={() =>
+                            setFlipE2eTeam({
+                              teamId: team.id,
+                              kind: (resourceKind === "war_room"
+                                ? "war-room"
+                                : resourceKind) as SharedResourceKind,
+                              resourceId,
+                            })
+                          }
+                          disabled={isPending || sharedStateLoading}
+                          className="shrink-0 rounded-md border border-cs-accent/40 px-2 py-1 text-xs text-cs-accent hover:bg-cs-accent/10 transition-colors disabled:opacity-50"
+                        >
+                          <ShieldCheck size={12} />
+                        </button>
+                      )}
+                      </>
                     )}
                     <button
                       type="button"
@@ -374,5 +421,6 @@ export default function ShareWithTeamButton({
         </div>
       )}
     </div>
+    </>
   );
 }

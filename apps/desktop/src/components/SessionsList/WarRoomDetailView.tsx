@@ -28,6 +28,7 @@ import {
 } from "./_helpers";
 import type { SingleRunDetail } from "./SingleRunDetailView";
 import InitiatorBadge from "@/components/InitiatorBadge";
+import ExecutionLogReceipt from "@/components/receipts/ExecutionLogReceipt";
 import LiveCursors from "@/components/livePresence/LiveCursors";
 import PresencePills from "@/components/livePresence/PresencePills";
 import CloseConversationModal from "./CloseConversationModal";
@@ -498,6 +499,9 @@ export default function WarRoomDetailView({
                     initiatorId={d.initiatorId}
                   />
                 )}
+                {/* FOLLOWUPS #1 — each seat is an execution_logs row; expose its
+                    id as a clickable receipt that opens SingleRunDetailView. */}
+                <ExecutionLogReceipt logId={d.id} label="open run" />
                 <span className="text-xs text-cs-muted ml-auto">
                   {formatTime(d.createdAt)}
                 </span>

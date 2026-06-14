@@ -158,6 +158,61 @@ export default function App() {
     void refreshTier();
   }, [refreshTier]);
 
+  // v2.15 Wave 3 — Anon telemetry drain timer.
+  //
+  // Fires once per hour (3_600_000ms). Drains up to 100 oldest entries from
+  // the local anon_telemetry_queue SQLite table, POSTs them to the cloud
+  // batch endpoint, and clears the entries on success. Best-effort: any error
+  // is silently swallowed so a telemetry failure never surfaces to the user.
+  //
+  // Only runs when in a Tauri context (the Tauri commands don't exist in
+  // web preview mode).
+  useEffect(() => {
+    if (!isTauri) return;
+
+    const drainTelemetry = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { postAnonTelemetryBatch } = await import("@/lib/cloud-api");
+
+        type QueueEntry = { id: number; data_json: string };
+        const entries = await invoke<QueueEntry[]>("anon_telemetry_drain_for_post");
+        if (!entries || entries.length === 0) return;
+
+        await postAnonTelemetryBatch(entries);
+        const ids = entries.map((e) => e.id);
+        await invoke("anon_telemetry_clear_ids", { ids });
+      } catch {
+        // Silently ignore — telemetry errors must never surface to users.
+      }
+    };
+
+    // Run once on mount (in case there's a backlog from a previous session),
+    // then every hour.
+    void drainTelemetry();
+    const timerId = setInterval(() => { void drainTelemetry(); }, 3_600_000);
+
+    // Flush-on-exit best-effort via a Tauri window close listener.
+    let removeCloseListener: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        const unlisten = await win.onCloseRequested(async () => {
+          await drainTelemetry();
+        });
+        removeCloseListener = unlisten;
+      } catch {
+        // Window events not available (web preview etc.).
+      }
+    })();
+
+    return () => {
+      clearInterval(timerId);
+      removeCloseListener?.();
+    };
+  }, []);
+
   return (
     <>
       {needsManualUpgrade && (

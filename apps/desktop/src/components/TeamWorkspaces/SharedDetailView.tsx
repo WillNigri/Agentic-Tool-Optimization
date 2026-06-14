@@ -15,6 +15,7 @@
 // Wave 3 TODO: wire encryption_mode from snapshot → isE2e prop +
 //   decrypt payload_json from live events before rendering.
 
+import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, Eye, Lock, Radio } from "lucide-react";
@@ -26,6 +27,9 @@ import {
   getSharedWarRoomDetail,
   getSharedLoopDetail,
   getSharedMissionDetail,
+  backfillTeamEvents,
+  decryptEventPayload,
+  getTeamMemberE2eKeys,
   type SharedChatDetail,
   type SharedSessionDetail,
   type SharedWarRoomDetail,
@@ -33,8 +37,11 @@ import {
   type SharedMissionDetail,
   type TeamEvent,
 } from "@/lib/cloud-api";
+import { loadTeamKey, TeamKeyUnsealError } from "@/lib/e2e/teamKey";
+import { fromBase64 } from "@/lib/e2e/crypto";
 import { formatTime } from "@/components/SessionsList/_helpers";
 import { useTeamEventStream } from "./useTeamEventStream";
+import type { DecryptorFn } from "@/lib/teamEventStream";
 import AppendTurnComposer from "./AppendTurnComposer";
 import type { SharedResourceKind } from "@/lib/cloud-api";
 
@@ -80,22 +87,106 @@ export default function SharedDetailView({
     staleTime: 60_000,
   });
 
-  // Extract last_seq from the snapshot response. The cloud adds this
-  // field in Wave 2; pre-Wave-2 responses omit it → default to 0.
+  // Extract last_seq from the snapshot response (Wave 2+).
   const lastSeq = (q.data as (SharedDetail & { last_seq?: number }) | undefined)
     ?.last_seq ?? 0;
 
   // Determine whether the share is E2E (Wave 3).
-  // For now no share is E2E — the column exists but is always 'plaintext'.
   const isE2e =
     (q.data as (SharedDetail & { encryption_mode?: string }) | undefined)
       ?.encryption_mode === "e2e";
+
+  // E2E state: backfilled+decrypted historical events.
+  const [e2eHistoryEvents, setE2eHistoryEvents] = useState<TeamEvent[]>([]);
+  const [e2eHistorySince, setE2eHistorySince] = useState(0);
+  const [e2eHistoryLoading, setE2eHistoryLoading] = useState(false);
+  const [e2eHistoryExhausted, setE2eHistoryExhausted] = useState(false);
+  // team_key_id is in the snapshot response when encryption_mode=e2e.
+  const teamKeyId = (q.data as (SharedDetail & { team_key_id?: string }) | undefined)
+    ?.team_key_id ?? null;
+
+  // Build the AD-hint for a given raw event. The hint must match what
+  // appendTeamEventEncrypted wrote: teamId|resourceId|seq_num|event_kind.
+  const buildAdHint = useCallback(
+    (event: TeamEvent) =>
+      `${teamId}|${resourceId}|${event.seq_num}|${event.event_kind}`,
+    [teamId, resourceId],
+  );
+
+  // Build a stable decryptor by lazily loading the Team Key and member pubkeys.
+  // The closure captures teamKeyId + buildAdHint; re-created when those change.
+  const decryptor = useCallback<DecryptorFn>(
+    async (raw: TeamEvent) => {
+      if (!teamKeyId) return { ...raw, payload_json: { __decrypt_error: true } };
+      try {
+        const teamKey = await loadTeamKey(teamKeyId);
+        // Preload member pubkeys for signature verification.
+        const memberKeyList = await getTeamMemberE2eKeys(teamId);
+        const memberPubkeys: Record<string, { ed25519_pubkey: string; key_id: string }> = {};
+        for (const m of memberKeyList) {
+          memberPubkeys[m.member_user_id] = {
+            ed25519_pubkey: m.ed25519_pubkey,
+            key_id: m.key_id,
+          };
+        }
+        // Attach AD hint for signature verification inside decryptEventPayload.
+        const withHint = { ...raw, __ad_hint: buildAdHint(raw) } as TeamEvent & { __ad_hint: string };
+        return decryptEventPayload(withHint, teamKey, memberPubkeys);
+      } catch {
+        return { ...raw, payload_json: { __decrypt_error: true } };
+      }
+    },
+    [teamKeyId, teamId, buildAdHint],
+  );
+
+  // For E2E shares, fetch the initial 200-event backfill (replaces snapshot).
+  const loadE2eHistory = useCallback(
+    async (since: number) => {
+      if (!isE2e || !teamKeyId) return;
+      setE2eHistoryLoading(true);
+      try {
+        const rawBatch = await backfillTeamEvents(teamId, resourceKind, resourceId, since, 200);
+        if (rawBatch.length < 200) setE2eHistoryExhausted(true);
+        const decryptedBatch = await Promise.all(rawBatch.map(decryptor));
+        setE2eHistoryEvents((prev) => {
+          const all = [...prev, ...decryptedBatch];
+          // Sort by seq_num, dedup.
+          const seen = new Set<number>();
+          return all
+            .filter((e) => { if (seen.has(e.seq_num)) return false; seen.add(e.seq_num); return true; })
+            .sort((a, b) => a.seq_num - b.seq_num);
+        });
+        if (rawBatch.length > 0) {
+          setE2eHistorySince(rawBatch[rawBatch.length - 1].seq_num);
+        }
+      } finally {
+        setE2eHistoryLoading(false);
+      }
+    },
+    [isE2e, teamKeyId, teamId, resourceKind, resourceId, decryptor],
+  );
+
+  // Trigger initial E2E backfill when the snapshot loads and confirms e2e.
+  // Use a ref to guard against firing twice in React Strict Mode.
+  const e2eBackfillFiredRef = { current: false };
+  if (isE2e && teamKeyId && !e2eBackfillFiredRef.current && e2eHistoryEvents.length === 0 && !e2eHistoryLoading) {
+    e2eBackfillFiredRef.current = true;
+    void loadE2eHistory(0);
+  }
+
+  // Derive the initial seq for the live stream.
+  // Plaintext: use snapshot's last_seq. E2E: start after the last history event.
+  const liveStreamSince = isE2e
+    ? (e2eHistoryEvents.length > 0 ? e2eHistoryEvents[e2eHistoryEvents.length - 1].seq_num : 0)
+    : lastSeq;
 
   const { events: liveEvents, isConnected } = useTeamEventStream(
     q.data ? teamId : null,
     q.data ? resourceKind : null,
     q.data ? resourceId : null,
-    lastSeq,
+    liveStreamSince,
+    // Pass decryptor only for E2E shares.
+    isE2e ? { decryptor } : undefined,
   );
 
   if (q.isLoading) {
@@ -200,21 +291,34 @@ export default function SharedDetailView({
         )}
       </div>
 
-      {/* Snapshot body */}
-      {resourceKind === "session" && (
-        <SharedSessionBody data={q.data as SharedSessionDetail} />
-      )}
-      {resourceKind === "war-room" && (
-        <SharedWarRoomBody data={q.data as SharedWarRoomDetail} />
-      )}
-      {resourceKind === "chat" && (
-        <SharedChatBody data={q.data as SharedChatDetail} />
-      )}
-      {resourceKind === "loop" && (
-        <SharedLoopBody data={q.data as SharedLoopDetail} />
-      )}
-      {resourceKind === "mission" && (
-        <SharedMissionBody data={q.data as SharedMissionDetail} />
+      {/* Snapshot body (plaintext) or E2E materialized state */}
+      {isE2e ? (
+        <E2eSnapshotSection
+          events={e2eHistoryEvents}
+          loading={e2eHistoryLoading}
+          exhausted={e2eHistoryExhausted}
+          teamKeyId={teamKeyId}
+          onLoadMore={() => void loadE2eHistory(e2eHistorySince)}
+          t={t}
+        />
+      ) : (
+        <>
+          {resourceKind === "session" && (
+            <SharedSessionBody data={q.data as SharedSessionDetail} />
+          )}
+          {resourceKind === "war-room" && (
+            <SharedWarRoomBody data={q.data as SharedWarRoomDetail} />
+          )}
+          {resourceKind === "chat" && (
+            <SharedChatBody data={q.data as SharedChatDetail} />
+          )}
+          {resourceKind === "loop" && (
+            <SharedLoopBody data={q.data as SharedLoopDetail} />
+          )}
+          {resourceKind === "mission" && (
+            <SharedMissionBody data={q.data as SharedMissionDetail} />
+          )}
+        </>
       )}
 
       {/* Live events divider + events */}
@@ -244,6 +348,99 @@ export default function SharedDetailView({
         resourceId={resourceId}
         isE2e={isE2e}
       />
+    </div>
+  );
+}
+
+// ── E2E materialized snapshot section ─────────────────────────
+
+interface E2eSnapshotSectionProps {
+  events: TeamEvent[];
+  loading: boolean;
+  exhausted: boolean;
+  teamKeyId: string | null;
+  onLoadMore: () => void;
+  t: (key: string, opts?: { defaultValue: string }) => string;
+}
+
+function E2eSnapshotSection({
+  events,
+  loading,
+  exhausted,
+  teamKeyId,
+  onLoadMore,
+  t,
+}: E2eSnapshotSectionProps) {
+  // If the user doesn't have the Team Key envelope yet, show a waiting state.
+  if (!teamKeyId) {
+    return (
+      <div className="rounded-md border border-cs-border/40 bg-cs-bg-raised/40 px-4 py-3 text-sm text-cs-muted space-y-1">
+        <div className="font-medium text-cs-text">
+          {t("teamShare.e2e.waitingForKey", { defaultValue: "Waiting for a teammate to share the key" })}
+        </div>
+        <div className="text-xs">
+          {t("teamShare.e2e.waitingExplain", {
+            defaultValue:
+              "This share is end-to-end encrypted. A team member who is online will " +
+              "automatically seal the Team Key to your public key. This usually takes " +
+              "a few seconds.",
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && events.length === 0) {
+    return (
+      <div className="rounded-md border border-cs-border/40 bg-cs-bg-raised/40 px-4 py-3 text-xs text-cs-muted">
+        {t("teamShare.e2e.decrypting", { defaultValue: "Decrypting event history…" })}
+      </div>
+    );
+  }
+
+  if (events.length === 0) {
+    return (
+      <div className="rounded-md border border-cs-border/40 bg-cs-bg-raised/40 px-4 py-3 text-xs text-cs-muted">
+        {t("teamShare.e2e.noEvents", { defaultValue: "No events in this encrypted share yet." })}
+      </div>
+    );
+  }
+
+  const hasDecryptError = events.some(
+    (e) =>
+      typeof e.payload_json === "object" &&
+      e.payload_json !== null &&
+      (e.payload_json as Record<string, unknown>).__decrypt_error,
+  );
+
+  return (
+    <div className="space-y-2">
+      {hasDecryptError && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          {t("teamShare.e2e.decryptErrorBanner", {
+            defaultValue:
+              "Some events could not be decrypted. They may have been encrypted with " +
+              "a different Team Key version or the signature was invalid.",
+          })}
+        </div>
+      )}
+      <div className="space-y-2">
+        {events.map((event) => (
+          <LiveEventRow key={event.seq_num} event={event} />
+        ))}
+      </div>
+      {!exhausted && (
+        <button
+          type="button"
+          onClick={onLoadMore}
+          disabled={loading}
+          className="w-full rounded-md border border-cs-border px-3 py-1.5 text-xs text-cs-muted hover:bg-cs-border/30 transition-colors disabled:opacity-50"
+        >
+          {loading
+            ? t("teamShare.e2e.loadingMore", { defaultValue: "Loading earlier events…" })
+            : t("teamShare.e2e.loadEarlier", { defaultValue: "Load earlier" })}
+        </button>
+      )}
     </div>
   );
 }

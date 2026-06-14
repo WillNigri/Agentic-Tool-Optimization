@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock3, History, Loader2, X } from "lucide-react";
 import InitiatorBadge from "@/components/InitiatorBadge";
+import ExecutionLogReceipt from "@/components/receipts/ExecutionLogReceipt";
 import { cn } from "@/lib/utils";
 import {
   get_loop_run_steps,
@@ -132,7 +133,10 @@ function RunStepCard({ step, run }: { step: LoopRunStep; run: LoopRun }) {
       <div className="mt-2 grid gap-2 text-xs text-cs-muted md:grid-cols-3">
         <div>Started: {formatTimestamp(step.startedAt)}</div>
         <div>Finished: {formatTimestamp(step.finishedAt)}</div>
-        <div>Execution log: {step.executionLogId ?? "—"}</div>
+        <div className="flex items-center gap-1.5">
+          <span>Execution log:</span>
+          <ExecutionLogReceipt logId={step.executionLogId} />
+        </div>
       </div>
       {step.error && (
         <div className="mt-3 rounded-md border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-xs text-rose-200">

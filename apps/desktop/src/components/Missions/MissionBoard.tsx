@@ -41,6 +41,7 @@ import { formatRelativeTime } from "@/lib/cron-utils";
 import MarkdownContent from "@/components/MarkdownContent";
 import LiveCursors from "@/components/livePresence/LiveCursors";
 import InitiatorBadge from "@/components/InitiatorBadge";
+import ExecutionLogReceipt from "@/components/receipts/ExecutionLogReceipt";
 import PresencePills from "@/components/livePresence/PresencePills";
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -273,18 +274,35 @@ function EventPayload({ payload }: { payload: Record<string, unknown> | null }) 
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   if (!payload) return null;
+
+  // FOLLOWUPS #1 — pull the execution_log_id out of the payload (if present)
+  // and surface it as a clickable receipt above the JSON dump. Missions emit
+  // `dispatched` events whose payload carries `execution_log_id`; that's the
+  // "where" reference Will called out.
+  const executionLogId =
+    typeof payload.execution_log_id === "string"
+      ? payload.execution_log_id
+      : null;
+
   return (
     <div className="mt-1">
-      <button
-        type="button"
-        onClick={() => setOpen((p) => !p)}
-        className="flex items-center gap-1 text-[10px] text-cs-muted hover:text-cs-text transition-colors"
-      >
-        {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-        {open
-          ? t("missions.hidePayload", "hide payload")
-          : t("missions.showPayload", "show payload")}
-      </button>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setOpen((p) => !p)}
+          className="flex items-center gap-1 text-[10px] text-cs-muted hover:text-cs-text transition-colors"
+        >
+          {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          {open
+            ? t("missions.hidePayload", "hide payload")
+            : t("missions.showPayload", "show payload")}
+        </button>
+        {executionLogId && (
+          <span className="text-[10px] text-cs-muted">
+            run: <ExecutionLogReceipt logId={executionLogId} />
+          </span>
+        )}
+      </div>
       {open && (
         <pre className="mt-1 rounded border border-cs-border bg-cs-bg p-2 text-[10px] font-mono text-cs-muted overflow-x-auto max-h-40">
           {JSON.stringify(payload, null, 2)}

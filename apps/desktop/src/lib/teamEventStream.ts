@@ -26,6 +26,23 @@ import type { TeamEvent, SharedResourceKind } from "./cloud-api";
 
 export type { TeamEvent, SharedResourceKind };
 
+/**
+ * Optional decryptor callback injected into the event stream for E2E shares.
+ *
+ * When set on a subscription, every incoming event passes through this function
+ * before being delivered to UI listeners. The decryptor should:
+ *   1. Parse ciphertext + nonce from the raw event.
+ *   2. Look up the signer's pubkey via a local member key cache.
+ *   3. Verify the Ed25519 signature.
+ *   4. Decrypt with the Team Key from the in-memory cache.
+ *   5. Return a new TeamEvent with payload_json filled in.
+ *
+ * On any failure the decryptor should return
+ * `{ ...raw, payload_json: { __decrypt_error: true } }` rather than throwing,
+ * so listener errors don't break the relay loop. The UI surfaces a banner.
+ */
+export type DecryptorFn = (raw: TeamEvent) => Promise<TeamEvent>;
+
 const TRANSPORT_ENABLED =
   (import.meta.env.VITE_TEAM_EVENT_STREAM_DISABLED as string | undefined) !== "1";
 
@@ -51,6 +68,11 @@ function kindToSegment(kind: SharedResourceKind): string {
 
 type EventListener = (event: TeamEvent) => void;
 
+/** Per-subscription options (Wave 3: decryptor for E2E shares). */
+interface SubscribeOptions {
+  decryptor?: DecryptorFn;
+}
+
 interface CachedToken {
   token: string;
   expiresAt: number; // unix ms
@@ -64,7 +86,8 @@ function tupleKey(teamId: string, kind: SharedResourceKind, resourceId: string):
 /** Internal state for one open (or reconnecting) WS connection. */
 interface ConnectionState {
   ws: WebSocket | null;
-  listeners: Set<EventListener>;
+  /** Map from raw EventListener → wrapped listener (may include decryptor). */
+  listeners: Map<EventListener, EventListener>;
   /** Connected/disconnected observers for the isConnected flag. */
   connectionListeners: Set<(connected: boolean) => void>;
   lastSeenSeq: number;
@@ -88,12 +111,13 @@ class TeamEventStreamManager {
   /**
    * Subscribe to live events for a resource.
    *
-   * @param teamId    - Team UUID
-   * @param kind      - Resource kind ('session' | 'war-room' | ...)
+   * @param teamId     - Team UUID
+   * @param kind       - Resource kind ('session' | 'war-room' | ...)
    * @param resourceId - Resource UUID
-   * @param since     - Initial seq_num to replay from (exclusive). Use
-   *                    `snapshot.last_seq ?? 0` from the REST response.
-   * @param onEvent   - Called for each new (or replayed) event.
+   * @param since      - Initial seq_num to replay from (exclusive). Use
+   *                     `snapshot.last_seq ?? 0` from the REST response.
+   * @param onEvent    - Called for each new (or replayed) event.
+   * @param options    - Optional: `decryptor` for E2E shares (Wave 3).
    * @returns  Unsubscribe function — call it when the component unmounts.
    */
   subscribe(
@@ -102,6 +126,7 @@ class TeamEventStreamManager {
     resourceId: string,
     since: number,
     onEvent: EventListener,
+    options?: SubscribeOptions,
   ): () => void {
     if (!TRANSPORT_ENABLED) return () => {};
 
@@ -110,7 +135,7 @@ class TeamEventStreamManager {
     if (!state) {
       state = {
         ws: null,
-        listeners: new Set(),
+        listeners: new Map(),
         connectionListeners: new Set(),
         lastSeenSeq: since,
         seenSeqs: new Set(),
@@ -124,7 +149,19 @@ class TeamEventStreamManager {
       this.connections.set(key, state);
     }
 
-    state.listeners.add(onEvent);
+    // Wrap the listener with the decryptor if one is provided.
+    // The decryptor runs async, but we call listeners synchronously via the
+    // wrapped fn which schedules a .then() and re-delivers. Events stay in order
+    // because they're pushed through the same setEvents reducer in the React hook.
+    const wrapped: EventListener = options?.decryptor
+      ? (event: TeamEvent) => {
+          void options.decryptor!(event).then((decrypted) => {
+            try { onEvent(decrypted); } catch { /* ignore listener errors */ }
+          });
+        }
+      : onEvent;
+
+    state.listeners.set(onEvent, wrapped);
     this.ensureOpen(state);
 
     return () => {
@@ -155,7 +192,7 @@ class TeamEventStreamManager {
     if (!state) {
       state = {
         ws: null,
-        listeners: new Set(),
+        listeners: new Map(),
         connectionListeners: new Set(),
         lastSeenSeq: since,
         seenSeqs: new Set(),
@@ -294,8 +331,9 @@ class TeamEventStreamManager {
         state.lastSeenSeq = event.seq_num;
       }
 
-      for (const l of state.listeners) {
-        try { l(event); } catch { /* listener errors must not break the relay */ }
+      // Call wrapped listeners (which may include async decryptors).
+      for (const wrapped of state.listeners.values()) {
+        try { wrapped(event); } catch { /* listener errors must not break the relay */ }
       }
     });
 

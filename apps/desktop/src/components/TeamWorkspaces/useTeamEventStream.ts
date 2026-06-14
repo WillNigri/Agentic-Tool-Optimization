@@ -15,15 +15,27 @@
 
 import { useState, useEffect, useRef } from "react";
 import { teamEventStream } from "@/lib/teamEventStream";
+import type { DecryptorFn } from "@/lib/teamEventStream";
 import type { TeamEvent, SharedResourceKind } from "@/lib/cloud-api";
 
-export type { TeamEvent, SharedResourceKind };
+export type { TeamEvent, SharedResourceKind, DecryptorFn };
+
+export interface UseTeamEventStreamOptions {
+  /**
+   * Optional decryptor for E2E shares (Wave 3).
+   * When provided, every incoming event is passed through this function before
+   * being delivered to the events array. On decryption failure the decryptor
+   * should return `{ ...raw, payload_json: { __decrypt_error: true } }`.
+   */
+  decryptor?: DecryptorFn;
+}
 
 export function useTeamEventStream(
   teamId: string | null,
   kind: SharedResourceKind | null,
   resourceId: string | null,
   initialSeq: number,
+  options?: UseTeamEventStreamOptions,
 ): { events: TeamEvent[]; isConnected: boolean } {
   const [events, setEvents] = useState<TeamEvent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -32,6 +44,11 @@ export function useTeamEventStream(
   // actually changes (not on every render if the caller passes a literal).
   const initialSeqRef = useRef(initialSeq);
   useEffect(() => { initialSeqRef.current = initialSeq; }, [initialSeq]);
+
+  // Stable ref for decryptor so we don't re-open the WS on every render
+  // if the caller passes an inline arrow function.
+  const decryptorRef = useRef(options?.decryptor);
+  useEffect(() => { decryptorRef.current = options?.decryptor; }, [options?.decryptor]);
 
   useEffect(() => {
     if (!teamId || !kind || !resourceId) return;
@@ -53,6 +70,8 @@ export function useTeamEventStream(
           return next;
         });
       },
+      // Forward the stable decryptor ref into the subscription.
+      decryptorRef.current ? { decryptor: (e) => decryptorRef.current!(e) } : undefined,
     );
 
     const unsubscribeConn = teamEventStream.subscribeConnectionState(
