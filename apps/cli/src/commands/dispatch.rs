@@ -1866,12 +1866,52 @@ pub fn cli_slug_to_api_slug(slug: &str) -> &str {
 }
 
 /// 64 KB cap matching the desktop's truncate_for_log.
+///
+/// Codex `feature/subagent-observability` R2 (2026-06-14) caught the
+/// raw-byte-slice panic risk in the equivalent helper in subagent.rs
+/// and fixed it; the same pattern existed here. Walk char_indices()
+/// and slice on the largest UTF-8 boundary ≤ MAX so any non-ASCII
+/// (emoji, accented Latin, CJK) near the 64KB mark doesn't crash.
 fn truncate(s: &str) -> String {
     const MAX: usize = 64 * 1024;
     if s.len() <= MAX {
-        s.to_string()
-    } else {
-        format!("{}…[truncated]", &s[..MAX])
+        return s.to_string();
+    }
+    let mut last_ok = 0usize;
+    for (i, _) in s.char_indices() {
+        if i > MAX {
+            break;
+        }
+        last_ok = i;
+    }
+    format!("{}…[truncated]", &s[..last_ok])
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate;
+
+    #[test]
+    fn short_string_unchanged() {
+        assert_eq!(truncate("hello"), "hello");
+    }
+
+    #[test]
+    fn long_ascii_truncated() {
+        let s = "x".repeat(64 * 1024 + 100);
+        let out = truncate(&s);
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.len() < s.len());
+    }
+
+    /// Multibyte boundary regression — pre-fix raw-byte slice would
+    /// panic if the cap landed inside a multi-byte UTF-8 codepoint.
+    #[test]
+    fn multibyte_boundary_no_panic() {
+        let prefix = "a".repeat(64 * 1024 - 2);
+        let s = format!("{}💥💥💥", prefix);
+        let out = truncate(&s);
+        assert!(out.ends_with("…[truncated]"));
     }
 }
 
