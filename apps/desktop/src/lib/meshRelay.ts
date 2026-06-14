@@ -49,13 +49,16 @@
 
 import { getStoredTokens } from "./cloud-api";
 
-// v1 transport stub — flip to true via VITE_MESH_RELAY_ENABLED once
-// the cloud-side query-string token endpoint OR the Tauri-side daemon
-// presence routing lands. With this false the components render but
-// don't open a WebSocket, so we don't pollute the relay with rejected
-// upgrade requests.
+// v2.14 — transport is now LIVE. The relay accepts ?presence_token=<jwt>
+// minted by POST /api/auth/mesh-presence-token (15-min TTL, Pro+ gated).
+// Keep the kill-switch env var around so a deploy can disable browser
+// presence without a code change if the relay misbehaves.
 const TRANSPORT_ENABLED =
-  (import.meta.env.VITE_MESH_RELAY_ENABLED as string | undefined) === "1";
+  (import.meta.env.VITE_MESH_RELAY_DISABLED as string | undefined) !== "1";
+
+const CLOUD_API_URL =
+  (import.meta.env.VITE_CLOUD_API_URL as string | undefined) ||
+  "https://api.agentictool.ai";
 
 const CLOUD_WS_URL =
   (import.meta.env.VITE_MESH_RELAY_URL as string | undefined) ||
@@ -86,6 +89,12 @@ export type PresenceFrame =
 
 type FrameListener = (frame: PresenceFrame) => void;
 
+interface PresenceCredentials {
+  token: string;
+  peerId: string;
+  expiresAt: number; // unix ms
+}
+
 class MeshRelay {
   private ws: WebSocket | null = null;
   private listeners = new Set<FrameListener>();
@@ -93,6 +102,10 @@ class MeshRelay {
   private intentionalClose = false;
   private pendingSendQueue: string[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // v2.14: cached presence credentials. Refresh ~1 minute before expiry
+  // (the cloud TTL is 15m so this is a conservative buffer).
+  private cachedCredentials: PresenceCredentials | null = null;
+  private credentialsPromise: Promise<PresenceCredentials | null> | null = null;
 
   subscribe(listener: FrameListener): () => void {
     this.listeners.add(listener);
@@ -119,15 +132,68 @@ class MeshRelay {
     }
   }
 
+  private async fetchCredentials(): Promise<PresenceCredentials | null> {
+    // Reuse if we have a valid cache (refresh window: ≥60s remaining).
+    if (this.cachedCredentials && this.cachedCredentials.expiresAt - Date.now() > 60_000) {
+      return this.cachedCredentials;
+    }
+    // Deduplicate concurrent fetches; subsequent ensureOpen calls wait
+    // for the in-flight promise rather than minting parallel tokens.
+    if (this.credentialsPromise) return this.credentialsPromise;
+    const tokens = getStoredTokens();
+    if (!tokens?.accessToken) return null;
+    this.credentialsPromise = (async () => {
+      try {
+        const res = await fetch(`${CLOUD_API_URL}/api/auth/mesh-presence-token`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${tokens.accessToken}`,
+          },
+        });
+        if (!res.ok) return null;
+        const body = (await res.json()) as {
+          success?: boolean;
+          data?: { token?: string; peer_id?: string; expires_at?: string };
+        };
+        if (!body.success || !body.data?.token || !body.data?.peer_id || !body.data?.expires_at) {
+          return null;
+        }
+        const creds: PresenceCredentials = {
+          token: body.data.token,
+          peerId: body.data.peer_id,
+          expiresAt: new Date(body.data.expires_at).getTime(),
+        };
+        this.cachedCredentials = creds;
+        return creds;
+      } catch {
+        return null;
+      } finally {
+        this.credentialsPromise = null;
+      }
+    })();
+    return this.credentialsPromise;
+  }
+
   private ensureOpen(): void {
-    if (!TRANSPORT_ENABLED) return; // v1 stub — see file header.
+    if (!TRANSPORT_ENABLED) return; // Kill-switched via VITE_MESH_RELAY_DISABLED=1.
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
     this.intentionalClose = false;
-    const tokens = getStoredTokens();
-    if (!tokens?.accessToken) return; // Not signed in — bail silently.
-    const url = `${CLOUD_WS_URL}?token=${encodeURIComponent(tokens.accessToken)}`;
+    // Fetch credentials async, then open. Subscribers can't see anything
+    // until the WS is open anyway; this race is benign.
+    void this.openWithFreshCredentials();
+  }
+
+  private async openWithFreshCredentials(): Promise<void> {
+    const creds = await this.fetchCredentials();
+    if (!creds || this.intentionalClose) return;
+    // Re-check state — a concurrent open may have raced ahead.
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    const url = `${CLOUD_WS_URL}?presence_token=${encodeURIComponent(creds.token)}`;
     let ws: WebSocket;
     try {
       ws = new WebSocket(url);
@@ -161,6 +227,12 @@ class MeshRelay {
     });
     ws.addEventListener("close", () => {
       this.ws = null;
+      // Drop the cached credential on close so the next reconnect
+      // mints a fresh token. A close at ~15-min-TTL boundary would
+      // otherwise reuse a stale token that the relay immediately
+      // rejects, throwing the connection into the reconnect-backoff
+      // loop.
+      this.cachedCredentials = null;
       if (!this.intentionalClose && this.listeners.size > 0) {
         this.scheduleReconnect();
       }
