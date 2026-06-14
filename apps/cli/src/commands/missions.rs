@@ -1971,7 +1971,57 @@ fn ensure_agent_worktree(
         &now,
     )?;
 
+    symlink_worktree_deps(&wt_path, std::path::Path::new(repo_root));
+
     Ok(wt_path)
+}
+
+/// FOLLOWUPS #4 fix — Symlink the source repo's gitignored build artifacts
+/// (node_modules, sidecar binaries) into the worktree so the pre-commit
+/// hook's full gate (tsc + vitest + cargo check on src-tauri) can run
+/// without a fresh `npm install` per worktree.
+///
+/// Best-effort: any individual symlink that fails is logged to stderr but
+/// doesn't abort the worktree creation. The pre-commit hook's
+/// reduced-gate fallback still covers the case where the symlinks can't
+/// be created.
+fn symlink_worktree_deps(wt_path: &std::path::Path, repo_root: &std::path::Path) {
+    let targets: &[(&str, &str)] = &[
+        ("node_modules", "node_modules"),
+        ("apps/desktop/node_modules", "apps/desktop/node_modules"),
+        (
+            "apps/desktop/src-tauri/binaries/ato-aarch64-apple-darwin",
+            "apps/desktop/src-tauri/binaries/ato-aarch64-apple-darwin",
+        ),
+    ];
+    for (rel_src, rel_dst) in targets {
+        let src = repo_root.join(rel_src);
+        let dst = wt_path.join(rel_dst);
+        if !src.exists() {
+            continue;
+        }
+        if dst.exists() || dst.is_symlink() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(&src, &dst);
+        #[cfg(not(unix))]
+        let result: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlinks not supported on this platform",
+        ));
+        if let Err(err) = result {
+            eprintln!(
+                "warning: failed to symlink worktree dep {} → {}: {}",
+                src.display(),
+                dst.display(),
+                err
+            );
+        }
+    }
 }
 
 /// Perform event-driven worktree cleanup per the mission's cleanup_policy.
@@ -2303,6 +2353,8 @@ fn ensure_integration_worktree(conn: &Connection, mission: &MissionRow) -> Resul
         })),
         &now,
     )?;
+
+    symlink_worktree_deps(&int_path, std::path::Path::new(repo_root));
 
     Ok(int_path)
 }
