@@ -25,6 +25,45 @@ use uuid::Uuid;
 use crate::db;
 use crate::output::{emit_human, emit_json, Opts};
 
+/// Codex R1+R2 fix — match dispatch.rs::truncate's 64KB cap so
+/// subagent rows respect the desktop's log-size assumptions and
+/// don't bloat execution_logs.
+const MAX_LOG_BYTES: usize = 64 * 1024;
+fn truncate_for_log(s: &str) -> String {
+    if s.len() <= MAX_LOG_BYTES {
+        s.to_string()
+    } else {
+        format!("{}…[truncated]", &s[..MAX_LOG_BYTES])
+    }
+}
+
+/// Codex R1+R2 fix — validate persona as a slug-shape (lowercase
+/// alpha + dash + digits + colon for sub-personas like `agent:claude`).
+/// Pre-fix shape wrote raw values like `Explore` or `code-writer`
+/// directly to agent_slug, polluting agent-targeted analytics with
+/// non-agent rows. Reject everything that isn't already slug-shaped.
+fn validate_persona_slug(s: &str) -> Result<()> {
+    let ok = !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ':' || c == '_');
+    if !ok {
+        anyhow::bail!(
+            "--persona must be lowercase slug-shape (a-z 0-9 - _ :), got: {:?}",
+            s
+        );
+    }
+    Ok(())
+}
+
+/// Codex R1 fix — desktop close/get/reopen paths hard-reject non-UUID
+/// war_room_ids. Pre-fix shape accepted any string; this matches the
+/// strictness `ato dispatch` enforces on the same flag.
+fn validate_uuid(label: &str, v: &str) -> Result<()> {
+    Uuid::parse_str(v).with_context(|| format!("--{} must be a UUID, got: {:?}", label, v))?;
+    Ok(())
+}
+
 #[derive(Args, Debug)]
 pub struct SubagentArgs {
     #[command(subcommand)]
@@ -138,7 +177,16 @@ fn create(
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
-    let prompt_text = resolve_text_arg(&prompt).context("read prompt")?;
+    // Codex R1+R2 fixes — slug-validate persona + UUID-validate war_room_id
+    // before any DB write so an invalid value can't poison the agent-slug
+    // analytics surface or land in war-room space that the desktop can't
+    // operate on.
+    validate_persona_slug(&persona)?;
+    if let Some(ref wr) = war_room_id {
+        validate_uuid("war-room-id", wr)?;
+    }
+
+    let prompt_text = truncate_for_log(&resolve_text_arg(&prompt).context("read prompt")?);
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -190,7 +238,9 @@ fn finish(
     let response_text = response
         .map(|s| resolve_text_arg(&s))
         .transpose()
-        .context("read response")?;
+        .context("read response")?
+        .map(|s| truncate_for_log(&s));
+    let error_text = error.map(|s| truncate_for_log(&s));
 
     let conn = db::open_readwrite(db_path).context("open db")?;
 
@@ -215,6 +265,17 @@ fn finish(
     };
     let final_duration = duration_ms.or(computed_duration);
 
+    // Codex R1+R2 fix — idempotency guard. Pre-fix shape was
+    // "UPDATE … WHERE id = ?" with COALESCE on every column. Two
+    // racing/retried `finish` calls could write status='error' but
+    // keep the prior `response` from the success call, leaving the
+    // row internally inconsistent. AND a typo'd id could mutate a
+    // non-subagent receipt — the WHERE didn't pin client_surface.
+    //
+    // New shape:
+    //   WHERE id = ? AND client_surface = 'subagent' AND status = 'pending'
+    // First finisher wins; second sees 0 rows updated and bails so
+    // the caller knows about the race.
     let updated = conn.execute(
         "UPDATE execution_logs
             SET status = ?1,
@@ -224,11 +285,13 @@ fn finish(
                 tokens_out = COALESCE(?5, tokens_out),
                 cost_usd_estimated = COALESCE(?6, cost_usd_estimated),
                 duration_ms = COALESCE(?7, duration_ms)
-          WHERE id = ?8",
+          WHERE id = ?8
+            AND client_surface = 'subagent'
+            AND status = 'pending'",
         params![
             status,
             response_text,
-            error,
+            error_text,
             tokens_in,
             tokens_out,
             cost_usd,
@@ -239,7 +302,31 @@ fn finish(
     .context("UPDATE execution_log")?;
 
     if updated == 0 {
-        anyhow::bail!("no execution_logs row found for id={}", id);
+        // Disambiguate: was it a missing id, a non-subagent row, or
+        // an already-finished row? Helpful for the caller's retry
+        // / cleanup logic.
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT COALESCE(client_surface, ''), status FROM execution_logs WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        match row {
+            None => anyhow::bail!("no execution_logs row found for id={}", id),
+            Some((surf, _)) if surf != "subagent" => {
+                anyhow::bail!(
+                    "execution_logs id={} is not a subagent row (client_surface={}); refusing to finish",
+                    id, surf
+                );
+            }
+            Some((_, existing)) => {
+                anyhow::bail!(
+                    "execution_logs id={} already finished (status={}); refusing to overwrite",
+                    id, existing
+                );
+            }
+        }
     }
     if opts.human {
         emit_human(&format!("subagent log {} -> {}", id, status));
