@@ -196,11 +196,21 @@ mod google {
         // the "models/" prefix because dispatch interpolates the bare id.
         // Filter to models that support generateContent so we don't surface
         // embedding / vision / TTS models in the chat picker.
+        //
+        // Deny-list of known-deprecated ids. Google's /v1beta/models endpoint
+        // still lists these for backwards-compat, but actual generateContent
+        // calls return HTTP 404 "model no longer available". Will hit this
+        // on gemini-2.0-flash-001 in the chat picker 2026-06-15 — kept the
+        // model fully selectable in the UI then 404'd on send. Filter at
+        // list time so the dropdown can't surface them.
         let models = arr
             .iter()
             .filter_map(|m| {
                 let full = m["name"].as_str()?;
                 let id = full.strip_prefix("models/").unwrap_or(full).to_string();
+                if is_deprecated_google_model(&id) {
+                    return None;
+                }
                 let methods = m["supportedGenerationMethods"].as_array();
                 let supports_generate = methods.map_or(true, |ms| {
                     ms.iter()
@@ -224,6 +234,30 @@ mod google {
             fetched_at: fetched_at.to_string(),
             fallback_reason: None,
         })
+    }
+
+    /// Models Google still lists in /v1beta/models but that 404 on call.
+    /// Maintain narrowly — when Google adds a new deprecation, append the
+    /// exact id. Glob/prefix matches risk shadowing live successors
+    /// (e.g. `gemini-2.0-flash` is live; `gemini-2.0-flash-001` is dead).
+    fn is_deprecated_google_model(id: &str) -> bool {
+        matches!(
+            id,
+            // Verified dead 2026-06-15 (Will hit 404 in chat picker).
+            "gemini-2.0-flash-001"
+            | "gemini-2.0-flash-lite-001"
+            // Older 1.x series — Google retired these end of 2025.
+            | "gemini-1.5-pro"
+            | "gemini-1.5-pro-001"
+            | "gemini-1.5-pro-002"
+            | "gemini-1.5-flash"
+            | "gemini-1.5-flash-001"
+            | "gemini-1.5-flash-002"
+            | "gemini-1.5-flash-8b"
+            | "gemini-1.5-flash-8b-001"
+            | "gemini-pro"
+            | "gemini-pro-vision"
+        )
     }
 
     fn urlencode(s: &str) -> String {
