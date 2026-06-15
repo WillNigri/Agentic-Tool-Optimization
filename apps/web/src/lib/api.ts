@@ -157,6 +157,108 @@ export async function listTeams(): Promise<TeamRow[]> {
   return apiRequest<TeamRow[]>("/teams");
 }
 
+// ──────────────────────────────────────────────────────────────────
+// v2.18.1 — Team CRUD + member management from web
+// ──────────────────────────────────────────────────────────────────
+
+export interface TeamDetail extends TeamRow {
+  created_at: string;
+  member_count: number;
+  plan: string;
+}
+
+export interface TeamMember {
+  user_id: string;
+  email: string;
+  name: string | null;
+  role: "owner" | "admin" | "member";
+  joined_at: string;
+  invite_pending: boolean;
+}
+
+export async function createTeam(name: string): Promise<TeamRow> {
+  return apiRequest<TeamRow>("/teams", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function getTeam(id: string): Promise<TeamDetail> {
+  return apiRequest<TeamDetail>(`/teams/${id}`);
+}
+
+export async function renameTeam(id: string, name: string): Promise<TeamRow> {
+  return apiRequest<TeamRow>(`/teams/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteTeam(id: string): Promise<void> {
+  await apiRequest<void>(`/teams/${id}`, { method: "DELETE" });
+}
+
+export async function listTeamMembers(id: string): Promise<TeamMember[]> {
+  // The cloud surfaces members under GET /teams/:id with a `members` array
+  // (verified in services/teams/src/routes.ts:186). Fall through to that
+  // path so we don't need a separate endpoint round-trip.
+  const detail = await apiRequest<TeamDetail & { members?: TeamMember[] }>(
+    `/teams/${id}`,
+  );
+  return detail.members ?? [];
+}
+
+export async function inviteTeamMember(
+  id: string,
+  email: string,
+  role: "admin" | "member" = "member",
+): Promise<{ invite_id: string }> {
+  return apiRequest<{ invite_id: string }>(`/teams/${id}/members`, {
+    method: "POST",
+    body: JSON.stringify({ email, role }),
+  });
+}
+
+export async function updateTeamMemberRole(
+  teamId: string,
+  memberId: string,
+  role: "admin" | "member",
+): Promise<void> {
+  await apiRequest<void>(`/teams/${teamId}/members/${memberId}`, {
+    method: "PUT",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export async function removeTeamMember(
+  teamId: string,
+  memberId: string,
+): Promise<void> {
+  await apiRequest<void>(`/teams/${teamId}/members/${memberId}`, {
+    method: "DELETE",
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// v2.18.1 — User profile + session controls
+// ──────────────────────────────────────────────────────────────────
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  name: string | null;
+  created_at: string;
+  plan: "free" | "pro" | "team" | "enterprise";
+}
+
+export async function getMe(): Promise<UserProfile> {
+  return apiRequest<UserProfile>("/auth/me");
+}
+
+export async function signOut(): Promise<void> {
+  await apiRequest<void>("/auth/logout", { method: "POST" });
+}
+
 export async function listSharedResources(
   teamId: string,
   kind: SharedResourceKind,
