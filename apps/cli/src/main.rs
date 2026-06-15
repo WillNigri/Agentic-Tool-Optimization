@@ -833,6 +833,30 @@ enum WarRoomsSub {
         #[arg(long)]
         encrypted: bool,
     },
+    /// #70 — sweep open war-rooms that have been idle for N minutes
+    /// and auto-close them with the coordinator. Designed to be run
+    /// from a cron / launchd tick so one-shot R1 fan-outs (architecture
+    /// review, security audit, etc.) self-close once the seats land
+    /// instead of sitting invisible in the Sessions feed.
+    Sweep {
+        /// Minimum idle period (no new dispatches in the war-room)
+        /// before a sweep is eligible. Default: 5 minutes.
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(i64).range(0..))]
+        idle_minutes: i64,
+        /// Cap on how many war-rooms one sweep run will close. Keeps
+        /// the cost bounded if the table has a big backlog. Default: 10.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+        max_per_run: u64,
+        /// Coordinator runtime to use for every close in this sweep.
+        /// Default `google` — fast, cheap, free quota; reasonable for
+        /// the kind of summarization a close needs. Override per
+        /// preference.
+        #[arg(long, default_value = "google", value_parser = parse_non_empty_string)]
+        coordinator: String,
+        /// Print which WRs would be closed without actually closing.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 /// v2.7.13 — chat-thread close lifecycle subcommands. Same shape as
@@ -1365,6 +1389,18 @@ enum AgentsSub {
         #[arg(long = "remove-skill")]
         remove_skill: Option<String>,
     },
+}
+
+/// clap value_parser that rejects empty / whitespace-only strings.
+/// Used by `war-rooms sweep --coordinator` (and any other future flag
+/// where a stringly-typed default is supplied but an empty string would
+/// be a silent foot-gun rather than a real default).
+fn parse_non_empty_string(s: &str) -> std::result::Result<String, String> {
+    if s.trim().is_empty() {
+        Err("value must not be empty".to_string())
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 fn main() -> Result<()> {
@@ -2062,6 +2098,22 @@ fn main() -> Result<()> {
                     "war-rooms", &id, &team, &kind, payload, encrypted, &opts,
                 )?;
                 Ok(())
+            }
+            WarRoomsSub::Sweep {
+                idle_minutes,
+                max_per_run,
+                coordinator,
+                dry_run,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::war_rooms::sweep(
+                    &conn,
+                    idle_minutes,
+                    max_per_run as usize,
+                    &coordinator,
+                    dry_run,
+                    &opts,
+                )
             }
         },
         Commands::Chats { sub } => match sub {
