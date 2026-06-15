@@ -29,7 +29,12 @@ import {
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/stores/useProjectStore";
 import { listAgents, type Agent } from "@/lib/agents";
+import { buildSessionSnapshot } from "@/lib/teamShareSnapshot";
 import CloseConversationModal from "./CloseConversationModal";
+import InitiatorBadge from "@/components/InitiatorBadge";
+import LiveCursors from "@/components/livePresence/LiveCursors";
+import PresencePills from "@/components/livePresence/PresencePills";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
 import {
   runtimeBadge,
   formatTime,
@@ -329,7 +334,8 @@ export default function SessionTranscriptView({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="relative space-y-4">
+      <LiveCursors resourceKind="session" resourceId={sessionId} />
       <div className="flex items-center gap-3 flex-wrap">
         <button
           onClick={onBack}
@@ -344,6 +350,12 @@ export default function SessionTranscriptView({
                 <span className="text-cs-muted italic">untitled</span>
               )}
             </span>
+            <PresencePills resourceKind="session" resourceId={sessionId} />
+            <ShareWithTeamButton
+              resourceKind="session"
+              resourceId={sessionId}
+              getSnapshot={() => buildSessionSnapshot(sessionId)}
+            />
             {isClosed && (
               <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase bg-cs-muted/20 text-cs-muted">
                 <Lock size={10} /> closed
@@ -658,6 +670,13 @@ export default function SessionTranscriptView({
                       <span className={runtimeBadge(turn.runtime)}>
                         {turn.runtime}
                       </span>
+                    )}
+                    {(turn.initiatorKind || turn.clientSurface) && (
+                      <InitiatorBadge
+                        initiatorKind={turn.initiatorKind}
+                        clientSurface={turn.clientSurface}
+                        initiatorId={turn.initiatorId}
+                      />
                     )}
                     <span className="text-[10px] text-cs-muted">
                       {formatTime(turn.createdAt)}

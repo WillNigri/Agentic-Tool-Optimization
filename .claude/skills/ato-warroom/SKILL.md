@@ -1,6 +1,6 @@
 ---
 name: ato-warroom
-version: 1.2.0
+version: 1.3.0
 description: |
   Before any material decision — code chunk, plan, strategy, design,
   scope cut, push to GitHub — convene a war-room. The session driver
@@ -9,8 +9,14 @@ description: |
   voice via `ato dispatch` so priors actually disagree, decide. A
   failure-mode filter (wrong assumptions / overcomplexity / orthogonal
   edits / imperative-over-declarative — Karpathy's four are one good
-  default, swap in your own) runs on every dispatch. Complement to
-  `ato-review` (post-code diff review); this is the pre-decision half.
+  default, swap in your own) runs on every dispatch.
+
+  Place in the v2.16 stack: war-rooms DECIDE before code starts;
+  `ato-mission` EXECUTES the work between decisions (multi-step,
+  goal-driven, persisted across days); `ato-review` VERIFIES the
+  resulting commits. Use a war-room for the design verdict, hand the
+  verdict to a Mission, review the merged result.
+
   Fires before: sending a code draft to the user as final, opening a
   PR, pushing to a remote-tracking branch, committing >50 LOC of
   behavior change, or delivering a plan or strategic recommendation as

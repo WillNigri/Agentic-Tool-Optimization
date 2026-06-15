@@ -376,6 +376,47 @@ export interface SharedTeamMethodology {
   shared_by_name: string | null;
 }
 
+export interface SharedTeamSession {
+  team_id: string;
+  session_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  // v2.14 — list endpoint excludes snapshot (kept for v1 back-compat
+  // typings) but DOES include the extra columns the cloud route
+  // surfaces: title / runtime / agent_slug / turn_count.
+  title?: string | null;
+  runtime?: string | null;
+  agent_slug?: string | null;
+  turn_count?: number | null;
+  expires_at?: string | null;
+}
+
+export interface SharedTeamWarRoom {
+  team_id: string;
+  war_room_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  title?: string | null;
+  expires_at?: string | null;
+}
+
+export interface SharedTeamChat {
+  team_id: string;
+  // Codex final-review F2: cloud wire shape uses chat_thread_id
+  // (matches the OSS-local chat_threads table). Earlier OSS wrappers
+  // typed it as chat_id which made every share/unshare/list call
+  // fail validation server-side. Aligned to chat_thread_id.
+  chat_thread_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  title?: string | null;
+  runtime?: string | null;
+  expires_at?: string | null;
+}
+
 export async function getTeamSharedAgents(teamId: string): Promise<SharedTeamAgent[]> {
   return apiRequest<SharedTeamAgent[]>(`/api/teams/${teamId}/agents`);
 }
@@ -407,6 +448,171 @@ export async function shareMethodologyWithTeam(
 
 export async function unshareMethodologyFromTeam(teamId: string, methodologyId: string): Promise<void> {
   await apiRequest(`/api/teams/${teamId}/methodologies/${methodologyId}/share`, { method: 'DELETE' });
+}
+
+export async function shareSessionWithTeam(teamId: string, sessionId: string, payload: unknown): Promise<{ team_id: string; session_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/sessions/share`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function shareWarRoomWithTeam(teamId: string, warRoomId: string, payload: unknown): Promise<{ team_id: string; war_room_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/war-rooms/share`, {
+    method: 'POST',
+    body: JSON.stringify({ war_room_id: warRoomId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function shareChatWithTeam(teamId: string, chatId: string, payload: unknown): Promise<{ team_id: string; chat_thread_id: string; shared_at: string }> {
+  // Codex final-review F2: cloud schema is chat_thread_id (matches
+  // OSS chat_threads.id). Use the canonical key on the wire.
+  return apiRequest(`/api/teams/${teamId}/chats/share`, {
+    method: 'POST',
+    body: JSON.stringify({ chat_thread_id: chatId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function unshareSessionFromTeam(teamId: string, sessionId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/sessions/${sessionId}/share`, { method: 'DELETE' });
+}
+
+export async function unshareWarRoomFromTeam(teamId: string, warRoomId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/war-rooms/${warRoomId}/share`, { method: 'DELETE' });
+}
+
+export async function unshareChatFromTeam(teamId: string, chatId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/chats/${chatId}/share`, { method: 'DELETE' });
+}
+
+export async function getSharedSessions(teamId: string): Promise<SharedTeamSession[]> {
+  return apiRequest<SharedTeamSession[]>(`/api/teams/${teamId}/sessions`);
+}
+
+export async function getSharedWarRooms(teamId: string): Promise<SharedTeamWarRoom[]> {
+  return apiRequest<SharedTeamWarRoom[]>(`/api/teams/${teamId}/war-rooms`);
+}
+
+export async function getSharedChats(teamId: string): Promise<SharedTeamChat[]> {
+  return apiRequest<SharedTeamChat[]>(`/api/teams/${teamId}/chats`);
+}
+
+// v2.14 — single-share detail (snapshot blob included).
+// Used by the read-only SharedDetailView (#6) for teammates who don't
+// have the local row.
+export interface SharedSessionDetail extends SharedTeamSession {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+export interface SharedWarRoomDetail extends SharedTeamWarRoom {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+export interface SharedChatDetail extends SharedTeamChat {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+
+export async function getSharedSessionDetail(teamId: string, sessionId: string): Promise<SharedSessionDetail> {
+  return apiRequest<SharedSessionDetail>(`/api/teams/${teamId}/sessions/${sessionId}`);
+}
+
+// v2.14 #12 — loops + missions sharing. Same shape as the other
+// shared resources; the desktop cloud-api wrappers mirror the cloud
+// routes added in migrations 033.
+export interface SharedTeamLoop {
+  team_id: string;
+  loop_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  title?: string | null;
+  expires_at?: string | null;
+}
+
+export interface SharedTeamMission {
+  team_id: string;
+  mission_id: string;
+  shared_by_user_id: string;
+  shared_at: string;
+  snapshot: unknown;
+  title?: string | null;
+  expires_at?: string | null;
+}
+
+export interface SharedLoopDetail extends SharedTeamLoop {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+export interface SharedMissionDetail extends SharedTeamMission {
+  snapshot: Record<string, unknown>;
+  expires_at: string | null;
+}
+
+export async function shareLoopWithTeam(teamId: string, loopId: string, payload: unknown): Promise<{ team_id: string; loop_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/loops/share`, {
+    method: 'POST',
+    body: JSON.stringify({ loop_id: loopId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function shareMissionWithTeam(teamId: string, missionId: string, payload: unknown): Promise<{ team_id: string; mission_id: string; shared_at: string }> {
+  return apiRequest(`/api/teams/${teamId}/missions/share`, {
+    method: 'POST',
+    body: JSON.stringify({ mission_id: missionId, ...((payload as Record<string, unknown>) ?? {}) }),
+  });
+}
+
+export async function unshareLoopFromTeam(teamId: string, loopId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/loops/${loopId}/share`, { method: 'DELETE' });
+}
+
+export async function unshareMissionFromTeam(teamId: string, missionId: string): Promise<void> {
+  await apiRequest(`/api/teams/${teamId}/missions/${missionId}/share`, { method: 'DELETE' });
+}
+
+export async function getSharedLoops(teamId: string): Promise<SharedTeamLoop[]> {
+  return apiRequest<SharedTeamLoop[]>(`/api/teams/${teamId}/loops`);
+}
+
+export async function getSharedMissions(teamId: string): Promise<SharedTeamMission[]> {
+  return apiRequest<SharedTeamMission[]>(`/api/teams/${teamId}/missions`);
+}
+
+export async function getSharedLoopDetail(teamId: string, loopId: string): Promise<SharedLoopDetail> {
+  return apiRequest<SharedLoopDetail>(`/api/teams/${teamId}/loops/${loopId}`);
+}
+
+export async function getSharedMissionDetail(teamId: string, missionId: string): Promise<SharedMissionDetail> {
+  return apiRequest<SharedMissionDetail>(`/api/teams/${teamId}/missions/${missionId}`);
+}
+
+// v2.14 #14 — team activity feed entry. The cloud route exposes a
+// generic activity log; the feed UI filters for share-related actions.
+export interface TeamActivityEntry {
+  id: string;
+  team_id: string;
+  user_id: string;
+  user_email?: string | null;
+  user_name?: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  resource_name: string | null;
+  changes: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export async function getTeamActivity(teamId: string, limit = 50): Promise<TeamActivityEntry[]> {
+  return apiRequest<TeamActivityEntry[]>(`/api/teams/${teamId}/activity?limit=${limit}`);
+}
+
+export async function getSharedWarRoomDetail(teamId: string, warRoomId: string): Promise<SharedWarRoomDetail> {
+  return apiRequest<SharedWarRoomDetail>(`/api/teams/${teamId}/war-rooms/${warRoomId}`);
+}
+
+export async function getSharedChatDetail(teamId: string, chatId: string): Promise<SharedChatDetail> {
+  return apiRequest<SharedChatDetail>(`/api/teams/${teamId}/chats/${chatId}`);
 }
 
 // ============================================================
@@ -569,4 +775,456 @@ export async function rotateEmbedKey(): Promise<string> {
   return data.embedKey;
 }
 
+// ============================================================
+// v2.15 Wave 1 — E2E Key Management API
+// ============================================================
+// (crypto imports consolidated at Wave 3 block below)
+
+/**
+ * Publish (or rotate) this user's E2E public keys.
+ * The cloud stores them indexed by key_id so team admins can seal Team Keys
+ * to each member's current X25519 public key.
+ * Returns the key_id assigned by the cloud and whether a previous key was rotated.
+ */
+export async function pushE2ePublicKeys(
+  x25519PublicKey: Uint8Array,
+  ed25519PublicKey: Uint8Array,
+): Promise<{ id: string; rotated: boolean }> {
+  return apiRequest<{ id: string; rotated: boolean }>('/api/auth/me/e2e-keys', {
+    method: 'POST',
+    body: JSON.stringify({
+      x25519_pubkey: toBase64(x25519PublicKey),
+      ed25519_pubkey: toBase64(ed25519PublicKey),
+    }),
+  });
+}
+
+/**
+ * List all E2E public keys for members of a team.
+ * Used by team admins to seal the Team Key for each member.
+ */
+export async function getTeamMemberE2eKeys(
+  teamId: string,
+): Promise<
+  Array<{
+    member_user_id: string;
+    key_id: string;
+    x25519_pubkey: string;
+    ed25519_pubkey: string;
+  }>
+> {
+  return apiRequest(`/api/auth/me/e2e-keys?team_id=${encodeURIComponent(teamId)}`);
+}
+
+/**
+ * Fetch the sealed Team Key envelope for the currently-authenticated user.
+ * The cloud returns the envelope that was sealed to this user's X25519 public key.
+ */
+export async function getTeamKeyEnvelope(teamKeyId: string): Promise<{
+  team_key_id: string;
+  sealed_key: string;
+  sealed_by_user_id: string;
+  created_at: string;
+}> {
+  return apiRequest(
+    `/api/auth/me/e2e-envelope?team_key_id=${encodeURIComponent(teamKeyId)}`,
+  );
+}
+
+// ============================================================
+// v2.15 Wave 2 — Team Event Log API
+// ============================================================
+
+/**
+ * A single event row from a team_shared_<kind>_events table.
+ * Plaintext shares populate payload_json; E2E shares (Wave 3)
+ * populate ciphertext_b64 + nonce_b64 instead.
+ */
+export interface TeamEvent {
+  seq_num: number;
+  event_kind: string;
+  payload_json: unknown | null;
+  ciphertext_b64: string | null;
+  nonce_b64: string | null;
+  signature_b64: string | null;
+  signer_key_id: string | null;
+  initiator_user_id: string | null;
+  initiator_runtime: string | null;
+  initiator_agent_slug: string | null;
+  surface: 'desktop' | 'cli' | 'web' | 'mcp' | 'cron';
+  created_at: string;
+}
+
+/**
+ * The five resource kinds that have per-kind event tables.
+ * URL segment uses hyphens (war-room → /war-rooms/:id/events).
+ */
+export type SharedResourceKind =
+  | 'session'
+  | 'war-room'
+  | 'chat'
+  | 'loop'
+  | 'mission';
+
+/** Map a SharedResourceKind to its URL path segment (plural). */
+function kindToPathSegment(kind: SharedResourceKind): string {
+  const map: Record<SharedResourceKind, string> = {
+    session: 'sessions',
+    'war-room': 'war-rooms',
+    chat: 'chats',
+    loop: 'loops',
+    mission: 'missions',
+  };
+  return map[kind];
+}
+
+/**
+ * Append a new event to a team-shared resource.
+ * On success the server returns the assigned seq_num (monotonically
+ * increasing per resource, assigned under a row-locked counter) and
+ * the server-side created_at timestamp.
+ */
+export async function appendTeamEvent(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  body: {
+    event_kind: string;
+    payload_json?: unknown;
+    ciphertext_b64?: string;
+    nonce_b64?: string;
+    signature_b64?: string;
+    signer_key_id?: string;
+    initiator_runtime?: string;
+    initiator_agent_slug?: string;
+    surface: 'desktop' | 'cli' | 'web' | 'mcp' | 'cron';
+  },
+): Promise<{ seq_num: number; created_at: string }> {
+  const segment = kindToPathSegment(kind);
+  return apiRequest<{ seq_num: number; created_at: string }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/**
+ * Backfill events for a resource since a given seq_num (exclusive).
+ * Used on WS reconnect and on the initial SharedDetailView mount to
+ * fetch events that arrived after the REST snapshot was taken.
+ */
+export async function backfillTeamEvents(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  since: number,
+  limit = 200,
+): Promise<TeamEvent[]> {
+  const segment = kindToPathSegment(kind);
+  return apiRequest<TeamEvent[]>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events?since=${since}&limit=${limit}`,
+  );
+}
+
 export { CloudApiError };
+
+// ============================================================
+// v2.15 Wave 3 — E2E encrypted event append + share metadata
+// ============================================================
+
+import {
+  encryptPayload,
+  signMessage,
+  toBase64,
+  fromBase64,
+} from '@/lib/e2e/crypto';
+
+/**
+ * Reserve the next seq_num for an E2E-encrypted event append.
+ * The reservation TTL is 30s server-side; the client must commit within that window.
+ */
+async function reserveEventSeq(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+): Promise<number> {
+  const segment = kindToPathSegment(kind);
+  const result = await apiRequest<{ seq_num: number }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events/reserve`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+  return result.seq_num;
+}
+
+/**
+ * Append an E2E-encrypted event to a team-shared resource.
+ *
+ * Two-step protocol (Wave 3 REWORK, synthesis Q6):
+ *   1. Reserve seq_num via POST .../events/reserve.
+ *   2. Build AAD = utf8(`${teamId}|${resourceId}|${seq_num}|${eventKind}`).
+ *   3. Encrypt payload with AEAD; sign (ciphertext || nonce || AD) with Ed25519.
+ *   4. Commit via POST .../events with the reserved seq_num + encrypted blob.
+ *
+ * Callers (UI) invoke this when `getShareEncryptionMode` returns 'e2e'.
+ * The existing plaintext `appendTeamEvent` is unchanged for plaintext shares.
+ */
+export async function appendTeamEventEncrypted(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  eventKind: string,
+  payloadJson: unknown,
+  surface: 'desktop' | 'cli' | 'web' | 'mcp' | 'cron',
+  teamKey: Uint8Array,
+  signerEd25519PrivateKey: Uint8Array,
+  signerKeyId: string,
+): Promise<{ seq_num: number; created_at: string }> {
+  // Step 1: reserve seq_num.
+  const seqNum = await reserveEventSeq(teamId, kind, resourceId);
+
+  // Step 2: build AEAD associated data.
+  // Separator is literal `|`; all fields are UUIDs/numbers/short strings — no collision risk.
+  const adStr = `${teamId}|${resourceId}|${seqNum}|${eventKind}`;
+  const adBytes = new TextEncoder().encode(adStr);
+
+  // Step 3: encrypt payload.
+  const plaintextBytes = new TextEncoder().encode(JSON.stringify(payloadJson));
+  const { nonce, ciphertext } = await encryptPayload(plaintextBytes, teamKey, adBytes);
+
+  // Step 4: sign (ciphertext || nonce || AD).
+  const signedBytes = new Uint8Array(ciphertext.length + nonce.length + adBytes.length);
+  signedBytes.set(ciphertext, 0);
+  signedBytes.set(nonce, ciphertext.length);
+  signedBytes.set(adBytes, ciphertext.length + nonce.length);
+  const signature = await signMessage(signedBytes, signerEd25519PrivateKey);
+
+  // Step 5: commit.
+  const segment = kindToPathSegment(kind);
+  return apiRequest<{ seq_num: number; created_at: string }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}/events`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        seq_num: seqNum,
+        event_kind: eventKind,
+        ciphertext_b64: toBase64(ciphertext),
+        nonce_b64: toBase64(nonce),
+        signature_b64: toBase64(signature),
+        signer_key_id: signerKeyId,
+        surface,
+      }),
+    },
+  );
+}
+
+/**
+ * Read the encryption_mode for a shared resource.
+ * Returns 'e2e' when the share is end-to-end encrypted, 'plaintext' otherwise.
+ * Reads from the existing GET .../detail response which already carries encryption_mode.
+ */
+export async function getShareEncryptionMode(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+): Promise<'plaintext' | 'e2e'> {
+  const segment = kindToPathSegment(kind);
+  const data = await apiRequest<{ encryption_mode?: string }>(
+    `/api/teams/${teamId}/${segment}/${resourceId}`,
+  );
+  return data.encryption_mode === 'e2e' ? 'e2e' : 'plaintext';
+}
+
+/**
+ * Codex R1 — pre-flight check for the flip-to-E2E flow. Returns the
+ * share's encryption_mode + how many events have been appended so far.
+ * Used by FlipToE2eModal to refuse rotating the team key when the
+ * server-side flip would 409 with HAS_PLAINTEXT_HISTORY.
+ */
+export async function getShareFlipPreflight(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+): Promise<{ encryption_mode: 'plaintext' | 'e2e'; last_seq: number }> {
+  const segment = kindToPathSegment(kind);
+  const data = await apiRequest<{
+    encryption_mode?: string;
+    last_seq?: number;
+  }>(`/api/teams/${teamId}/${segment}/${resourceId}`);
+  return {
+    encryption_mode: data.encryption_mode === 'e2e' ? 'e2e' : 'plaintext',
+    last_seq: typeof data.last_seq === 'number' ? data.last_seq : 0,
+  };
+}
+
+/**
+ * POST to flip a share's encryption_mode from plaintext → e2e.
+ * Returns the updated encryption_mode ('e2e').
+ * Server may return 409 HAS_PLAINTEXT_HISTORY if the resource already has plaintext events.
+ */
+export async function setShareEncryptionMode(
+  teamId: string,
+  kind: SharedResourceKind,
+  resourceId: string,
+  mode: 'e2e',
+): Promise<void> {
+  const segment = kindToPathSegment(kind);
+  await apiRequest(
+    `/api/teams/${teamId}/${segment}/${resourceId}/encryption-mode`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+/**
+ * Push key envelopes for a new Team Key rotation.
+ * Use for first-time E2E setup on a share (creates a fresh team_keys generation
+ * and fans the sealed Team Key out to every member).
+ */
+// Codex R1 — cloud zod schema accepts `{member_user_id, sealed_key}` only
+// (services/teams/src/keyEnvelopes.ts envelopeItemSchema). Pre-fix shape
+// posted `sealed_key_b64` plus an unused `key_id`; the rename request
+// failed validation. Inline-strip the OSS-internal `key_id` and rename
+// the b64 field on the wire to match.
+export async function pushKeyRotation(
+  teamId: string,
+  envelopes: Array<{
+    member_user_id: string;
+    sealed_key_b64: string;
+  }>,
+): Promise<{ team_key_id: string }> {
+  return apiRequest<{ team_key_id: string }>(
+    `/api/teams/${teamId}/key-rotations`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        envelopes: envelopes.map((e) => ({
+          member_user_id: e.member_user_id,
+          sealed_key: e.sealed_key_b64,
+        })),
+      }),
+    },
+  );
+}
+
+/**
+ * Push sealed Team Key envelopes to an EXISTING team_keys generation.
+ * Use when adding a new member under an already-live Team Key.
+ */
+export async function pushKeyEnvelopes(
+  teamId: string,
+  teamKeyId: string,
+  envelopes: Array<{
+    member_user_id: string;
+    sealed_key_b64: string;
+  }>,
+): Promise<void> {
+  await apiRequest(
+    `/api/teams/${teamId}/key-envelopes`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        team_key_id: teamKeyId,
+        envelopes: envelopes.map((e) => ({
+          member_user_id: e.member_user_id,
+          sealed_key: e.sealed_key_b64,
+        })),
+      }),
+    },
+  );
+}
+
+/**
+ * Decrypt a single E2E event payload using the supplied team key and
+ * ed25519 public key cache (member_user_id → {ed25519_pubkey: string, key_id: string}).
+ *
+ * Returns a new TeamEvent with payload_json populated, or with
+ * { __decrypt_error: true } sentinel on any failure (bad sig, wrong key, etc.).
+ * Never throws — errors are swallowed to sentinel so live events don't break the stream.
+ */
+// CSO H1 — require AD context from the caller. Pre-fix shape made
+// signature verification optional (skipped silently when __ad_hint
+// was absent) and decrypted with an empty AD, which trivially fails
+// AEAD but also bypassed the Ed25519 signature when the event lacked
+// a hint. New contract: caller must supply teamId + resourceId; the
+// AD is reconstructed deterministically from the event itself and
+// the signature MUST verify whenever signature_b64 is present.
+export interface DecryptContext {
+  teamId: string;
+  resourceId: string;
+}
+
+function buildDecryptAd(ctx: DecryptContext, raw: TeamEvent): string {
+  return `${ctx.teamId}|${ctx.resourceId}|${raw.seq_num}|${raw.event_kind}`;
+}
+
+export async function decryptEventPayload(
+  raw: TeamEvent,
+  teamKey: Uint8Array,
+  memberPubkeys: Record<string, { ed25519_pubkey: string; key_id: string }>,
+  ctx: DecryptContext,
+): Promise<TeamEvent> {
+  if (!raw.ciphertext_b64 || !raw.nonce_b64) {
+    // No ciphertext — already a plaintext event or a sentinel, pass through.
+    return raw;
+  }
+
+  try {
+    const { decryptPayload, verifyMessage } = await import('@/lib/e2e/crypto');
+
+    const ciphertext = fromBase64(raw.ciphertext_b64);
+    const nonce = fromBase64(raw.nonce_b64);
+    const adBytes = new TextEncoder().encode(buildDecryptAd(ctx, raw));
+
+    // Authenticate-then-decrypt: when a signature is present we MUST
+    // verify it. A present-but-unverifiable signature is a hard fail —
+    // we never surface decrypted plaintext alongside a bad signature.
+    if (raw.signature_b64) {
+      if (!raw.signer_key_id || !raw.initiator_user_id) {
+        return { ...raw, payload_json: { __decrypt_error: true } };
+      }
+      const signerPubkey = memberPubkeys[raw.initiator_user_id];
+      if (!signerPubkey) {
+        // Caller didn't preload the signer's pubkey; can't verify.
+        return { ...raw, payload_json: { __decrypt_error: true } };
+      }
+      const pubkeyBytes = fromBase64(signerPubkey.ed25519_pubkey);
+      const sigBytes = new Uint8Array(
+        ciphertext.length + nonce.length + adBytes.length,
+      );
+      sigBytes.set(ciphertext, 0);
+      sigBytes.set(nonce, ciphertext.length);
+      sigBytes.set(adBytes, ciphertext.length + nonce.length);
+      const sig = fromBase64(raw.signature_b64);
+      const ok = await verifyMessage(sigBytes, sig, pubkeyBytes);
+      if (!ok) {
+        return { ...raw, payload_json: { __decrypt_error: true } };
+      }
+    }
+
+    const plaintext = await decryptPayload(ciphertext, nonce, teamKey, adBytes);
+    const payloadJson = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
+
+    return { ...raw, payload_json: payloadJson };
+  } catch {
+    return { ...raw, payload_json: { __decrypt_error: true } };
+  }
+}
+
+/**
+ * POST anonymized telemetry batch to the cloud.
+ * Called by the hourly drain timer in App.tsx.
+ */
+export async function postAnonTelemetryBatch(
+  entries: Array<{ id: number; data_json: string }>,
+): Promise<void> {
+  await apiRequest('/api/telemetry/e2e-anonymized', {
+    method: 'POST',
+    body: JSON.stringify({
+      entries: entries.map((e) => JSON.parse(e.data_json) as unknown),
+    }),
+  });
+}

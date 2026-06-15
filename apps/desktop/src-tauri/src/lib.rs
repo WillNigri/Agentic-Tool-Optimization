@@ -1,6 +1,10 @@
 mod openclaw_ws;
 mod byok;
+mod e2e_keychain;
 mod encryption;
+// v2.15 Wave 3 — local SQLite queue for anonymized telemetry + per-share
+// opt-in preferences. OSS-local only; the cloud POST fires from App.tsx.
+mod anon_telemetry;
 mod identity;
 mod log_watcher;
 mod passive_observer;
@@ -284,6 +288,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // v2.17 — inputs read-only commands for the InputPicker UI.
+            commands::inputs::list_inputs,
+            commands::inputs::get_input,
             identity_probe::get_identity_probe_status,
             rekey::rekey_master_key,
             rekey::get_rekey_applicability,
@@ -333,6 +340,11 @@ pub fn run() {
             get_chat_messages,
             append_chat_message,
             delete_chat_message,
+            // v2.16 PR-7 — Mission-control board
+            missions_list,
+            mission_detail,
+            mission_set_category,
+            mission_set_state,
             // v2.14 Loop Composer — SQLite-backed CRUD for loops.
             list_loops,
             get_loop,
@@ -341,6 +353,9 @@ pub fn run() {
             delete_loop,
             list_loop_runs,
             get_loop_run_steps,
+            // v2.14 step 3 — execution wrapper that fires the prod ato
+            // CLI's `loop run` engine and returns the loop_runs id.
+            commands::loops::run_loop_by_slug,
             prompt_agent_stream,
             prompt_agent_with_history_stream,
             prompt_claude,
@@ -409,6 +424,9 @@ pub fn run() {
             parse_gemini_agent,
             watch_project_files,
             stop_watching_project,
+            reveal_path,
+            open_path,
+            path_exists,
             create_agent_skill,
             parse_agent_permissions,
             get_agent_context_preview,
@@ -678,6 +696,16 @@ pub fn run() {
             // to the UpdateBanner so we can show a copy-pasteable
             // upgrade command instead of the failing in-place updater.
             installer_detect::get_install_method,
+            // v2.15 Wave 1 — E2E keychain commands (X25519 + Ed25519 privkeys).
+            e2e_keychain::e2e_keypair_exists,
+            e2e_keychain::e2e_store_keypair,
+            e2e_keychain::e2e_load_keypair,
+            // v2.15 Wave 3 — anon telemetry queue + per-share opt-in prefs.
+            anon_telemetry::anon_telemetry_enqueue,
+            anon_telemetry::anon_telemetry_drain_for_post,
+            anon_telemetry::anon_telemetry_clear_ids,
+            anon_telemetry::set_share_telemetry_pref,
+            anon_telemetry::get_share_telemetry_pref,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

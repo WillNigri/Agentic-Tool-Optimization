@@ -41,6 +41,28 @@ pub struct ApiDispatchOutcome {
     pub duration_ms: i64,
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
+    /// Anthropic 5-min prompt-cache WRITE tokens. Billed at 1.25× input
+    /// rate. None for non-Anthropic providers and when absent from usage.
+    ///
+    /// IMPORTANT: Anthropic's `input_tokens` does NOT include this class —
+    /// they are separate billing lines. Total billed input:
+    ///   input_tokens * rate_in
+    ///   + cache_creation_input_tokens * 1.25 * rate_in
+    ///   + cache_read_input_tokens * 0.10 * rate_in
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i64>,
+    /// Anthropic 5-min prompt-cache READ tokens. Billed at 0.10× input
+    /// rate. None for non-Anthropic providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    /// OpenAI/DeepSeek reasoning tokens (informational only).
+    ///
+    /// IMPORTANT: OpenAI `completion_tokens` ALREADY INCLUDES reasoning
+    /// tokens — `reasoning_tokens` is a breakdown of output, NOT additive.
+    /// Do NOT add this to the cost formula. Recorded here for observability
+    /// only so the UI can show how much of the output budget was reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<i64>,
     /// Tier 2 tool-call audit. None for normal dispatches that don't
     /// involve function-calling; Some(vec) when api_dispatch_tools
     /// produced the outcome — empty vec means "tools were offered
@@ -342,6 +364,9 @@ pub fn dispatch_with_history(
                 duration_ms: final_attempt_duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count,
                 attempt_summary_json,
@@ -361,6 +386,9 @@ pub fn dispatch_with_history(
             duration_ms: final_attempt_duration_ms,
             tokens_in: None,
             tokens_out: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count,
             attempt_summary_json,
@@ -476,6 +504,9 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -554,6 +585,9 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -573,6 +607,9 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -586,6 +623,9 @@ where
             duration_ms,
             tokens_in: None,
             tokens_out: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -598,6 +638,11 @@ where
     let tokens_out = last_usage
         .as_ref()
         .and_then(|u| u["completion_tokens"].as_i64());
+    // reasoning_tokens: informational breakdown of completion_tokens.
+    // COST NOTE: do NOT add to cost — already included in completion_tokens.
+    let reasoning_tokens = last_usage
+        .as_ref()
+        .and_then(|u| u["completion_tokens_details"]["reasoning_tokens"].as_i64());
 
     Ok(ApiDispatchOutcome {
         response: Some(full_response),
@@ -606,6 +651,9 @@ where
         duration_ms,
         tokens_in,
         tokens_out,
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
+        reasoning_tokens,
         tool_calls: None,
         retry_count: 0,
         attempt_summary_json: None,
@@ -632,9 +680,12 @@ pub(crate) fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
-            tool_calls: None,
-            retry_count: 0,
-            attempt_summary_json: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+                tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
         // Success: candidates[0].content.parts is an array of {text:"..."}.
@@ -690,6 +741,9 @@ pub(crate) fn parse_response(
                     duration_ms,
                     tokens_in: None,
                     tokens_out: None,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                    reasoning_tokens: None,
                     tool_calls: None,
                     retry_count: 0,
                     attempt_summary_json: None,
@@ -724,6 +778,9 @@ pub(crate) fn parse_response(
             duration_ms,
             tokens_in,
             tokens_out,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -746,6 +803,9 @@ pub(crate) fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
                 tool_calls: None,
                 retry_count: 0,
                 attempt_summary_json: None,
@@ -773,8 +833,14 @@ pub(crate) fn parse_response(
             })
             .unwrap_or_default();
         let usage = &payload["usage"];
+        // Anthropic billing semantics: input_tokens, cache_creation_input_tokens,
+        // and cache_read_input_tokens are SEPARATE billing classes.
+        // input_tokens does NOT include the cache classes — total billed input:
+        //   input_tokens * rate + cache_creation * 1.25 * rate + cache_read * 0.10 * rate
         let tokens_in = usage["input_tokens"].as_i64();
         let tokens_out = usage["output_tokens"].as_i64();
+        let cache_creation_tokens = usage["cache_creation_input_tokens"].as_i64();
+        let cache_read_tokens = usage["cache_read_input_tokens"].as_i64();
         // Surface non-end_turn stop reasons as informational so the
         // operator can tell a truncation/tool-use from a normal
         // completion. (minimax #3) max_tokens specifically is the
@@ -794,6 +860,9 @@ pub(crate) fn parse_response(
             duration_ms,
             tokens_in,
             tokens_out,
+            cache_creation_tokens,
+            cache_read_tokens,
+            reasoning_tokens: None,
             tool_calls: None,
             retry_count: 0,
             attempt_summary_json: None,
@@ -821,9 +890,12 @@ pub(crate) fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
-            tool_calls: None,
-            retry_count: 0,
-            attempt_summary_json: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+                tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
     }
@@ -865,9 +937,12 @@ pub(crate) fn parse_response(
                     duration_ms,
                     tokens_in: None,
                     tokens_out: None,
-            tool_calls: None,
-            retry_count: 0,
-            attempt_summary_json: None,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                    reasoning_tokens: None,
+                    tool_calls: None,
+                    retry_count: 0,
+                    attempt_summary_json: None,
                 });
             }
             return Ok(ApiDispatchOutcome {
@@ -881,9 +956,12 @@ pub(crate) fn parse_response(
                 duration_ms,
                 tokens_in: None,
                 tokens_out: None,
-            tool_calls: None,
-            retry_count: 0,
-            attempt_summary_json: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+                tool_calls: None,
+                retry_count: 0,
+                attempt_summary_json: None,
             });
         }
     };
@@ -899,9 +977,28 @@ pub(crate) fn parse_response(
 
     // usage shape: most providers do {prompt_tokens, completion_tokens,
     // total_tokens}. MiniMax does {total_tokens, total_characters}.
+    //
+    // OpenAI o-series / DeepSeek reasoning: completion_tokens ALREADY
+    // INCLUDES reasoning_tokens — they are a breakdown of output, NOT
+    // additive. Cost is already correct; reasoning_tokens is recorded
+    // for observability only. Never add reasoning_tokens to the cost.
+    //
+    // DeepSeek-reasoner uses the same OpenAI-compatible usage shape
+    // with `completion_tokens_details.reasoning_tokens`. Record-only.
     let usage = &payload["usage"];
     let tokens_in = usage["prompt_tokens"].as_i64();
     let tokens_out = usage["completion_tokens"].as_i64();
+    // Reasoning tokens: informational breakdown of completion_tokens.
+    // OpenAI: usage.completion_tokens_details.reasoning_tokens
+    // DeepSeek: same path (openai-compatible flavor).
+    // COST NOTE: do NOT add this to cost — it is already included in
+    // completion_tokens. This field is purely for UI observability.
+    let reasoning_tokens = usage["completion_tokens_details"]["reasoning_tokens"].as_i64();
+    // OpenRouter: some routes carry usage.cost in credits. Record-only
+    // when present; we do not attempt to convert credits → USD because
+    // the conversion rate is route-specific and may change.
+    // TODO(openrouter-cost): if usage["cost"].as_f64() is Some(_),
+    //   record it in a future `provider_reported_cost_credits` column.
 
     Ok(ApiDispatchOutcome {
         response: Some(response),
@@ -910,6 +1007,9 @@ pub(crate) fn parse_response(
         duration_ms,
         tokens_in,
         tokens_out,
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
+        reasoning_tokens,
         tool_calls: None,
         retry_count: 0,
         attempt_summary_json: None,

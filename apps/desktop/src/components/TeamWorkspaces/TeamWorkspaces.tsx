@@ -34,6 +34,7 @@ import {
   type TeamWithMembers,
   type TeamSkill,
 } from '@/lib/cloud-api';
+import TeamShareActivityFeed from './TeamShareActivityFeed';
 
 type View = 'list' | 'detail' | 'create';
 
@@ -440,6 +441,9 @@ export default function TeamWorkspaces() {
                 </div>
               )}
             </div>
+
+            {/* v2.14 #14 — share activity feed */}
+            <TeamShareActivityFeed />
           </div>
         )}
       </div>

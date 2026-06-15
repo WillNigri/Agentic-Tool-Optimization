@@ -50,7 +50,9 @@
     "runsHistory": "History",
     "runsSchedules": "Schedules",
     "runsAutomations": "Loop Composer",
+    "runsLoops": "Loops",
     "runsHooks": "Hooks",
+    "runsMissions": "Missions",
     "insightsAgents": "Agents",
     "insightsHealth": "Health",
     "insightsAnalytics": "Analytics",
@@ -152,15 +154,23 @@
     "openWizard": "Open Create Agent"
   },
   "common": {
-    "send": "Send",
+    "save": "Save",
     "cancel": "Cancel",
     "close": "Close",
-    "copy": "Copy",
-    "copied": "Copied",
-    "back": "Back",
+    "create": "Create",
+    "update": "Update",
     "delete": "Delete",
-    "remove": "Remove",
-    "save": "Save"
+    "confirm": "Confirm",
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success",
+    "retry": "Retry",
+    "search": "Search...",
+    "noResults": "No results found",
+    "language": "Language",
+    "english": "English",
+    "portuguese": "Portuguese",
+    "spanish": "Spanish"
   },
   "tier": {
     "lockedTitle": "{{tier}} feature",
@@ -707,6 +717,51 @@
     "addSkill": "Add Skill",
     "removeSkill": "Remove"
   },
+  "loopComposer": {
+    "trigger": {
+      "label": "Trigger:",
+      "manual": "Manual",
+      "cron": "Cron",
+      "event": "Event",
+      "cronPlaceholder": "0 9 * * 1-5",
+      "eventPlaceholder": "pull_request.opened",
+      "validationCron": "Cron trigger requires a cron expression.",
+      "validationEvent": "Event trigger requires an event name."
+    },
+    "variables": {
+      "title": "Variables",
+      "description": "Define workflow-level key/value variables.",
+      "add": "Add variable",
+      "remove": "Remove variable",
+      "empty": "No workflow variables yet.",
+      "emptyHint": "Select a node to edit node settings, or add workflow variables below.",
+      "keyPlaceholder": "key",
+      "valuePlaceholder": "value"
+    },
+    "migration": {
+      "banner": "You have {{count}} legacy workflows in browser storage.",
+      "migrate": "Migrate to Loops",
+      "dismiss": "Dismiss"
+    },
+    "pasteJson": {
+      "button": "Paste JSON",
+      "title": "Paste workflow JSON",
+      "description": "Paste a workflow with \"nodes\" and \"edges\" arrays. This replaces the current canvas.",
+      "placeholder": "{ \"nodes\": [], \"edges\": [] }",
+      "submit": "Replace canvas",
+      "cancel": "Cancel",
+      "errorJson": "Could not parse JSON — check the syntax.",
+      "errorShape": "Workflow must be an object with \"nodes\" and \"edges\" arrays.",
+      "errorNode": "Each node needs a non-empty string \"id\".",
+      "errorEdge": "Each edge needs string \"from\" and \"to\" fields."
+    },
+    "autoLayout": {
+      "button": "Auto-layout"
+    },
+    "validation": {
+      "missingRequired": "Missing required fields:"
+    }
+  },
   "cron": {
     "title": "Cron Monitor",
     "subtitle": "Visual monitoring of scheduled agent jobs",
@@ -910,25 +965,6 @@
     "keepLocal": "Keep Local (Upload)",
     "keepCloud": "Keep Cloud (Download)"
   },
-  "common": {
-    "save": "Save",
-    "cancel": "Cancel",
-    "close": "Close",
-    "create": "Create",
-    "update": "Update",
-    "delete": "Delete",
-    "confirm": "Confirm",
-    "loading": "Loading...",
-    "error": "Error",
-    "success": "Success",
-    "retry": "Retry",
-    "search": "Search...",
-    "noResults": "No results found",
-    "language": "Language",
-    "english": "English",
-    "portuguese": "Portuguese",
-    "spanish": "Spanish"
-  },
   "projects": {
     "backToProjects": "Projects",
     "memory": "Memory",
@@ -1073,6 +1109,52 @@
       "recent": "polled <1h ago"
     }
   },
+  "missions": {
+    "title": "Missions",
+    "subtitle": "Local mission-control board. Dispatch and tick run CLI-side.",
+    "goal": "Goal",
+    "workspace": "Workspace",
+    "merge": "Merge",
+    "cleanup": "Cleanup",
+    "repoRoot": "Repo",
+    "workerConfig": "Worker Config",
+    "budgets": "Budgets",
+    "maxLoops": "Max loops",
+    "dispatches": "Dispatches",
+    "spent": "Spent",
+    "actions": "Actions",
+    "category": "Category",
+    "state": "State",
+    "narrative": "Narrative",
+    "events": "Events",
+    "noEvents": "No events yet.",
+    "pendingEscalations": "Pending Escalations",
+    "detailError": "Failed to load mission detail.",
+    "loadError": "Failed to load missions — is the ATO DB available?",
+    "empty": "No missions yet.",
+    "emptyHint": "Create one with `ato missions create --name ... --goal ...`",
+    "confirmComplete": "Mark this mission as complete? Worktree cleanup runs CLI-side via `ato missions cleanup`.",
+    "state_open": "Open",
+    "state_in_progress": "In Progress",
+    "state_blocked": "Blocked",
+    "state_complete": "Complete",
+    "category_autonomous": "Autonomous",
+    "category_needs_owner": "Needs Owner",
+    "category_ignored": "Ignored",
+    "category_done": "Done",
+    "budgetOver": "over",
+    "dispatchesShort_one": "{{count}} dispatch",
+    "dispatchesShort_other": "{{count}} dispatches",
+    "showPayload": "show payload",
+    "hidePayload": "hide payload",
+    "detailNotFound": "Mission not found.",
+    "escalationLabel": "escalation",
+    "errorGeneric": "Error",
+    "confirmDialog": {
+      "cancel": "Cancel",
+      "confirm": "Confirm"
+    }
+  },
   "insights": {
     "cost": {
       "groupByCloudProvider": "By cloud provider",
@@ -1086,5 +1168,62 @@
       "tokensOut": "Tokens out",
       "spend": "Spend"
     }
+  },
+  "clickablePath": {
+    "reveal": "Reveal",
+    "open": "Open",
+    "exists": "✓ exists",
+    "gone": "✗ gone"
+  },
+  "inputPicker": {
+    "contextInput": "Context input",
+    "buttonTitle": "Pick a saved input",
+    "placeholder": "Select a context input",
+    "searchPlaceholder": "Search inputs…",
+    "none": "No context input",
+    "loading": "Loading inputs…",
+    "error": "Could not load inputs",
+    "empty": "No inputs match this search"
+  },
+  "initiatorBadge": {
+    "via": "via {{surface}}",
+    "kind": {
+      "unknown": "Unknown",
+      "human": "Human",
+      "agent": "Agent",
+      "claude": "Claude",
+      "codex": "Codex",
+      "gemini": "Gemini",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes",
+      "coordinator": "Coordinator",
+      "scheduler": "Scheduler",
+      "hook": "Hook"
+    },
+    "surface": {
+      "cli": "CLI",
+      "desktop": "Desktop",
+      "mcp": "MCP",
+      "cloud": "Cloud",
+      "tick": "Tick",
+      "web": "Web"
+    }
+  },
+  "livePresence": {
+    "tooltip": "{{count}} teammate viewing",
+    "tooltip_other": "{{count}} teammates viewing",
+    "andOthers": " +{{count}} more",
+    "viewingNow": "viewing"
+  },
+  "teamShare": {
+    "title": "Share with team",
+    "share": "Share",
+    "unshare": "Unshare",
+    "shareWithTeams": "Share with teams",
+    "sharedWithCount_one": "Shared with {{count}} team",
+    "sharedWithCount_other": "Shared with {{count}} teams",
+    "free_tier_disabled": "Team sharing is unavailable on the free tier",
+    "share_failed": "Share failed",
+    "noTeams": "No teams available"
   }
 }

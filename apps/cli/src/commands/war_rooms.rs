@@ -155,12 +155,16 @@ impl Closeable for WarRoom {
         // prior value instead of clobbering it.
         let now = chrono::Utc::now().to_rfc3339();
         let tags_json = serde_json::to_string(&fields.tags).unwrap_or_else(|_| "[]".to_string());
+        // v2.16 attribution — close is the only write path for the row,
+        // so stamp the initiator of the close on both insert and re-close.
+        let attribution = crate::attribution::Attribution::detect();
         let changed = conn.execute(
             "INSERT INTO war_rooms
                 (id, status, closed_at, auto_title, summary, tags_json,
                  category, team, project_id, coordinator_runtime, coordinator_model,
-                 human_comment, duration_ms, created_at, updated_at)
-             VALUES (?1, 'closed', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+                 human_comment, duration_ms, created_at, updated_at,
+                 initiator_kind, client_surface, initiator_id)
+             VALUES (?1, 'closed', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                 status = 'closed',
                 closed_at = excluded.closed_at,
@@ -174,7 +178,10 @@ impl Closeable for WarRoom {
                 coordinator_model = excluded.coordinator_model,
                 human_comment = COALESCE(excluded.human_comment, war_rooms.human_comment),
                 duration_ms = excluded.duration_ms,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                initiator_kind = excluded.initiator_kind,
+                client_surface = excluded.client_surface,
+                initiator_id = COALESCE(excluded.initiator_id, war_rooms.initiator_id)
               WHERE war_rooms.status = 'open'",
             rusqlite::params![
                 self.id,
@@ -190,6 +197,9 @@ impl Closeable for WarRoom {
                 fields.human_comment,
                 fields.duration_ms,
                 now,
+                attribution.kind,
+                attribution.surface,
+                attribution.id,
             ],
         )?;
         Ok(changed)

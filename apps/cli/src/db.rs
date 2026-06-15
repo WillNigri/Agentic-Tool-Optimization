@@ -119,10 +119,203 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         [],
     );
 
+    // v2.15.5 — fallback-chain receipt (war_room CC9DBD0E). CLI-only
+    // guard: fails silently when the column already exists (desktop
+    // migration applied it first via schema.rs). Must appear before any
+    // run_api INSERT that binds this column.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN fallback_of TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_fallback_of \
+            ON execution_logs(fallback_of) \
+            WHERE fallback_of IS NOT NULL",
+        [],
+    );
+
+    // v2.17 — git_commit_sha provenance (CLI backfill, mirrors schema.rs).
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN git_commit_sha TEXT",
+        [],
+    );
+
+    // v2.15.1 — retry receipt columns (CLI-only guard, mirrors schema.rs).
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN attempt_summary TEXT",
+        [],
+    );
+
+    // cost-accounting fix cluster (2026-06-12) — cache + reasoning token
+    // columns. Each ALTER fails silently when the column already exists
+    // (desktop schema.rs applied it first). Backfill runs below.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN cache_creation_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN cache_read_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN reasoning_tokens INTEGER",
+        [],
+    );
+
+    // Attribution PR-A (2026-06-13) — initiator provenance columns
+    // (initiator_kind / client_surface / initiator_id) on every
+    // conversation/run-bearing table. CLI-only guard mirroring the
+    // desktop migration in schema.rs: a user dispatching from the CLI
+    // without ever opening the desktop needs these columns so the
+    // dispatch INSERTs that bind them don't hit "no such column". Each
+    // ALTER fails silently when the column already exists.
+    for table in [
+        "execution_logs",
+        "sessions",
+        "war_rooms",
+        "chat_threads",
+        "loop_runs",
+        "missions",
+        "methodology_runs",
+        "session_turns",
+        "chat_messages",
+        "loop_run_steps",
+    ] {
+        for col in ["initiator_kind", "client_surface", "initiator_id"] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {col} TEXT"),
+                [],
+            );
+        }
+    }
+
+    // ato_meta: tiny key/value table for migration markers.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS ato_meta (key TEXT PRIMARY KEY, value TEXT)",
+        [],
+    );
+
+    // One-time NULL-cost recompute (Section 5).
+    // Guard: only runs when the 'cost_recompute_v1' marker is absent.
+    // For each historical row that has tokens but no cost and a known
+    // model, recompute and write the cost. Makes it cheap and idempotent.
+    //
+    // Candidate predicate intentionally excludes rows that already carry
+    // cache_creation_tokens or cache_read_tokens: those rows must be
+    // priced via cost_from_token_classes with the real cache values (not
+    // the cache-blind formula). They keep cost_usd_estimated=NULL until
+    // the next dispatch path writes them correctly.
+    //
+    // Historical rows are repriced at CURRENT table rates — an estimate,
+    // the same approximation the cost panel already makes for all rows.
+    let already_done: bool = conn
+        .query_row(
+            "SELECT 1 FROM ato_meta WHERE key = 'cost_recompute_v1'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !already_done {
+        // Collect candidate rows in one SELECT, then UPDATE in a loop.
+        // Using a Vec avoids holding an active statement across UPDATEs.
+        let candidates: Vec<(String, String, i64, i64)> = conn
+            .prepare(
+                "SELECT id, model, tokens_in, tokens_out
+                   FROM execution_logs
+                  WHERE cost_usd_estimated IS NULL
+                    AND tokens_in IS NOT NULL
+                    AND tokens_out IS NOT NULL
+                    AND model IS NOT NULL
+                    AND model != ''
+                    AND cache_creation_tokens IS NULL
+                    AND cache_read_tokens IS NULL",
+            )
+            .map(|mut stmt| {
+                stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+                .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        for (id, model, tin, tout) in candidates {
+            // cost_from_token_classes with None cache fields is
+            // arithmetically identical to cost_from_tokens today and
+            // future-proof if per-class rates diverge.
+            let tc = ato_pricing::TokenClasses {
+                tokens_in: tin,
+                tokens_out: tout,
+                cache_creation_in: None,
+                cache_read_in: None,
+            };
+            if let Some(cost) = ato_pricing::cost_from_token_classes(&model, &tc) {
+                let _ = conn.execute(
+                    "UPDATE execution_logs SET cost_usd_estimated = ?1 WHERE id = ?2",
+                    rusqlite::params![cost, id],
+                );
+            }
+        }
+        // Set the marker so subsequent opens are instant.
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO ato_meta (key, value) VALUES ('cost_recompute_v1', '1')",
+            [],
+        );
+    }
+
     // v2.16 PR-3 — repo_root column on missions (per_agent_worktree
     // support). Same CLI-only guard pattern: fails silently when the
     // column already exists (desktop migration applied it first).
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
+
+    // v2.16 PR-4 — worker_config column on missions (coordinator tick).
+    // JSON shape: {"runtime":"...","model":null|"...","require_tools":["..."]}.
+    // NULL = tick will escalate with reason="no_worker_config".
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
+    // inputs bundle storage (OSS). CLI mirrors the desktop schema so a
+    // write from `ato inputs` works even if the user has not opened the
+    // desktop since upgrading.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS inputs (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            kind          TEXT NOT NULL DEFAULT 'markdown',
+            tags          TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inputs_updated
+            ON inputs(updated_at DESC)",
+        [],
+    );
+
+    // v2.17 — Output bundles. Idempotent backfill so CLI-only users get
+    // the table even if the desktop schema migration hasn't run yet.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_bundles (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            description   TEXT,
+            source_kind   TEXT NOT NULL,
+            source_id     TEXT NOT NULL,
+            manifest      TEXT NOT NULL,
+            export_path   TEXT,
+            signed_url    TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
 
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT
@@ -132,6 +325,143 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         let _ = conn.execute(stmt, []);
     }
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    /// Minimal in-memory schema that exercises open_readwrite's recompute.
+    fn bootstrap(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE execution_logs (
+                id                    TEXT PRIMARY KEY,
+                runtime               TEXT NOT NULL,
+                prompt                TEXT,
+                response              TEXT,
+                tokens_in             INTEGER,
+                tokens_out            INTEGER,
+                duration_ms           INTEGER,
+                status                TEXT NOT NULL,
+                error_message         TEXT,
+                skill_name            TEXT,
+                cloud_trace_id        TEXT,
+                created_at            TEXT NOT NULL,
+                cost_usd_estimated    REAL,
+                session_id            TEXT,
+                tool_calls_count      INTEGER,
+                tool_calls_summary    TEXT,
+                model                 TEXT,
+                auth_mode             TEXT,
+                agent_slug            TEXT,
+                retry_count           INTEGER NOT NULL DEFAULT 0,
+                attempt_summary       TEXT,
+                fallback_of           TEXT,
+                war_room_id           TEXT,
+                war_room_round        INTEGER,
+                cache_creation_tokens INTEGER,
+                cache_read_tokens     INTEGER,
+                reasoning_tokens      INTEGER
+            );
+            CREATE TABLE ato_meta (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .expect("bootstrap schema");
+    }
+
+    fn insert_row(
+        conn: &Connection,
+        id: &str,
+        model: Option<&str>,
+        tokens_in: Option<i64>,
+        tokens_out: Option<i64>,
+        cost: Option<f64>,
+        cache_creation_tokens: Option<i64>,
+        cache_read_tokens: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO execution_logs
+             (id, runtime, status, created_at, prompt, model, tokens_in, tokens_out,
+              cost_usd_estimated, cache_creation_tokens, cache_read_tokens)
+             VALUES (?1, 'anthropic', 'success', '2026-06-12T00:00:00+00:00', 'hi',
+                     ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, model, tokens_in, tokens_out, cost,
+                               cache_creation_tokens, cache_read_tokens],
+        )
+        .expect("insert");
+    }
+
+    /// Recompute prices a cache-free row and leaves a cache-bearing row alone.
+    #[test]
+    fn recompute_skips_cache_bearing_rows() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        bootstrap(&conn);
+
+        // Row A: known model, no cost, no cache tokens → should be priced.
+        insert_row(&conn, "row-a", Some("claude-sonnet-4-6"), Some(1000), Some(500),
+                   None, None, None);
+
+        // Row B: known model, no cost, but HAS cache_creation_tokens →
+        // must NOT be touched by the cache-blind recompute formula.
+        insert_row(&conn, "row-b", Some("claude-sonnet-4-6"), Some(1000), Some(500),
+                   None, Some(200), None);
+
+        // Run the recompute block manually (mirrors open_readwrite logic).
+        let candidates: Vec<(String, String, i64, i64)> = conn
+            .prepare(
+                "SELECT id, model, tokens_in, tokens_out
+                   FROM execution_logs
+                  WHERE cost_usd_estimated IS NULL
+                    AND tokens_in IS NOT NULL
+                    AND tokens_out IS NOT NULL
+                    AND model IS NOT NULL
+                    AND model != ''
+                    AND cache_creation_tokens IS NULL
+                    AND cache_read_tokens IS NULL",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (id, model, tin, tout) in candidates {
+            let tc = ato_pricing::TokenClasses {
+                tokens_in: tin,
+                tokens_out: tout,
+                cache_creation_in: None,
+                cache_read_in: None,
+            };
+            if let Some(cost) = ato_pricing::cost_from_token_classes(&model, &tc) {
+                conn.execute(
+                    "UPDATE execution_logs SET cost_usd_estimated = ?1 WHERE id = ?2",
+                    rusqlite::params![cost, id],
+                )
+                .unwrap();
+            }
+        }
+
+        let cost_a: Option<f64> = conn
+            .query_row(
+                "SELECT cost_usd_estimated FROM execution_logs WHERE id = 'row-a'",
+                [], |r| r.get(0),
+            )
+            .unwrap();
+        let cost_b: Option<f64> = conn
+            .query_row(
+                "SELECT cost_usd_estimated FROM execution_logs WHERE id = 'row-b'",
+                [], |r| r.get(0),
+            )
+            .unwrap();
+
+        assert!(cost_a.is_some(), "row-a (no cache tokens) must be priced by recompute");
+        assert!(
+            cost_b.is_none(),
+            "row-b (has cache_creation_tokens) must NOT be touched by cache-blind recompute"
+        );
+    }
 }
 
 /// Parse a `--since` window string like "7d", "24h", "30m" into a SQLite

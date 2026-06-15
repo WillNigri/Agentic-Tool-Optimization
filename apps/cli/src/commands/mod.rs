@@ -2,6 +2,7 @@ pub mod agents;
 pub mod auth;
 pub mod bridge;
 pub mod evaluators;
+pub mod inputs;
 pub mod chats;
 // v2.8.x Phase A chunk 6 — `ato pro enable` / `ato pro status`
 // (war-room 87E6CADF round 3, DevEx AMEND: smooth OSS→Pro upgrade).
@@ -25,6 +26,7 @@ pub mod ratchet;
 pub mod recipes;
 pub mod review;
 pub mod sessions;
+pub mod subagent;
 pub mod regressions;
 pub mod replay;
 pub mod replays;
@@ -65,3 +67,14 @@ pub mod loops;
 // a goal-driven primitive that spawns Loops as workers. See
 // docs/v2.16-missions.md for the war-room-locked design.
 pub mod missions;
+
+// v2.17 — `ato bundles` (output bundles, packaged inference results).
+// A bundle = run + dispatches + judge scores + artifact files + manifest.
+// Closes the Collison "shareable results" gap.
+pub mod bundles;
+
+// v2.15 Wave 4 — shared HTTP helpers for team-shared resource CLI parity.
+// Provides share_resource / unshare_resource / list_shared / append_event
+// used by the Share/Unshare/ListShared/AppendEvent subcommands added to
+// sessions, war_rooms, chats, loops, and missions.
+pub mod team_shared;

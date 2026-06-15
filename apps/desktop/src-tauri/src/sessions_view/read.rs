@@ -68,7 +68,8 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     let mut stmt = conn.prepare(
         "SELECT s.id, s.runtime, s.agent_slug, s.title, s.created_at, s.last_used_at, s.turn_count,
                 COALESCE(s.status, 'open'), s.closed_at, s.auto_title, s.summary, s.tags_json, s.project_id,
-                s.category, s.team, p.name, s.human_comment
+                s.category, s.team, p.name, s.human_comment,
+                s.initiator_kind, s.client_surface, s.initiator_id
            FROM sessions s
            LEFT JOIN projects p ON p.id = s.project_id
           ORDER BY s.last_used_at DESC
@@ -109,9 +110,12 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 human_comment: r.get(16)?,
                 anchor_runtime: None, // sessions have a single anchor (s.runtime) — no separate column
                 row_kind: "session".to_string(),
+                initiator_kind: r.get(17)?,
+                client_surface: r.get(18)?,
+                initiator_id: r.get(19)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .collect();
 
     // Enrich each row with computed fields. Two cheap follow-up queries
@@ -127,7 +131,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         )?;
         let runtimes: Vec<String> = rt_stmt
             .query_map([&row.id], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
             .collect();
         // Fall back to the session's anchor runtime when session_turns
         // is empty (e.g. a freshly opened session before its first
@@ -151,7 +155,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         )?;
         let agents: Vec<String> = ag_stmt
             .query_map([&row.id], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
             .collect();
         row.agents_used = agents;
 
@@ -225,7 +229,8 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
     // invariants this card variant assumes.
     let mut eph_stmt = conn.prepare(
         "SELECT e.id, e.runtime, e.agent_slug, e.created_at, e.cost_usd_estimated,
-                e.prompt, e.response, e.model, e.status
+                e.prompt, e.response, e.model, e.status,
+                e.initiator_kind, e.client_surface, e.initiator_id
            FROM execution_logs e
           WHERE e.session_id IS NULL
             AND e.war_room_id IS NULL
@@ -244,6 +249,9 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             let response: Option<String> = r.get(6)?;
             let _model: Option<String> = r.get(7)?;
             let status_str: Option<String> = r.get(8)?;
+            let initiator_kind: Option<String> = r.get(9)?;
+            let client_surface: Option<String> = r.get(10)?;
+            let initiator_id: Option<String> = r.get(11)?;
             // Single-run title = first 80 chars of the prompt (so the
             // card is recognizable at a glance). The last_assistant_
             // preview slot carries the response truncated to 160. If
@@ -304,9 +312,12 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 human_comment: None,
                 anchor_runtime: None,
                 row_kind: "single_run".to_string(),
+                initiator_kind,
+                client_surface,
+                initiator_id,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .collect();
 
     // PR 14b — war-room synthetic rows. Group execution_logs by
@@ -332,7 +343,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         .query_map([limit], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .collect();
 
     let mut war_rooms: Vec<SessionListRow> = Vec::with_capacity(war_room_ids.len());
@@ -348,7 +359,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         )?;
         let runtimes: Vec<String> = rt_stmt
             .query_map([&wr_id], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
             .collect();
 
         let mut ag_stmt = conn.prepare_cached(
@@ -359,7 +370,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         )?;
         let agents: Vec<String> = ag_stmt
             .query_map([&wr_id], |r| r.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
             .collect();
 
         // Sum cost + count participants.
@@ -420,11 +431,15 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             Option<String>, // project_id
             Option<String>, // coordinator_runtime
             Option<String>, // human_comment
+            Option<String>, // initiator_kind
+            Option<String>, // client_surface
+            Option<String>, // initiator_id
         );
         let lifecycle: WrLifecycle = conn
             .query_row(
                 "SELECT status, closed_at, auto_title, summary, tags_json,
-                        category, team, project_id, coordinator_runtime, human_comment
+                        category, team, project_id, coordinator_runtime, human_comment,
+                        initiator_kind, client_surface, initiator_id
                    FROM war_rooms WHERE id = ?1",
                 [&wr_id],
                 |r| {
@@ -439,12 +454,18 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                         r.get::<_, Option<String>>(7)?,
                         r.get::<_, Option<String>>(8)?,
                         r.get::<_, Option<String>>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                        r.get::<_, Option<String>>(11)?,
+                        r.get::<_, Option<String>>(12)?,
                     ))
                 },
             )
             .unwrap_or_else(|_| {
                 (
                     "open".to_string(),
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -467,6 +488,9 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             wr_project_id,
             wr_coordinator,
             wr_human_comment,
+            wr_initiator_kind,
+            wr_client_surface,
+            wr_initiator_id,
         ) = lifecycle;
         let wr_tags: Vec<String> = wr_tags_json
             .as_deref()
@@ -513,6 +537,9 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             human_comment: wr_human_comment,
             anchor_runtime: None, // war-rooms don't have a single anchor by design (multi-runtime peers)
             row_kind: "war_room".to_string(),
+            initiator_kind: wr_initiator_kind,
+            client_surface: wr_client_surface,
+            initiator_id: wr_initiator_id,
         });
     }
 
@@ -550,7 +577,8 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         "SELECT id, title, created_at, COALESCE(last_message_at, created_at) AS last_at,
                 message_count, project_id,
                 COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json,
-                category, team, coordinator_runtime, human_comment, anchor_runtime
+                category, team, coordinator_runtime, human_comment, anchor_runtime,
+                initiator_kind, client_surface, initiator_id
            FROM chat_threads
           WHERE archived = 0
           ORDER BY last_at DESC
@@ -585,6 +613,9 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 r.get::<_, Option<String>>(13)?,        // coordinator_runtime
                 r.get::<_, Option<String>>(14)?,        // human_comment
                 r.get::<_, Option<String>>(15)?,        // anchor_runtime
+                r.get::<_, Option<String>>(16)?,        // initiator_kind
+                r.get::<_, Option<String>>(17)?,        // client_surface
+                r.get::<_, Option<String>>(18)?,        // initiator_id
             ))
         })?
         // v2.7.14 — log on row-drop so the next regression of the
@@ -616,6 +647,9 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             coordinator_runtime,
             human_comment,
             anchor_runtime,
+            initiator_kind,
+            client_surface,
+            initiator_id,
         )| {
             let tags: Vec<String> = tags_json
                 .as_deref()
@@ -688,6 +722,9 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 human_comment,
                 anchor_runtime: anchor_runtime.clone(),
                 row_kind: "chat".to_string(),
+                initiator_kind,
+                client_surface,
+                initiator_id,
             }
         })
         .collect();
@@ -750,7 +787,7 @@ fn list_sessions_narrow_chat_fallback(
                 r.get::<_, Option<String>>(5)?,
             ))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .map(|(id, title, created_at, last_at, message_count, project_id)| SessionListRow {
             id,
             runtime: "chat".to_string(),
@@ -776,6 +813,11 @@ fn list_sessions_narrow_chat_fallback(
             human_comment: None,
             anchor_runtime: None, // fallback predates the anchor column
             row_kind: "chat".to_string(),
+            // Narrow fallback path — attribution columns omitted from the
+            // defensive SELECT, so the badge degrades to "unknown".
+            initiator_kind: None,
+            client_surface: None,
+            initiator_id: None,
         })
         .collect();
     enriched.extend(single_runs);
@@ -845,7 +887,7 @@ pub fn search_session_turns(
         let ids: std::collections::HashSet<String> = stmt
             .query_map([&like_pattern], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
             .collect();
         result_set = Some(match result_set {
             Some(existing) => existing.intersection(&ids).cloned().collect(),
@@ -960,7 +1002,7 @@ pub fn get_session_cost_breakdown(
             })
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .collect();
 
     let total_cost_usd: f64 = rows.iter().map(|r| r.total_cost_usd).sum();
@@ -1025,6 +1067,16 @@ pub struct SingleRunDetail {
     /// pre-v2.7.8 rows (the column is recent) and on dispatches
     /// that didn't use any tools.
     pub tool_calls_summary: Option<String>,
+    /// v2.17 git-linkage — git HEAD sha of the CWD at dispatch time, so
+    /// the detail view can answer "what commit did this run produce?".
+    /// NULL when the CWD wasn't a git repo at dispatch time.
+    pub git_commit_sha: Option<String>,
+    /// Attribution PR (2026-06-13) — initiator provenance for the
+    /// InitiatorBadge on the single-run / war-room seat detail header.
+    /// NULL on rows dispatched before the attribution backfill.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 /// First-Chat Wizard (2026-05-18) — fire a war-room from the
@@ -1059,7 +1111,8 @@ pub fn get_war_room_constituents(
         .prepare(
             "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                     created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
-                    war_room_round, tool_calls_summary
+                    war_room_round, tool_calls_summary,
+                    git_commit_sha, initiator_kind, client_surface, initiator_id
                FROM execution_logs
               WHERE war_room_id = ?1
               ORDER BY war_room_round ASC, created_at ASC",
@@ -1084,10 +1137,14 @@ pub fn get_war_room_constituents(
                 auth_mode: r.get(13)?,
                 war_room_round: r.get(14)?,
                 tool_calls_summary: r.get(15)?,
+                git_commit_sha: r.get(16)?,
+                initiator_kind: r.get(17)?,
+                client_surface: r.get(18)?,
+                initiator_id: r.get(19)?,
             })
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .collect();
     Ok(rows)
 }
@@ -1108,7 +1165,8 @@ pub fn get_single_run_detail(
     conn.query_row(
         "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                 created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
-                war_room_round, tool_calls_summary
+                war_room_round, tool_calls_summary,
+                git_commit_sha, initiator_kind, client_surface, initiator_id
            FROM execution_logs
           WHERE id = ?1 AND session_id IS NULL",
         [&log_id],
@@ -1130,6 +1188,10 @@ pub fn get_single_run_detail(
                 auth_mode: r.get(13)?,
                 war_room_round: r.get(14)?,
                 tool_calls_summary: r.get(15)?,
+                git_commit_sha: r.get(16)?,
+                initiator_kind: r.get(17)?,
+                client_surface: r.get(18)?,
+                initiator_id: r.get(19)?,
             })
         },
     )
@@ -1158,6 +1220,9 @@ pub fn get_session_transcript(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
     );
     let (
         runtime,
@@ -1170,11 +1235,14 @@ pub fn get_session_transcript(
         tags_json,
         project_id,
         human_comment,
+        initiator_kind,
+        client_surface,
+        initiator_id,
     ): Header = conn
         .query_row(
             "SELECT runtime, agent_slug, title,
                     COALESCE(status, 'open'), closed_at, auto_title, summary, tags_json, project_id,
-                    human_comment
+                    human_comment, initiator_kind, client_surface, initiator_id
                FROM sessions WHERE id = ?1",
             [&session_id],
             |r| Ok((
@@ -1188,6 +1256,9 @@ pub fn get_session_transcript(
                 r.get(7)?,
                 r.get(8)?,
                 r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
             )),
         )
         .map_err(|e| format!("session not found: {}", e))?;
@@ -1198,7 +1269,8 @@ pub fn get_session_transcript(
 
     let mut stmt = conn
         .prepare(
-            "SELECT turn_index, role, text, runtime, created_at, agent_slug
+            "SELECT turn_index, role, text, runtime, created_at, agent_slug,
+                    initiator_kind, client_surface, initiator_id
                FROM session_turns
               WHERE session_id = ?1
               ORDER BY turn_index ASC",
@@ -1214,10 +1286,13 @@ pub fn get_session_transcript(
                 runtime: r.get(3)?,
                 created_at: r.get(4)?,
                 agent_slug: r.get(5)?,
+                initiator_kind: r.get(6)?,
+                client_surface: r.get(7)?,
+                initiator_id: r.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { eprintln!("[sessions_view] row decode failed: {}", e); None } })
         .collect();
 
     Ok(SessionTranscript {
@@ -1233,6 +1308,9 @@ pub fn get_session_transcript(
         tags,
         project_id,
         human_comment,
+        initiator_kind,
+        client_surface,
+        initiator_id,
     })
 }
 

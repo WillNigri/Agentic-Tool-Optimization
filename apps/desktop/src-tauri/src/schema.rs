@@ -1775,6 +1775,24 @@ pub fn init_database(conn: &Connection) {
             ON missions(updated_at DESC)",
         [],
     );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS inputs (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            kind          TEXT NOT NULL DEFAULT 'markdown',
+            tags          TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inputs_updated
+            ON inputs(updated_at DESC)",
+        [],
+    );
 
     // mission_events — append-only event log per mission. The Mission ↔
     // Loop relationship lives in payload.loop_run_id when kind='loop_run_
@@ -1809,6 +1827,44 @@ pub fn init_database(conn: &Connection) {
     // even when the process cwd has changed. NULL on single_cwd missions.
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN repo_root TEXT", []);
 
+    // v2.16 PR-4 — coordinator tick worker config. JSON shape:
+    // {"runtime": "...", "model": null|"...", "require_tools": [...]}
+    // NULL means the tick will escalate with reason="no_worker_config".
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
+
+    // v2.17 — Output bundles. Packaged inference results addressable by slug,
+    // exportable as a tarball. A bundle captures (source row, dispatches,
+    // judge scores, artifact files) at creation time so it can be shared
+    // externally even after the underlying tables change. Closes the Collison
+    // "shareable results" gap. signed_url is populated by the Pro
+    // cloud-sync layer; OSS just stores the value if set externally.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS output_bundles (
+            id            TEXT PRIMARY KEY,
+            slug          TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            description   TEXT,
+            source_kind   TEXT NOT NULL,
+            source_id     TEXT NOT NULL,
+            manifest      TEXT NOT NULL,
+            export_path   TEXT,
+            signed_url    TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_output_bundles_source
+            ON output_bundles(source_kind, source_id)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_output_bundles_created
+            ON output_bundles(created_at DESC)",
+        [],
+    );
+
     // v2.15.1 — retry-with-backoff accounting (war_room 08F8629A
     // codex audit verdict: "one execution_logs row per dispatch,
     // plus retry_count and a compact JSON attempt summary column").
@@ -1836,6 +1892,38 @@ pub fn init_database(conn: &Connection) {
     // policy_chosen, fallback_runtime, raw_message }.
     let _ = conn.execute(
         "ALTER TABLE execution_logs ADD COLUMN exhaustion_audit TEXT",
+        [],
+    );
+
+    // v2.15.5 — post-retry fallback-chain receipt (war_room CC9DBD0E).
+    // fallback_of: the execution_logs.id of the failed dispatch this
+    // row replaces. NULL for all non-fallback rows (i.e. the overwhelming
+    // majority). The original failed row keeps status=error untouched;
+    // the fallback row carries a new id and links back here so the UI
+    // can show the chain of attempts.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN fallback_of TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_fallback_of \
+            ON execution_logs(fallback_of) \
+            WHERE fallback_of IS NOT NULL",
+        [],
+    );
+
+    // v2.17 — git_commit_sha provenance. Stamps the current git HEAD
+    // of the CWD at dispatch time so every receipt can answer
+    // "what run produced this commit?" — closes Collison VCS gap.
+    // NULL when the CWD isn't a git repo at dispatch time.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN git_commit_sha TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_logs_git_commit_sha \
+            ON execution_logs(git_commit_sha) \
+            WHERE git_commit_sha IS NOT NULL",
         [],
     );
 
@@ -1899,6 +1987,108 @@ pub fn init_database(conn: &Connection) {
         "ALTER TABLE loop_runs ADD COLUMN paused_dispatch_id TEXT",
         [],
     );
+
+    // cost-accounting fix cluster (2026-06-12) — cache + reasoning token
+    // observability columns on execution_logs. Each ALTER fails silently
+    // when the column already exists (idempotent migration pattern).
+    //
+    // cache_creation_tokens: Anthropic 5-min cache WRITE tokens, billed at
+    //   1.25× input rate. None for all non-Anthropic dispatches.
+    // cache_read_tokens: Anthropic 5-min cache READ tokens, billed at 0.10×
+    //   input rate. None for all non-Anthropic dispatches.
+    // reasoning_tokens: OpenAI/DeepSeek reasoning breakdown of output tokens.
+    //   IMPORTANT: completion_tokens already includes these — do NOT add to
+    //   cost formula. Stored for UI observability only.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN cache_creation_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN cache_read_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN reasoning_tokens INTEGER",
+        [],
+    );
+
+    // ato_meta key/value table for migration markers (used by CLI recompute).
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS ato_meta (key TEXT PRIMARY KEY, value TEXT)",
+        [],
+    );
+
+    // Attribution PR-A (2026-06-13) — initiator provenance on every
+    // conversation/run-bearing table. Three nullable TEXT columns:
+    //   initiator_kind:  who/what started it (human, agent, schedule, hook, ...)
+    //   client_surface:  where it came in from (desktop, cli, mcp, cloud, ...)
+    //   initiator_id:    stable id of the initiator within that kind
+    // All NULL on existing rows; populated by the dispatch paths going
+    // forward. Each ALTER fails silently when the column already exists
+    // (idempotent migration pattern). Mirrored in apps/cli/src/db.rs so
+    // CLI-only users (desktop never opened) get the columns too.
+    for table in [
+        "execution_logs",
+        "sessions",
+        "war_rooms",
+        "chat_threads",
+        "loop_runs",
+        "missions",
+        "methodology_runs",
+        "session_turns",
+        "chat_messages",
+        "loop_run_steps",
+    ] {
+        for col in ["initiator_kind", "client_surface", "initiator_id"] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {col} TEXT"),
+                [],
+            );
+        }
+    }
+
+    // v2.15 Wave 3 — Local SQLite for anonymized telemetry queue +
+    // per-share telemetry opt-in preference.
+    //
+    // anon_telemetry_queue: local staging area for anonymized aggregate
+    // metrics extracted by proLocalRun (score, confidence, event_count).
+    // Drained hourly by a background timer in App.tsx, POSTed to
+    // /api/telemetry/e2e-anonymized, then cleared by id. The queue
+    // stores raw JSON blobs; the drain timer is responsible for batching.
+    //
+    // share_telemetry_prefs: records whether the user opted in to
+    // contributing anonymized metrics for a specific share. Set at
+    // flip-to-E2E time via the FlipToE2eModal checkbox (default off).
+    // PK is (team_id, resource_kind, resource_id) — one row per share.
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS anon_telemetry_queue (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_json     TEXT NOT NULL,
+            queued_at     TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+        [],
+    ) {
+        eprintln!("WARN: failed to create anon_telemetry_queue table: {}", e);
+    }
+    if let Err(e) = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anon_telemetry_queue_queued_at
+            ON anon_telemetry_queue(queued_at ASC)",
+        [],
+    ) {
+        eprintln!("WARN: failed to create anon_telemetry_queue index: {}", e);
+    }
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS share_telemetry_prefs (
+            team_id       TEXT NOT NULL,
+            resource_kind TEXT NOT NULL,
+            resource_id   TEXT NOT NULL,
+            opt_in        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (team_id, resource_kind, resource_id)
+        )",
+        [],
+    ) {
+        eprintln!("WARN: failed to create share_telemetry_prefs table: {}", e);
+    }
 }
 
 #[cfg(test)]

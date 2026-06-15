@@ -10,12 +10,18 @@
 // file boundary moves.
 
 pub mod shared;
+// v2.17 — inputs read-only commands for the InputPicker UI. The
+// CLI surface (ato inputs add/list/get/edit/delete) ships in
+// apps/cli/src/commands/inputs.rs; this Tauri side is the
+// component's invoke<...>() target.
+pub mod inputs;
 pub mod models;
 pub mod usage_billing;
 pub mod knowledge;
 pub mod posts;
 pub mod analytics;
 pub mod files_paths;
+pub mod fs_actions;
 pub mod onboarding;
 pub mod context;
 pub mod workflows;
@@ -45,12 +51,15 @@ pub mod mcp_install;
 pub mod telemetry;
 // v2.14 Loop Composer — reframed Automations w/ SQLite persistence.
 pub mod loops;
+// v2.16 PR-7 — Mission-control board (local OSS single-machine view).
+pub mod missions;
 pub use models::*;
 pub use usage_billing::*;
 pub use knowledge::*;
 pub use posts::*;
 pub use analytics::*;
 pub use files_paths::*;
+pub use fs_actions::*;
 pub use onboarding::*;
 pub use context::*;
 pub use workflows::*;
@@ -77,6 +86,7 @@ pub use mcp::*;
 pub use mcp_install::*;
 pub use telemetry::*;
 pub use loops::*;
+pub use missions::*;
 
 use crate::*;
 use std::collections::HashMap;
@@ -2037,10 +2047,21 @@ pub async fn prompt_api_provider(
             // `model` column entirely. EVERY desktop BYOK dispatch
             // recorded $0 cost — strictly worse than the CLI's
             // partial coverage. Now we compute cost the same way
-            // CLI run_api does: prefer real provider tokens via
-            // cost_from_tokens; fall back to chars-heuristic.
+            // CLI run_api does: use cost_from_token_classes so
+            // Anthropic cache classes (cache_creation at 1.25×,
+            // cache_read at 0.10×) are billed correctly. For
+            // non-Anthropic providers both cache fields are None
+            // and the function degrades to flat in×rate + out×rate.
             let cost_usd: Option<f64> = match (o.tokens_in, o.tokens_out) {
-                (Some(ti), Some(to)) => ato_pricing::cost_from_tokens(&o.model_used, ti, to),
+                (Some(ti), Some(to)) => {
+                    let tc = ato_pricing::TokenClasses {
+                        tokens_in: ti,
+                        tokens_out: to,
+                        cache_creation_in: o.cache_creation_tokens,
+                        cache_read_in: o.cache_read_tokens,
+                    };
+                    ato_pricing::cost_from_token_classes(&o.model_used, &tc)
+                }
                 _ => estimate_cost_usd(
                     &o.model_used,
                     &prompt,
@@ -2051,8 +2072,8 @@ pub async fn prompt_api_provider(
             // of swallowing them. The dispatch still succeeds; the
             // log row just doesn't exist, and the user sees why.
             if let Err(e) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary, cache_creation_tokens, cache_read_tokens, reasoning_tokens, initiator_kind, client_surface, initiator_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'human', 'desktop', NULL)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -2071,6 +2092,9 @@ pub async fn prompt_api_provider(
                     "api_key",
                     o.retry_count,
                     o.attempt_summary_json.as_ref(),
+                    o.cache_creation_tokens,
+                    o.cache_read_tokens,
+                    o.reasoning_tokens,
                 ],
             ) {
                 eprintln!("prompt_api_provider: execution_logs write failed: {}", e);
@@ -2106,8 +2130,8 @@ pub async fn prompt_api_provider(
             // macro can infer the binding correctly.
             let cost_usd_opt: Option<f64> = cost_usd;
             if let Err(write_err) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode)
-                 VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, 'error', ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, initiator_kind, client_surface, initiator_id)
+                 VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, 'error', ?5, NULL, NULL, ?6, ?7, ?8, ?9, 'human', 'desktop', NULL)",
                 rusqlite::params![
                     id,
                     provider.slug,

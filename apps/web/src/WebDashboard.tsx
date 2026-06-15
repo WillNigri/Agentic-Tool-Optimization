@@ -1,17 +1,20 @@
-import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useState, useEffect, useRef } from 'react';
 import {
   BarChart3,
   Key,
-  Settings,
-  Shield,
-  Activity,
   LogOut,
   Crown,
+  Users,
+  Menu,
+  X,
 } from 'lucide-react';
 import CostDashboard from './CostDashboard';
 import ApiKeysPanel from './ApiKeysPanel';
 import Onboarding from './Onboarding';
+import TeamsListPage from './teamWorkspace/TeamsListPage';
+import TeamWorkspacePage from './teamWorkspace/TeamWorkspacePage';
+import SharedResourceDetailPage from './teamWorkspace/SharedResourceDetailPage';
+import { type SharedResourceKind, type TeamRow } from './lib/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'https://api.agentictool.ai/api';
 
@@ -97,17 +100,62 @@ function useAuth() {
   return { user, token, login, register, logout, loginWithGithub, isAuthenticated: !!token };
 }
 
-type Panel = 'costs' | 'api-keys' | 'settings';
+type Panel = 'costs' | 'api-keys' | 'workspaces' | 'settings';
 
 const NAV_ITEMS: { id: Panel; label: string; icon: typeof BarChart3 }[] = [
   { id: 'costs', label: 'Cost Dashboard', icon: BarChart3 },
   { id: 'api-keys', label: 'API Keys', icon: Key },
+  { id: 'workspaces', label: 'Team Workspaces', icon: Users },
 ];
 
+// ──────────────────────────────────────────────────────────────────
+// Workspace sub-router types
+// ──────────────────────────────────────────────────────────────────
+
+type WSRoute =
+  | { view: 'teams' }
+  | { view: 'workspace'; teamId: string; teamName: string }
+  | { view: 'detail'; teamId: string; teamName: string; kind: SharedResourceKind; resourceId: string };
+
 export default function WebDashboard() {
-  const { user, token, login, register, logout, loginWithGithub, isAuthenticated } = useAuth();
+  const { user, login, register, logout, loginWithGithub, isAuthenticated } = useAuth();
   const [panel, setPanel] = useState<Panel>('costs');
   const [showOnboarding, setShowOnboarding] = useState(false);
+  // v2.16 Wave 5 — mobile nav drawer state. Always false on first
+  // render; toggled by the hamburger / backdrop / nav-item click.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // Codex R1 #4 fix — refs for the focus-trap and focus-restore on
+  // the mobile nav drawer.
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
+
+  // Codex R1 #4 fix — Escape closes the mobile nav; focus moves to
+  // the close button on open and back to the hamburger on close. No
+  // full focus trap (would require trapping Tab cycles too) but the
+  // common assistive-tech path now works.
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    drawerCloseRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [mobileNavOpen]);
+  // Codex R2 fix to R1 #4 — restore focus only when the drawer was
+  // ACTUALLY open and is now being closed. Pre-fix shape fired on
+  // initial render too, jumping focus to the hamburger before any
+  // user interaction.
+  const prevMobileNavOpen = useRef(false);
+  useEffect(() => {
+    if (prevMobileNavOpen.current && !mobileNavOpen) {
+      hamburgerRef.current?.focus({ preventScroll: true });
+    }
+    prevMobileNavOpen.current = mobileNavOpen;
+  }, [mobileNavOpen]);
+  const [wsRoute, setWsRoute] = useState<WSRoute>({ view: 'teams' });
 
   // Show onboarding for new users who haven't completed it
   useEffect(() => {
@@ -124,15 +172,101 @@ export default function WebDashboard() {
     return <Onboarding onComplete={() => setShowOnboarding(false)} />;
   }
 
-  const PanelComponent = panel === 'api-keys' ? ApiKeysPanel : CostDashboard;
+  /** Reset workspace sub-route whenever user clicks away and comes back. */
+  const handlePanelChange = (next: Panel) => {
+    if (next === 'workspaces') setWsRoute({ view: 'teams' });
+    setPanel(next);
+  };
+
+  function renderMainPanel() {
+    if (panel === 'api-keys') return <ApiKeysPanel />;
+    if (panel === 'workspaces') {
+      if (wsRoute.view === 'teams') {
+        return (
+          <TeamsListPage
+            onSelectTeam={(team: TeamRow) =>
+              setWsRoute({ view: 'workspace', teamId: team.id, teamName: team.name })
+            }
+          />
+        );
+      }
+      if (wsRoute.view === 'workspace') {
+        return (
+          <TeamWorkspacePage
+            teamId={wsRoute.teamId}
+            teamName={wsRoute.teamName}
+            onBack={() => setWsRoute({ view: 'teams' })}
+            onOpenDetail={(kind: SharedResourceKind, resourceId: string) =>
+              setWsRoute({
+                view: 'detail',
+                teamId: wsRoute.teamId,
+                teamName: wsRoute.teamName,
+                kind,
+                resourceId,
+              })
+            }
+          />
+        );
+      }
+      if (wsRoute.view === 'detail') {
+        return (
+          <SharedResourceDetailPage
+            teamId={wsRoute.teamId}
+            kind={wsRoute.kind}
+            resourceId={wsRoute.resourceId}
+            onBack={() =>
+              setWsRoute({ view: 'workspace', teamId: wsRoute.teamId, teamName: wsRoute.teamName })
+            }
+          />
+        );
+      }
+    }
+    return <CostDashboard />;
+  }
 
   return (
     <div className="flex h-screen bg-[#0a0a0f]">
-      {/* Sidebar */}
-      <aside className="w-56 h-screen bg-[#16161e] border-r border-[#2a2a3a] flex flex-col shrink-0">
-        <div className="px-4 py-5 border-b border-[#2a2a3a]">
-          <h1 className="text-lg font-bold text-white tracking-tight">ATO</h1>
-          <p className="text-xs text-[#8888a0] mt-0.5 truncate">{user?.email}</p>
+      {/* v2.16 Wave 5 — mobile sidebar overlay. The desktop sidebar is
+          fixed-position on viewports < md so the main content gets
+          the whole width. Backdrop click + hamburger toggle the
+          mobileNavOpen flag; nav clicks auto-close. */}
+      {mobileNavOpen && (
+        <div
+          className="md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden
+        />
+      )}
+      <aside
+        id="ato-mobile-nav"
+        // Codex R1 #4 — drawer is a modal nav surface on mobile;
+        // expose dialog semantics + aria-hidden when collapsed so
+        // screen readers don't tab into the off-screen DOM.
+        role="navigation"
+        aria-label="Main"
+        aria-modal={mobileNavOpen}
+        aria-hidden={!mobileNavOpen && typeof window !== 'undefined' && window.innerWidth < 768}
+        className={`
+          fixed md:static z-40 md:z-auto inset-y-0 left-0
+          w-56 h-screen bg-[#16161e] border-r border-[#2a2a3a]
+          flex flex-col shrink-0
+          transform transition-transform duration-200
+          ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+        `}
+      >
+        <div className="px-4 py-5 border-b border-[#2a2a3a] flex items-center justify-between md:block">
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold text-white tracking-tight">ATO</h1>
+            <p className="text-xs text-[#8888a0] mt-0.5 truncate">{user?.email}</p>
+          </div>
+          <button
+            ref={drawerCloseRef}
+            onClick={() => setMobileNavOpen(false)}
+            className="md:hidden p-1.5 -mr-1.5 rounded-md text-[#8888a0] hover:text-white hover:bg-[#2a2a3a]/60 focus:outline-none focus:ring-2 focus:ring-[#00FFB2]/40"
+            aria-label="Close navigation menu"
+          >
+            <X size={18} />
+          </button>
         </div>
 
         <nav className="flex-1 py-3 px-2 space-y-0.5">
@@ -141,7 +275,10 @@ export default function WebDashboard() {
             return (
               <button
                 key={item.id}
-                onClick={() => setPanel(item.id)}
+                onClick={() => {
+                  handlePanelChange(item.id);
+                  setMobileNavOpen(false);
+                }}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                   panel === item.id
                     ? 'bg-[#00FFB2]/15 text-[#00FFB2]'
@@ -174,10 +311,30 @@ export default function WebDashboard() {
         </div>
       </aside>
 
-      {/* Main */}
-      <main className="flex-1 overflow-y-auto p-6">
-        <PanelComponent />
-      </main>
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* v2.16 Wave 5 — mobile top bar. Only visible <md; renders
+            the hamburger + current panel title. */}
+        <header className="md:hidden flex items-center gap-3 px-4 py-3 border-b border-[#2a2a3a] bg-[#16161e]">
+          <button
+            ref={hamburgerRef}
+            onClick={() => setMobileNavOpen(true)}
+            className="p-1.5 -ml-1.5 rounded-md text-[#8888a0] hover:text-white hover:bg-[#2a2a3a]/60 focus:outline-none focus:ring-2 focus:ring-[#00FFB2]/40"
+            aria-label="Open navigation menu"
+            aria-expanded={mobileNavOpen}
+            aria-controls="ato-mobile-nav"
+          >
+            <Menu size={20} />
+          </button>
+          <span className="text-sm font-medium text-white truncate">
+            {NAV_ITEMS.find((n) => n.id === panel)?.label ?? 'ATO'}
+          </span>
+        </header>
+
+        {/* Main */}
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
+          {renderMainPanel()}
+        </main>
+      </div>
     </div>
   );
 }

@@ -137,6 +137,7 @@ interface AutomationStore {
   setActiveWorkflowId: (id: string) => void;
   toggleWorkflow: (id: string) => void;
   dirty: boolean;
+  updateActiveWorkflow: (updates: Partial<Workflow>) => void;
 
   // Active workflow accessors
   getActiveWorkflow: () => Workflow;
@@ -152,6 +153,14 @@ interface AutomationStore {
   updateNode: (id: string, updates: Partial<FlowNode>) => void;
   moveNode: (id: string, x: number, y: number) => void;
   deleteNode: (id: string) => void;
+
+  // Undo/redo (snapshot ring buffer, cap 50)
+  undoStack: Workflow[];
+  redoStack: Workflow[];
+  _moveBatchActive: boolean;
+  undo: () => void;
+  redo: () => void;
+  endMoveBatch: () => void;
 
   // Edge operations
   connecting: ConnectingState | null;
@@ -200,6 +209,31 @@ function genId() {
   return `node-${Date.now()}-${idCounter++}`;
 }
 
+// ---------------------------------------------------------------------------
+// Undo/redo — snapshot ring buffer (cap 50)
+// ---------------------------------------------------------------------------
+//
+// Every node/edge mutation records a deep clone of the active workflow onto
+// `undoStack` (capped at HISTORY_CAP, oldest dropped). Cmd/Ctrl+Z rehydrates
+// the previous snapshot; Cmd/Ctrl+Shift+Z replays it. Continuous drags are
+// coalesced into a single snapshot via `_moveBatchActive` so one gesture =
+// one undo step (the canvas resets the batch flag on mouse-up via
+// `endMoveBatch`).
+const HISTORY_CAP = 50;
+
+function cloneWorkflow(w: Workflow): Workflow {
+  return structuredClone(w);
+}
+
+function snapshotStacks(s: AutomationStore): { undoStack: Workflow[]; redoStack: Workflow[] } {
+  const active = s.workflows.find((w) => w.id === s.activeWorkflowId);
+  if (!active) return { undoStack: s.undoStack, redoStack: s.redoStack };
+  return {
+    undoStack: [...s.undoStack, cloneWorkflow(active)].slice(-HISTORY_CAP),
+    redoStack: [],
+  };
+}
+
 export const useAutomationStore = create<AutomationStore>((set, get) => ({
   mode: "view",
   setMode: (mode) => set({ mode }),
@@ -207,6 +241,35 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   workflows: [],
   activeWorkflowId: "",
   dirty: false,
+
+  undoStack: [],
+  redoStack: [],
+  _moveBatchActive: false,
+
+  updateActiveWorkflow: (updates) =>
+    set((s) => ({
+      // Codex R1: cover trigger / variables / source / name edits in
+      // the undo stack too. Previously only nodes/edges snapshotted,
+      // so undo couldn't roll back a trigger flip from manual→cron
+      // or a variables-table edit. Snapshot on ANY change to a
+      // meaningful workflow field.
+      ...("nodes" in updates ||
+        "edges" in updates ||
+        "triggerKind" in updates ||
+        "triggerConfig" in updates ||
+        "variables" in updates ||
+        "name" in updates ||
+        "description" in updates ||
+        "enabled" in updates
+        ? { ...snapshotStacks(s), _moveBatchActive: false }
+        : {}),
+      dirty: true,
+      workflows: s.workflows.map((w) =>
+        w.id === s.activeWorkflowId
+          ? { ...w, ...updates }
+          : w
+      ),
+    })),
 
   setActiveWorkflowId: (id) =>
     set({ activeWorkflowId: id, selectedNodeId: null, selectedEdgeKey: null }),
@@ -229,6 +292,9 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       errorCount: 0,
       nodes: [],
       edges: [],
+      triggerKind: "manual",
+      triggerConfig: null,
+      variables: {},
     };
   },
 
@@ -240,6 +306,8 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   // Node ops
   addNode: (node) =>
     set((s) => ({
+      ...snapshotStacks(s),
+      _moveBatchActive: false,
       dirty: true,
       workflows: s.workflows.map((w) =>
         w.id === s.activeWorkflowId
@@ -250,6 +318,8 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
 
   updateNode: (id, updates) =>
     set((s) => ({
+      ...snapshotStacks(s),
+      _moveBatchActive: false,
       dirty: true,
       workflows: s.workflows.map((w) =>
         w.id === s.activeWorkflowId
@@ -260,6 +330,9 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
 
   moveNode: (id, x, y) =>
     set((s) => ({
+      // Coalesce a continuous drag (or one auto-layout pass) into a single
+      // snapshot: only the first move of the batch records history.
+      ...(s._moveBatchActive ? {} : { ...snapshotStacks(s), _moveBatchActive: true }),
       workflows: s.workflows.map((w) =>
         w.id === s.activeWorkflowId
           ? { ...w, nodes: w.nodes.map((n) => (n.id === id ? { ...n, x, y } : n)) }
@@ -269,6 +342,8 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
 
   deleteNode: (id) =>
     set((s) => ({
+      ...snapshotStacks(s),
+      _moveBatchActive: false,
       dirty: true,
       selectedNodeId: s.selectedNodeId === id ? null : s.selectedNodeId,
       workflows: s.workflows.map((w) =>
@@ -289,6 +364,8 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
 
   addEdge: (edge) =>
     set((s) => ({
+      ...snapshotStacks(s),
+      _moveBatchActive: false,
       dirty: true,
       connecting: null,
       workflows: s.workflows.map((w) =>
@@ -305,6 +382,8 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
 
   deleteEdge: (from, to) =>
     set((s) => ({
+      ...snapshotStacks(s),
+      _moveBatchActive: false,
       dirty: true,
       selectedEdgeKey: null,
       workflows: s.workflows.map((w) =>
@@ -313,6 +392,63 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
           : w
       ),
     })),
+
+  // Undo/redo — pop a snapshot, push the current state onto the opposite
+  // stack, and rehydrate. Snapshots carry their own workflow id so undo
+  // refocuses the workflow that was mutated even after switching tabs.
+  undo: () =>
+    set((s) => {
+      if (s.undoStack.length === 0) return s;
+      const undoStack = s.undoStack.slice();
+      const snapshot = undoStack.pop()!;
+      const current = s.workflows.find((w) => w.id === snapshot.id);
+      const redoStack = current
+        ? [...s.redoStack, cloneWorkflow(current)].slice(-HISTORY_CAP)
+        : s.redoStack;
+      const exists = s.workflows.some((w) => w.id === snapshot.id);
+      const workflows = exists
+        ? s.workflows.map((w) => (w.id === snapshot.id ? snapshot : w))
+        : [...s.workflows, snapshot];
+      const nodeStillThere = snapshot.nodes.some((n) => n.id === s.selectedNodeId);
+      return {
+        undoStack,
+        redoStack,
+        workflows,
+        activeWorkflowId: snapshot.id,
+        selectedNodeId: nodeStillThere ? s.selectedNodeId : null,
+        selectedEdgeKey: null,
+        dirty: true,
+        _moveBatchActive: false,
+      };
+    }),
+
+  redo: () =>
+    set((s) => {
+      if (s.redoStack.length === 0) return s;
+      const redoStack = s.redoStack.slice();
+      const snapshot = redoStack.pop()!;
+      const current = s.workflows.find((w) => w.id === snapshot.id);
+      const undoStack = current
+        ? [...s.undoStack, cloneWorkflow(current)].slice(-HISTORY_CAP)
+        : s.undoStack;
+      const exists = s.workflows.some((w) => w.id === snapshot.id);
+      const workflows = exists
+        ? s.workflows.map((w) => (w.id === snapshot.id ? snapshot : w))
+        : [...s.workflows, snapshot];
+      const nodeStillThere = snapshot.nodes.some((n) => n.id === s.selectedNodeId);
+      return {
+        undoStack,
+        redoStack,
+        workflows,
+        activeWorkflowId: snapshot.id,
+        selectedNodeId: nodeStillThere ? s.selectedNodeId : null,
+        selectedEdgeKey: null,
+        dirty: true,
+        _moveBatchActive: false,
+      };
+    }),
+
+  endMoveBatch: () => set({ _moveBatchActive: false }),
 
   // Workflow CRUD
   createWorkflow: (name) => {
@@ -326,6 +462,10 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       errorCount: 0,
       nodes: [],
       edges: [],
+      source: "manual",
+      triggerKind: "manual",
+      triggerConfig: null,
+      variables: {},
     };
     set((s) => ({
       workflows: [...s.workflows, newWorkflow],
@@ -435,6 +575,9 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
         to: `${e.to}-${Date.now()}`,
       })),
       fromTemplateId: templateId,
+      triggerKind: "manual",
+      triggerConfig: null,
+      variables: {},
     };
 
     set((s) => ({

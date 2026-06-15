@@ -145,18 +145,23 @@ fn run_with_matrix(
     let started_at = chrono::Utc::now().to_rfc3339();
     let started_clock = Instant::now();
 
+    // v2.16 attribution — resolve initiator provenance at run-start.
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
         "INSERT INTO methodology_runs
             (id, methodology_id, customer_user_id, started_at, status,
              total_dispatches_planned, total_dispatches_completed,
-             customer_billing_mode)
-         VALUES (?1, ?2, NULL, ?3, 'running', ?4, 0, ?5)",
+             customer_billing_mode, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, NULL, ?3, 'running', ?4, 0, ?5, ?6, ?7, ?8)",
         params![
             &run_id,
             methodology_id,
             &started_at,
             planned_capped as i64,
             run_opts.billing_mode.as_str(),
+            attribution.kind,
+            attribution.surface,
+            attribution.id,
         ],
     )
     .context("insert methodology_runs row")?;

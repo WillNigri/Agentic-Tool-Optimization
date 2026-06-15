@@ -31,7 +31,7 @@ pub struct Loop {
     /// Canonical loop graph as JSON: { nodes: LoopStep[], edges: LoopEdge[] }.
     pub graph: serde_json::Value,
     pub variables: Option<serde_json::Value>,
-    /// "manual" | "schedule" | "webhook"
+    /// "manual" | "cron" | "event"
     pub trigger_kind: String,
     pub trigger_config: Option<serde_json::Value>,
     /// "manual" | "migrated-from-automations" | "skill" | "group"
@@ -39,6 +39,10 @@ pub struct Loop {
     pub source_ref: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub last_run_status: Option<String>,
+    pub last_run_at: Option<String>,
+    pub dispatch_count: i64,
+    pub total_cost_usd: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -48,6 +52,10 @@ pub struct LoopCreateInput {
     pub description: Option<String>,
     /// Optional — if omitted, derived from name.
     pub slug: Option<String>,
+    /// Codex R4: optional override for the default-enabled behavior.
+    /// None means "use the default" (enabled=true); Some(false) lets
+    /// the caller persist a newly-created disabled workflow correctly.
+    pub enabled: Option<bool>,
     pub graph: serde_json::Value,
     pub variables: Option<serde_json::Value>,
     pub trigger_kind: Option<String>,
@@ -76,9 +84,17 @@ pub struct LoopRun {
     pub status: String,
     pub started_at: String,
     pub finished_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub step_count: i64,
     pub error: Option<String>,
     pub triggered_by: Option<String>,
     pub variables: Option<serde_json::Value>,
+    /// Attribution PR (2026-06-13) — initiator provenance so the Loop
+    /// Composer run-history list can render an InitiatorBadge per run.
+    /// NULL on runs recorded before the attribution backfill.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -158,7 +174,7 @@ fn parse_json(field: &str, raw: Option<String>) -> Result<Option<serde_json::Val
     }
 }
 
-fn row_to_loop(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String)> {
+fn row_to_loop(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, i64, f64)> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -173,13 +189,35 @@ fn row_to_loop(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, Str
         row.get(10)?,
         row.get(11)?,
         row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
+        row.get(16)?,
     ))
 }
 
 fn assemble_loop(
-    raw: (String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String),
+    raw: (String, String, String, Option<String>, i32, String, Option<String>, String, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, i64, f64),
 ) -> Result<Loop, String> {
-    let (id, slug, name, description, enabled, graph_raw, variables_raw, trigger_kind, trigger_config_raw, source, source_ref, created_at, updated_at) = raw;
+    let (
+        id,
+        slug,
+        name,
+        description,
+        enabled,
+        graph_raw,
+        variables_raw,
+        trigger_kind,
+        trigger_config_raw,
+        source,
+        source_ref,
+        created_at,
+        updated_at,
+        last_run_status,
+        last_run_at,
+        dispatch_count,
+        total_cost_usd,
+    ) = raw;
     let graph = serde_json::from_str(&graph_raw)
         .map_err(|e| format!("invalid graph json on loop {}: {}", id, e))?;
     let variables = parse_json("variables", variables_raw)?;
@@ -198,10 +236,57 @@ fn assemble_loop(
         source_ref,
         created_at,
         updated_at,
+        last_run_status,
+        last_run_at,
+        dispatch_count,
+        total_cost_usd,
     })
 }
 
-const LOOP_SELECT: &str = "SELECT id, slug, name, description, enabled, graph, variables, trigger_kind, trigger_config, source, source_ref, created_at, updated_at FROM loops";
+const LOOP_SELECT: &str = "SELECT
+    l.id,
+    l.slug,
+    l.name,
+    l.description,
+    l.enabled,
+    l.graph,
+    l.variables,
+    l.trigger_kind,
+    l.trigger_config,
+    l.source,
+    l.source_ref,
+    l.created_at,
+    l.updated_at,
+    (
+        SELECT lr.status
+          FROM loop_runs lr
+         WHERE lr.loop_id = l.id
+         ORDER BY lr.started_at DESC, lr.id DESC
+         LIMIT 1
+    ) AS last_run_status,
+    (
+        SELECT lr.started_at
+          FROM loop_runs lr
+         WHERE lr.loop_id = l.id
+         ORDER BY lr.started_at DESC, lr.id DESC
+         LIMIT 1
+    ) AS last_run_at,
+    COALESCE((
+        SELECT COUNT(*)
+          FROM loop_run_steps lrs
+         WHERE lrs.loop_run_id IN (
+             SELECT lr.id FROM loop_runs lr WHERE lr.loop_id = l.id
+         )
+           AND lrs.execution_log_id IS NOT NULL
+    ), 0) AS dispatch_count,
+    COALESCE((
+        SELECT SUM(COALESCE(el.cost_usd_estimated, 0))
+          FROM loop_run_steps lrs
+          JOIN loop_runs lr ON lr.id = lrs.loop_run_id
+          JOIN execution_logs el ON el.id = lrs.execution_log_id
+         WHERE lr.loop_id = l.id
+    ), 0) AS total_cost_usd
+FROM loops l";
 
 /// Loop identifier resolution. Callers pass either a UUID `id` or a kebab-case
 /// `slug` — we detect which by attempting a UUID parse. Without this, the
@@ -253,7 +338,7 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         .unwrap_or_else(|| "manual".to_string());
     if !matches!(
         trigger_kind.as_str(),
-        "manual" | "schedule" | "webhook"
+        "manual" | "cron" | "event" | "schedule" | "webhook"
     ) {
         return Err(format!("invalid trigger_kind: {}", trigger_kind));
     }
@@ -279,18 +364,23 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         None => None,
     };
     let source = input.source.unwrap_or_else(|| "manual".to_string());
+    // Codex R4: honor an explicit `enabled=false` on create. Default
+    // remains true so existing callers see no change.
+    let enabled = input.enabled.unwrap_or(true);
+    let enabled_int: i32 = if enabled { 1 } else { 0 };
 
     conn.execute(
         "INSERT INTO loops (
             id, slug, name, description, enabled, graph, variables,
             trigger_kind, trigger_config, source, source_ref,
             created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         params![
             id,
             slug,
             name,
             input.description,
+            enabled_int,
             graph_str,
             variables_str,
             trigger_kind,
@@ -307,7 +397,7 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         slug,
         name,
         description: input.description,
-        enabled: true,
+        enabled,
         graph: input.graph,
         variables: input.variables,
         trigger_kind,
@@ -316,6 +406,10 @@ pub fn create_loop(db: State<'_, DbState>, input: LoopCreateInput) -> Result<Loo
         source_ref: input.source_ref,
         created_at: now.clone(),
         updated_at: now,
+        last_run_status: None,
+        last_run_at: None,
+        dispatch_count: 0,
+        total_cost_usd: 0.0,
     })
 }
 
@@ -364,7 +458,7 @@ pub fn update_loop(
     if let Some(trigger_kind) = input.trigger_kind {
         if !matches!(
             trigger_kind.as_str(),
-            "manual" | "schedule" | "webhook"
+            "manual" | "cron" | "event" | "schedule" | "webhook"
         ) {
             return Err(format!("invalid trigger_kind: {}", trigger_kind));
         }
@@ -433,34 +527,58 @@ pub fn list_loop_runs(
     let cap = limit.unwrap_or(50).clamp(1, 500);
     let sql = format!(
         "SELECT lr.id, lr.loop_id, lr.status, lr.started_at, lr.finished_at,
-                lr.error, lr.triggered_by, lr.variables
+                CASE
+                    WHEN lr.finished_at IS NULL THEN NULL
+                    ELSE CAST((julianday(lr.finished_at) - julianday(lr.started_at)) * 86400000 AS INTEGER)
+                END AS duration_ms,
+                (SELECT COUNT(*) FROM loop_run_steps s WHERE s.loop_run_id = lr.id) AS step_count,
+                lr.error, lr.triggered_by, lr.variables,
+                lr.initiator_kind, lr.client_surface, lr.initiator_id
            FROM loop_runs lr
            JOIN loops l ON lr.loop_id = l.id
           WHERE l.{} = ?1
-          ORDER BY lr.started_at DESC
+          ORDER BY lr.started_at DESC, lr.id DESC
           LIMIT ?2",
         id_or_slug_column(&loop_id),
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![loop_id, cap], |row| {
-            let raw_vars: Option<String> = row.get(7)?;
+            let raw_vars: Option<String> = row.get(9)?;
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
                 raw_vars,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for r in rows {
-        let (id, loop_id, status, started_at, finished_at, error, triggered_by, raw_vars) =
-            r.map_err(|e| e.to_string())?;
+        let (
+            id,
+            loop_id,
+            status,
+            started_at,
+            finished_at,
+            duration_ms,
+            step_count,
+            error,
+            triggered_by,
+            raw_vars,
+            initiator_kind,
+            client_surface,
+            initiator_id,
+        ) = r.map_err(|e| e.to_string())?;
         let variables = parse_json("variables", raw_vars)?;
         out.push(LoopRun {
             id,
@@ -468,9 +586,14 @@ pub fn list_loop_runs(
             status,
             started_at,
             finished_at,
+            duration_ms,
+            step_count,
             error,
             triggered_by,
             variables,
+            initiator_kind,
+            client_surface,
+            initiator_id,
         });
     }
     Ok(out)
@@ -543,6 +666,81 @@ pub fn get_loop_run_steps(
         });
     }
     Ok(out)
+}
+
+// ── v2.14 step 3: run_loop_by_slug ──────────────────────────────────────
+//
+// Tauri command that the LoopComposer's Run button calls. Shells out to
+// the prod ato CLI binary (`ato loop run <slug>`) — the CLI is the
+// execution engine (v2.14 MVP wired in apps/cli/src/commands/loops.rs).
+// The CLI writes the loop_runs + loop_run_steps rows; this command just
+// returns the loop_run id so the desktop can poll get_loop_run_steps
+// for status updates.
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopRunStarted {
+    pub run_id: String,
+    pub status: String,
+}
+
+#[tauri::command]
+pub async fn run_loop_by_slug(slug_or_id: String) -> Result<LoopRunStarted, String> {
+    // Resolve the ato binary — prefer the prod app's sibling path so
+    // we hit the same keychain ACL identity the GUI uses for everything
+    // else (the dev `cargo run` binary has a different signature and
+    // gets refused by the master_key keychain item).
+    let ato_path = resolve_ato_cli_path()?;
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&ato_path)
+            .args(["loop", "run", &slug_or_id])
+            .env("ATO_CLIENT_SURFACE", "desktop")
+            .env("ATO_INITIATOR_KIND", "human")
+            .output()
+    })
+    .await
+    .map_err(|e| format!("spawn join error: {e}"))?
+    .map_err(|e| format!("Failed to spawn ato CLI: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!(
+            "ato loop run exited with status {} — {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    // The CLI emits JSON on success: {"run_id": "...", "status": "...", ...}.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    #[derive(serde::Deserialize)]
+    struct CliRunResult {
+        run_id: String,
+        status: String,
+    }
+    let parsed: CliRunResult = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("CLI returned non-JSON output: {e} — stdout was: {stdout}"))?;
+
+    Ok(LoopRunStarted {
+        run_id: parsed.run_id,
+        status: parsed.status,
+    })
+}
+
+/// Best-effort resolve the prod ato CLI binary. The desktop is always
+/// installed alongside the CLI at /Applications/ATO.app/Contents/MacOS/ato
+/// on macOS; on other platforms we fall back to the PATH-resolved `ato`.
+fn resolve_ato_cli_path() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let prod = "/Applications/ATO.app/Contents/MacOS/ato";
+        if std::path::Path::new(prod).exists() {
+            return Ok(prod.to_string());
+        }
+    }
+    // Fallback: PATH lookup — let the OS spawn handle resolution.
+    Ok("ato".to_string())
 }
 
 // Tests for slug derivation + update partial-write semantics live in

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuthStore } from "@/hooks/useAuth";
 import Login from "@/pages/Login";
@@ -109,7 +109,36 @@ export default function App() {
   // on /login or /register routes (UX leak per claude + minimax both).
   // Mirrors the existing isAuthenticated pattern at line 59.
   const isAuthenticatedForBanner = useAuthStore((s) => s.isAuthenticated);
+  const isCloudUser = useAuthStore((s) => s.isCloudUser);
   const [needsManualUpgrade, setNeedsManualUpgrade] = useState(false);
+
+  // v2.15 Wave 1 — E2E key bootstrap.
+  // Fires once per session when the user becomes a cloud user (logged-in
+  // Pro+). If no keypair exists in the keychain, generates one, stores it,
+  // and pushes the public keys to the cloud so team admins can seal Team
+  // Keys to this member. Wrapped in try/catch: E2E is opt-in per-resource,
+  // so a keychain error here must not block the rest of the login flow.
+  const e2eBootstrappedRef = useRef(false);
+  useEffect(() => {
+    if (!isCloudUser || e2eBootstrappedRef.current) return;
+    e2eBootstrappedRef.current = true;
+    void (async () => {
+      try {
+        const { hasE2eKeypair, storeE2eKeypair } = await import("@/lib/e2e/keychain");
+        const { generateE2eKeypair, ensureSodiumReady } = await import("@/lib/e2e/crypto");
+        const { pushE2ePublicKeys } = await import("@/lib/cloud-api");
+        await ensureSodiumReady();
+        if (!(await hasE2eKeypair())) {
+          const kp = await generateE2eKeypair();
+          await storeE2eKeypair(kp.x25519PrivateKey, kp.ed25519PrivateKey);
+          await pushE2ePublicKeys(kp.x25519PublicKey, kp.ed25519PublicKey);
+        }
+      } catch (err) {
+        // E2E bootstrap failure is non-fatal — log and continue.
+        console.warn("[e2e] keypair bootstrap failed:", err);
+      }
+    })();
+  }, [isCloudUser]);
 
   useEffect(() => {
     void (async () => {
@@ -128,6 +157,61 @@ export default function App() {
     // the web, the desktop tier badge updates without a re-login.
     void refreshTier();
   }, [refreshTier]);
+
+  // v2.15 Wave 3 — Anon telemetry drain timer.
+  //
+  // Fires once per hour (3_600_000ms). Drains up to 100 oldest entries from
+  // the local anon_telemetry_queue SQLite table, POSTs them to the cloud
+  // batch endpoint, and clears the entries on success. Best-effort: any error
+  // is silently swallowed so a telemetry failure never surfaces to the user.
+  //
+  // Only runs when in a Tauri context (the Tauri commands don't exist in
+  // web preview mode).
+  useEffect(() => {
+    if (!isTauri) return;
+
+    const drainTelemetry = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { postAnonTelemetryBatch } = await import("@/lib/cloud-api");
+
+        type QueueEntry = { id: number; data_json: string };
+        const entries = await invoke<QueueEntry[]>("anon_telemetry_drain_for_post");
+        if (!entries || entries.length === 0) return;
+
+        await postAnonTelemetryBatch(entries);
+        const ids = entries.map((e) => e.id);
+        await invoke("anon_telemetry_clear_ids", { ids });
+      } catch {
+        // Silently ignore — telemetry errors must never surface to users.
+      }
+    };
+
+    // Run once on mount (in case there's a backlog from a previous session),
+    // then every hour.
+    void drainTelemetry();
+    const timerId = setInterval(() => { void drainTelemetry(); }, 3_600_000);
+
+    // Flush-on-exit best-effort via a Tauri window close listener.
+    let removeCloseListener: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        const unlisten = await win.onCloseRequested(async () => {
+          await drainTelemetry();
+        });
+        removeCloseListener = unlisten;
+      } catch {
+        // Window events not available (web preview etc.).
+      }
+    })();
+
+    return () => {
+      clearInterval(timerId);
+      removeCloseListener?.();
+    };
+  }, []);
 
   return (
     <>

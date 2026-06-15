@@ -26,10 +26,13 @@ use serde::Serialize;
 /// NULL as "$? (pricing missing)" specifically so this misses are
 /// visible rather than silently free.
 ///
-/// **Rates last verified: 2026-05-16.** Treat as estimates — vendor
+/// **Rates last verified: 2026-06-12.** Treat as estimates — vendor
 /// rates drift. Cross-check against the provider's own dashboard for
 /// billing-grade numbers. The `(0.30, 2.50)` Gemini 2.5 Flash entry,
-/// for example, came from Google AI Studio pricing as of that date.
+/// for example, came from Google AI Studio pricing as of 2026-05-16.
+/// 2026-06-12: added gemini-3 family (flash-preview, flash, 3.5-flash,
+/// pro-preview, pro, 3.1-pro-preview, 3.1-pro) — root cause of 7x
+/// undercount bug where unknown models returned None → NULL cost.
 pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
         // ---- Anthropic ----
@@ -54,6 +57,18 @@ pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
         "o3-mini" => Some((1.1, 4.4)),
 
         // ---- Google (Gemini API on AI Studio) ----
+        // gemini-3 family — added 2026-06-12 (web-verified). Longer/more-specific
+        // names listed first so any future prefix-based matching won't short-circuit.
+        // Pro rows priced at the base tier (≤200K context); the >200K tier is
+        // $4.00/$18.00 — callers needing that tier must handle it upstream.
+        "gemini-3.5-flash"           => Some((1.50,  9.00)),  // launched 2026-05-19
+        "gemini-3.1-pro-preview"     => Some((2.00, 12.00)),
+        "gemini-3.1-pro"             => Some((2.00, 12.00)),
+        "gemini-3-flash-preview"     => Some((0.50,  3.00)),
+        "gemini-3-flash"             => Some((0.50,  3.00)),
+        "gemini-3-pro-preview"       => Some((2.00, 12.00)),
+        "gemini-3-pro"               => Some((2.00, 12.00)),
+        // gemini-2.x and older
         "gemini-2.5-pro" => Some((1.25, 10.0)),
         "gemini-2.5-flash" => Some((0.30, 2.50)),
         "gemini-2.5-flash-lite" => Some((0.1, 0.4)),
@@ -96,7 +111,13 @@ pub fn models_for_provider(provider: &str) -> &'static [&'static str] {
     match provider {
         "anthropic" => &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
         "openai" => &["gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1-mini", "o3-mini", "gpt-4.1", "o3", "gpt-4o", "gpt-5"],
-        "google" => &["gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-2.5-pro"],
+        "google" => &[
+            "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-2.0-flash",
+            "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3-flash",
+            "gemini-1.5-pro", "gemini-2.5-pro",
+            "gemini-3.5-flash", "gemini-3-pro-preview", "gemini-3-pro",
+            "gemini-3.1-pro-preview", "gemini-3.1-pro",
+        ],
         "deepseek" => &["deepseek-chat", "deepseek-reasoner"],
         "qwen" => &["qwen-turbo", "qwen-plus", "qwen-max"],
         "minimax" => &["MiniMax-Text-01", "MiniMax-M2", "MiniMax-M2.7-highspeed"],
@@ -171,14 +192,68 @@ pub fn cheaper_cross_provider(current_model: &str) -> Vec<&'static str> {
     alts.into_iter().map(|(m, _)| m).collect()
 }
 
+/// Token-class breakdown for accurate Anthropic cache billing.
+///
+/// Anthropic's Messages API returns three separate billing classes:
+///   - `tokens_in`           — regular (non-cached) input tokens
+///   - `cache_creation_in`   — tokens written into the 5-min prompt cache;
+///                             billed at 1.25× the input rate
+///   - `cache_read_in`       — tokens served from the 5-min cache;
+///                             billed at 0.10× the input rate
+///
+/// Note: `input_tokens` in the Anthropic response does NOT include
+/// cache_creation_input_tokens or cache_read_input_tokens — they are
+/// separate billing classes. Total billed input =
+///   input_tokens * rate_in
+///   + cache_creation_input_tokens * 1.25 * rate_in
+///   + cache_read_input_tokens * 0.10 * rate_in
+///
+/// For non-Anthropic providers both cache fields stay `None`.
+#[derive(Debug, Clone, Default)]
+pub struct TokenClasses {
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// Anthropic 5-min cache WRITE tokens (billed at 1.25× input rate).
+    pub cache_creation_in: Option<i64>,
+    /// Anthropic 5-min cache READ tokens (billed at 0.10× input rate).
+    pub cache_read_in: Option<i64>,
+}
+
+/// Compute cost from a `TokenClasses` breakdown.
+///
+/// Formula (all per-million):
+///   cost = tokens_in * rate_in
+///        + tokens_out * rate_out
+///        + cache_creation_in * 1.25 * rate_in   (5-min cache write)
+///        + cache_read_in * 0.10 * rate_in        (5-min cache read)
+///
+/// Returns `None` when the model is not in the pricing table.
+pub fn cost_from_token_classes(model: &str, tc: &TokenClasses) -> Option<f64> {
+    let (in_per_m, out_per_m) = pricing_for_model(model)?;
+    let base = (tc.tokens_in as f64 / 1_000_000.0) * in_per_m
+        + (tc.tokens_out as f64 / 1_000_000.0) * out_per_m;
+    let cache_write = tc.cache_creation_in
+        .map(|n| (n as f64 / 1_000_000.0) * 1.25 * in_per_m)
+        .unwrap_or(0.0);
+    let cache_read = tc.cache_read_in
+        .map(|n| (n as f64 / 1_000_000.0) * 0.10 * in_per_m)
+        .unwrap_or(0.0);
+    let cost = base + cache_write + cache_read;
+    Some((cost * 1_000_000.0).round() / 1_000_000.0)
+}
+
 /// Estimate cost from real token counts (preferred over chars/4
 /// when the provider returned a usage block). Returns `None` if the
 /// model isn't in the pricing table.
+///
+/// Delegates to `cost_from_token_classes` with no cache fields.
 pub fn cost_from_tokens(model: &str, tokens_in: i64, tokens_out: i64) -> Option<f64> {
-    let (in_per_m, out_per_m) = pricing_for_model(model)?;
-    let cost = (tokens_in as f64 / 1_000_000.0) * in_per_m
-        + (tokens_out as f64 / 1_000_000.0) * out_per_m;
-    Some((cost * 1_000_000.0).round() / 1_000_000.0)
+    cost_from_token_classes(model, &TokenClasses {
+        tokens_in,
+        tokens_out,
+        cache_creation_in: None,
+        cache_read_in: None,
+    })
 }
 
 /// 4-chars-per-token heuristic for estimating tokens from raw text.
@@ -273,6 +348,67 @@ mod tests {
     }
 
     #[test]
+    fn cost_from_token_classes_cache_arithmetic() {
+        // claude-sonnet-4-6: $3/M in, $15/M out
+        // 1M input      → $3.00
+        // 1M output     → $15.00
+        // 1M cache_write→ 1.25 × $3 = $3.75
+        // 1M cache_read → 0.10 × $3 = $0.30
+        // total         → $22.05
+        let tc = TokenClasses {
+            tokens_in: 1_000_000,
+            tokens_out: 1_000_000,
+            cache_creation_in: Some(1_000_000),
+            cache_read_in: Some(1_000_000),
+        };
+        let cost = cost_from_token_classes("claude-sonnet-4-6", &tc).unwrap();
+        assert!(
+            (cost - 22.05).abs() < 1e-5,
+            "expected $22.05, got ${cost}"
+        );
+    }
+
+    #[test]
+    fn cost_from_token_classes_none_cache_equals_cost_from_tokens() {
+        // With no cache fields, the two functions must agree exactly.
+        let tc = TokenClasses {
+            tokens_in: 500_000,
+            tokens_out: 200_000,
+            cache_creation_in: None,
+            cache_read_in: None,
+        };
+        let via_classes = cost_from_token_classes("claude-sonnet-4-6", &tc).unwrap();
+        let via_tokens  = cost_from_tokens("claude-sonnet-4-6", 500_000, 200_000).unwrap();
+        assert!(
+            (via_classes - via_tokens).abs() < 1e-12,
+            "cache-None should equal cost_from_tokens: {} vs {}",
+            via_classes, via_tokens
+        );
+    }
+
+    #[test]
+    fn cost_from_token_classes_unknown_model_returns_none() {
+        let tc = TokenClasses {
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_creation_in: Some(10),
+            cache_read_in: Some(5),
+        };
+        assert!(cost_from_token_classes("not-a-real-model", &tc).is_none());
+    }
+
+    #[test]
+    fn cost_from_tokens_gemini3_flash_preview() {
+        // 1,000,000 input @ $0.50/M + 1,000,000 output @ $3.00/M = $3.50
+        let cost = cost_from_tokens("gemini-3-flash-preview", 1_000_000, 1_000_000)
+            .expect("gemini-3-flash-preview must be in pricing table");
+        assert!(
+            (cost - 3.5).abs() < 1e-9,
+            "expected $3.50, got ${cost}"
+        );
+    }
+
+    #[test]
     fn billing_mode_classifies() {
         assert_eq!(billing_mode("claude"), BillingMode::Subscription);
         assert_eq!(billing_mode("google"), BillingMode::ApiKey);
@@ -334,6 +470,14 @@ mod tests {
             ("gemini-2.5-flash", 0.30,  2.50),
             ("gemini-2.5-pro",   1.25, 10.0),
             ("gemini-1.5-flash", 0.075, 0.3),
+            // gemini-3 family — added 2026-06-12; was causing 7x undercount (NULL cost)
+            ("gemini-3-flash-preview",  0.50,  3.00),
+            ("gemini-3-flash",          0.50,  3.00),
+            ("gemini-3.5-flash",        1.50,  9.00),
+            ("gemini-3-pro-preview",    2.00, 12.00),
+            ("gemini-3-pro",            2.00, 12.00),
+            ("gemini-3.1-pro-preview",  2.00, 12.00),
+            ("gemini-3.1-pro",          2.00, 12.00),
             // MiniMax — CLI had these, desktop didn't
             ("MiniMax-M2.7-highspeed", 1.0, 3.0),
             // DeepSeek

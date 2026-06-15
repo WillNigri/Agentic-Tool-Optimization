@@ -131,6 +131,55 @@ pub enum LoopSub {
         #[command(subcommand)]
         sub: ScheduleSub,
     },
+
+    // ── v2.15 Wave 4 — team-shared resource CLI parity ────────────────────
+
+    /// v2.15 Wave 4 — share this loop with a team.
+    #[command(name = "share")]
+    Share {
+        /// Loop id (UUID) to share.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — remove a team share for this loop.
+    #[command(name = "unshare")]
+    Unshare {
+        /// Loop id (UUID) to unshare.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — list loops shared with this team.
+    #[command(name = "list-shared")]
+    ListShared {
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — append a new event to a team-shared loop.
+    #[command(name = "append-event")]
+    AppendEvent {
+        /// Loop id (UUID).
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+        /// Event kind, e.g. `turn_appended`, `judge_verdict`.
+        #[arg(long)]
+        kind: String,
+        /// Payload as inline JSON, or @path/to/file.json.
+        #[arg(long)]
+        json: String,
+        /// Use the E2E two-step encrypted flow.
+        /// NOTE: Refused in Wave 4 with a clear error; use the desktop
+        /// app or omit --encrypted for plaintext. Full CLI E2E support
+        /// ships in a follow-up wave.
+        #[arg(long)]
+        encrypted: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -390,6 +439,23 @@ pub fn run(args: LoopArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
             RunsSub::List { slug_or_id, limit } => run_runs_list(slug_or_id, limit, db_path, opts),
             RunsSub::Show { run_id } => run_runs_show(run_id, db_path, opts),
         },
+        // v2.15 Wave 4 — team-shared resource verbs.
+        LoopSub::Share { id, team } => {
+            crate::commands::team_shared::share_resource("loops", "loop_id", &id, &team, opts)
+        }
+        LoopSub::Unshare { id, team } => {
+            crate::commands::team_shared::unshare_resource("loops", &id, &team, opts)
+        }
+        LoopSub::ListShared { team } => {
+            crate::commands::team_shared::list_shared("loops", &team, opts)
+        }
+        LoopSub::AppendEvent { id, team, kind, json, encrypted } => {
+            let payload = crate::commands::team_shared::parse_json_arg(&json)?;
+            crate::commands::team_shared::append_event(
+                "loops", &id, &team, &kind, payload, encrypted, opts,
+            )?;
+            Ok(())
+        }
     }
 }
 
@@ -803,10 +869,13 @@ pub fn execute_loop(
         .unwrap_or_else(|_| "unknown".into());
     let triggered_by = format!("manual:{}", username);
     let vars_str = serde_json::to_string(&variables).unwrap_or_else(|_| "{}".into());
+    // v2.16 attribution — resolve once; shared by the loop_runs row and
+    // every loop_run_steps row this run mints below.
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
-        "INSERT INTO loop_runs (id, loop_id, status, started_at, triggered_by, variables)
-         VALUES (?1, ?2, 'running', ?3, ?4, ?5)",
-        params![run_id, loop_row.id, started_at, triggered_by, vars_str],
+        "INSERT INTO loop_runs (id, loop_id, status, started_at, triggered_by, variables, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![run_id, loop_row.id, started_at, triggered_by, vars_str, attribution.kind, attribution.surface, attribution.id],
     )
     .context("insert loop_run")?;
 
@@ -831,9 +900,9 @@ pub fn execute_loop(
         conn.execute(
             "INSERT INTO loop_run_steps (
                 id, loop_run_id, node_id, node_type, status,
-                started_at, input
-             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6)",
-            params![step_id, run_id, node.id, node.node_type, step_started, input_json],
+                started_at, input, initiator_kind, client_surface, initiator_id
+             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9)",
+            params![step_id, run_id, node.id, node.node_type, step_started, input_json, attribution.kind, attribution.surface, attribution.id],
         )
         .context("insert loop_run_step")?;
 

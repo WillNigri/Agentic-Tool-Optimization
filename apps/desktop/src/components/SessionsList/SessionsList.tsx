@@ -54,7 +54,18 @@ import {
   WarRoomCard,
   SingleRunCard,
   SessionCard,
+  TeamSharedCard,
 } from "./SessionCards";
+// teamfilter (#1) — cloud-shared rows. getTeams returns the teams the
+// user belongs to (or throws for free/unauthenticated tiers — we swallow
+// that so the merge is a no-op); the three getShared* calls return the
+// snapshots shared into each team.
+import {
+  getTeams,
+  getSharedSessions,
+  getSharedWarRooms,
+  getSharedChats,
+} from "@/lib/cloud-api";
 // v2.10.0 PR-1 (UI) — eval-cluster card. Imported as a default-style
 // named import so re-exports from ./SessionCards/index don't have to
 // land in lockstep; the cluster card is opt-in render-path only.
@@ -105,7 +116,88 @@ const CATEGORY_VOCAB = [
 // values (success/error/unknown) so they pass through the "all"
 // status bucket only. PR 5c dropped the History tab and added the
 // single-run click-into-detail panel — see SingleRunDetailView.tsx.
-type KindFilter = "all" | "sessions" | "single_runs" | "war_rooms" | "chats";
+// teamfilter (#1) — "team" is a peer of the existing kind chips. Picking
+// it fetches cloud-shared rows and scopes the feed to them (same model as
+// "sessions"/"chats" scoping to a single rowKind).
+type KindFilter =
+  | "all"
+  | "sessions"
+  | "single_runs"
+  | "war_rooms"
+  | "chats"
+  | "team";
+
+// teamfilter (#1) — rowKinds that came from the cloud share feed.
+const TEAM_SHARED_KINDS = new Set<SessionListRow["rowKind"]>([
+  "team_shared_session",
+  "team_shared_war_room",
+  "team_shared_chat",
+]);
+
+// teamfilter (#1) — safely read a string field off an unknown snapshot
+// payload. The shared-* endpoints return `snapshot: unknown`; we only
+// surface a handful of human-readable fields and never trust the shape.
+function snapshotString(
+  snapshot: unknown,
+  ...keys: string[]
+): string | null {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const obj = snapshot as Record<string, unknown>;
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+  return null;
+}
+
+// teamfilter (#1) — fold one shared payload into a SessionListRow so it
+// flows through the same filter/render pipeline as local rows. Synthetic
+// id is `shared:<teamId>:<originalId>` so the click handler can recover
+// the team + original id when routing to the placeholder view (#6).
+function teamSharedRow(args: {
+  teamId: string;
+  teamName: string;
+  rowKind: Extract<SessionListRow["rowKind"], `team_shared_${string}`>;
+  originalId: string;
+  sharedByUserId: string;
+  sharedAt: string;
+  snapshot: unknown;
+}): SessionListRow {
+  const { teamId, teamName, rowKind, originalId, sharedByUserId, sharedAt, snapshot } =
+    args;
+  return {
+    id: `shared:${teamId}:${originalId}`,
+    runtime: snapshotString(snapshot, "runtime", "anchorRuntime") ?? "claude",
+    agentSlug: null,
+    title: snapshotString(snapshot, "autoTitle", "title", "summary"),
+    createdAt: sharedAt,
+    lastUsedAt: sharedAt,
+    turnCount: 1,
+    runtimesUsed: [],
+    agentsUsed: [],
+    totalCostUsd: null,
+    lastAssistantPreview: null,
+    status: "open",
+    closedAt: null,
+    autoTitle: snapshotString(snapshot, "autoTitle"),
+    summary: snapshotString(snapshot, "summary", "lastAssistantPreview"),
+    tags: [],
+    projectId: null,
+    projectName: null,
+    category: null,
+    team: null,
+    coordinatorRuntime: null,
+    humanComment: null,
+    anchorRuntime: null,
+    rowKind,
+    sharedAt,
+    // No display name on the shared-* payloads yet — show the (shortened)
+    // sharer id. #6 can resolve this to a member name.
+    sharedByLabel: sharedByUserId ? sharedByUserId.slice(0, 8) : null,
+    sharedTeamId: teamId,
+    sharedTeamName: teamName,
+  };
+}
 
 /// Case-insensitive substring search across every human-readable
 /// field on a session row plus the 8-char id prefix. Returns the
@@ -135,6 +227,10 @@ function rowMatchesFilters(
     if (f.kind === "single_runs" && s.rowKind !== "single_run") return false;
     if (f.kind === "war_rooms" && s.rowKind !== "war_room") return false;
     if (f.kind === "chats" && s.rowKind !== "chat") return false;
+    // teamfilter (#1) — "team" scopes to cloud-shared rows; every other
+    // kind excludes them so a shared row never leaks into "all" etc.
+    if (f.kind === "team" && !TEAM_SHARED_KINDS.has(s.rowKind)) return false;
+    if (f.kind !== "team" && TEAM_SHARED_KINDS.has(s.rowKind)) return false;
   }
   if (skip !== "status") {
     if (f.status === "open" && s.status !== "open") return false;
@@ -198,6 +294,14 @@ type OpenSelection =
   | { kind: "single_run"; id: string }
   | { kind: "war_room"; id: string }
   | { kind: "chat"; id: string }
+  // teamfilter (#1) — a cloud-shared row. Carries the synthetic
+  // `shared:<teamId>:<originalId>` id and which shared kind it is so the
+  // placeholder (and #6's real view) can route. Read-only.
+  | {
+      kind: "team_shared";
+      id: string;
+      sharedKind: "session" | "war_room" | "chat";
+    }
   | null;
 
 export default function SessionsList() {
@@ -323,6 +427,77 @@ export default function SessionsList() {
     refetchInterval: 30_000,
   });
 
+  // teamfilter (#1) — cloud-shared rows. Fetched lazily: the query is only
+  // enabled while the Team chip is picked, and TanStack's 30s staleTime
+  // means toggling the chip on/off within that window reuses the cache
+  // instead of re-hitting the network (requirement D).
+  //
+  // Free-tier safe (requirement E): getTeams throws for free/unauthed
+  // users; we catch and return [] so the merge is a no-op. Per-team
+  // getShared* calls are individually caught so one team erroring (e.g.
+  // permissions) doesn't blank the whole feed. Rows are sorted shared_at
+  // DESC so the most recently shared surface first (requirement A).
+  const teamSharedQ = useQuery<SessionListRow[]>({
+    queryKey: ["team-shared-rows"],
+    enabled: kindFilter === "team",
+    staleTime: 30_000,
+    queryFn: async () => {
+      // getTeams throws for free/unauthenticated tiers; `.catch(() => [])`
+      // turns that into an empty teams list → empty feed (requirement E).
+      const teams = await getTeams().catch(() => []);
+      const perTeam = await Promise.all(
+        teams.map(async (t) => {
+          const [sessions, warRooms, chats] = await Promise.all([
+            getSharedSessions(t.id).catch(() => []),
+            getSharedWarRooms(t.id).catch(() => []),
+            getSharedChats(t.id).catch(() => []),
+          ]);
+          return [
+            ...sessions.map((x) =>
+              teamSharedRow({
+                teamId: t.id,
+                teamName: t.name,
+                rowKind: "team_shared_session",
+                originalId: x.session_id,
+                sharedByUserId: x.shared_by_user_id,
+                sharedAt: x.shared_at,
+                snapshot: x.snapshot,
+              }),
+            ),
+            ...warRooms.map((x) =>
+              teamSharedRow({
+                teamId: t.id,
+                teamName: t.name,
+                rowKind: "team_shared_war_room",
+                originalId: x.war_room_id,
+                sharedByUserId: x.shared_by_user_id,
+                sharedAt: x.shared_at,
+                snapshot: x.snapshot,
+              }),
+            ),
+            ...chats.map((x) =>
+              teamSharedRow({
+                teamId: t.id,
+                teamName: t.name,
+                rowKind: "team_shared_chat",
+                originalId: x.chat_thread_id,
+                sharedByUserId: x.shared_by_user_id,
+                sharedAt: x.shared_at,
+                snapshot: x.snapshot,
+              }),
+            ),
+          ];
+        }),
+      );
+      // ISO-8601 timestamps sort lexicographically, so a string compare is
+      // a correct shared_at DESC ordering.
+      return perTeam
+        .flat()
+        .sort((a, b) => (b.sharedAt ?? "").localeCompare(a.sharedAt ?? ""));
+    },
+  });
+  const teamRows = teamSharedQ.data ?? [];
+
   // Backend search across turn text. Returns the set of session ids
   // whose turns contain all the search tokens. Combined with the
   // metadata filter (client-side) via union: a row matches if it
@@ -362,10 +537,19 @@ export default function SessionsList() {
   const clusteredData = nonEmptyData
     ? clusterEvalRuns(nonEmptyData)
     : undefined;
-  const filteredSessions = clusteredData
+  // teamfilter (#1) — merge cloud-shared rows into the local feed when the
+  // Team chip is active. teamRows is pre-sorted shared_at DESC and prepended,
+  // and the kind="team" predicate in rowMatchesFilters scopes the visible
+  // set to exactly these rows; for every other kind teamRows is empty
+  // (query disabled) so the local list is unchanged.
+  const sourceRows =
+    clusteredData && kindFilter === "team"
+      ? [...teamRows, ...clusteredData]
+      : clusteredData;
+  const filteredSessions = sourceRows
     ? (() => {
         const metaMatched = filterSessions(
-          clusteredData,
+          sourceRows,
           searchQuery,
           statusFilter,
           kindFilter,
@@ -387,7 +571,7 @@ export default function SessionsList() {
           team: teamFilter,
           tag: tagFilter,
         };
-        return clusteredData.filter((s) => {
+        return sourceRows.filter((s) => {
           if (!rowMatchesFilters(s, f)) return false;
           return metaIds.has(s.id) || contentMatchIds.has(s.id);
         });
@@ -424,6 +608,43 @@ export default function SessionsList() {
         threadId={openSelection.id}
         onBack={() => setOpenSelection(null)}
       />
+    );
+  }
+  // teamfilter (#1) — placeholder read-only view for a cloud-shared row.
+  // #6 replaces this with the real cross-machine transcript; until then we
+  // confirm the routing works (synthetic id decodes to team + original id)
+  // without pretending to render content we haven't fetched.
+  if (openSelection?.kind === "team_shared") {
+    // id shape: `shared:<teamId>:<originalId>`
+    const [, teamId, ...rest] = openSelection.id.split(":");
+    const originalId = rest.join(":");
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={() => setOpenSelection(null)}
+          className="flex items-center gap-2 text-sm text-cs-muted hover:text-cs-text"
+        >
+          <ArrowLeft size={16} /> Back
+        </button>
+        <div className="border border-cs-border rounded-lg p-6 text-center">
+          <Lock size={32} className="mx-auto mb-3 text-cs-accent opacity-70" />
+          <p className="text-cs-text font-medium">
+            Shared {openSelection.sharedKind.replace("_", " ")} — read-only
+          </p>
+          <p className="text-sm text-cs-muted mt-2 max-w-md mx-auto">
+            The full cross-machine transcript view lands in a follow-up. For
+            now this confirms the routing: team{" "}
+            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text font-mono">
+              {teamId}
+            </code>
+            , original id{" "}
+            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text font-mono">
+              {originalId}
+            </code>
+            .
+          </p>
+        </div>
+      </div>
     );
   }
 
@@ -515,6 +736,7 @@ export default function SessionsList() {
                 ["single_runs", "Single runs"],
                 ["war_rooms", "War rooms"],
                 ["chats", "Chats"],
+                ["team", "Team"],
               ] as [KindFilter, string][]).map(([k, label]) => {
                 const count =
                   k === "all"
@@ -525,7 +747,12 @@ export default function SessionsList() {
                         ? rowsForKindCount.filter((row) => row.rowKind === "single_run").length
                         : k === "war_rooms"
                           ? rowsForKindCount.filter((row) => row.rowKind === "war_room").length
-                          : rowsForKindCount.filter((row) => row.rowKind === "chat").length;
+                          : k === "chats"
+                            ? rowsForKindCount.filter((row) => row.rowKind === "chat").length
+                            // teamfilter (#1) — local rows never include
+                            // shared kinds; the Team count comes from the
+                            // cloud query (0 until the chip is first picked).
+                            : teamRows.length;
                 return (
                 <button
                   key={k}
@@ -541,6 +768,48 @@ export default function SessionsList() {
                   <span className="ml-1 opacity-60">({count})</span>
                 </button>
               );
+              });
+            })()}
+          </div>
+          {/* 2026-06-14 fix — status chips (All / Open / Closed) were
+              lost in an IA refactor; the filter state existed but no
+              UI control flipped it. Mirrors the kind-chip pattern and
+              uses the same counting strategy via filterFields. Single-
+              runs have no lifecycle so they're excluded when Open or
+              Closed is selected. */}
+          <div className="flex items-center gap-2 text-xs">
+            {(() => {
+              const statusChips: { key: StatusFilter; label: string }[] = [
+                { key: "all", label: "All" },
+                { key: "open", label: "Open" },
+                { key: "closed", label: "Closed" },
+              ];
+              return statusChips.map(({ key, label }) => {
+                // Count rows that would be visible if statusFilter === key,
+                // holding the other filters constant. The actual filter
+                // logic is at line ~140 (status: 'open' / 'closed' only
+                // matches rows with that lifecycle; single_runs are
+                // excluded from those buckets).
+                const count = nonEmptyData!.filter((row) => {
+                  if (key === "open" && row.status !== "open") return false;
+                  if (key === "closed" && row.status !== "closed") return false;
+                  return true;
+                }).length;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setStatusFilter(key)}
+                    className={cn(
+                      "px-2 py-1 rounded-md border transition-colors",
+                      statusFilter === key
+                        ? "border-cs-accent bg-cs-accent/10 text-cs-accent"
+                        : "border-cs-border bg-cs-card text-cs-muted hover:text-cs-text"
+                    )}
+                  >
+                    {label}
+                    <span className="ml-1 opacity-60">({count})</span>
+                  </button>
+                );
               });
             })()}
           </div>
@@ -729,7 +998,8 @@ export default function SessionsList() {
         </div>
       )}
 
-      {sessionsQ.isLoading ? (
+      {sessionsQ.isLoading ||
+      (kindFilter === "team" && teamSharedQ.isLoading) ? (
         <div className="flex items-center justify-center h-32">
           <Loader2 className="animate-spin text-cs-accent" size={28} />
         </div>
@@ -755,14 +1025,28 @@ export default function SessionsList() {
           </p>
         </div>
       ) : filteredSessions.length === 0 ? (
-        <div className="text-center py-12 text-cs-muted">
-          <Search size={36} className="mx-auto mb-3 opacity-50" />
-          <p>No sessions match your search.</p>
-          <p className="text-xs mt-2">
-            Try a different word, or clear the filter to see all{" "}
-            {nonEmptyData!.length} sessions.
-          </p>
-        </div>
+        kindFilter === "team" ? (
+          // teamfilter (#1) — distinct empty state for the Team feed so a
+          // free-tier user (no teams → no rows) or a team with nothing
+          // shared yet doesn't read it as "search returned nothing."
+          <div className="text-center py-12 text-cs-muted">
+            <MessagesSquare size={36} className="mx-auto mb-3 opacity-50" />
+            <p>Nothing shared with your teams yet.</p>
+            <p className="text-xs mt-2 max-w-md mx-auto">
+              Conversations a teammate shares into a team workspace show up
+              here. Share one from any conversation's “Share with team” menu.
+            </p>
+          </div>
+        ) : (
+          <div className="text-center py-12 text-cs-muted">
+            <Search size={36} className="mx-auto mb-3 opacity-50" />
+            <p>No sessions match your search.</p>
+            <p className="text-xs mt-2">
+              Try a different word, or clear the filter to see all{" "}
+              {nonEmptyData!.length} sessions.
+            </p>
+          </div>
+        )
       ) : (
         <div className="space-y-2">
           {filteredSessions.map((s) => {
@@ -776,6 +1060,34 @@ export default function SessionsList() {
                   key={s.id}
                   session={s}
                   onOpen={() => setOpenSelection({ kind: "chat", id: s.id })}
+                />
+              );
+            }
+            // teamfilter (#1) — cloud-shared rows. Route to the read-only
+            // placeholder, threading the synthetic id + which shared kind
+            // so the detail view (and #6's replacement) can decode it.
+            if (
+              s.rowKind === "team_shared_session" ||
+              s.rowKind === "team_shared_war_room" ||
+              s.rowKind === "team_shared_chat"
+            ) {
+              const sharedKind =
+                s.rowKind === "team_shared_session"
+                  ? "session"
+                  : s.rowKind === "team_shared_war_room"
+                    ? "war_room"
+                    : "chat";
+              return (
+                <TeamSharedCard
+                  key={s.id}
+                  session={s}
+                  onOpen={() =>
+                    setOpenSelection({
+                      kind: "team_shared",
+                      id: s.id,
+                      sharedKind,
+                    })
+                  }
                 />
               );
             }

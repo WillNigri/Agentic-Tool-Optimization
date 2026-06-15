@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -12,7 +12,7 @@ import NodePalette from "./loops/NodePalette";
 import NodeConfigPanel from "./loops/NodeConfigPanel";
 import FlowCanvas from "./loops/FlowCanvas";
 import ExecutionOverlay from "./loops/ExecutionOverlay";
-import { promptAgent, saveWorkflow as persistWorkflow, openclawListCronJobs } from "@/lib/api";
+import { promptAgent, openclawListCronJobs } from "@/lib/api";
 import { getSkills, getSkillDetail } from "@/lib/api";
 import { generateWorkflowsFromSkills } from "@/lib/skill-to-workflow";
 import { groupsToWorkflows, cronsToWorkflows, hooksToWorkflows, decorateWorkflowsWithStatus } from "@/lib/loopsAggregator";
@@ -21,11 +21,20 @@ import { listAgents } from "@/lib/agents";
 import { listAgentHooks } from "@/lib/agentHooks";
 import { listCronJobs, migrateWorkflowsToLoops } from "@/lib/tauri-api";
 import { getAgentMetrics } from "@/lib/agentObservability";
+import { create_loop, delete_loop, list_loops, run_loop_by_slug, toggle_loop_enabled, update_loop } from "@/lib/loops-api";
+import { loopToWorkflow, workflowToLoopCreateInput, workflowToLoopUpdateInput } from "./loops/loopMapper";
 import type { SkillDetail } from "@/lib/api";
 import type { Workflow as WorkflowType, FlowNode, FlowEdge } from "./loops/types";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export default function LoopComposer() {
   const { t } = useTranslation();
+  const [legacyWorkflowCount, setLegacyWorkflowCount] = useState<number | null>(null);
+  // Codex R2 — guards the migration UI so concurrent fires can't race
+  // (startup auto-check + button click + Run during in-flight migration).
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationError, setMigrationError] = useState<string | null>(null);
   const {
     mode,
     getActiveWorkflow,
@@ -33,12 +42,16 @@ export default function LoopComposer() {
     selectNode,
     deleteNode,
     saveWorkflow: markSaved,
+    undo,
+    redo,
     startExecution,
     updateNodeExecStatus,
     appendOutput,
     finishExecution,
     execution,
     workflows,
+    toggleWorkflow,
+    deleteWorkflow,
   } = useAutomationStore();
 
   // Load skill-based workflows (gstack etc.) on mount
@@ -119,6 +132,36 @@ export default function LoopComposer() {
       .catch((err) => {
         console.warn("[ATO] Loop Composer migration failed:", err);
       });
+  }, []);
+
+  const refreshLoops = useCallback(() => {
+    list_loops()
+      .then((loops) => {
+        const persisted = loops.map(loopToWorkflow);
+        const store = useAutomationStore.getState();
+        const nonPersisted = store.workflows.filter((w) => w.source !== "manual" || !UUID_RE.test(w.id));
+        store.loadWorkflows([...persisted, ...nonPersisted]);
+      })
+      .catch((err) => {
+        console.warn("[ATO] Loop Composer load failed:", err);
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshLoops();
+  }, [refreshLoops]);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("ato-workflows-migration-dismissed") === "1") return;
+      const raw = localStorage.getItem("ato-workflows");
+      if (!raw || !raw.trim()) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed) || parsed.length === 0) return;
+      setLegacyWorkflowCount(parsed.length);
+    } catch (err) {
+      console.warn("[ATO] Loop Composer localStorage migration check failed:", err);
+    }
   }, []);
 
   useEffect(() => {
@@ -360,21 +403,66 @@ export default function LoopComposer() {
   const workflow = getActiveWorkflow();
   const selectedNode = workflow.nodes.find((n) => n.id === selectedNodeId) || null;
 
-  // Save workflow to disk
+  const replaceWorkflow = useCallback((nextWorkflow: WorkflowType, priorId?: string) => {
+    const store = useAutomationStore.getState();
+    const currentId = priorId ?? nextWorkflow.id;
+    const nextWorkflows = store.workflows.map((item) => (item.id === currentId ? nextWorkflow : item));
+    store.loadWorkflows(nextWorkflows);
+    store.setActiveWorkflowId(nextWorkflow.id);
+  }, []);
+
+  // Save workflow to loops table
   const handleSave = useCallback(async () => {
+    if (workflow.triggerKind === "cron" && !workflow.triggerConfig?.cron?.trim()) {
+      window.alert(t("loopComposer.trigger.validationCron"));
+      return;
+    }
+    if (workflow.triggerKind === "event" && !workflow.triggerConfig?.event?.trim()) {
+      window.alert(t("loopComposer.trigger.validationEvent"));
+      return;
+    }
     try {
-      await persistWorkflow(workflow);
+      if (UUID_RE.test(workflow.id)) {
+        const saved = await update_loop(workflow.id, workflowToLoopUpdateInput(workflow));
+        replaceWorkflow(loopToWorkflow(saved));
+      } else {
+        const created = await create_loop(workflowToLoopCreateInput(workflow));
+        replaceWorkflow(loopToWorkflow(created), workflow.id);
+      }
       markSaved();
     } catch {
-      // localStorage fallback is handled in tauri-api
       markSaved();
     }
-  }, [workflow, markSaved]);
+  }, [workflow, markSaved, replaceWorkflow, t]);
+
+  const handleToggle = useCallback(async () => {
+    if (!workflow.id) return;
+    if (!UUID_RE.test(workflow.id)) {
+      toggleWorkflow(workflow.id);
+      return;
+    }
+    const enabled = !workflow.enabled;
+    const saved = await toggle_loop_enabled(workflow.id, enabled);
+    replaceWorkflow(loopToWorkflow(saved));
+  }, [workflow, toggleWorkflow, replaceWorkflow]);
+
+  const handleDelete = useCallback(async () => {
+    if (!workflow.id) return;
+    if (UUID_RE.test(workflow.id)) {
+      await delete_loop(workflow.id);
+    }
+    deleteWorkflow(workflow.id);
+  }, [workflow, deleteWorkflow]);
 
   // Execute workflow via Claude CLI
   const handleRun = useCallback(async () => {
     if (execution.running) return;
     if (workflow.nodes.length === 0) return;
+    // Codex R2 — block Run while migration is in flight: the migration
+    // can rewrite the workflow's underlying row, and firing the loop
+    // mid-migration would risk dispatching against stale data or a
+    // half-written loops entry.
+    if (isMigrating) return;
 
     const prompt = serializeWorkflowToPrompt(workflow);
     startExecution();
@@ -385,6 +473,25 @@ export default function LoopComposer() {
     }
 
     try {
+      // v2.14 step 3 — for loops that are persisted in the v2.14 Loop
+      // table (UUID id), fire the real `ato loop run <slug>` engine
+      // via the new run_loop_by_slug Tauri command. The CLI writes
+      // loop_runs + loop_run_steps with attribution. Fall back to the
+      // legacy promptAgent shim for browser-only workflows (cron/skill
+      // imports) that haven't been persisted to the Loop table yet.
+      const isPersistedLoop = typeof workflow.id === "string"
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workflow.id);
+
+      if (isPersistedLoop) {
+        const result = await run_loop_by_slug(workflow.id);
+        for (const node of workflow.nodes) {
+          updateNodeExecStatus(node.id, "completed");
+        }
+        appendOutput(`Loop run started — run_id=${result.runId} status=${result.status}`);
+        finishExecution();
+        return;
+      }
+
       // Use the dominant runtime from action nodes, fallback to claude
       const actionNodes = workflow.nodes.filter((n) => n.type === "action" || n.type === "process");
       const runtime = actionNodes.find((n) => n.runtime)?.runtime || "claude";
@@ -422,7 +529,23 @@ export default function LoopComposer() {
       appendOutput(message);
       finishExecution(message);
     }
-  }, [workflow, execution.running, startExecution, updateNodeExecStatus, appendOutput, finishExecution]);
+  }, [workflow, execution.running, isMigrating, startExecution, updateNodeExecStatus, appendOutput, finishExecution]);
+
+  // Undo/redo keybinds — scoped to the composer. The handler lives on the
+  // root container (tabIndex below) so it only fires when focus is inside
+  // the composer, never globally. We let native field-level undo win while
+  // the user is typing in an input/textarea/select.
+  const composerRef = useRef<HTMLDivElement>(null);
+  const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod || e.key.toLowerCase() !== "z") return;
+    const target = e.target as HTMLElement;
+    const tag = target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return;
+    e.preventDefault();
+    if (e.shiftKey) redo();
+    else undo();
+  }, [undo, redo]);
 
   if (workflows.length === 0) {
     return (
@@ -453,9 +576,88 @@ export default function LoopComposer() {
   }
 
   return (
-    <div className="flex flex-col h-full w-full" style={{ background: "#0a0a0f" }}>
+    <div
+      ref={composerRef}
+      tabIndex={0}
+      onKeyDown={handleComposerKeyDown}
+      className="flex flex-col h-full w-full outline-none"
+      style={{ background: "#0a0a0f" }}
+    >
+      {legacyWorkflowCount !== null && (
+        <div className="flex items-center justify-between gap-3 border-b border-[#2a2a3a] bg-[#16161e] px-4 py-2">
+          <p className="text-sm text-[#e8e8f0]">
+            {isMigrating
+              ? t("loopComposer.migration.inProgress", { count: legacyWorkflowCount, defaultValue: "Migrating {{count}} workflows…" })
+              : migrationError
+                ? t("loopComposer.migration.error", { defaultValue: "Migration failed — try again." })
+                : t("loopComposer.migration.banner", { count: legacyWorkflowCount })}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isMigrating}
+              onClick={async () => {
+                if (isMigrating) return;
+                setIsMigrating(true);
+                setMigrationError(null);
+                try {
+                  const result = await migrateWorkflowsToLoops();
+                  // Codex R2 — only clear localStorage when EVERY legacy
+                  // entry was migrated. If any were skipped (dup, parse
+                  // error, etc.) keep them around so the user can retry.
+                  const migrated = (result as { migrated?: number } | null | undefined)?.migrated ?? 0;
+                  const skipped = (result as { skipped?: number } | null | undefined)?.skipped ?? 0;
+                  if (skipped === 0 && migrated > 0) {
+                    localStorage.removeItem("ato-workflows");
+                    setLegacyWorkflowCount(null);
+                  } else if (skipped > 0) {
+                    setMigrationError(`${migrated} migrated, ${skipped} skipped`);
+                  } else {
+                    // No rows actually migrated; treat as dismiss.
+                    localStorage.removeItem("ato-workflows");
+                    setLegacyWorkflowCount(null);
+                  }
+                  refreshLoops();
+                } catch (err) {
+                  setMigrationError(err instanceof Error ? err.message : String(err));
+                } finally {
+                  setIsMigrating(false);
+                }
+              }}
+              className={cn(
+                "rounded-md border px-3 py-1.5 text-xs transition-colors",
+                isMigrating
+                  ? "border-[#2a2a3a] bg-[#0e0e16] text-[#8888a0] cursor-not-allowed"
+                  : "border-[#00FFB2]/40 bg-[#00FFB210] text-[#00FFB2] hover:bg-[#00FFB220]"
+              )}
+            >
+              {isMigrating
+                ? t("loopComposer.migration.migrating", { defaultValue: "Migrating…" })
+                : t("loopComposer.migration.migrate")}
+            </button>
+            <button
+              type="button"
+              disabled={isMigrating}
+              onClick={() => {
+                if (isMigrating) return;
+                localStorage.setItem("ato-workflows-migration-dismissed", "1");
+                setLegacyWorkflowCount(null);
+              }}
+              className={cn(
+                "rounded-md border border-[#2a2a3a] px-3 py-1.5 text-xs transition-colors",
+                isMigrating
+                  ? "text-[#3a3a4a] cursor-not-allowed"
+                  : "text-[#8888a0] hover:text-[#e8e8f0]"
+              )}
+            >
+              {t("loopComposer.migration.dismiss")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
-      <WorkflowToolbar onRun={handleRun} onSave={handleSave} />
+      <WorkflowToolbar onRun={handleRun} onSave={handleSave} onToggle={handleToggle} onDelete={handleDelete} />
 
       <div className="flex flex-1 overflow-hidden">
         {/* Node Palette (edit mode only) */}
@@ -465,10 +667,12 @@ export default function LoopComposer() {
         <FlowCanvas />
 
         {/* Config Panel (edit mode, when node selected) */}
-        {mode === "edit" && selectedNode && (
+        {mode === "edit" && (
           <NodeConfigPanel
             node={selectedNode}
+            workflow={workflow}
             onDelete={() => {
+              if (!selectedNode) return;
               if (confirm(t("automation.builder.confirmDelete", "Delete this node?"))) {
                 deleteNode(selectedNode.id);
               }

@@ -299,10 +299,15 @@ pub fn append_turn(
         )
         .unwrap_or(0);
     let now = chrono::Utc::now().to_rfc3339();
+    // Per-message attribution: every turn carries who/where on its own
+    // row (FOLLOWUPS #3). Detect at append-time so live-attached agents
+    // mid-conversation show up correctly per-message instead of
+    // inheriting the session-open initiator.
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
-        "INSERT INTO session_turns (session_id, turn_index, role, text, runtime, created_at, agent_slug)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![session_id, next_index, role, text, runtime, now, agent_slug],
+        "INSERT INTO session_turns (session_id, turn_index, role, text, runtime, created_at, agent_slug, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![session_id, next_index, role, text, runtime, now, agent_slug, attribution.kind, attribution.surface, attribution.id],
     )?;
     Ok(())
 }
@@ -392,10 +397,12 @@ pub fn create_inner(
         Some(pid) if !pid.is_empty() => resolve_project_id(conn, pid),
         _ => None,
     };
+    // v2.16 attribution — resolve initiator provenance for the session row.
+    let attribution = crate::attribution::Attribution::detect();
     conn.execute(
-        "INSERT INTO sessions (id, runtime, agent_slug, runtime_session_id, title, created_at, last_used_at, turn_count, project_id)
-         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?5, 0, ?6)",
-        rusqlite::params![id, runtime, agent_slug, title, now, resolved_project_id],
+        "INSERT INTO sessions (id, runtime, agent_slug, runtime_session_id, title, created_at, last_used_at, turn_count, project_id, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?5, 0, ?6, ?7, ?8, ?9)",
+        rusqlite::params![id, runtime, agent_slug, title, now, resolved_project_id, attribution.kind, attribution.surface, attribution.id],
     )
     .context("insert session row")?;
     Ok(Session {
@@ -882,7 +889,10 @@ mod tests {
                 last_used_at TEXT NOT NULL,
                 turn_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'open',
-                project_id TEXT
+                project_id TEXT,
+                initiator_kind TEXT,
+                client_surface TEXT,
+                initiator_id TEXT
              );
              INSERT INTO projects (id, name) VALUES ('proj-abc', 'ATO');",
         )
@@ -914,7 +924,10 @@ mod tests {
                 last_used_at TEXT NOT NULL,
                 turn_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'open',
-                project_id TEXT
+                project_id TEXT,
+                initiator_kind TEXT,
+                client_surface TEXT,
+                initiator_id TEXT
              );",
         )
         .unwrap();

@@ -256,6 +256,10 @@ pub struct CreditBurnSummary {
     pub api_key_cost_usd: f64,    // real billing (user's API account)
     pub subscription_cost_usd: f64, // API-equivalent of subscription-path dispatches
     pub rows: Vec<RuntimeCostRow>,
+    /// Number of dispatches in the window that have token data but no cost
+    /// (model not in the pricing table). UI can badge this so users know
+    /// cost figures are incomplete rather than silently under-reported.
+    pub unpriced_dispatches: i64,
 }
 
 /// Aggregate execution_logs cost for the current month (UTC). Splits
@@ -330,6 +334,28 @@ pub fn get_credit_burn_summary() -> Result<CreditBurnSummary, String> {
         }
     }
 
+    // Count dispatches that have a model name and token data but no
+    // estimated cost — meaning the model has no pricing entry.
+    // The AND model IS NOT NULL / != '' guard ensures rows with a
+    // missing model name (where cost is unknowable regardless) are
+    // excluded, matching the badge's documented meaning.
+    // Backend-only; no React changes required (badge driven from this field).
+    let unpriced_dispatches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+               FROM execution_logs
+              WHERE created_at >= ?1
+                AND created_at <  ?2
+                AND status = 'success'
+                AND cost_usd_estimated IS NULL
+                AND tokens_in IS NOT NULL
+                AND model IS NOT NULL
+                AND model != ''",
+            [&since, &until],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
     Ok(CreditBurnSummary {
         since,
         until,
@@ -338,6 +364,7 @@ pub fn get_credit_burn_summary() -> Result<CreditBurnSummary, String> {
         api_key_cost_usd: api_key_cost,
         subscription_cost_usd: subscription_cost,
         rows,
+        unpriced_dispatches,
     })
 }
 

@@ -12,23 +12,124 @@ import {
   Plus,
   Trash2,
   Globe,
+  ClipboardPaste,
+  AlignVerticalJustifyStart,
+  X,
 } from "lucide-react";
 import { SERVICE_COLORS, SERVICE_ICONS } from "./constants";
 import { useAutomationStore } from "@/stores/useLoopStore";
-import type { Workflow, BuilderMode } from "./types";
+import type { WorkflowTriggerKind, FlowNode, FlowEdge } from "./types";
 
 interface WorkflowToolbarProps {
   onRun: () => void;
   onSave: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
 }
 
-export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps) {
+// Paste-from-JSON: validate a pasted blob against the Workflow graph shape
+// ({ nodes: [], edges: [] }). Returns normalized nodes/edges (missing
+// presentational fields like stats/status are defaulted) or an i18n error
+// code the modal renders inline.
+type PasteResult =
+  | { ok: true; nodes: FlowNode[]; edges: FlowEdge[] }
+  | { ok: false; code: "errorJson" | "errorShape" | "errorNode" | "errorEdge" };
+
+// Codex R1: tighten paste-from-JSON validation. The previous shape spread
+// raw user input into the FlowNode/FlowEdge structurally — accepted any
+// extra fields, no node-id ↔ edge-endpoint integrity check, no allowlist
+// on node.type. A malicious or careless paste could land junk fields that
+// crash downstream consumers. Now: strict allowlist on each field, no
+// spread of arbitrary keys, and edges must reference declared node ids.
+const ALLOWED_NODE_TYPES = new Set([
+  "action",
+  "process",
+  "trigger",
+  "condition",
+  "run",
+  "diagnose",
+  "apply",
+  "review",
+  "war_room",
+  "score",
+  "input",
+  "methodology_run",
+]);
+
+function parseWorkflowJson(text: string): PasteResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return { ok: false, code: "errorJson" };
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return { ok: false, code: "errorShape" };
+  }
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.nodes) || !Array.isArray(obj.edges)) {
+    return { ok: false, code: "errorShape" };
+  }
+
+  const nodes: FlowNode[] = [];
+  const seenIds = new Set<string>();
+  for (const raw of obj.nodes) {
+    if (typeof raw !== "object" || raw === null) return { ok: false, code: "errorNode" };
+    const n = raw as Record<string, unknown>;
+    if (typeof n.id !== "string" || n.id.length === 0 || n.id.length > 128) {
+      return { ok: false, code: "errorNode" };
+    }
+    if (seenIds.has(n.id)) return { ok: false, code: "errorNode" };
+    seenIds.add(n.id);
+    const declaredType = typeof n.type === "string" && ALLOWED_NODE_TYPES.has(n.type)
+      ? (n.type as FlowNode["type"])
+      : ("process" as FlowNode["type"]);
+    nodes.push({
+      id: n.id,
+      type: declaredType,
+      label: typeof n.label === "string" ? n.label.slice(0, 200) : n.id,
+      description: typeof n.description === "string" ? n.description.slice(0, 2000) : "",
+      x: typeof n.x === "number" && Number.isFinite(n.x) ? n.x : 0,
+      y: typeof n.y === "number" && Number.isFinite(n.y) ? n.y : 0,
+      runtime: typeof n.runtime === "string" ? (n.runtime as FlowNode["runtime"]) : undefined,
+      status: "idle",
+      stats: { executions: 0, errors: 0, avgTimeMs: 0 },
+      // Allow a single nested `config` object; reject anything else
+      // (no top-level junk spread).
+      config: typeof n.config === "object" && n.config !== null && !Array.isArray(n.config)
+        ? (n.config as FlowNode["config"])
+        : undefined,
+    } as FlowNode);
+  }
+
+  const edges: FlowEdge[] = [];
+  for (const raw of obj.edges) {
+    if (typeof raw !== "object" || raw === null) return { ok: false, code: "errorEdge" };
+    const e = raw as Record<string, unknown>;
+    if (typeof e.from !== "string" || typeof e.to !== "string") return { ok: false, code: "errorEdge" };
+    // Edge endpoints must reference declared nodes — a dangling edge
+    // would break canvas rendering and could hide a typo from the user.
+    if (!seenIds.has(e.from) || !seenIds.has(e.to)) return { ok: false, code: "errorEdge" };
+    edges.push({
+      from: e.from,
+      to: e.to,
+      label: typeof e.label === "string" ? e.label.slice(0, 200) : undefined,
+    } as FlowEdge);
+  }
+
+  return { ok: true, nodes, edges };
+}
+
+export default function WorkflowToolbar({ onRun, onSave, onToggle, onDelete }: WorkflowToolbarProps) {
   const { t } = useTranslation();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [newName, setNewName] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [showPasteDialog, setShowPasteDialog] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
 
   const {
     mode,
@@ -36,11 +137,13 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
     workflows,
     activeWorkflowId,
     setActiveWorkflowId,
-    toggleWorkflow,
+    updateActiveWorkflow,
     dirty,
     createWorkflow,
-    deleteWorkflow,
     execution,
+    moveNode,
+    endMoveBatch,
+    selectNode,
   } = useAutomationStore();
 
   const active = workflows.find((w) => w.id === activeWorkflowId)!;
@@ -56,7 +159,50 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
 
   function handleDelete() {
     if (!confirm(t("automation.builder.confirmDeleteWorkflow", "Delete this workflow?"))) return;
-    deleteWorkflow(activeWorkflowId);
+    onDelete();
+  }
+
+  function setTriggerKind(triggerKind: WorkflowTriggerKind) {
+    const nextConfig: Record<string, string> | null =
+      triggerKind === "manual"
+        ? null
+        : triggerKind === "cron"
+          ? { cron: active.triggerConfig?.cron ?? "" }
+          : { event: active.triggerConfig?.event ?? "" };
+    updateActiveWorkflow({ triggerKind, triggerConfig: nextConfig });
+  }
+
+  function setTriggerField(key: "cron" | "event", value: string) {
+    updateActiveWorkflow({
+      triggerConfig: {
+        ...(active.triggerConfig ?? {}),
+        [key]: value,
+      },
+    });
+  }
+
+  function handlePasteSubmit() {
+    const result = parseWorkflowJson(pasteText);
+    if (!result.ok) {
+      setPasteError(t(`loopComposer.pasteJson.${result.code}`));
+      return;
+    }
+    // Replace the current canvas. Goes through updateActiveWorkflow so the
+    // swap lands in one undo snapshot.
+    selectNode(null);
+    updateActiveWorkflow({ nodes: result.nodes, edges: result.edges });
+    setPasteText("");
+    setPasteError(null);
+    setShowPasteDialog(false);
+  }
+
+  // Auto-layout: simple top-down stack. Sort by current y, then restack at
+  // a fixed vertical rhythm, keeping each node's x. Uses the existing
+  // moveNode position path; endMoveBatch closes the single undo snapshot.
+  function handleAutoLayout() {
+    const sorted = [...active.nodes].sort((a, b) => a.y - b.y);
+    sorted.forEach((node, i) => moveNode(node.id, node.x, i * 120));
+    endMoveBatch();
   }
 
   return (
@@ -72,6 +218,37 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
       </button>
 
       <p className="text-xs text-[#8888a0] flex-1 truncate">{active.description}</p>
+
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-[11px] text-[#8888a0]">{t("loopComposer.trigger.label")}</span>
+        <select
+          value={active.triggerKind ?? "manual"}
+          onChange={(e) => setTriggerKind(e.target.value as WorkflowTriggerKind)}
+          className="rounded-md border border-[#2a2a3a] bg-[#16161e] px-2 py-1 text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+        >
+          <option value="manual">{t("loopComposer.trigger.manual")}</option>
+          <option value="cron">{t("loopComposer.trigger.cron")}</option>
+          <option value="event">{t("loopComposer.trigger.event")}</option>
+        </select>
+        {active.triggerKind === "cron" && (
+          <input
+            type="text"
+            value={active.triggerConfig?.cron ?? ""}
+            onChange={(e) => setTriggerField("cron", e.target.value)}
+            placeholder={t("loopComposer.trigger.cronPlaceholder")}
+            className="w-40 rounded-md border border-[#2a2a3a] bg-[#16161e] px-2 py-1 text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+          />
+        )}
+        {active.triggerKind === "event" && (
+          <input
+            type="text"
+            value={active.triggerConfig?.event ?? ""}
+            onChange={(e) => setTriggerField("event", e.target.value)}
+            placeholder={t("loopComposer.trigger.eventPlaceholder")}
+            className="w-40 rounded-md border border-[#2a2a3a] bg-[#16161e] px-2 py-1 text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+          />
+        )}
+      </div>
 
       {/* Mode toggle */}
       <div className="flex items-center rounded-lg border border-[#2a2a3a] overflow-hidden" style={{ background: "#16161e" }}>
@@ -99,7 +276,7 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
 
       {/* Enable/disable toggle */}
       <button
-        onClick={() => toggleWorkflow(activeWorkflowId)}
+        onClick={onToggle}
         className="flex items-center gap-1.5 text-xs shrink-0"
       >
         {active.enabled ? (
@@ -129,6 +306,27 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
           <Save size={12} />
           {t("automation.builder.save", "Save")}
         </button>
+      )}
+
+      {/* Auto-layout + Paste JSON (edit mode) */}
+      {mode === "edit" && (
+        <>
+          <button
+            onClick={handleAutoLayout}
+            title={t("loopComposer.autoLayout.button")}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-colors border border-[#2a2a3a] text-[#8888a0] hover:border-[#00FFB2] hover:text-[#00FFB2]"
+          >
+            <AlignVerticalJustifyStart size={12} />
+            {t("loopComposer.autoLayout.button")}
+          </button>
+          <button
+            onClick={() => { setPasteError(null); setShowPasteDialog(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-colors border border-[#2a2a3a] text-[#8888a0] hover:border-[#00FFB2] hover:text-[#00FFB2]"
+          >
+            <ClipboardPaste size={12} />
+            {t("loopComposer.pasteJson.button")}
+          </button>
+        </>
       )}
 
       {/* Run button */}
@@ -162,6 +360,72 @@ export default function WorkflowToolbar({ onRun, onSave }: WorkflowToolbarProps)
         <span className="text-[10px] text-[#8888a0] shrink-0">
           {t("automation.lastRun", "Last run")}: {active.lastRun}
         </span>
+      )}
+
+      {/* Paste JSON modal */}
+      {showPasteDialog && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          onClick={() => setShowPasteDialog(false)}
+        >
+          <div
+            className="w-[560px] max-w-[90vw] rounded-xl border border-[#2a2a3a] shadow-2xl"
+            style={{ background: "#16161e" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-[#2a2a3a] px-4 py-3">
+              <h3 className="text-sm font-semibold text-[#e8e8f0]">
+                {t("loopComposer.pasteJson.title")}
+              </h3>
+              <button
+                onClick={() => setShowPasteDialog(false)}
+                className="flex h-6 w-6 items-center justify-center rounded-md text-[#8888a0] hover:text-[#e8e8f0]"
+                aria-label={t("loopComposer.pasteJson.cancel")}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="p-4">
+              <p className="mb-2 text-xs text-[#8888a0]">
+                {t("loopComposer.pasteJson.description")}
+              </p>
+              <textarea
+                autoFocus
+                value={pasteText}
+                onChange={(e) => { setPasteText(e.target.value); if (pasteError) setPasteError(null); }}
+                placeholder={t("loopComposer.pasteJson.placeholder")}
+                rows={12}
+                spellCheck={false}
+                className="w-full resize-none rounded-md border border-[#2a2a3a] bg-[#0a0a0f] px-3 py-2 font-mono text-xs text-[#e8e8f0] focus:outline-none focus:border-[#00FFB2] transition-colors"
+              />
+              {pasteError && (
+                <p className="mt-2 rounded-md border border-[#FF4466]/40 bg-[#FF446610] px-3 py-2 text-xs text-[#FF4466]">
+                  {pasteError}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-[#2a2a3a] px-4 py-3">
+              <button
+                onClick={() => setShowPasteDialog(false)}
+                className="rounded-md border border-[#2a2a3a] px-3 py-1.5 text-xs text-[#8888a0] hover:text-[#e8e8f0] transition-colors"
+              >
+                {t("loopComposer.pasteJson.cancel")}
+              </button>
+              <button
+                onClick={handlePasteSubmit}
+                disabled={!pasteText.trim()}
+                className={cn(
+                  "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
+                  pasteText.trim()
+                    ? "border-[#00FFB240] bg-[#00FFB210] text-[#00FFB2] hover:bg-[#00FFB220]"
+                    : "border-[#2a2a3a] text-[#3a3a4a] cursor-not-allowed"
+                )}
+              >
+                {t("loopComposer.pasteJson.submit")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Dropdown menu */}

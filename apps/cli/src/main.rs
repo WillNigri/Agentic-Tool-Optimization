@@ -35,6 +35,10 @@ mod tier;
 // binary for keychain-bound API providers.
 mod cli_path;
 mod review_tools;
+// v2.16 PR-B — initiator attribution detection (kind / surface / id).
+// Env-first resolution of who/what started a dispatch; populates the
+// PR-A schema columns at the edge. See module header.
+mod attribution;
 // v2.15.4 — pause-and-wake persistence + lifecycle (war_room E063A89E).
 // Authoritative storage for paused_dispatches table; loop_runs has
 // mirror columns for fast queries. See module header for the full design.
@@ -143,6 +147,24 @@ enum Commands {
     /// criteria. See `docs/v2.16-missions.md` for the design.
     #[command(name = "missions")]
     Missions(commands::missions::MissionArgs),
+    /// Log a Claude Code subagent (code-writer / cso / pr-reviewer /
+    /// etc.) run so it appears in the same Sessions feed as `ato
+    /// dispatch` runs. Bracket each Agent tool invocation:
+    /// `ato subagent log create` before, `ato subagent log finish` after.
+    /// Multi-agent fan-outs share a `--war-room-id` and can be summarized
+    /// via `ato war-rooms close <id>`.
+    #[command(name = "subagent")]
+    Subagent(commands::subagent::SubagentArgs),
+    /// v2.17 — Bundles: packaged inference results. A bundle = a source
+    /// row (mission / methodology run / loop run / session / dispatch) +
+    /// its dispatches + judge scores + artifact files + manifest.
+    /// Exportable as a tarball for sharing externally.
+    #[command(name = "bundles")]
+    Bundles(commands::bundles::BundlesArgs),
+    /// v2.17 — Inputs: stored markdown / text / json context bundles
+    /// addressable by slug, so agent / loop / methodology configs can
+    /// reference a named prompt scaffold instead of duplicating it.
+    Inputs(commands::inputs::InputsArgs),
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
@@ -680,6 +702,54 @@ enum SessionsSub {
     /// continue the conversation; the next close will refresh the
     /// summary with the new turns.
     Reopen { id: String },
+
+    // ── v2.15 Wave 4 — team-shared resource CLI parity ────────────────────
+
+    /// v2.15 Wave 4 — share this session with a team.
+    #[command(name = "share")]
+    Share {
+        /// Session id (UUID) to share.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — remove a team share for this session.
+    #[command(name = "unshare")]
+    Unshare {
+        /// Session id (UUID) to unshare.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — list sessions shared with this team.
+    #[command(name = "list-shared")]
+    ListShared {
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — append a new event to a team-shared session.
+    #[command(name = "append-event")]
+    AppendEvent {
+        /// Session id (UUID).
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+        /// Event kind, e.g. `turn_appended`, `judge_verdict`.
+        #[arg(long)]
+        kind: String,
+        /// Payload as inline JSON, or @path/to/file.json.
+        #[arg(long)]
+        json: String,
+        /// Use the E2E two-step encrypted flow.
+        /// NOTE: Refused in Wave 4 with a clear error; use the desktop
+        /// app or omit --encrypted for plaintext.
+        #[arg(long)]
+        encrypted: bool,
+    },
 }
 
 /// v2.7.13 — war-room close lifecycle subcommands. Mirrors the shape
@@ -715,6 +785,54 @@ enum WarRoomsSub {
     Reopen { id: String },
     /// Print the war room snapshot (status, seat count, last summary).
     Get { id: String },
+
+    // ── v2.15 Wave 4 — team-shared resource CLI parity ────────────────────
+
+    /// v2.15 Wave 4 — share this war room with a team.
+    #[command(name = "share")]
+    Share {
+        /// War room id (UUID) to share.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — remove a team share for this war room.
+    #[command(name = "unshare")]
+    Unshare {
+        /// War room id (UUID) to unshare.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — list war rooms shared with this team.
+    #[command(name = "list-shared")]
+    ListShared {
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — append a new event to a team-shared war room.
+    #[command(name = "append-event")]
+    AppendEvent {
+        /// War room id (UUID).
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+        /// Event kind, e.g. `turn_appended`, `judge_verdict`.
+        #[arg(long)]
+        kind: String,
+        /// Payload as inline JSON, or @path/to/file.json.
+        #[arg(long)]
+        json: String,
+        /// Use the E2E two-step encrypted flow.
+        /// NOTE: Refused in Wave 4 with a clear error; use the desktop
+        /// app or omit --encrypted for plaintext.
+        #[arg(long)]
+        encrypted: bool,
+    },
 }
 
 /// v2.7.13 — chat-thread close lifecycle subcommands. Same shape as
@@ -747,6 +865,54 @@ enum ChatsSub {
     Reopen { id: String },
     /// Print the chat thread snapshot.
     Get { id: String },
+
+    // ── v2.15 Wave 4 — team-shared resource CLI parity ────────────────────
+
+    /// v2.15 Wave 4 — share this chat with a team.
+    #[command(name = "share")]
+    Share {
+        /// Chat thread id (UUID) to share.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — remove a team share for this chat.
+    #[command(name = "unshare")]
+    Unshare {
+        /// Chat thread id (UUID) to unshare.
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — list chats shared with this team.
+    #[command(name = "list-shared")]
+    ListShared {
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+    },
+    /// v2.15 Wave 4 — append a new event to a team-shared chat.
+    #[command(name = "append-event")]
+    AppendEvent {
+        /// Chat thread id (UUID).
+        id: String,
+        /// Team slug or UUID.
+        #[arg(long)]
+        team: String,
+        /// Event kind, e.g. `turn_appended`, `judge_verdict`.
+        #[arg(long)]
+        kind: String,
+        /// Payload as inline JSON, or @path/to/file.json.
+        #[arg(long)]
+        json: String,
+        /// Use the E2E two-step encrypted flow.
+        /// NOTE: Refused in Wave 4 with a clear error; use the desktop
+        /// app or omit --encrypted for plaintext.
+        #[arg(long)]
+        encrypted: bool,
+    },
 }
 
 /// v2.7.14 master_key_v2 PR-6 — CLI mirror of the master-key
@@ -1277,6 +1443,18 @@ fn main() -> Result<()> {
         }
         Commands::Missions(args) => {
             commands::missions::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Subagent(args) => {
+            commands::subagent::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Bundles(args) => {
+            commands::bundles::run(args, &db_path, &opts)?;
+            return Ok(());
+        }
+        Commands::Inputs(args) => {
+            commands::inputs::run(args, &db_path, &opts)?;
             return Ok(());
         }
         Commands::Traces(args) => {
@@ -1822,6 +2000,23 @@ fn main() -> Result<()> {
                 let conn = db::open_readwrite(&db_path)?;
                 commands::sessions::reopen(&conn, &id, &opts)
             }
+            // v2.15 Wave 4 — team-shared session verbs.
+            SessionsSub::Share { id, team } => {
+                commands::team_shared::share_resource("sessions", "session_id", &id, &team, &opts)
+            }
+            SessionsSub::Unshare { id, team } => {
+                commands::team_shared::unshare_resource("sessions", &id, &team, &opts)
+            }
+            SessionsSub::ListShared { team } => {
+                commands::team_shared::list_shared("sessions", &team, &opts)
+            }
+            SessionsSub::AppendEvent { id, team, kind, json, encrypted } => {
+                let payload = commands::team_shared::parse_json_arg(&json)?;
+                commands::team_shared::append_event(
+                    "sessions", &id, &team, &kind, payload, encrypted, &opts,
+                )?;
+                Ok(())
+            }
         },
         Commands::WarRooms { sub } => match sub {
             WarRoomsSub::Close {
@@ -1849,6 +2044,25 @@ fn main() -> Result<()> {
                 commands::war_rooms::reopen(&conn, &id, &opts)
             }
             WarRoomsSub::Get { id } => commands::war_rooms::get(&ro_conn()?, &id, &opts),
+            // v2.15 Wave 4 — team-shared war-room verbs.
+            WarRoomsSub::Share { id, team } => {
+                commands::team_shared::share_resource(
+                    "war-rooms", "war_room_id", &id, &team, &opts,
+                )
+            }
+            WarRoomsSub::Unshare { id, team } => {
+                commands::team_shared::unshare_resource("war-rooms", &id, &team, &opts)
+            }
+            WarRoomsSub::ListShared { team } => {
+                commands::team_shared::list_shared("war-rooms", &team, &opts)
+            }
+            WarRoomsSub::AppendEvent { id, team, kind, json, encrypted } => {
+                let payload = commands::team_shared::parse_json_arg(&json)?;
+                commands::team_shared::append_event(
+                    "war-rooms", &id, &team, &kind, payload, encrypted, &opts,
+                )?;
+                Ok(())
+            }
         },
         Commands::Chats { sub } => match sub {
             ChatsSub::Close {
@@ -1876,6 +2090,25 @@ fn main() -> Result<()> {
                 commands::chats::reopen(&conn, &id, &opts)
             }
             ChatsSub::Get { id } => commands::chats::get(&ro_conn()?, &id, &opts),
+            // v2.15 Wave 4 — team-shared chat verbs.
+            ChatsSub::Share { id, team } => {
+                commands::team_shared::share_resource(
+                    "chats", "chat_thread_id", &id, &team, &opts,
+                )
+            }
+            ChatsSub::Unshare { id, team } => {
+                commands::team_shared::unshare_resource("chats", &id, &team, &opts)
+            }
+            ChatsSub::ListShared { team } => {
+                commands::team_shared::list_shared("chats", &team, &opts)
+            }
+            ChatsSub::AppendEvent { id, team, kind, json, encrypted } => {
+                let payload = commands::team_shared::parse_json_arg(&json)?;
+                commands::team_shared::append_event(
+                    "chats", &id, &team, &kind, payload, encrypted, &opts,
+                )?;
+                Ok(())
+            }
         },
         Commands::MasterKey { sub } => match sub {
             MasterKeySub::Export { confirm } => commands::master_key::export(confirm, &opts),

@@ -44,7 +44,9 @@
     "runsHistory": "Historial",
     "runsSchedules": "Programaciones",
     "runsAutomations": "Compositor de Loops",
+    "runsLoops": "Bucles",
     "runsHooks": "Hooks",
+    "runsMissions": "Misiones",
     "insightsHealth": "Salud",
     "insightsAnalytics": "Analiticas",
     "insightsContext": "Contexto",
@@ -145,15 +147,23 @@
     "openWizard": "Abrir Crear Agente"
   },
   "common": {
-    "send": "Enviar",
+    "save": "Guardar",
     "cancel": "Cancelar",
     "close": "Cerrar",
-    "copy": "Copiar",
-    "copied": "Copiado",
-    "back": "Atras",
+    "create": "Crear",
+    "update": "Actualizar",
     "delete": "Eliminar",
-    "remove": "Quitar",
-    "save": "Guardar"
+    "confirm": "Confirmar",
+    "loading": "Cargando...",
+    "error": "Error",
+    "success": "Exito",
+    "retry": "Reintentar",
+    "search": "Buscar...",
+    "noResults": "No se encontraron resultados",
+    "language": "Idioma",
+    "english": "Ingles",
+    "portuguese": "Portugues",
+    "spanish": "Espanol"
   },
   "tier": {
     "lockedTitle": "Funcion {{tier}}",
@@ -723,25 +733,6 @@
     "override": "Sobrescrito por la configuracion del proyecto",
     "noConfig": "No se encontraron archivos de configuracion"
   },
-  "common": {
-    "save": "Guardar",
-    "cancel": "Cancelar",
-    "close": "Cerrar",
-    "create": "Crear",
-    "update": "Actualizar",
-    "delete": "Eliminar",
-    "confirm": "Confirmar",
-    "loading": "Cargando...",
-    "error": "Error",
-    "success": "Exito",
-    "retry": "Reintentar",
-    "search": "Buscar...",
-    "noResults": "No se encontraron resultados",
-    "language": "Idioma",
-    "english": "Ingles",
-    "portuguese": "Portugues",
-    "spanish": "Espanol"
-  },
   "projects": {
     "backToProjects": "Proyectos",
     "memory": "Memoria",
@@ -813,6 +804,51 @@
       "closeBranding": "ATO. Local-first. Licencia MIT. agentictool.ai"
     }
   },
+  "loopComposer": {
+    "trigger": {
+      "label": "Disparador:",
+      "manual": "Manual",
+      "cron": "Cron",
+      "event": "Evento",
+      "cronPlaceholder": "0 9 * * 1-5",
+      "eventPlaceholder": "pull_request.opened",
+      "validationCron": "El disparador cron requiere una expresion cron.",
+      "validationEvent": "El disparador de evento requiere un nombre de evento."
+    },
+    "variables": {
+      "title": "Variables",
+      "description": "Define variables del workflow como clave=valor.",
+      "add": "Agregar variable",
+      "remove": "Quitar variable",
+      "empty": "Aun no hay variables de workflow.",
+      "emptyHint": "Selecciona un nodo para editar su configuracion o agrega variables del workflow abajo.",
+      "keyPlaceholder": "clave",
+      "valuePlaceholder": "valor"
+    },
+    "migration": {
+      "banner": "Tienes {{count}} workflows heredados en el almacenamiento del navegador.",
+      "migrate": "Migrar a Loops",
+      "dismiss": "Descartar"
+    },
+    "pasteJson": {
+      "button": "Pegar JSON",
+      "title": "Pegar JSON del workflow",
+      "description": "Pega un workflow con arreglos \"nodes\" y \"edges\". Esto reemplaza el lienzo actual.",
+      "placeholder": "{ \"nodes\": [], \"edges\": [] }",
+      "submit": "Reemplazar lienzo",
+      "cancel": "Cancelar",
+      "errorJson": "No se pudo analizar el JSON — revisa la sintaxis.",
+      "errorShape": "El workflow debe ser un objeto con arreglos \"nodes\" y \"edges\".",
+      "errorNode": "Cada nodo necesita un \"id\" string no vacio.",
+      "errorEdge": "Cada conexion necesita los campos string \"from\" y \"to\"."
+    },
+    "autoLayout": {
+      "button": "Auto-organizar"
+    },
+    "validation": {
+      "missingRequired": "Campos obligatorios faltantes:"
+    }
+  },
   "providerKeys": {
     "title": "Claves de proveedor",
     "intro": "Registra claves de API para los proveedores que usas. El poller en la nube obtiene tu uso diario para que la pestana Uso muestre totales autoritativos — incluyendo actividad de apps moviles y UIs web que el watcher local no ve. Las claves se cifran en reposo con AES-256-GCM y AAD por usuario; el texto plano solo viaja en el registro y nunca se devuelve.",
@@ -857,6 +893,52 @@
       "recent": "consultada hace <1h"
     }
   },
+  "missions": {
+    "title": "Misiones",
+    "subtitle": "Panel de control local. Dispatch y tick corren desde la CLI.",
+    "goal": "Objetivo",
+    "workspace": "Workspace",
+    "merge": "Merge",
+    "cleanup": "Limpieza",
+    "repoRoot": "Repositorio",
+    "workerConfig": "Config del Worker",
+    "budgets": "Presupuestos",
+    "maxLoops": "Loops máx.",
+    "dispatches": "Despachos",
+    "spent": "Gastado",
+    "actions": "Acciones",
+    "category": "Categoría",
+    "state": "Estado",
+    "narrative": "Narrativa",
+    "events": "Eventos",
+    "noEvents": "Sin eventos aún.",
+    "pendingEscalations": "Escalaciones Pendientes",
+    "detailError": "Error al cargar detalle de misión.",
+    "loadError": "Error al cargar misiones — ¿está disponible la DB de ATO?",
+    "empty": "Sin misiones aún.",
+    "emptyHint": "Crea una con `ato missions create --name ... --goal ...`",
+    "confirmComplete": "¿Marcar como completa? La limpieza del worktree corre via `ato missions cleanup`.",
+    "state_open": "Abierta",
+    "state_in_progress": "En Progreso",
+    "state_blocked": "Bloqueada",
+    "state_complete": "Completa",
+    "category_autonomous": "Autónoma",
+    "category_needs_owner": "Necesita Dueño",
+    "category_ignored": "Ignorada",
+    "category_done": "Hecha",
+    "budgetOver": "excedido",
+    "dispatchesShort_one": "{{count}} despacho",
+    "dispatchesShort_other": "{{count}} despachos",
+    "showPayload": "mostrar payload",
+    "hidePayload": "ocultar payload",
+    "detailNotFound": "Misión no encontrada.",
+    "escalationLabel": "escalación",
+    "errorGeneric": "Error",
+    "confirmDialog": {
+      "cancel": "Cancelar",
+      "confirm": "Confirmar"
+    }
+  },
   "insights": {
     "cost": {
       "groupByCloudProvider": "Por proveedor en la nube",
@@ -870,5 +952,62 @@
       "tokensOut": "Tokens salida",
       "spend": "Gasto"
     }
+  },
+  "clickablePath": {
+    "reveal": "Mostrar",
+    "open": "Abrir",
+    "exists": "✓ existe",
+    "gone": "✗ eliminado"
+  },
+  "inputPicker": {
+    "contextInput": "Entrada de contexto",
+    "buttonTitle": "Elegir una entrada guardada",
+    "placeholder": "Selecciona una entrada de contexto",
+    "searchPlaceholder": "Buscar entradas…",
+    "none": "Sin entrada de contexto",
+    "loading": "Cargando entradas…",
+    "error": "No se pudieron cargar las entradas",
+    "empty": "Ninguna entrada coincide con esta busqueda"
+  },
+  "initiatorBadge": {
+    "via": "vía {{surface}}",
+    "kind": {
+      "unknown": "Desconocido",
+      "human": "Humano",
+      "agent": "Agente",
+      "claude": "Claude",
+      "codex": "Codex",
+      "gemini": "Gemini",
+      "openclaw": "OpenClaw",
+      "hermes": "Hermes",
+      "coordinator": "Coordinador",
+      "scheduler": "Programador",
+      "hook": "Hook"
+    },
+    "surface": {
+      "cli": "CLI",
+      "desktop": "Escritorio",
+      "mcp": "MCP",
+      "cloud": "Nube",
+      "tick": "Tick",
+      "web": "Web"
+    }
+  },
+  "livePresence": {
+    "tooltip": "{{count}} compañero viendo",
+    "tooltip_other": "{{count}} compañeros viendo",
+    "andOthers": " +{{count}} más",
+    "viewingNow": "viendo"
+  },
+  "teamShare": {
+    "title": "Compartir con el equipo",
+    "share": "Compartir",
+    "unshare": "Quitar",
+    "shareWithTeams": "Compartir con equipos",
+    "sharedWithCount_one": "Compartido con {{count}} equipo",
+    "sharedWithCount_other": "Compartido con {{count}} equipos",
+    "free_tier_disabled": "Compartir con equipos no esta disponible en el plan gratuito",
+    "share_failed": "No se pudo compartir",
+    "noTeams": "No hay equipos disponibles"
   }
 }

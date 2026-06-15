@@ -7,3 +7,4 @@ export { ChatCard } from "./ChatCard";
 export { WarRoomCard } from "./WarRoomCard";
 export { SingleRunCard } from "./SingleRunCard";
 export { SessionCard } from "./SessionCard";
+export { TeamSharedCard } from "./TeamSharedCard";

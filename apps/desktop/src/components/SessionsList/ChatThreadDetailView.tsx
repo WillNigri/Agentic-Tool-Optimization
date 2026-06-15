@@ -22,6 +22,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { cn } from "@/lib/utils";
+import { buildChatSnapshot } from "@/lib/teamShareSnapshot";
 import {
   runtimeBadge,
   personaBadge,
@@ -29,6 +30,8 @@ import {
   formatTime,
 } from "./_helpers";
 import CloseConversationModal from "./CloseConversationModal";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
+import InitiatorBadge from "@/components/InitiatorBadge";
 
 interface ChatMessage {
   id: string;
@@ -39,6 +42,9 @@ interface ChatMessage {
   agentSlug: string | null;
   metadata: string | null;
   createdAt: string;
+  initiatorKind?: string | null;
+  clientSurface?: string | null;
+  initiatorId?: string | null;
 }
 
 // chat_threads row snapshot returned by `get_chat`. Maps directly
@@ -169,6 +175,11 @@ export default function ChatThreadDetailView({
           ← Back to Sessions
         </button>
         <div className="flex items-center gap-2">
+          <ShareWithTeamButton
+            resourceKind="chat"
+            resourceId={threadId}
+            getSnapshot={() => buildChatSnapshot(threadId)}
+          />
           <div className="text-xs text-cs-muted font-mono">{threadId}</div>
           {isClosed ? (
             <button
@@ -304,6 +315,13 @@ export default function ChatThreadDetailView({
                     <span className={personaBadge()}>
                       {personaDisplay(m.agentSlug)}
                     </span>
+                  )}
+                  {(m.initiatorKind || m.clientSurface) && (
+                    <InitiatorBadge
+                      initiatorKind={m.initiatorKind}
+                      clientSurface={m.clientSurface}
+                      initiatorId={m.initiatorId}
+                    />
                   )}
                   <span className="ml-auto text-[11px] text-cs-muted">
                     {formatTime(m.createdAt)}

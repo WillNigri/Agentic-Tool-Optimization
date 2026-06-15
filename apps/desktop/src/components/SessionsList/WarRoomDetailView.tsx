@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 import { cn } from "@/lib/utils";
+import { buildWarRoomSnapshot } from "@/lib/teamShareSnapshot";
 import {
   runtimeBadge,
   personaBadge,
@@ -26,7 +27,12 @@ import {
   formatTime,
 } from "./_helpers";
 import type { SingleRunDetail } from "./SingleRunDetailView";
+import InitiatorBadge from "@/components/InitiatorBadge";
+import ExecutionLogReceipt from "@/components/receipts/ExecutionLogReceipt";
+import LiveCursors from "@/components/livePresence/LiveCursors";
+import PresencePills from "@/components/livePresence/PresencePills";
 import CloseConversationModal from "./CloseConversationModal";
+import ShareWithTeamButton from "@/components/TeamWorkspaces/ShareWithTeamButton";
 
 interface WarRoomDispatchResult {
   warRoomId: string;
@@ -273,7 +279,8 @@ export default function WarRoomDetailView({
   );
 
   return (
-    <div className="space-y-4">
+    <div className="relative space-y-4">
+      <LiveCursors resourceKind="war_room" resourceId={warRoomId} />
       <div className="flex items-center justify-between gap-3">
         <button
           onClick={onBack}
@@ -282,6 +289,12 @@ export default function WarRoomDetailView({
           ← Back to Sessions
         </button>
         <div className="flex items-center gap-2">
+          <PresencePills resourceKind="war_room" resourceId={warRoomId} />
+          <ShareWithTeamButton
+            resourceKind="war_room"
+            resourceId={warRoomId}
+            getSnapshot={() => buildWarRoomSnapshot(warRoomId)}
+          />
           <div className="text-xs text-cs-muted font-mono">{warRoomId}</div>
           {/* v2.7.13 — close + reopen buttons (mirrors the session
               detail view's lifecycle controls). Disabled while a
@@ -479,6 +492,16 @@ export default function WarRoomDetailView({
                     {d.model}
                   </span>
                 )}
+                {(d.initiatorKind || d.clientSurface) && (
+                  <InitiatorBadge
+                    initiatorKind={d.initiatorKind}
+                    clientSurface={d.clientSurface}
+                    initiatorId={d.initiatorId}
+                  />
+                )}
+                {/* FOLLOWUPS #1 — each seat is an execution_logs row; expose its
+                    id as a clickable receipt that opens SingleRunDetailView. */}
+                <ExecutionLogReceipt logId={d.id} label="open run" />
                 <span className="text-xs text-cs-muted ml-auto">
                   {formatTime(d.createdAt)}
                 </span>

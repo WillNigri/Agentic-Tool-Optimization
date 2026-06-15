@@ -142,6 +142,12 @@ pub struct SessionListRow {
     /// typed string keeps future variants open ("scheduled-run",
     /// "automation-step", etc.) without another migration.
     pub row_kind: String,
+    /// Attribution PR (2026-06-13) — initiator provenance surfaced so
+    /// the SessionsList card can render an InitiatorBadge. NULL on rows
+    /// dispatched before the attribution mission backfilled the columns.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -157,6 +163,12 @@ pub struct SessionTurn {
     /// (raw model priors, no persona overlay). Drives the persona role
     /// label in the chat-bubble UI.
     pub agent_slug: Option<String>,
+    /// Attribution PR (2026-06-13) — per-turn initiator provenance so
+    /// each chat bubble can render an InitiatorBadge. NULL on turns
+    /// written before the attribution mission backfilled the columns.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -179,6 +191,12 @@ pub struct SessionTranscript {
     /// coordinator's auto-generated summary. NULL when no comment
     /// was added (or the session pre-dates the column).
     pub human_comment: Option<String>,
+    /// Attribution PR (2026-06-13) — initiator provenance for the
+    /// session header badge. NULL on sessions created before the
+    /// attribution mission backfilled the columns.
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 // 2026-05-19 elegance war-room split (was 1635-line sessions_view.rs).

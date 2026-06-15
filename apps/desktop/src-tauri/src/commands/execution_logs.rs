@@ -108,7 +108,7 @@ pub fn add_execution_log(
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'human', 'desktop', NULL)",
         params![id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, now],
     ).map_err(|e| e.to_string())?;
 

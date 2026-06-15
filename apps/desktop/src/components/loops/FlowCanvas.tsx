@@ -27,6 +27,7 @@ export default function FlowCanvas() {
     selectNode,
     selectEdge,
     moveNode,
+    endMoveBatch,
     addNode,
     connecting,
     startConnecting,
@@ -123,8 +124,11 @@ export default function FlowCanvas() {
 
   const handleMouseUp = useCallback(() => {
     setIsPanning(false);
+    // Close the drag's undo-snapshot batch so the next gesture records its
+    // own snapshot (one drag = one undo step).
+    if (draggingNodeId) endMoveBatch();
     setDraggingNodeId(null);
-  }, []);
+  }, [draggingNodeId, endMoveBatch]);
 
   // Drop handler for palette items
   const handleDrop = useCallback(

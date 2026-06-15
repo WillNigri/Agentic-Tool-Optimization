@@ -54,6 +54,9 @@ pub struct ChatMessage {
     pub agent_slug: Option<String>,
     pub metadata: Option<String>,
     pub created_at: String,
+    pub initiator_kind: Option<String>,
+    pub client_surface: Option<String>,
+    pub initiator_id: Option<String>,
 }
 
 #[tauri::command]
@@ -123,8 +126,8 @@ pub fn create_chat_thread(
         title.trim().chars().take(120).collect()
     };
     conn.execute(
-        "INSERT INTO chat_threads (id, title, project_id, agent_id, created_at, last_message_at, message_count, archived)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, 0)",
+        "INSERT INTO chat_threads (id, title, project_id, agent_id, created_at, last_message_at, message_count, archived, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, 0, 'human', 'desktop', NULL)",
         params![id, trimmed, project_id, agent_id, now],
     )
     .map_err(|e| e.to_string())?;
@@ -319,7 +322,8 @@ pub fn get_chat_messages(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at
+            "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at,
+                    initiator_kind, client_surface, initiator_id
              FROM chat_messages
              WHERE thread_id = ?1
              ORDER BY created_at ASC",
@@ -336,6 +340,9 @@ pub fn get_chat_messages(
                 agent_slug: row.get(5)?,
                 metadata: row.get(6)?,
                 created_at: row.get(7)?,
+                initiator_kind: row.get(8)?,
+                client_surface: row.get(9)?,
+                initiator_id: row.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -360,8 +367,8 @@ pub fn append_chat_message(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO chat_messages (id, thread_id, role, content, runtime, agent_slug, metadata, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO chat_messages (id, thread_id, role, content, runtime, agent_slug, metadata, created_at, initiator_kind, client_surface, initiator_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'human', 'desktop', NULL)",
         params![id, thread_id, role, content, runtime, agent_slug, metadata, now],
     )
     .map_err(|e| e.to_string())?;
@@ -383,6 +390,9 @@ pub fn append_chat_message(
         agent_slug,
         metadata,
         created_at: now,
+        initiator_kind: Some("human".into()),
+        client_surface: Some("desktop".into()),
+        initiator_id: None,
     })
 }
 
