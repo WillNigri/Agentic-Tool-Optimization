@@ -496,6 +496,7 @@ function E2EBranch({ teamId, kind, resourceId, lastSeq }: E2EBranchProps) {
     state: 'idle',
     machineName: null,
     sessionId: null,
+    browserPubkeyFp: null,
   });
 
   // Available host machines queried from the cloud tether/sessions endpoint.
@@ -530,7 +531,7 @@ function E2EBranch({ teamId, kind, resourceId, lastSeq }: E2EBranchProps) {
         void startTether(machines[0]);
       } else if (machines.length === 0) {
         // No hosts online — stay in host_offline visual.
-        setTetherInfo({ state: 'host_offline', machineName: null, sessionId: null });
+        setTetherInfo({ state: 'host_offline', machineName: null, sessionId: null, browserPubkeyFp: null });
       }
       // If >1, render MachinePicker and wait for user selection.
     });

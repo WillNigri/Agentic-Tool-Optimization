@@ -581,14 +581,16 @@ async fn handle_inbound(
                 return;
             }
             // If cloud said auto_approved but local table disagreed,
-            // fall through to the modal path — log the discrepancy so
-            // a stuck user can debug whether their desktop's local
-            // cache got wiped vs the cloud row got stuck.
+            // fall through to the modal path. Codex R1 follow-up — log
+            // a debuggable mismatch without leaking the full
+            // browser_ua_hash (it's a stable identifier; safer to
+            // print only the first 8 chars in any log aggregation).
             if auto_approved && !local_persistent_match {
+                let ua_prefix: String = browser_ua_hash.chars().take(8).collect();
                 eprintln!(
                     "[tether_host] cloud auto_approved set but local tether_approvals \
-                     has no persistent row for browser_ua_hash={}; falling through to modal",
-                    browser_ua_hash
+                     has no persistent row (ua prefix={}); falling through to modal",
+                    ua_prefix
                 );
             }
             // Spec: "discard ephemeral privkeys after HKDF derive" — done above.
