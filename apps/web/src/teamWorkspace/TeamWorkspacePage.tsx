@@ -26,9 +26,10 @@ interface Props {
   teamName: string;
   onOpenDetail(kind: SharedResourceKind, resourceId: string): void;
   onBack(): void;
+  onOpenSettings?(): void;
 }
 
-export default function TeamWorkspacePage({ teamId, teamName, onOpenDetail, onBack }: Props) {
+export default function TeamWorkspacePage({ teamId, teamName, onOpenDetail, onBack, onOpenSettings }: Props) {
   const [activeKind, setActiveKind] = useState<SharedResourceKind>('session');
   // v2.16 Wave 3 — paginated shares. Reset to page 0 whenever the
   // active kind tab changes so a teammate switching tabs doesn't
@@ -78,10 +79,18 @@ export default function TeamWorkspacePage({ teamId, teamName, onOpenDetail, onBa
         >
           <ArrowLeft className="w-4 h-4" />
         </button>
-        <div>
+        <div className="flex-1 min-w-0">
           <h2 className="text-xl font-semibold text-white">{teamName}</h2>
           <p className="text-[#8888a0] text-xs mt-0.5">Team workspace — read-only view</p>
         </div>
+        {onOpenSettings && (
+          <button
+            onClick={onOpenSettings}
+            className="px-3 py-1.5 rounded-md border border-[#2a2a3a] bg-[#16161e] text-[#aaaab8] hover:text-white hover:border-[#3a3a4a] text-xs transition-colors"
+          >
+            Settings
+          </button>
+        )}
       </div>
 
       {/* Kind tabs */}

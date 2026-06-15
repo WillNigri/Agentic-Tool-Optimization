@@ -157,6 +157,131 @@ export async function listTeams(): Promise<TeamRow[]> {
   return apiRequest<TeamRow[]>("/teams");
 }
 
+// ──────────────────────────────────────────────────────────────────
+// v2.18.1 — Team CRUD + member management from web
+// ──────────────────────────────────────────────────────────────────
+
+// Shape matches cloud `TeamWithMembers` (services/teams/src/routes.ts:186)
+// — flat team fields PLUS members[] with each row carrying tm.* and a
+// nested `user` object built via json_build_object on the server.
+// member_count is server-computed.
+export interface TeamDetail {
+  id: string;
+  name: string;
+  slug: string;
+  role: "owner" | "admin" | "member";
+  member_count: number;
+  members?: TeamMember[];
+  created_at?: string;
+}
+
+// Shape of one row from GET /teams/:id .members[] (services/teams/src/routes.ts:206).
+// team_members has NO invite_pending column — pending invites live in the
+// separate team_invitations table (separate follow-up to surface those).
+export interface TeamMember {
+  id: string;
+  team_id: string;
+  user_id: string;
+  role: "owner" | "admin" | "member";
+  joined_at: string;
+  invited_by: string | null;
+  user: {
+    id: string;
+    email: string;
+    name: string | null;
+    avatar_url: string | null;
+  };
+}
+
+export async function createTeam(name: string): Promise<TeamRow> {
+  return apiRequest<TeamRow>("/teams", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function getTeam(id: string): Promise<TeamDetail> {
+  return apiRequest<TeamDetail>(`/teams/${id}`);
+}
+
+export async function renameTeam(id: string, name: string): Promise<TeamRow> {
+  return apiRequest<TeamRow>(`/teams/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteTeam(id: string): Promise<void> {
+  await apiRequest<void>(`/teams/${id}`, { method: "DELETE" });
+}
+
+export async function listTeamMembers(id: string): Promise<TeamMember[]> {
+  // Cloud GET /teams/:id returns members[] with .user nested.
+  // We reuse that endpoint instead of a separate round-trip.
+  const detail = await getTeam(id);
+  return detail.members ?? [];
+}
+
+export async function inviteTeamMember(
+  id: string,
+  email: string,
+  role: "admin" | "member" = "member",
+): Promise<{ invite_id: string }> {
+  return apiRequest<{ invite_id: string }>(`/teams/${id}/members`, {
+    method: "POST",
+    body: JSON.stringify({ email, role }),
+  });
+}
+
+export async function updateTeamMemberRole(
+  teamId: string,
+  memberId: string,
+  role: "admin" | "member",
+): Promise<void> {
+  await apiRequest<void>(`/teams/${teamId}/members/${memberId}`, {
+    method: "PUT",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export async function removeTeamMember(
+  teamId: string,
+  memberId: string,
+): Promise<void> {
+  await apiRequest<void>(`/teams/${teamId}/members/${memberId}`, {
+    method: "DELETE",
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// v2.18.1 — User profile + session controls
+// ──────────────────────────────────────────────────────────────────
+
+// Matches cloud SafeUserWithAuth. Cloud nests under `{ user: ... }`; we
+// flatten via getMe() so callers see one shape. Note: cloud field is
+// `subscription_tier`, not `plan`.
+export interface UserProfile {
+  id: string;
+  email: string;
+  name: string | null;
+  avatar_url: string | null;
+  auth_method: "password" | "github" | null;
+  github_username: string | null;
+  subscription_tier: "free" | "pro" | "team" | "enterprise";
+  email_verified: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getMe(): Promise<UserProfile> {
+  const data = await apiRequest<{ user: UserProfile }>("/auth/me");
+  return data.user;
+}
+
+export async function signOut(): Promise<void> {
+  await apiRequest<void>("/auth/logout", { method: "POST" });
+}
+
 /// v2.16 Wave 3 — paginated shares list.
 ///
 /// The cloud route currently returns ALL shares for a team in one
