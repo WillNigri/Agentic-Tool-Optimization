@@ -2089,6 +2089,30 @@ pub fn init_database(conn: &Connection) {
     ) {
         eprintln!("WARN: failed to create share_telemetry_prefs table: {}", e);
     }
+
+    // v2.17 Wave 2 — local tether approval cache.
+    // Persists "Allow always" decisions keyed by (browser_ua_hash, browser_ip_class)
+    // so the approval modal is skipped for known browser sessions.
+    // browser_ua_hash is a SHA-256 hex string; browser_ip_class is a /24 or /48 prefix.
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS tether_approvals (
+            id                TEXT PRIMARY KEY,
+            browser_ua_hash   TEXT NOT NULL,
+            browser_ip_class  TEXT,
+            approval_state    TEXT NOT NULL DEFAULT 'approved'
+                CHECK (approval_state IN ('approved', 'denied')),
+            persistent        INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL
+        )",
+        [],
+    ) {
+        eprintln!("WARN: failed to create tether_approvals table: {}", e);
+    }
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tether_approvals_ua_hash \
+         ON tether_approvals(browser_ua_hash, browser_ip_class)",
+        [],
+    );
 }
 
 #[cfg(test)]
