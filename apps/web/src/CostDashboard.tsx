@@ -125,12 +125,16 @@ export default function CostDashboard() {
         <select
           value={days}
           onChange={(e) => setDays(Number(e.target.value))}
-          className="px-3 py-1.5 text-sm bg-cs-border/30 border border-cs-border rounded-md"
+          className="appearance-none cursor-pointer pl-3 pr-8 py-1.5 text-sm bg-[#16161e] border border-[#2a2a3a] rounded-md text-white hover:border-[#3a3a4a] focus:outline-none focus:border-[#00FFB2]/50 transition-colors bg-[length:14px] bg-no-repeat bg-[right_8px_center]"
+          style={{
+            backgroundImage:
+              "url(\"data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238888a0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e\")",
+          }}
         >
-          <option value={7}>Last 7 days</option>
-          <option value={14}>Last 14 days</option>
-          <option value={30}>Last 30 days</option>
-          <option value={90}>Last 90 days</option>
+          <option value={7} className="bg-[#16161e] text-white">Last 7 days</option>
+          <option value={14} className="bg-[#16161e] text-white">Last 14 days</option>
+          <option value={30} className="bg-[#16161e] text-white">Last 30 days</option>
+          <option value={90} className="bg-[#16161e] text-white">Last 90 days</option>
         </select>
       </div>
 
