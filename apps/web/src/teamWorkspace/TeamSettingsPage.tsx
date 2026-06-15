@@ -131,7 +131,6 @@ export default function TeamSettingsPage({
         <p className="text-xs text-[#8888a0] mt-1">
           {team.role} · {team.member_count ?? members.length} member
           {(team.member_count ?? members.length) === 1 ? "" : "s"}
-          {team.plan ? ` · ${team.plan}` : ""}
         </p>
       </div>
 
