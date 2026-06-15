@@ -76,27 +76,18 @@ fn validate_uuid(label: &str, v: &str) -> Result<()> {
     Ok(())
 }
 
-/// #71 follow-up — git HEAD provenance. Returns Some(sha) when cwd is
-/// a git repo and `git` is on PATH, None otherwise. Failures are
-/// silent on purpose: a non-repo invocation of `ato subagent log
-/// create` (e.g., from a temp dir during a one-off LLM call) should
-/// not panic. Matches `apps/cli/src/commands/dispatch.rs`'s existing
-/// best-effort stamping behavior.
-fn capture_head_sha() -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
-}
+// #71 follow-up — git HEAD provenance.
+//
+// Codex R1 fix — the original implementation here spawned `git
+// rev-parse HEAD` synchronously and blocked the CLI. A wedged git
+// (NFS hang, fsck-in-flight, hung filesystem) would hang `ato
+// subagent log create` indefinitely.
+//
+// dispatch.rs already has the right shape: a worker thread + a 2s
+// recv_timeout. Reuse it directly so the two surfaces share the same
+// bound. `apps/cli/src/commands/dispatch.rs` exposes
+// `capture_git_head` as `pub(crate)` precisely so other commands can
+// call it.
 
 #[derive(Args, Debug)]
 pub struct SubagentArgs {
@@ -139,20 +130,28 @@ pub enum LogSub {
         /// the receipt records which LLM the subagent is using.
         #[arg(long)]
         model: Option<String>,
-        /// #71 follow-up — how the subagent dispatch authenticated to
-        /// the LLM. Defaults to "claude_code" (the Anthropic Agent
-        /// tool driven by a Claude Code session). Override to
-        /// "anthropic_api_key" / "openai_api_key" / etc. if a future
-        /// caller wires this through a different auth path.
-        #[arg(long, default_value = "claude_code")]
+        /// #71 follow-up — how the subagent dispatch authenticated.
+        /// Defaults to "subscription" matching the vocabulary
+        /// dispatch.rs already records for Claude CLI auth. Override
+        /// to "api_key" / "ollama" / etc. when a caller wires through
+        /// a different path.
+        ///
+        /// Codex R1 fix — original draft used "claude_code", which
+        /// drifted from dispatch.rs (`subscription` / `api_key`) and
+        /// would have produced its own bucket in the cost-split UI.
+        #[arg(long, default_value = "subscription")]
         auth_mode: String,
-        /// #71 follow-up — billing-side classification for the cost-
-        /// split surfaces. Defaults to "claude_subscription" because
-        /// Claude Code subagents draw from the user's Claude
-        /// subscription quota, not their API-key budget. Override to
-        /// "anthropic_api" / "openai_api" / "self_hosted" as
+        /// #71 follow-up — billing-side classification for cost-split
+        /// surfaces. Defaults to "claude_code_subscription" matching
+        /// the canonical surface label in active_runs.rs,
+        /// ato-passive-observer/sources.rs, and the schema column.
+        /// Override to "anthropic_api" / "openai_api" / "ollama" as
         /// appropriate.
-        #[arg(long, default_value = "claude_subscription")]
+        ///
+        /// Codex R1 fix — original draft used "claude_subscription"
+        /// (dropped the `_code_` segment); didn't match the canon and
+        /// would have produced its own analytics bucket.
+        #[arg(long, default_value = "claude_code_subscription")]
         billing_surface: String,
     },
     /// Update a pending row with the subagent's response + status.
@@ -254,12 +253,10 @@ fn create(
         (None, _) => None,
     };
 
-    // #71 follow-up — git_commit_sha provenance. Best-effort: capture
-    // HEAD of the cwd if it's a git repo. Failures (not a repo, git
-    // not on PATH) leave the column NULL — receipts still render, just
-    // without commit attribution. Matches dispatch.rs's existing
-    // git_commit_sha stamping behavior.
-    let git_commit_sha = capture_head_sha();
+    // #71 follow-up — bounded git_commit_sha provenance via the
+    // shared dispatch::capture_git_head helper. 2s timeout; failures
+    // (not a repo, git missing, wedged) leave the column NULL.
+    let git_commit_sha = crate::commands::dispatch::capture_git_head(None);
 
     let conn = db::open_readwrite(db_path).context("open db")?;
     conn.execute(
