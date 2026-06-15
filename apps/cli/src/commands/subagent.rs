@@ -76,6 +76,49 @@ fn validate_uuid(label: &str, v: &str) -> Result<()> {
     Ok(())
 }
 
+/// Codex R2 fix — canonical auth_mode vocabulary mirrors what
+/// dispatch.rs writes and what the cost-split UI buckets on.
+const AUTH_MODE_VOCAB: &[&str] = &["subscription", "api_key", "local"];
+
+/// Codex R2 fix — canonical billing_surface vocabulary mirrors
+/// schema.rs:529 + active_runs.rs:224-228 + sources.rs:41. Anything
+/// outside this set silently shows up as "Other" in the cost-split
+/// UI; reject at the CLI boundary so analytics stays honest.
+const BILLING_SURFACE_VOCAB: &[&str] = &[
+    "claude_code_subscription",
+    "anthropic_api",
+    "codex_cli_subscription",
+    "openai_api",
+    "gemini_cli_subscription",
+    "gemini_api",
+    "ollama_local",
+];
+
+fn validate_one_of(label: &str, value: &str, vocab: &[&str]) -> Result<()> {
+    if !vocab.contains(&value) {
+        anyhow::bail!(
+            "--{} must be one of [{}], got: {:?}",
+            label,
+            vocab.join(", "),
+            value
+        );
+    }
+    Ok(())
+}
+
+// #71 follow-up — git HEAD provenance.
+//
+// Codex R1 fix — the original implementation here spawned `git
+// rev-parse HEAD` synchronously and blocked the CLI. A wedged git
+// (NFS hang, fsck-in-flight, hung filesystem) would hang `ato
+// subagent log create` indefinitely.
+//
+// dispatch.rs already has the right shape: a worker thread + a 2s
+// recv_timeout. Reuse it directly so the two surfaces share the same
+// bound. `apps/cli/src/commands/dispatch.rs` exposes
+// `capture_git_head` as `pub(crate)` precisely so other commands can
+// call it.
+
 #[derive(Args, Debug)]
 pub struct SubagentArgs {
     #[command(subcommand)]
@@ -117,6 +160,27 @@ pub enum LogSub {
         /// the receipt records which LLM the subagent is using.
         #[arg(long)]
         model: Option<String>,
+        /// #71 follow-up — how the subagent dispatch authenticated.
+        /// Defaults to "subscription" matching dispatch.rs's vocab.
+        /// Accepted: subscription | api_key | local.
+        ///
+        /// Codex R2 fix — pre-fix shape was free-form; downstream
+        /// readers assume canonical enums for the auth-mode bucket
+        /// in cost-split analytics. Validated against AUTH_MODE_VOCAB
+        /// before INSERT.
+        #[arg(long, default_value = "subscription")]
+        auth_mode: String,
+        /// #71 follow-up — billing-side classification for cost-split
+        /// surfaces. Defaults to "claude_code_subscription". Accepted
+        /// per schema.rs:529 vocabulary: claude_code_subscription |
+        /// anthropic_api | codex_cli_subscription | openai_api |
+        /// gemini_cli_subscription | gemini_api | ollama_local.
+        ///
+        /// Codex R2 fix — pre-fix shape was free-form and the help
+        /// text documented "ollama" (canonical is "ollama_local").
+        /// Validated against BILLING_SURFACE_VOCAB before INSERT.
+        #[arg(long, default_value = "claude_code_subscription")]
+        billing_surface: String,
     },
     /// Update a pending row with the subagent's response + status.
     Finish {
@@ -154,7 +218,12 @@ pub fn run(args: SubagentArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
                 war_room_id,
                 war_room_round,
                 model,
-            } => create(persona, prompt, war_room_id, war_room_round, model, db_path, opts),
+                auth_mode,
+                billing_surface,
+            } => create(
+                persona, prompt, war_room_id, war_room_round, model,
+                auth_mode, billing_surface, db_path, opts,
+            ),
             LogSub::Finish {
                 id,
                 status,
@@ -180,12 +249,15 @@ pub fn run(args: SubagentArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create(
     persona: String,
     prompt: String,
     war_room_id: Option<String>,
     war_room_round: Option<i64>,
     model: Option<String>,
+    auth_mode: String,
+    billing_surface: String,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -197,6 +269,9 @@ fn create(
     if let Some(ref wr) = war_room_id {
         validate_uuid("war-room-id", wr)?;
     }
+    // Codex R2 — vocab guard so analytics buckets stay honest.
+    validate_one_of("auth-mode", &auth_mode, AUTH_MODE_VOCAB)?;
+    validate_one_of("billing-surface", &billing_surface, BILLING_SURFACE_VOCAB)?;
 
     let prompt_text = truncate_for_log(&resolve_text_arg(&prompt).context("read prompt")?);
     let id = Uuid::new_v4().to_string();
@@ -209,17 +284,27 @@ fn create(
         (None, _) => None,
     };
 
+    // #71 follow-up — bounded git_commit_sha provenance via the
+    // shared dispatch::capture_git_head helper. 2s timeout; failures
+    // (not a repo, git missing, wedged) leave the column NULL.
+    let git_commit_sha = crate::commands::dispatch::capture_git_head(None);
+
     let conn = db::open_readwrite(db_path).context("open db")?;
     conn.execute(
         "INSERT INTO execution_logs
            (id, runtime, prompt, status, created_at,
             agent_slug, war_room_id, war_room_round, model,
-            initiator_kind, client_surface, initiator_id)
+            initiator_kind, client_surface, initiator_id,
+            auth_mode, billing_surface, git_commit_sha)
          VALUES
            (?1, 'claude', ?2, 'pending', ?3,
             ?4, ?5, ?6, ?7,
-            'agent:claude', 'subagent', 'claude-code')",
-        params![id, prompt_text, now, persona, war_room_id, round, model],
+            'agent:claude', 'subagent', 'claude-code',
+            ?8, ?9, ?10)",
+        params![
+            id, prompt_text, now, persona, war_room_id, round, model,
+            auth_mode, billing_surface, git_commit_sha
+        ],
     )
     .context("INSERT pending execution_log")?;
 
