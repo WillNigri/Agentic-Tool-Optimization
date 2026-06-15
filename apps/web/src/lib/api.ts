@@ -161,19 +161,36 @@ export async function listTeams(): Promise<TeamRow[]> {
 // v2.18.1 — Team CRUD + member management from web
 // ──────────────────────────────────────────────────────────────────
 
-export interface TeamDetail extends TeamRow {
-  created_at: string;
+// Shape matches cloud `TeamWithMembers` (services/teams/src/routes.ts:186)
+// — flat team fields PLUS members[] with each row carrying tm.* and a
+// nested `user` object built via json_build_object on the server.
+// member_count is server-computed.
+export interface TeamDetail {
+  id: string;
+  name: string;
+  slug: string;
+  role: "owner" | "admin" | "member";
   member_count: number;
-  plan: string;
+  members?: TeamMember[];
+  created_at?: string;
 }
 
+// Shape of one row from GET /teams/:id .members[] (services/teams/src/routes.ts:206).
+// team_members has NO invite_pending column — pending invites live in the
+// separate team_invitations table (see #87 follow-up for surfacing those).
 export interface TeamMember {
+  id: string;
+  team_id: string;
   user_id: string;
-  email: string;
-  name: string | null;
   role: "owner" | "admin" | "member";
   joined_at: string;
-  invite_pending: boolean;
+  invited_by: string | null;
+  user: {
+    id: string;
+    email: string;
+    name: string | null;
+    avatar_url: string | null;
+  };
 }
 
 export async function createTeam(name: string): Promise<TeamRow> {
@@ -199,12 +216,10 @@ export async function deleteTeam(id: string): Promise<void> {
 }
 
 export async function listTeamMembers(id: string): Promise<TeamMember[]> {
-  // The cloud surfaces members under GET /teams/:id with a `members` array
-  // (verified in services/teams/src/routes.ts:186). Fall through to that
-  // path so we don't need a separate endpoint round-trip.
-  const detail = await apiRequest<TeamDetail & { members?: TeamMember[] }>(
-    `/teams/${id}`,
-  );
+  // Cloud GET /teams/:id returns members[] with .user nested (see
+  // services/teams/src/routes.ts:206 json_build_object). We reuse the
+  // same endpoint instead of a separate round-trip.
+  const detail = await getTeam(id);
   return detail.members ?? [];
 }
 
@@ -243,16 +258,28 @@ export async function removeTeamMember(
 // v2.18.1 — User profile + session controls
 // ──────────────────────────────────────────────────────────────────
 
+// Matches cloud SafeUserWithAuth (services/auth/src/routes.ts:614). Cloud
+// nests under `{ user: ... }`; we flatten via getMe() so callers see one
+// shape regardless of wire format. Note: cloud field is `subscription_tier`,
+// not `plan`.
 export interface UserProfile {
   id: string;
   email: string;
   name: string | null;
+  avatar_url: string | null;
+  auth_method: "password" | "github" | null;
+  github_username: string | null;
+  subscription_tier: "free" | "pro" | "team" | "enterprise";
+  email_verified: boolean;
   created_at: string;
-  plan: "free" | "pro" | "team" | "enterprise";
+  updated_at: string;
 }
 
 export async function getMe(): Promise<UserProfile> {
-  return apiRequest<UserProfile>("/auth/me");
+  // Cloud wraps the record in { user }; flatten so the UI doesn't have to
+  // care about wire envelopes.
+  const data = await apiRequest<{ user: UserProfile }>("/auth/me");
+  return data.user;
 }
 
 export async function signOut(): Promise<void> {

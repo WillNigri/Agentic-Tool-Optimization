@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import {
   getTeam,
-  listTeamMembers,
+  getMe,
   renameTeam,
   deleteTeam,
   inviteTeamMember,
@@ -35,18 +35,22 @@ export default function TeamSettingsPage({
   onDeleted,
 }: TeamSettingsPageProps) {
   const queryClient = useQueryClient();
+  // getTeam returns the full TeamWithMembers shape so we don't need a
+  // second fetch for members — they come embedded. listTeamMembers used
+  // to wrap this; we now just read .members directly.
   const teamQuery = useQuery({
     queryKey: ["team", teamId],
     queryFn: () => getTeam(teamId),
   });
-  const membersQuery = useQuery({
-    queryKey: ["team-members", teamId],
-    queryFn: () => listTeamMembers(teamId),
-  });
+  // Resolve "is this member me?" so the action gate can hide self-demote
+  // / self-remove buttons. R1 caught a strand-yourself-out bug from
+  // always passing isMyRow=false.
+  const meQuery = useQuery({ queryKey: ["me"], queryFn: getMe });
 
   const team = teamQuery.data;
-  const members = membersQuery.data ?? [];
+  const members = team?.members ?? [];
   const myRole = team?.role ?? "member";
+  const myUserId = meQuery.data?.id;
   const canManage = myRole === "owner" || myRole === "admin";
   const canDestroy = myRole === "owner";
 
@@ -71,7 +75,10 @@ export default function TeamSettingsPage({
     mutationFn: () =>
       inviteTeamMember(teamId, inviteEmail.trim(), inviteRole),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["team-members", teamId] });
+      // Members live inside the ["team", id] payload now, so invalidate
+      // the parent key (covers header member_count + the embedded list).
+      queryClient.invalidateQueries({ queryKey: ["team", teamId] });
+      queryClient.invalidateQueries({ queryKey: ["teams"] });
       setInviteEmail("");
       setInviteSent(true);
       setTimeout(() => setInviteSent(false), 2000);
@@ -84,6 +91,15 @@ export default function TeamSettingsPage({
   const deleteMutation = useMutation({
     mutationFn: () => deleteTeam(teamId),
     onSuccess: () => {
+      // R1 fix: remove the deleted team's queries entirely + optimistically
+      // strip it from the cached teams list, so the brief refetch window
+      // can't render a 404-on-click. Order matters: write cache then nav.
+      queryClient.removeQueries({ queryKey: ["team", teamId] });
+      queryClient.removeQueries({ queryKey: ["shared", teamId] });
+      queryClient.setQueryData<{ id: string }[] | undefined>(
+        ["teams"],
+        (prev) => (prev ? prev.filter((t) => t.id !== teamId) : prev),
+      );
       queryClient.invalidateQueries({ queryKey: ["teams"] });
       onDeleted();
     },
@@ -239,9 +255,13 @@ export default function TeamSettingsPage({
           </div>
         )}
 
-        {/* Member list */}
-        {membersQuery.isLoading ? (
+        {/* Member list — handle (load), (error), (empty), (rows) separately */}
+        {teamQuery.isLoading ? (
           <p className="text-xs text-[#8888a0]">Loading members…</p>
+        ) : teamQuery.isError ? (
+          <p className="text-xs text-red-400">
+            Couldn't load members. {teamQuery.error?.message}
+          </p>
         ) : members.length === 0 ? (
           <p className="text-xs text-[#8888a0]">No members yet.</p>
         ) : (
@@ -252,7 +272,7 @@ export default function TeamSettingsPage({
                 member={m}
                 teamId={teamId}
                 canManage={canManage}
-                isMyRow={false}
+                isMyRow={myUserId === m.user_id}
               />
             ))}
           </ul>
@@ -330,6 +350,7 @@ function MemberRow({
   member,
   teamId,
   canManage,
+  isMyRow,
 }: {
   member: TeamMember;
   teamId: string;
@@ -340,16 +361,30 @@ function MemberRow({
   const roleMutation = useMutation({
     mutationFn: (role: "admin" | "member") =>
       updateTeamMemberRole(teamId, member.user_id, role),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["team-members", teamId] }),
+    onSuccess: () => {
+      // R1 fix: members live inside ["team", teamId] (server returns
+      // TeamWithMembers). Invalidating ["team-members"] alone was a
+      // stale-cache foot-gun — that key isn't read anywhere now.
+      queryClient.invalidateQueries({ queryKey: ["team", teamId] });
+      queryClient.invalidateQueries({ queryKey: ["teams"] });
+    },
   });
   const removeMutation = useMutation({
     mutationFn: () => removeTeamMember(teamId, member.user_id),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["team-members", teamId] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["team", teamId] });
+      queryClient.invalidateQueries({ queryKey: ["teams"] });
+    },
   });
 
   const isOwner = member.role === "owner";
+  // R1 fix: never let a user demote or remove themself. Owners can't be
+  // demoted by anyone anyway (server gate); for admin/member the UI
+  // hides the controls on their own row so they can't strand
+  // themselves out of the team.
+  const showControls = canManage && !isOwner && !isMyRow;
+  const u = member.user;
+  const display = u.name || u.email;
 
   return (
     <li className="py-3 flex items-center justify-between gap-3">
@@ -363,16 +398,18 @@ function MemberRow({
         </div>
         <div className="min-w-0">
           <p className="text-sm text-white truncate">
-            {member.name || member.email}
+            {display}
+            {isMyRow && (
+              <span className="ml-1.5 text-[10px] uppercase tracking-wide text-[#8888a0]">
+                you
+              </span>
+            )}
           </p>
-          <p className="text-[11px] text-[#8888a0] truncate">
-            {member.email}
-            {member.invite_pending && " · invite pending"}
-          </p>
+          <p className="text-[11px] text-[#8888a0] truncate">{u.email}</p>
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {canManage && !isOwner ? (
+        {showControls ? (
           <>
             <select
               value={member.role}
@@ -396,17 +433,13 @@ function MemberRow({
             </select>
             <button
               onClick={() => {
-                if (
-                  confirm(
-                    `Remove ${member.name || member.email} from this team?`,
-                  )
-                ) {
+                if (confirm(`Remove ${display} from this team?`)) {
                   removeMutation.mutate();
                 }
               }}
               disabled={removeMutation.isPending}
               className="p-1.5 rounded-md text-[#8888a0] hover:text-red-400 hover:bg-red-500/10 transition-colors"
-              aria-label={`Remove ${member.email}`}
+              aria-label={`Remove ${u.email}`}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>

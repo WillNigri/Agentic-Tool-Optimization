@@ -68,7 +68,7 @@ export default function UserSettingsPage({ onSignedOut }: UserSettingsPageProps)
           <ProfileRow
             icon={<Shield className="w-3.5 h-3.5" />}
             label="Plan"
-            value={profile.plan}
+            value={profile.subscription_tier}
             valueClassName="uppercase tracking-wide"
           />
           <ProfileRow
