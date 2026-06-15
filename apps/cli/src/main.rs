@@ -841,17 +841,17 @@ enum WarRoomsSub {
     Sweep {
         /// Minimum idle period (no new dispatches in the war-room)
         /// before a sweep is eligible. Default: 5 minutes.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(i64).range(0..))]
         idle_minutes: i64,
         /// Cap on how many war-rooms one sweep run will close. Keeps
         /// the cost bounded if the table has a big backlog. Default: 10.
-        #[arg(long, default_value_t = 10)]
-        max_per_run: usize,
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+        max_per_run: u64,
         /// Coordinator runtime to use for every close in this sweep.
         /// Default `google` — fast, cheap, free quota; reasonable for
         /// the kind of summarization a close needs. Override per
         /// preference.
-        #[arg(long, default_value = "google")]
+        #[arg(long, default_value = "google", value_parser = parse_non_empty_string)]
         coordinator: String,
         /// Print which WRs would be closed without actually closing.
         #[arg(long, default_value_t = false)]
@@ -1389,6 +1389,18 @@ enum AgentsSub {
         #[arg(long = "remove-skill")]
         remove_skill: Option<String>,
     },
+}
+
+/// clap value_parser that rejects empty / whitespace-only strings.
+/// Used by `war-rooms sweep --coordinator` (and any other future flag
+/// where a stringly-typed default is supplied but an empty string would
+/// be a silent foot-gun rather than a real default).
+fn parse_non_empty_string(s: &str) -> std::result::Result<String, String> {
+    if s.trim().is_empty() {
+        Err("value must not be empty".to_string())
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 fn main() -> Result<()> {
@@ -2097,7 +2109,7 @@ fn main() -> Result<()> {
                 commands::war_rooms::sweep(
                     &conn,
                     idle_minutes,
-                    max_per_run,
+                    max_per_run as usize,
                     &coordinator,
                     dry_run,
                     &opts,
