@@ -50,6 +50,19 @@ curl -fsSL https://agentictool.ai/install.sh | sh && ato demo-war-room
 
 ---
 
+## What's new in v2.18.0
+
+- **Browse your team workspaces from any browser.** Sign in to your cloud account on the web — every shared session, war-room, chat, loop, and mission renders with the same fidelity as the desktop. Read-only by default; mobile-responsive.
+- **Pair your browser to your desktop.** v2.17 tether: X25519 DH + AEAD, fingerprint-verified pairing. Your laptop becomes a secure oracle for the page you're looking at — no plaintext through the cloud relay.
+- **Create + manage teams from the web.** New "+ New team", invite by email, role changes, danger-zone delete. Account page with profile + plan + sign-out. (LLM keys, runtimes, and skills still live in the desktop where the OS keychain is.)
+- **`ato war-rooms sweep`** — auto-closes idle war-rooms with a coordinator-summary, single-JSON envelope output, clap-layer validators. Wire to cron and one-shot R1 reviews self-close.
+- **`ato subagent log`** — Claude Code's Agent (Task) tool dispatches now show up in execution_logs alongside outer-session work. Canonical `auth_mode` / `billing_surface` vocab so analytics group cleanly. Git commit SHA captured per receipt.
+- **Web sign-in + Onboarding redesigned.** Minimal centered sign-in card. Onboarding walks users through install / `.env` / wrap-the-client with explanations of *why* each step matters.
+- **Deprecated Google models auto-filtered** from the chat picker (no more `gemini-2.0-flash-001` 404s).
+- See [CHANGELOG.md](CHANGELOG.md) for the full list.
+
+---
+
 ## Why ATO
 
 Claude Code, Codex, Gemini CLI already come with tools. They can grep your repo, read your files, run your tests, edit code. **That's the default now** — chat is a commodity and so are hands.
