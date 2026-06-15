@@ -729,6 +729,30 @@ enum WarRoomsSub {
     Reopen { id: String },
     /// Print the war room snapshot (status, seat count, last summary).
     Get { id: String },
+    /// #70 — sweep open war-rooms that have been idle for N minutes
+    /// and auto-close them with the coordinator. Designed to be run
+    /// from a cron / launchd tick so one-shot R1 fan-outs (architecture
+    /// review, security audit, etc.) self-close once the seats land
+    /// instead of sitting invisible in the Sessions feed.
+    Sweep {
+        /// Minimum idle period (no new dispatches in the war-room)
+        /// before a sweep is eligible. Default: 5 minutes.
+        #[arg(long, default_value_t = 5)]
+        idle_minutes: i64,
+        /// Cap on how many war-rooms one sweep run will close. Keeps
+        /// the cost bounded if the table has a big backlog. Default: 10.
+        #[arg(long, default_value_t = 10)]
+        max_per_run: usize,
+        /// Coordinator runtime to use for every close in this sweep.
+        /// Default `google` — fast, cheap, free quota; reasonable for
+        /// the kind of summarization a close needs. Override per
+        /// preference.
+        #[arg(long, default_value = "google")]
+        coordinator: String,
+        /// Print which WRs would be closed without actually closing.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 /// v2.7.13 — chat-thread close lifecycle subcommands. Same shape as
@@ -1871,6 +1895,22 @@ fn main() -> Result<()> {
                 commands::war_rooms::reopen(&conn, &id, &opts)
             }
             WarRoomsSub::Get { id } => commands::war_rooms::get(&ro_conn()?, &id, &opts),
+            WarRoomsSub::Sweep {
+                idle_minutes,
+                max_per_run,
+                coordinator,
+                dry_run,
+            } => {
+                let conn = db::open_readwrite(&db_path)?;
+                commands::war_rooms::sweep(
+                    &conn,
+                    idle_minutes,
+                    max_per_run,
+                    &coordinator,
+                    dry_run,
+                    &opts,
+                )
+            }
         },
         Commands::Chats { sub } => match sub {
             ChatsSub::Close {
