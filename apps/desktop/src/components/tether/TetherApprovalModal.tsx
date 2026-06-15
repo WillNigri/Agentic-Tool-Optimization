@@ -39,6 +39,12 @@ interface ApprovalRequest {
   ua_hint: string;
   browser_ip_class: string | null;
   machine_name: string;
+  /** #79 fix — 12-char hex of the browser's X25519 pubkey first 6 bytes.
+   *  Shown in the modal as a cryptographic fingerprint that defeats
+   *  machine-name homoglyph spoofing — even if an attacker registers a
+   *  Mac that displays identically to "Will's MacBook Pro", the
+   *  fingerprint changes because their X25519 pubkey is different. */
+  browser_pubkey_fp: string;
 }
 
 type Decision = "once" | "always" | "deny";
@@ -117,12 +123,22 @@ export default function TetherApprovalModal() {
         </div>
 
         {/* Body */}
-        <p className="mb-5 text-sm leading-relaxed text-white/70">
+        <p className="mb-3 text-sm leading-relaxed text-white/70">
           A browser session{" "}
           <span className="font-mono text-white/90">{current.ua_hint}…</span>
           {current.browser_ip_class ? ` (${current.browser_ip_class})` : ""} wants to
           decrypt E2E-encrypted team shares on this Mac using the Team Key cached in memory.
         </p>
+        {/* #79 fix — cryptographic fingerprint of the browser's
+            ephemeral X25519 pubkey. Verify this against the same
+            value shown in your browser tether modal to defeat
+            machine-name homoglyph spoofing. */}
+        <div className="mb-5 flex items-center gap-2 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs">
+          <span className="text-white/40">browser fingerprint</span>
+          <span className="font-mono text-white/80 tracking-wide">
+            {current.browser_pubkey_fp.match(/.{1,4}/g)?.join(" ") ?? current.browser_pubkey_fp}
+          </span>
+        </div>
 
         {/* Action buttons */}
         <div className="flex flex-col gap-2">

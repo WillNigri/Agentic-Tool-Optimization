@@ -38,6 +38,12 @@ export interface TetherInfo {
   state: TetherState;
   machineName: string | null;
   sessionId: string | null;
+  /** #79 fix — 12-hex fingerprint of the browser's own X25519 pubkey.
+   *  Browser sets this on tether_hello so the UI can render it
+   *  alongside the desktop's matching modal display. The user
+   *  visually compares the two — if they differ, the cloud relay
+   *  swapped someone else's pair_request in mid-flight. */
+  browserPubkeyFp: string | null;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -57,6 +63,7 @@ interface TetherSingleton {
   state: TetherState;
   machineName: string | null;
   sessionId: string | null;
+  browserPubkeyFp: string | null;
   ws: WebSocket | null;
   sessionKey: Uint8Array | null;
   txSeq: bigint;
@@ -69,6 +76,7 @@ const singleton: TetherSingleton = {
   state: "idle",
   machineName: null,
   sessionId: null,
+  browserPubkeyFp: null,
   ws: null,
   sessionKey: null,
   txSeq: 0n,
@@ -86,6 +94,7 @@ export function getTether(): TetherInfo {
     state: singleton.state,
     machineName: singleton.machineName,
     sessionId: singleton.sessionId,
+    browserPubkeyFp: singleton.browserPubkeyFp,
   };
 }
 
@@ -162,6 +171,13 @@ export async function startTether(targetMachineName: string): Promise<void> {
 
   // Generate ephemeral keypair. We'll discard privkey after DH below.
   const ephemeralKp = generateTetherKeypair();
+  // #79 fix — compute the matching fingerprint the desktop will show
+  // in its approval modal. 6 raw bytes of pubkey → 12 hex chars. The
+  // user visually compares this side-by-side with the desktop modal
+  // to defeat machine-name homoglyph spoofing.
+  singleton.browserPubkeyFp = Array.from(ephemeralKp.pubkey.slice(0, 6))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 
   // Compute UA hash for the tether_hello frame.
   const uaHash = await computeUaHash();
@@ -456,6 +472,9 @@ function teardownWs(): void {
   }
   singleton.txSeq = 0n;
   singleton.rxSeq = 0n;
+  // #79 — drop the fingerprint with the WS so the next startTether
+  // generates a fresh one (matching the fresh ephemeral keypair).
+  singleton.browserPubkeyFp = null;
 }
 
 // (CSO #1 fix — old buildNonce removed; nonces are now HKDF-derived in

@@ -199,6 +199,12 @@ pub struct TetherApprovalRequested {
     pub ua_hint: String,
     pub browser_ip_class: Option<String>,
     pub machine_name: String,
+    /// #79 fix — first 12 chars of the browser's X25519 ephemeral pubkey
+    /// (hex). Defeats machine-name homoglyph spoofing: even if the
+    /// attacker manages to register a Mac with a name that looks
+    /// identical to the legit "Will's MacBook Pro", the fingerprint
+    /// surfaces the actual cryptographic identity to the human.
+    pub browser_pubkey_fp: String,
 }
 
 /// Emitted when the host needs the JS crypto layer to decrypt events.
@@ -519,7 +525,38 @@ async fn handle_inbound(
                 .get("auto_approved")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if auto_approved {
+            // #79 fix — also auto-approve if the local tether_approvals
+            // table has a persistent row matching this browser. Pre-
+            // fix shape relied entirely on the cloud's persistent-
+            // approval cache, which means a desktop that lost its
+            // local DB (fresh install / wipe) but reconnects to a
+            // cloud-known browser would still skip the modal. Now BOTH
+            // sides have to agree before we silently approve.
+            // Conversely: if the cloud says auto-approve but the local
+            // table disagrees (desktop wiped, user re-installed), we
+            // pop the modal again — defense in depth.
+            let local_persistent_match = {
+                let db_path = crate::get_db_path();
+                rusqlite::Connection::open(&db_path)
+                    .ok()
+                    .and_then(|conn| {
+                        conn.query_row(
+                            "SELECT 1 FROM tether_approvals
+                              WHERE browser_ua_hash = ?1
+                                AND COALESCE(browser_ip_class, '') = COALESCE(?2, '')
+                                AND persistent = 1
+                              LIMIT 1",
+                            rusqlite::params![
+                                browser_ua_hash,
+                                browser_ip_class.clone().unwrap_or_default(),
+                            ],
+                            |_| Ok(()),
+                        )
+                        .ok()
+                    })
+                    .is_some()
+            };
+            if auto_approved && local_persistent_match {
                 sessions.insert(
                     session_id.clone(),
                     ApprovalState::Approved {
@@ -542,6 +579,17 @@ async fn handle_inbound(
                     .send(Message::Text(decision_frame.to_string()))
                     .await;
                 return;
+            }
+            // If cloud said auto_approved but local table disagreed,
+            // fall through to the modal path — log the discrepancy so
+            // a stuck user can debug whether their desktop's local
+            // cache got wiped vs the cloud row got stuck.
+            if auto_approved && !local_persistent_match {
+                eprintln!(
+                    "[tether_host] cloud auto_approved set but local tether_approvals \
+                     has no persistent row for browser_ua_hash={}; falling through to modal",
+                    browser_ua_hash
+                );
             }
             // Spec: "discard ephemeral privkeys after HKDF derive" — done above.
             // The session_key is held in memory only for the duration of the approved
@@ -568,6 +616,22 @@ async fn handle_inbound(
             } else {
                 browser_ua_hash.clone()
             };
+            // #79 fix — short hex fingerprint of the RAW pubkey (not
+            // its base64 string!) so the modal can show a stable
+            // cryptographic identity. Defeats machine-name homoglyph
+            // spoofing: even if an attacker manages to spawn a Mac
+            // named identically to the user's real Mac, the
+            // fingerprint changes when the underlying X25519 pubkey
+            // is different. 6 raw bytes = 12 hex chars = ~48 bits,
+            // enough for visual disambiguation; full attack-grade
+            // verification would use the entire 32 bytes.
+            let browser_pubkey_fp = xb_pub_bytes
+                .iter()
+                .take(6)
+                .fold(String::new(), |mut acc, b| {
+                    acc.push_str(&format!("{:02x}", b));
+                    acc
+                });
             let _ = app.emit(
                 "tether_approval_requested",
                 TetherApprovalRequested {
@@ -575,6 +639,7 @@ async fn handle_inbound(
                     ua_hint,
                     browser_ip_class,
                     machine_name: machine_name.to_string(),
+                    browser_pubkey_fp,
                 },
             );
         }

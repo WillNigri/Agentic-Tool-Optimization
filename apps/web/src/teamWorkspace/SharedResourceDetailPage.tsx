@@ -382,7 +382,7 @@ function HostOfflineCard() {
 }
 
 /** Card shown while tether is connecting or waiting on desktop approval. */
-function TetherStatusCard({ state, machineName }: { state: TetherState; machineName: string | null }) {
+function TetherStatusCard({ state, machineName, browserPubkeyFp }: { state: TetherState; machineName: string | null; browserPubkeyFp: string | null }) {
   if (state === 'idle' || state === 'connecting') {
     return (
       <div className="flex flex-col items-center justify-center py-14 bg-[#16161e] border border-[#2a2a3a] rounded-lg text-center px-8 space-y-3">
@@ -402,6 +402,19 @@ function TetherStatusCard({ state, machineName }: { state: TetherState; machineN
             Open ATO on <span className="text-white font-mono">{machineName}</span> and click{' '}
             <span className="text-[#00FFB2] font-medium">Allow</span>.
           </p>
+        )}
+        {/* #79 fix — render the browser's pubkey fingerprint here so
+            the user can VISUALLY compare it against the same value
+            shown in the desktop approval modal. If they differ, the
+            cloud relay swapped pair_request payloads in flight; the
+            user should Deny on the desktop instead of Allow. */}
+        {browserPubkeyFp && (
+          <div className="mt-1 flex items-center gap-2 rounded-md border border-[#2a2a3a] bg-[#0a0a0f] px-3 py-2 text-xs">
+            <span className="text-[#8888a0]">verify fingerprint</span>
+            <span className="font-mono text-white/90 tracking-wide">
+              {browserPubkeyFp.match(/.{1,4}/g)?.join(' ') ?? browserPubkeyFp}
+            </span>
+          </div>
         )}
         {/* TODO (v2.17.x): wire the desktop "keychain-prompt-in-progress" state
             here to show "Desktop is unlocking your keychain..." with a 30s
@@ -551,7 +564,7 @@ function E2EBranch({ teamId, kind, resourceId, lastSeq }: E2EBranchProps) {
   }
 
   // All other states: status card.
-  return <TetherStatusCard state={tetherInfo.state} machineName={tetherInfo.machineName} />;
+  return <TetherStatusCard state={tetherInfo.state} machineName={tetherInfo.machineName} browserPubkeyFp={tetherInfo.browserPubkeyFp} />;
 }
 
 // ──────────────────────────────────────────────────────────────────
