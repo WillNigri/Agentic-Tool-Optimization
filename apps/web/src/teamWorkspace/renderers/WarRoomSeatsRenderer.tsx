@@ -210,10 +210,15 @@ export default function WarRoomSeatsRenderer({ seats }: Props) {
                       </div>
                     </details>
 
-                    {/* Response — collapsible, open by default */}
-                    <details open>
+                    {/* Response — collapsible, open by default.
+                        Codex R1 follow-up — open:rotate-90 isn't a
+                        Tailwind-native variant; use the same
+                        group/group-open pattern the Prompt block
+                        uses so the chevron actually rotates with
+                        the <details> toggle. */}
+                    <details open className="group">
                       <summary className="cursor-pointer select-none text-[10px] uppercase tracking-wider text-[#8888a0] font-medium list-none flex items-center gap-1">
-                        <span className="open:rotate-90 transition-transform inline-block">▶</span>
+                        <span className="group-open:rotate-90 transition-transform inline-block">▶</span>
                         Response
                       </summary>
                       <div className="mt-2 rounded-lg border border-[#2a2a3a]/40 bg-[#0a0a0f]/40 p-3">

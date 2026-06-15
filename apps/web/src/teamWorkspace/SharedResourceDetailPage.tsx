@@ -92,16 +92,42 @@ function SnapshotSection({
               <p className="text-white mt-0.5 font-medium truncate">{detail.title}</p>
             </div>
           )}
-          {typeof detail.turn_count === 'number' && (
+          {/* Codex R1 follow-up — surface kind-specific snapshot
+              metadata the api.ts normalizer doesn't lift to top-level.
+              Sessions have turn_count (normalized); war-rooms put
+              seat_count, chats put message_count + coordinator_runtime
+              inside `snapshot`. Pre-fix shape rendered nothing for
+              those kinds. */}
+          {kind === 'session' && typeof detail.turn_count === 'number' && (
             <div>
               <span className="text-[#8888a0]">Turns</span>
               <p className="text-white mt-0.5 font-medium">{detail.turn_count}</p>
+            </div>
+          )}
+          {kind === 'war-room' && typeof (snap?.seat_count ?? snap?.seatCount) === 'number' && (
+            <div>
+              <span className="text-[#8888a0]">Seats</span>
+              <p className="text-white mt-0.5 font-medium">{snap?.seat_count ?? snap?.seatCount}</p>
+            </div>
+          )}
+          {kind === 'chat' && typeof (snap?.message_count ?? snap?.messageCount) === 'number' && (
+            <div>
+              <span className="text-[#8888a0]">Messages</span>
+              <p className="text-white mt-0.5 font-medium">{snap?.message_count ?? snap?.messageCount}</p>
             </div>
           )}
           {detail.runtime && (
             <div>
               <span className="text-[#8888a0]">Runtime</span>
               <p className="text-white mt-0.5 font-medium">{detail.runtime}</p>
+            </div>
+          )}
+          {kind === 'war-room' && (snap?.coordinator_runtime || snap?.coordinatorRuntime) && (
+            <div>
+              <span className="text-[#8888a0]">Coordinator</span>
+              <p className="text-white mt-0.5 font-medium">
+                {snap?.coordinator_runtime ?? snap?.coordinatorRuntime}
+              </p>
             </div>
           )}
           {detail.agent_slug && (

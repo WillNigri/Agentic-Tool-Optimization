@@ -144,9 +144,16 @@ export default function WebDashboard() {
       window.removeEventListener('keydown', onKey);
     };
   }, [mobileNavOpen]);
+  // Codex R2 fix to R1 #4 — restore focus only when the drawer was
+  // ACTUALLY open and is now being closed. Pre-fix shape fired on
+  // initial render too, jumping focus to the hamburger before any
+  // user interaction.
+  const prevMobileNavOpen = useRef(false);
   useEffect(() => {
-    // On close (after the drawer was previously open), return focus.
-    if (!mobileNavOpen) hamburgerRef.current?.focus({ preventScroll: true });
+    if (prevMobileNavOpen.current && !mobileNavOpen) {
+      hamburgerRef.current?.focus({ preventScroll: true });
+    }
+    prevMobileNavOpen.current = mobileNavOpen;
   }, [mobileNavOpen]);
   const [wsRoute, setWsRoute] = useState<WSRoute>({ view: 'teams' });
 

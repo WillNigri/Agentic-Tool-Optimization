@@ -21,12 +21,19 @@ type Listener = (event: TeamEvent) => void;
 // v2.16 Wave 4 — connection state surface. Wave 1's "connected" was
 // optimistic (flipped after backfill resolved). Callers can now
 // subscribe to actual WS lifecycle events.
+//
+// Codex R1 follow-up — dropped the "error" state. The original union
+// included it for "unrecoverable" failures (e.g. mintToken returning
+// null), but every failure path actually falls through to
+// reconnecting + scheduleReconnect, which IS recoverable: a fresh
+// auth token next tick or a network blip resolved on the next retry.
+// Keeping "error" as a leaf would require callers to special-case a
+// terminal state we never emit. Dropped for accuracy.
 export type ConnectionState =
   | "idle"          // no listeners + no open WS
   | "connecting"    // WS opening / reconnect pending
   | "open"          // WS is open and receiving events
-  | "reconnecting"  // WS dropped; backoff timer running
-  | "error";        // unrecoverable (e.g. mint token returned null)
+  | "reconnecting"; // WS dropped or auth blocked; backoff timer running
 export type ConnectionListener = (state: ConnectionState) => void;
 
 interface SubKey {
@@ -91,6 +98,14 @@ export function subscribeTeamEvents(
     };
     subs.set(key, sub);
     void open(sub, k);
+  } else if (initialSeq > sub.lastSeq) {
+    // Codex R2 fix — when a subscription was first created by
+    // subscribeConnectionState (which doesn't know the lastSeq and
+    // defaults to 0), a later subscribeTeamEvents(initialSeq) call
+    // for the same key must update lastSeq. Without this, on
+    // reconnect the WS opens with `since=0` and back-fills the
+    // entire history again. Only widen forward — never shrink lastSeq.
+    sub.lastSeq = initialSeq;
   }
   sub.listeners.add(onEvent);
   return () => {
