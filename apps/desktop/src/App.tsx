@@ -8,6 +8,7 @@ import UpdateBanner from "@/components/UpdateBanner";
 import MigrationBanner from "@/components/Migration/MigrationBanner";
 import IdentityProbeBanner from "@/components/Security/IdentityProbeBanner";
 import TetherApprovalModal from "@/components/tether/TetherApprovalModal";
+import WhatsNewModal from "@/components/WhatsNewModal";
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -269,6 +270,11 @@ export default function App() {
       </div>
       {/* v2.17 Wave 2 — tether approval modal (shown over any view). */}
       <TetherApprovalModal />
+      {/* v2.18.0 — "What's new" first-launch-after-upgrade modal.
+          Quiet on fresh installs (Onboarding handles that); fires
+          once when the version stamped in localStorage differs from
+          the current build. */}
+      <WhatsNewModal />
     <Routes>
       <Route
         path="/"

@@ -151,6 +151,10 @@ pub fn get_share_telemetry_pref(
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, OptionalExtension};
+    // CI hotfix 2026-06-15 — test module needs the parent's struct in scope
+    // for the Vec<TelemetryQueueEntry> drain assertion. Pre-existing
+    // compile error caught by check-rust on PR #63.
+    use super::TelemetryQueueEntry;
 
     fn open_db() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory db");

@@ -922,27 +922,72 @@ mod tests {
         }
     }
 
-    /// AEAD round-trip: seal then open must recover plaintext.
+    // ── AEAD tests ────────────────────────────────────────────────────
+    //
+    // aead_seal hardcodes direction=0 (host→browser) and aead_open
+    // hardcodes direction=1 (browser→host) — those are PRODUCTION
+    // directions: the host module only ever sends in direction 0 and
+    // receives in direction 1. So we can't round-trip aead_seal through
+    // aead_open in a single direction; that's by design.
+    //
+    // The tests below exercise what's actually meant to be tested:
+    // 1. The cipher itself round-trips when both sides agree on the
+    //    nonce derivation. We do that by using the cipher + derive_nonce
+    //    directly, both at direction=1.
+    // 2. The replay guard in aead_open rejects mismatched recv_seq.
+    //    For that we encrypt with derive_nonce(dir=1, seq=5) directly,
+    //    then call aead_open with seq=5 (should succeed) and seq=6
+    //    (should fail with the nonce-mismatch error).
+
+    use chacha20poly1305::aead::Aead;
+    use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    fn seal_at_direction(
+        session_key: &[u8; 32],
+        direction: u8,
+        frame_seq: u64,
+        plaintext: &[u8],
+    ) -> String {
+        let nonce = derive_nonce(session_key, direction, frame_seq);
+        let cipher = XChaCha20Poly1305::new_from_slice(session_key).expect("key init");
+        let ct = cipher
+            .encrypt(&nonce, chacha20poly1305::aead::Payload { msg: plaintext, aad: b"" })
+            .expect("encrypt");
+        let mut packed = nonce.to_vec();
+        packed.extend_from_slice(&ct);
+        B64.encode(packed)
+    }
+
+    /// AEAD round-trip via the cipher directly (direction-symmetric).
+    /// Validates that the encrypt/decrypt logic and HKDF nonce
+    /// derivation are correct, independent of the production direction
+    /// hardcoding on aead_seal/aead_open.
     #[test]
     fn aead_round_trip() {
         let key = [0xABu8; 32];
         let plaintext = b"hello tether world";
-        let send_seq = 0u64;
-
-        let sealed = aead_seal(&key, send_seq, plaintext).expect("seal");
-        let recovered = aead_open(&key, send_seq, &sealed).expect("open");
+        // Encrypt at direction=1 (browser→host) so aead_open will
+        // recognise the nonce and succeed.
+        let sealed = seal_at_direction(&key, 1, 0, plaintext);
+        let recovered = aead_open(&key, 0, &sealed).expect("open");
         assert_eq!(recovered, plaintext);
     }
 
-    /// Replay guard: opening with the wrong frame_seq fails.
+    /// Replay guard: aead_open MUST reject a packed blob whose nonce
+    /// was derived at a different seq than the recv counter.
     #[test]
     fn aead_replay_guard() {
         let key = [0xABu8; 32];
-        let sealed = aead_seal(&key, 5, b"data").expect("seal");
+        // Encrypt at direction=1, seq=5 (matches aead_open's hardcoded direction).
+        let sealed = seal_at_direction(&key, 1, 5, b"data");
         // Correct seq succeeds.
         aead_open(&key, 5, &sealed).expect("correct seq should open");
-        // Wrong seq fails.
+        // Wrong seq fails with nonce mismatch.
         let result = aead_open(&key, 6, &sealed);
         assert!(result.is_err(), "wrong seq must fail AEAD open");
+        let err = result.unwrap_err();
+        assert!(err.contains("nonce mismatch"), "expected nonce-mismatch error, got: {}", err);
     }
 }
