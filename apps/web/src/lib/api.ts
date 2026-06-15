@@ -157,10 +157,30 @@ export async function listTeams(): Promise<TeamRow[]> {
   return apiRequest<TeamRow[]>("/teams");
 }
 
+/// v2.16 Wave 3 — paginated shares list.
+///
+/// The cloud route currently returns ALL shares for a team in one
+/// response (the buildRouter list handler doesn't accept since/limit
+/// today). For now we paginate client-side: fetch once, slice
+/// per-page. When the cloud route gains cursor support, swap to
+/// server-side pagination by passing `before`/`limit` through.
+///
+/// Default page size matches the events backfill cap (200) so a
+/// single visible page rarely needs more than one server round trip.
+export const SHARES_PAGE_SIZE = 50;
+
+export interface SharedResourcesPage {
+  rows: SharedRow[];
+  total: number;
+  hasMore: boolean;
+}
+
 export async function listSharedResources(
   teamId: string,
   kind: SharedResourceKind,
-): Promise<SharedRow[]> {
+  page = 0,
+  pageSize = SHARES_PAGE_SIZE,
+): Promise<SharedResourcesPage> {
   const seg = RESOURCE_KIND_META[kind].segment;
   // The cloud routes return rows keyed by the per-kind id column
   // (session_id, war_room_id, …). Normalize to `resource_id` so the
@@ -168,7 +188,15 @@ export async function listSharedResources(
   const raw = await apiRequest<Array<Record<string, unknown>>>(
     `/teams/${teamId}/${seg}`,
   );
-  return raw.map((row) => normalizeSharedRow(kind, row));
+  const all = raw.map((row) => normalizeSharedRow(kind, row));
+  const start = page * pageSize;
+  const end = start + pageSize;
+  const rows = all.slice(start, end);
+  return {
+    rows,
+    total: all.length,
+    hasMore: end < all.length,
+  };
 }
 
 export async function getSharedDetail(
