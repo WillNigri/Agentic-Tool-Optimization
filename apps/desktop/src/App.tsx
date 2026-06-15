@@ -7,6 +7,7 @@ import Dashboard from "@/pages/Dashboard";
 import UpdateBanner from "@/components/UpdateBanner";
 import MigrationBanner from "@/components/Migration/MigrationBanner";
 import IdentityProbeBanner from "@/components/Security/IdentityProbeBanner";
+import TetherApprovalModal from "@/components/tether/TetherApprovalModal";
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -140,6 +141,45 @@ export default function App() {
     })();
   }, [isCloudUser]);
 
+  // v2.17 Wave 2 — tether host lifecycle.
+  // Spawns the Rust tether-host WS task on Pro+ login; tears it down on
+  // logout. Also starts the JS decrypt bridge so tether_decrypt events
+  // from Rust are handled by the existing v2.15 crypto stack.
+  // Both operations are non-fatal: a tether failure must never block the
+  // rest of the app.
+  const tetherStartedRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri) return;
+    if (isCloudUser && !tetherStartedRef.current) {
+      tetherStartedRef.current = true;
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const { getStoredTokens } = await import("@/lib/cloud-api");
+          const tokens = getStoredTokens();
+          if (!tokens?.accessToken) return;
+          const { startTetherDecryptBridge } = await import("@/lib/tether/host");
+          await startTetherDecryptBridge();
+          await invoke("start_tether_host", { accessToken: tokens.accessToken });
+        } catch (err) {
+          console.warn("[tether] host start failed (non-fatal):", err);
+        }
+      })();
+    } else if (!isCloudUser && tetherStartedRef.current) {
+      tetherStartedRef.current = false;
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const { stopTetherDecryptBridge } = await import("@/lib/tether/host");
+          stopTetherDecryptBridge();
+          await invoke("stop_tether_host");
+        } catch (err) {
+          console.warn("[tether] host stop failed (non-fatal):", err);
+        }
+      })();
+    }
+  }, [isCloudUser]);
+
   useEffect(() => {
     void (async () => {
       const manual = await detectNeedsManualUpgrade();
@@ -227,6 +267,8 @@ export default function App() {
       <div className="fixed top-32 right-4 z-50 w-96 max-w-[90vw]">
         <IdentityProbeBanner />
       </div>
+      {/* v2.17 Wave 2 — tether approval modal (shown over any view). */}
+      <TetherApprovalModal />
     <Routes>
       <Route
         path="/"
