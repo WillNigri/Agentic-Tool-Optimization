@@ -60,7 +60,7 @@ What you can't do without a cockpit:
 - **Watch every tool call.** Per-dispatch receipts: prompt, runtime, model, every `read_file` / `grep` / `git_log` with arguments, every byte returned, files written via mtime-snapshot diff. Verified-via-N-tool-calls vs prompt-only badges per seat so you know which findings were checked against the code and which are vibes.
 - **Compare what each AI actually did.** Side-by-side replay across runtimes. File attribution per dispatch. "Claude touched 3 files, Codex touched 5 — these two diverge here."
 - **Kill a runaway.** Live runs registry, one-click kill, across every runtime.
-- **Bring runtimes that don't have hands yet.** Hermes and OpenClaw are scaffolds — you wire their tools through ATO. Same receipts, same rules.
+- **Bring API models in as full teammates.** Claude Code, Codex, Gemini CLI, Hermes, and OpenClaw already have hands — they ship with their own coding tool layer. The runtimes that don't are API providers without a first-party coding agent — Grok, MiniMax, DeepSeek, Qwen, GLM, Yi, Kimi — they hit a prompt-in, text-out endpoint with no built-in `read_file` / `grep` / `bash`. ATO wraps them with the same tool loop the CLI runtimes use, so a Grok or DeepSeek call can review code alongside Claude Code under identical rules + receipts. One war room, every seat with hands.
 
 All of it local. AES-256 at rest, OS-keychain master key with a rotation ledger (v2.7.14+). No cloud round-trip unless you opt in.
 
