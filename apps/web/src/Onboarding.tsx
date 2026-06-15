@@ -98,13 +98,14 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
           </div>
         )}
 
-        {/* Step 1: Show Key + Install */}
+        {/* Step 1: Show Key + What it's for */}
         {step === 1 && apiKey && (
           <div className="space-y-6">
             <div className="text-center">
               <h1 className="text-2xl font-bold text-white">Your API key</h1>
-              <p className="text-[#8888a0] mt-2">
-                Copy it now — you won't be able to see it again.
+              <p className="text-[#8888a0] mt-2 text-sm">
+                This key tells ATO who's sending data to your dashboard. Copy it now — for
+                security, we can't show it to you again.
               </p>
             </div>
 
@@ -114,75 +115,137 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
                 <button
                   onClick={copyKey}
                   className="shrink-0 p-2 rounded-md hover:bg-[#2a2a3a] transition-colors"
+                  aria-label="Copy key"
                 >
                   {copied ? <Check className="w-4 h-4 text-[#00FFB2]" /> : <Copy className="w-4 h-4 text-[#8888a0]" />}
                 </button>
               </div>
+              {copied && (
+                <p className="text-xs text-[#00FFB2] mt-2">Copied to clipboard ✓</p>
+              )}
             </div>
 
-            <div className="bg-[#16161e] border border-[#2a2a3a] rounded-lg p-4 space-y-3">
-              <p className="text-xs text-[#8888a0] uppercase tracking-wide">Install the SDK</p>
-              <div className="bg-[#0a0a0f] rounded-md p-3 font-mono text-sm text-[#e8e8f0]">
-                <span className="text-[#8888a0]">$</span> npm install @ato-sdk/js
-              </div>
+            <div className="bg-[#16161e]/50 border border-[#2a2a3a] rounded-lg p-4 space-y-2">
+              <p className="text-xs uppercase tracking-wide text-[#8888a0]">What's this for?</p>
+              <p className="text-sm text-[#aaaab8] leading-relaxed">
+                When you make AI calls from your code (with Claude, OpenAI, etc), the ATO SDK
+                tags each call with this key so it shows up in <span className="text-white">your</span> dashboard — not someone else's.
+                Think of it like a username for your AI usage.
+              </p>
             </div>
 
             <button
               onClick={() => setStep(2)}
-              className="w-full px-6 py-3 bg-[#00FFB2] text-black font-semibold rounded-lg hover:bg-[#00FFB2]/90 transition-colors flex items-center justify-center gap-2"
+              disabled={!copied}
+              className="w-full px-6 py-3 bg-[#00FFB2] text-black font-semibold rounded-lg hover:bg-[#00FFB2]/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
             >
-              I've copied my key <ChevronRight className="w-4 h-4" />
+              {copied ? <>I've copied my key <ChevronRight className="w-4 h-4" /></> : 'Copy the key first ↑'}
             </button>
           </div>
         )}
 
-        {/* Step 2: Code Example */}
+        {/* Step 2: Three-step setup with full explanation */}
         {step === 2 && (
           <div className="space-y-6">
             <div className="text-center">
               <div className="w-12 h-12 rounded-xl bg-[#00FFB2]/10 flex items-center justify-center mx-auto mb-4">
                 <Terminal className="w-6 h-6 text-[#00FFB2]" />
               </div>
-              <h1 className="text-2xl font-bold text-white">Add to your code</h1>
-              <p className="text-[#8888a0] mt-2">
-                Wrap your LLM client — every call will be traced automatically.
+              <h1 className="text-2xl font-bold text-white">Use your key in 3 steps</h1>
+              <p className="text-[#8888a0] mt-2 text-sm">
+                For a Node.js or TypeScript project. New to this? See the
+                {' '}<a href="https://github.com/WillNigri/Agentic-Tool-Optimization/blob/main/docs/SDK.md#non-technical-setup" target="_blank" rel="noreferrer" className="text-[#00FFB2] hover:underline">non-technical setup guide</a>.
               </p>
             </div>
 
-            <div className="bg-[#16161e] border border-[#2a2a3a] rounded-lg overflow-hidden">
-              <div className="px-4 py-2 border-b border-[#2a2a3a] flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-[#ef4444]" />
-                <div className="w-3 h-3 rounded-full bg-[#eab308]" />
-                <div className="w-3 h-3 rounded-full bg-[#22c55e]" />
-                <span className="text-xs text-[#8888a0] ml-2">app.ts</span>
+            {/* Step 1: Install */}
+            <div className="bg-[#16161e] border border-[#2a2a3a] rounded-lg p-5 space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 rounded-full bg-[#00FFB2]/15 text-[#00FFB2] text-xs font-bold flex items-center justify-center">1</div>
+                <p className="text-sm font-semibold text-white">Install the ATO SDK</p>
               </div>
-              <pre className="p-4 text-sm font-mono text-[#e8e8f0] overflow-x-auto">{`import { init } from '@ato-sdk/js';
+              <p className="text-xs text-[#8888a0] leading-relaxed pl-9">
+                Open a terminal inside your project folder and run:
+              </p>
+              <div className="bg-[#0a0a0f] rounded-md p-3 font-mono text-sm text-[#e8e8f0] ml-9">
+                <span className="text-[#8888a0]">$</span> npm install @ato-sdk/js
+              </div>
+            </div>
+
+            {/* Step 2: Store the key safely */}
+            <div className="bg-[#16161e] border border-[#2a2a3a] rounded-lg p-5 space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 rounded-full bg-[#00FFB2]/15 text-[#00FFB2] text-xs font-bold flex items-center justify-center">2</div>
+                <p className="text-sm font-semibold text-white">Save the key as an environment variable</p>
+              </div>
+              <p className="text-xs text-[#8888a0] leading-relaxed pl-9">
+                Create a file called <code className="text-[#00FFB2] bg-[#0a0a0f] px-1.5 py-0.5 rounded">.env</code> at the root of your project (same folder as <code className="text-[#00FFB2] bg-[#0a0a0f] px-1.5 py-0.5 rounded">package.json</code>) and paste this line into it. Don't commit <code className="text-[#00FFB2] bg-[#0a0a0f] px-1.5 py-0.5 rounded">.env</code> to git — add it to <code className="text-[#00FFB2] bg-[#0a0a0f] px-1.5 py-0.5 rounded">.gitignore</code>.
+              </p>
+              <div className="bg-[#0a0a0f] rounded-md p-3 font-mono text-xs text-[#e8e8f0] ml-9 overflow-x-auto">
+                ATO_API_KEY={apiKey || 'ato_your_key_here'}
+              </div>
+              <p className="text-[11px] text-[#5a5a6e] leading-relaxed pl-9">
+                Why not paste it directly in your code? If you push to GitHub, anyone can read it and run up your bill.
+                The <code className="text-[#00FFB2]">.env</code> file stays on your machine.
+              </p>
+            </div>
+
+            {/* Step 3: Wrap your client */}
+            <div className="bg-[#16161e] border border-[#2a2a3a] rounded-lg p-5 space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 rounded-full bg-[#00FFB2]/15 text-[#00FFB2] text-xs font-bold flex items-center justify-center">3</div>
+                <p className="text-sm font-semibold text-white">Add ATO to your code</p>
+              </div>
+              <p className="text-xs text-[#8888a0] leading-relaxed pl-9">
+                Wherever you create an Anthropic or OpenAI client, wrap it with ATO. Every call after this is auto-traced — no other code changes.
+              </p>
+              <div className="bg-[#0a0a0f] rounded-md overflow-hidden ml-9 border border-[#2a2a3a]">
+                <div className="px-3 py-1.5 border-b border-[#2a2a3a] flex items-center gap-1.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-[#ef4444]" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-[#eab308]" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-[#22c55e]" />
+                  <span className="text-[11px] text-[#8888a0] ml-1.5">app.ts</span>
+                </div>
+                <pre className="p-3 text-xs font-mono text-[#e8e8f0] overflow-x-auto leading-relaxed">{`import { init } from '@ato-sdk/js';
 import { wrapAnthropic } from '@ato-sdk/js/anthropic';
 import Anthropic from '@anthropic-ai/sdk';
 
-// Initialize ATO
-init({ apiKey: '${apiKey?.slice(0, 15) || 'ato_your_key'}...' });
+// 1. Tell ATO who you are (key from your .env file)
+init({ apiKey: process.env.ATO_API_KEY });
 
-// Wrap your client
+// 2. Wrap your existing Anthropic client
 const client = wrapAnthropic(new Anthropic());
 
-// Use normally — traces are captured automatically
+// 3. Use it exactly like before — traces happen automatically
 const msg = await client.messages.create({
   model: 'claude-sonnet-4-6',
   max_tokens: 1024,
   messages: [{ role: 'user', content: 'Hello' }],
 });`}</pre>
+              </div>
             </div>
 
-            <div className="bg-[#16161e] border border-[#2a2a3a] rounded-lg p-4">
-              <p className="text-sm text-[#8888a0]">
-                Also works with <span className="text-white">OpenAI</span> (<code className="text-[#00FFB2]">wrapOpenAI</code>) and the <span className="text-white">Claude Agent SDK</span> (<code className="text-[#00FFB2]">wrapAgent</code>).
+            {/* What to expect */}
+            <div className="bg-[#00FFB2]/5 border border-[#00FFB2]/20 rounded-lg p-4 space-y-2">
+              <p className="text-sm font-semibold text-[#00FFB2]">What happens next</p>
+              <p className="text-xs text-[#aaaab8] leading-relaxed">
+                Run your code and make any AI call. Within a few seconds, that call shows up here in your dashboard
+                with full receipts: prompt, response, model, tokens used, cost, latency. Refresh this page to see it.
+              </p>
+            </div>
+
+            {/* Also supported + docs */}
+            <div className="bg-[#16161e]/50 border border-[#2a2a3a] rounded-lg p-4 space-y-2">
+              <p className="text-xs text-[#8888a0]">
+                Also works with <span className="text-white">OpenAI</span> (use <code className="text-[#00FFB2]">wrapOpenAI</code>),
+                the <span className="text-white">Claude Agent SDK</span> (use <code className="text-[#00FFB2]">wrapAgent</code>),
+                and any provider via the manual trace API.
               </p>
               <a
                 href="https://github.com/WillNigri/Agentic-Tool-Optimization/blob/main/docs/SDK.md"
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-[#00FFB2] hover:underline mt-2"
+                className="inline-flex items-center gap-1 text-xs text-[#00FFB2] hover:underline"
               >
                 <ExternalLink className="w-3 h-3" /> Full SDK documentation
               </a>
