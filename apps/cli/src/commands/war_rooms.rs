@@ -308,6 +308,38 @@ pub fn close(
     force_close_without_context: bool,
     opts: &Opts,
 ) -> Result<()> {
+    let (target, fields) = close_returning(
+        conn,
+        id,
+        agent_slug_override,
+        model_override,
+        coordinator_override,
+        human_comment,
+        force_close_without_context,
+        opts,
+    )?;
+    if opts.human {
+        emit_human_close(&target, &fields);
+    } else {
+        emit_json_close(&target, &fields)?;
+    }
+    Ok(())
+}
+
+/// Close the war room and return the resolved (target, fields) instead
+/// of emitting. #70 sweep() consumes this so it can accumulate per-WR
+/// results into ONE stable JSON envelope at end-of-run rather than
+/// emitting multiple stand-alone JSON documents to stdout.
+fn close_returning(
+    conn: &Connection,
+    id: &str,
+    agent_slug_override: Option<String>,
+    model_override: Option<String>,
+    coordinator_override: Option<String>,
+    human_comment: Option<String>,
+    force_close_without_context: bool,
+    opts: &Opts,
+) -> Result<(WarRoom, CloseFields)> {
     let target = lookup(conn, id)?;
     let fields = close_conversation(
         conn,
@@ -319,12 +351,7 @@ pub fn close(
         force_close_without_context,
         opts,
     )?;
-    if opts.human {
-        emit_human_close(&target, &fields);
-    } else {
-        emit_json_close(&target, &fields)?;
-    }
-    Ok(())
+    Ok((target, fields))
 }
 
 /// #70 — sweep idle open war-rooms and auto-close them.
@@ -340,9 +367,12 @@ pub fn close(
 /// once the seats land. Removes the manual `ato war-rooms close`
 /// step that's been the #1 UX trap of using ATO for multi-LLM review.
 ///
-/// Cost bounded by `max_per_run` — closes at most N per invocation.
 /// Each close runs ONE coordinator dispatch (cheap with --coordinator
-/// google, the default), and the row inserts under a single txn.
+/// google, the default). The sweep is NOT atomic — closes happen
+/// sequentially, and a failure on one WR does not roll back the
+/// preceding closes. That is intentional for cron use: partial
+/// progress is preferable to all-or-nothing on a transient seat error.
+/// Failed WRs surface in the final JSON / human summary.
 pub fn sweep(
     conn: &Connection,
     idle_minutes: i64,
@@ -353,6 +383,12 @@ pub fn sweep(
 ) -> Result<()> {
     if idle_minutes < 0 {
         anyhow::bail!("--idle-minutes must be >= 0");
+    }
+    if max_per_run == 0 {
+        anyhow::bail!("--max-per-run must be > 0 (0 would silently no-op)");
+    }
+    if coordinator.trim().is_empty() {
+        anyhow::bail!("--coordinator must be non-empty (e.g. google, claude, codex)");
     }
     let cutoff_seconds = idle_minutes * 60;
 
@@ -379,6 +415,50 @@ pub fn sweep(
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
+    // ── DRY RUN ──────────────────────────────────────────────────────
+    // Human mode: stream lines as we go (familiar CLI feel).
+    // JSON mode: emit ONE final envelope with the candidate list, so
+    // downstream tooling can `jq .candidates[]` without dealing with
+    // multiple JSON documents on a single stdout.
+    if dry_run {
+        if opts.human {
+            emit_human(&format!(
+                "Found {} eligible war-room(s) (idle ≥ {}m).",
+                rows.len(),
+                idle_minutes
+            ));
+            for (id, seats, last_at) in &rows {
+                emit_human(&format!(
+                    "  [DRY-RUN] would close {} ({} seats; last activity {})",
+                    id, seats, last_at
+                ));
+            }
+        } else {
+            let candidates: Vec<_> = rows
+                .iter()
+                .map(|(id, seats, last_at)| {
+                    serde_json::json!({
+                        "war_room_id": id,
+                        "seats": seats,
+                        "last_at": last_at,
+                    })
+                })
+                .collect();
+            emit_json(&serde_json::json!({
+                "action": "sweep",
+                "dry_run": true,
+                "idle_minutes": idle_minutes,
+                "coordinator": coordinator,
+                "eligible": rows.len(),
+                "candidates": candidates,
+            }))?;
+        }
+        return Ok(());
+    }
+
+    // ── LIVE RUN ─────────────────────────────────────────────────────
+    // Human mode prints a header + per-WR line + final summary.
+    // JSON mode accumulates per-WR results into one final envelope.
     if opts.human {
         emit_human(&format!(
             "Found {} eligible war-room(s) (idle ≥ {}m).",
@@ -387,36 +467,11 @@ pub fn sweep(
         ));
     }
 
-    if dry_run {
-        for (id, seats, last_at) in &rows {
-            if opts.human {
-                emit_human(&format!(
-                    "  [DRY-RUN] would close {} ({} seats; last activity {})",
-                    id, seats, last_at
-                ));
-            } else {
-                emit_json(&serde_json::json!({
-                    "war_room_id": id,
-                    "seats": seats,
-                    "last_at": last_at,
-                    "action": "would_close",
-                }))?;
-            }
-        }
-        if !opts.human {
-            // dry_run still emits a final summary row for machine consumers.
-            emit_json(&serde_json::json!({
-                "summary": "dry_run",
-                "eligible": rows.len(),
-            }))?;
-        }
-        return Ok(());
-    }
+    let mut closed_records: Vec<serde_json::Value> = Vec::new();
+    let mut failed_records: Vec<serde_json::Value> = Vec::new();
 
-    let mut closed = 0usize;
-    let mut failed: Vec<(String, String)> = Vec::new();
     for (id, _seats, _last_at) in rows {
-        let result = close(
+        match close_returning(
             conn,
             &id,
             None,
@@ -425,29 +480,59 @@ pub fn sweep(
             None,
             false,
             opts,
-        );
-        match result {
-            Ok(()) => closed += 1,
-            Err(e) => failed.push((id, e.to_string())),
+        ) {
+            Ok((target, fields)) => {
+                if opts.human {
+                    emit_human(&format!(
+                        "  ✓ closed {} ({} seats) — {}",
+                        target.id,
+                        target.seat_count,
+                        fields.auto_title.as_deref().unwrap_or("(no title)")
+                    ));
+                } else {
+                    closed_records.push(serde_json::json!({
+                        "id": target.id,
+                        "seat_count": target.seat_count,
+                        "auto_title": fields.auto_title,
+                        "summary": fields.summary,
+                        "tags": fields.tags,
+                        "coordinator_runtime": fields.coordinator_runtime,
+                        "coordinator_model": fields.coordinator_model,
+                        "duration_ms": fields.duration_ms,
+                        "closed_at": fields.closed_at,
+                    }));
+                }
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if opts.human {
+                    emit_human(&format!("  ✗ {} — {}", id, err_str));
+                } else {
+                    failed_records.push(serde_json::json!({
+                        "war_room_id": id,
+                        "error": err_str,
+                    }));
+                }
+            }
         }
     }
 
     if opts.human {
         emit_human(&format!(
             "Sweep done. Closed {} war-room(s); {} failure(s).",
-            closed,
-            failed.len()
+            closed_records.len(),
+            failed_records.len()
         ));
-        for (id, err) in &failed {
-            emit_human(&format!("  ✗ {} — {}", id, err));
-        }
     } else {
         emit_json(&serde_json::json!({
-            "summary": "swept",
-            "closed": closed,
-            "failed": failed.iter().map(|(id, err)| {
-                serde_json::json!({"war_room_id": id, "error": err})
-            }).collect::<Vec<_>>(),
+            "action": "sweep",
+            "dry_run": false,
+            "idle_minutes": idle_minutes,
+            "coordinator": coordinator,
+            "closed": closed_records.len(),
+            "failed": failed_records.len(),
+            "closed_records": closed_records,
+            "failed_records": failed_records,
         }))?;
     }
     Ok(())
