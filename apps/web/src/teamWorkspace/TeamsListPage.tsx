@@ -1,8 +1,11 @@
 // v2.16 Wave 1 — read-only Team Workspaces: teams list.
+// v2.18.1 — adds "+ New team" button + CreateTeamModal wiring.
 
 import { useQuery } from '@tanstack/react-query';
-import { Users, ChevronRight, AlertCircle } from 'lucide-react';
+import { useState } from 'react';
+import { Users, ChevronRight, AlertCircle, Plus } from 'lucide-react';
 import { listTeams, type TeamRow } from '../lib/api';
+import CreateTeamModal from './CreateTeamModal';
 
 const ROLE_PILL: Record<TeamRow['role'], { label: string; classes: string }> = {
   owner: { label: 'Owner', classes: 'bg-[#00FFB2]/15 text-[#00FFB2] border border-[#00FFB2]/30' },
@@ -19,19 +22,33 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
     queryKey: ['teams'],
     queryFn: listTeams,
   });
+  const [showCreate, setShowCreate] = useState(false);
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-          <Users className="w-5 h-5 text-[#00FFB2]" />
-          Team Workspaces
-        </h2>
-        <p className="text-[#8888a0] text-sm mt-0.5">
-          Browse shared sessions, war rooms, and missions across your teams.
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+            <Users className="w-5 h-5 text-[#00FFB2]" />
+            Team Workspaces
+          </h2>
+          <p className="text-[#8888a0] text-sm mt-0.5">
+            Browse shared sessions, war rooms, and missions across your teams.
+          </p>
+        </div>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="shrink-0 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+        >
+          <Plus className="w-3.5 h-3.5" /> New team
+        </button>
       </div>
+
+      <CreateTeamModal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+      />
 
       {/* Loading */}
       {isLoading && (
@@ -57,12 +74,18 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
 
       {/* Empty state */}
       {!isLoading && !error && teams?.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-16 bg-[#16161e] border border-[#2a2a3a] rounded-lg text-center">
+        <div className="flex flex-col items-center justify-center py-16 bg-[#16161e] border border-[#2a2a3a] rounded-lg text-center px-6">
           <Users className="w-10 h-10 text-[#2a2a3a] mb-4" />
           <p className="text-white text-sm font-medium">No teams yet</p>
           <p className="text-[#8888a0] text-xs mt-1">
-            Create one from your desktop app.
+            Create one to share sessions, war rooms, and missions with teammates.
           </p>
+          <button
+            onClick={() => setShowCreate(true)}
+            className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+          >
+            <Plus className="w-3.5 h-3.5" /> Create your first team
+          </button>
         </div>
       )}
 

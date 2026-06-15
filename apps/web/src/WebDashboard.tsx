@@ -7,6 +7,7 @@ import {
   Users,
   Menu,
   X,
+  Settings as SettingsIcon,
 } from 'lucide-react';
 import CostDashboard from './CostDashboard';
 import ApiKeysPanel from './ApiKeysPanel';
@@ -14,6 +15,8 @@ import Onboarding from './Onboarding';
 import TeamsListPage from './teamWorkspace/TeamsListPage';
 import TeamWorkspacePage from './teamWorkspace/TeamWorkspacePage';
 import SharedResourceDetailPage from './teamWorkspace/SharedResourceDetailPage';
+import TeamSettingsPage from './teamWorkspace/TeamSettingsPage';
+import UserSettingsPage from './UserSettingsPage';
 import { type SharedResourceKind, type TeamRow } from './lib/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'https://api.agentictool.ai/api';
@@ -100,12 +103,13 @@ function useAuth() {
   return { user, token, login, register, logout, loginWithGithub, isAuthenticated: !!token };
 }
 
-type Panel = 'costs' | 'api-keys' | 'workspaces' | 'settings';
+type Panel = 'costs' | 'api-keys' | 'workspaces' | 'account';
 
 const NAV_ITEMS: { id: Panel; label: string; icon: typeof BarChart3 }[] = [
   { id: 'costs', label: 'Cost Dashboard', icon: BarChart3 },
   { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'workspaces', label: 'Team Workspaces', icon: Users },
+  { id: 'account', label: 'Account', icon: SettingsIcon },
 ];
 
 // ──────────────────────────────────────────────────────────────────
@@ -115,7 +119,8 @@ const NAV_ITEMS: { id: Panel; label: string; icon: typeof BarChart3 }[] = [
 type WSRoute =
   | { view: 'teams' }
   | { view: 'workspace'; teamId: string; teamName: string }
-  | { view: 'detail'; teamId: string; teamName: string; kind: SharedResourceKind; resourceId: string };
+  | { view: 'detail'; teamId: string; teamName: string; kind: SharedResourceKind; resourceId: string }
+  | { view: 'team-settings'; teamId: string; teamName: string };
 
 export default function WebDashboard() {
   const { user, login, register, logout, loginWithGithub, isAuthenticated } = useAuth();
@@ -180,6 +185,9 @@ export default function WebDashboard() {
 
   function renderMainPanel() {
     if (panel === 'api-keys') return <ApiKeysPanel />;
+    if (panel === 'account') {
+      return <UserSettingsPage onSignedOut={logout} />;
+    }
     if (panel === 'workspaces') {
       if (wsRoute.view === 'teams') {
         return (
@@ -205,6 +213,13 @@ export default function WebDashboard() {
                 resourceId,
               })
             }
+            onOpenSettings={() =>
+              setWsRoute({
+                view: 'team-settings',
+                teamId: wsRoute.teamId,
+                teamName: wsRoute.teamName,
+              })
+            }
           />
         );
       }
@@ -217,6 +232,17 @@ export default function WebDashboard() {
             onBack={() =>
               setWsRoute({ view: 'workspace', teamId: wsRoute.teamId, teamName: wsRoute.teamName })
             }
+          />
+        );
+      }
+      if (wsRoute.view === 'team-settings') {
+        return (
+          <TeamSettingsPage
+            teamId={wsRoute.teamId}
+            onBack={() =>
+              setWsRoute({ view: 'workspace', teamId: wsRoute.teamId, teamName: wsRoute.teamName })
+            }
+            onDeleted={() => setWsRoute({ view: 'teams' })}
           />
         );
       }
