@@ -76,6 +76,28 @@ fn validate_uuid(label: &str, v: &str) -> Result<()> {
     Ok(())
 }
 
+/// #71 follow-up — git HEAD provenance. Returns Some(sha) when cwd is
+/// a git repo and `git` is on PATH, None otherwise. Failures are
+/// silent on purpose: a non-repo invocation of `ato subagent log
+/// create` (e.g., from a temp dir during a one-off LLM call) should
+/// not panic. Matches `apps/cli/src/commands/dispatch.rs`'s existing
+/// best-effort stamping behavior.
+fn capture_head_sha() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct SubagentArgs {
     #[command(subcommand)]
@@ -117,6 +139,21 @@ pub enum LogSub {
         /// the receipt records which LLM the subagent is using.
         #[arg(long)]
         model: Option<String>,
+        /// #71 follow-up — how the subagent dispatch authenticated to
+        /// the LLM. Defaults to "claude_code" (the Anthropic Agent
+        /// tool driven by a Claude Code session). Override to
+        /// "anthropic_api_key" / "openai_api_key" / etc. if a future
+        /// caller wires this through a different auth path.
+        #[arg(long, default_value = "claude_code")]
+        auth_mode: String,
+        /// #71 follow-up — billing-side classification for the cost-
+        /// split surfaces. Defaults to "claude_subscription" because
+        /// Claude Code subagents draw from the user's Claude
+        /// subscription quota, not their API-key budget. Override to
+        /// "anthropic_api" / "openai_api" / "self_hosted" as
+        /// appropriate.
+        #[arg(long, default_value = "claude_subscription")]
+        billing_surface: String,
     },
     /// Update a pending row with the subagent's response + status.
     Finish {
@@ -154,7 +191,12 @@ pub fn run(args: SubagentArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
                 war_room_id,
                 war_room_round,
                 model,
-            } => create(persona, prompt, war_room_id, war_room_round, model, db_path, opts),
+                auth_mode,
+                billing_surface,
+            } => create(
+                persona, prompt, war_room_id, war_room_round, model,
+                auth_mode, billing_surface, db_path, opts,
+            ),
             LogSub::Finish {
                 id,
                 status,
@@ -180,12 +222,15 @@ pub fn run(args: SubagentArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create(
     persona: String,
     prompt: String,
     war_room_id: Option<String>,
     war_room_round: Option<i64>,
     model: Option<String>,
+    auth_mode: String,
+    billing_surface: String,
     db_path: &PathBuf,
     opts: &Opts,
 ) -> Result<()> {
@@ -209,17 +254,29 @@ fn create(
         (None, _) => None,
     };
 
+    // #71 follow-up — git_commit_sha provenance. Best-effort: capture
+    // HEAD of the cwd if it's a git repo. Failures (not a repo, git
+    // not on PATH) leave the column NULL — receipts still render, just
+    // without commit attribution. Matches dispatch.rs's existing
+    // git_commit_sha stamping behavior.
+    let git_commit_sha = capture_head_sha();
+
     let conn = db::open_readwrite(db_path).context("open db")?;
     conn.execute(
         "INSERT INTO execution_logs
            (id, runtime, prompt, status, created_at,
             agent_slug, war_room_id, war_room_round, model,
-            initiator_kind, client_surface, initiator_id)
+            initiator_kind, client_surface, initiator_id,
+            auth_mode, billing_surface, git_commit_sha)
          VALUES
            (?1, 'claude', ?2, 'pending', ?3,
             ?4, ?5, ?6, ?7,
-            'agent:claude', 'subagent', 'claude-code')",
-        params![id, prompt_text, now, persona, war_room_id, round, model],
+            'agent:claude', 'subagent', 'claude-code',
+            ?8, ?9, ?10)",
+        params![
+            id, prompt_text, now, persona, war_room_id, round, model,
+            auth_mode, billing_surface, git_commit_sha
+        ],
     )
     .context("INSERT pending execution_log")?;
 
