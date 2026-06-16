@@ -38,6 +38,14 @@ interface Props {
   stickAgentToThread: (agentId: string | null) => Promise<void>;
   open: boolean;
   setOpen: (next: boolean | ((v: boolean) => boolean)) => void;
+  /**
+   * #83 — current model override from ModelPicker (when the runtime is an
+   * API provider). When BOTH this and selectedAgent.model are set,
+   * the picker wins — but the user has no way to tell that from looking
+   * at the chips. We use this in the chip's `title` to surface the
+   * precedence on hover ("@slug · prefers gpt-4o, using gpt-4.1 from picker").
+   */
+  modelOverride?: string | null;
 }
 
 export function AgentPicker({
@@ -48,6 +56,7 @@ export function AgentPicker({
   setGroupSlug,
   selectedAgent,
   selectedGroup,
+  modelOverride,
   runtimeAgents,
   runtimeGroups,
   stickAgentToThread,
@@ -55,6 +64,34 @@ export function AgentPicker({
   setOpen,
 }: Props) {
   const { t } = useTranslation();
+
+  // #83 — precedence-aware tooltip + visual cue. When both an agent
+  // (with a stored model) and a model-picker override are set AND they
+  // differ, surface that on hover and tint the chip amber so the user
+  // sees at a glance that their dispatch will run with the picker's
+  // model — not the agent's stored preference. No clutter, no extra
+  // copy in the chip itself; just a richer title attribute and a
+  // distinct border colour.
+  const agentModel = selectedAgent?.model ?? null;
+  const precedenceMismatch =
+    !!agentModel && !!modelOverride && agentModel !== modelOverride;
+  const chipTitle = precedenceMismatch
+    ? t(
+        "prompt.agentPickerTitleOverride",
+        "@{{slug}} prefers {{agentModel}} · using {{overrideModel}} from the model picker",
+        {
+          slug: selectedAgent?.slug,
+          agentModel,
+          overrideModel: modelOverride,
+        },
+      )
+    : agentModel
+      ? t(
+          "prompt.agentPickerTitleAgentModel",
+          "@{{slug}} · model: {{agentModel}}",
+          { slug: selectedAgent?.slug, agentModel },
+        )
+      : t("prompt.agentPickerTitle", "Pick an agent or group");
 
   return (
     <div className="relative shrink-0">
@@ -65,10 +102,12 @@ export function AgentPicker({
         className={cn(
           "flex items-center gap-1 px-2 py-1.5 rounded-lg border transition-colors",
           selectedAgent || selectedGroup
-            ? "border-cs-accent/40 bg-cs-accent/5"
+            ? precedenceMismatch
+              ? "border-amber-500/40 bg-amber-500/5"
+              : "border-cs-accent/40 bg-cs-accent/5"
             : "border-cs-border hover:border-cs-border/80",
         )}
-        title={t("prompt.agentPickerTitle", "Pick an agent or group")}
+        title={chipTitle}
       >
         {selectedGroup ? (
           <Network size={12} className="text-cs-accent" />
