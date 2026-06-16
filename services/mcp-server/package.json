@@ -13,14 +13,14 @@
     "qa:stdio": "npm run build && node scripts/qa-stdio-smoke.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "chokidar": "^3.6.0",
     "glob": "^11.0.0",
     "gray-matter": "^4.0.3",
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.7.0"
   }
 }
