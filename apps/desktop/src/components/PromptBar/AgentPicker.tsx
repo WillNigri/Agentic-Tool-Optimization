@@ -14,7 +14,7 @@
 //   - open / setOpen — shared `openPicker` mutex state so only one
 //     popover is open at a time
 
-import { Bot, Check, Network, X } from "lucide-react";
+import { Bot, Check, Network, X, AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
@@ -121,7 +121,9 @@ export function AgentPicker({
           className={cn(
             "text-[10px] font-medium font-mono",
             selectedAgent || selectedGroup
-              ? "text-cs-accent"
+              ? precedenceMismatch
+                ? "text-amber-300"
+                : "text-cs-accent"
               : "text-cs-muted",
           )}
         >
@@ -131,6 +133,32 @@ export function AgentPicker({
               ? `@${selectedAgent.slug}`
               : t("prompt.noAgent", "no agent")}
         </span>
+        {/* #83 R1 fix — visible + accessible signal for the precedence
+            mismatch. Color and title alone aren't sufficient (title is
+            unreliable on screen readers + invisible on touch). The
+            AlertTriangle is rendered with aria-hidden and we follow it
+            with an sr-only span so assistive tech announces the full
+            precedence explanation. */}
+        {precedenceMismatch && (
+          <>
+            <AlertTriangle
+              size={11}
+              className="text-amber-400 ml-0.5 shrink-0"
+              aria-hidden="true"
+            />
+            <span className="sr-only">
+              {t(
+                "prompt.agentModelOverrideA11y",
+                "Model picker is overriding @{{slug}}'s preferred model {{agentModel}} with {{overrideModel}}",
+                {
+                  slug: selectedAgent?.slug,
+                  agentModel,
+                  overrideModel: modelOverride,
+                },
+              )}
+            </span>
+          </>
+        )}
       </button>
 
       {open && (
