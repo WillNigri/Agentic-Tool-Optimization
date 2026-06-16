@@ -216,8 +216,13 @@ export default function CloudAuth() {
           </div>
         )}
 
-        {/* #86 — SDK trace key surface for the Onboarding ATO_API_KEY workflow */}
-        <EmbedKeyCard subscriptionTier={user?.subscription_tier as any} />
+        {/* #86 — SDK trace key surface for the Onboarding ATO_API_KEY workflow.
+            R1 fix — pass userId so the query cache is scoped per-account
+            (logout+login as another account must NOT show the previous key). */}
+        <EmbedKeyCard
+          subscriptionTier={user?.subscription_tier as any}
+          userId={user?.id}
+        />
 
         {/* Sync Status */}
         <div className="card">

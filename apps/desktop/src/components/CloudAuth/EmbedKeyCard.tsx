@@ -31,29 +31,48 @@ import { getEmbedKey, rotateEmbedKey } from "@/lib/cloud-api";
 interface EmbedKeyCardProps {
   /** Tier from cloud user record. embed_key is Pro+ only. */
   subscriptionTier: "free" | "pro" | "team" | "enterprise" | null | undefined;
+  /**
+   * Cloud user id. R1 fix — the query key MUST be scoped per account so
+   * that logout+login as a different cloud account never surfaces the
+   * previous account's key. useCloudStore.logout() does not clear the
+   * react-query cache, so a plain ["embed-key"] would leak across
+   * accounts in the same desktop session.
+   */
+  userId: string | null | undefined;
 }
 
-export default function EmbedKeyCard({ subscriptionTier }: EmbedKeyCardProps) {
+export default function EmbedKeyCard({ subscriptionTier, userId }: EmbedKeyCardProps) {
   const queryClient = useQueryClient();
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirmingRotate, setConfirmingRotate] = useState(false);
+  // R1 fix — typed-confirm for the rotate destructive action. Users
+  // must type "rotate" (case-insensitive) before the button arms.
+  const [rotateConfirmText, setRotateConfirmText] = useState("");
 
-  const hasAccess = subscriptionTier && subscriptionTier !== "free";
+  // R1 fix — explicit boolean for readability + correctness on null/undefined.
+  const hasAccess: boolean =
+    !!subscriptionTier && subscriptionTier !== "free";
 
   const keyQuery = useQuery<string, Error>({
-    queryKey: ["embed-key"],
+    // R1 fix — per-account scope; never leaks across logout+login.
+    queryKey: ["embed-key", userId ?? "anon"],
     queryFn: getEmbedKey,
-    enabled: !!hasAccess,
+    enabled: hasAccess && !!userId,
     staleTime: Infinity, // Won't change unless rotated.
   });
 
   const rotateMutation = useMutation<string, Error>({
     mutationFn: rotateEmbedKey,
     onSuccess: (fresh) => {
-      queryClient.setQueryData(["embed-key"], fresh);
+      // R1 fix — write under the per-account scope key.
+      queryClient.setQueryData(["embed-key", userId ?? "anon"], fresh);
+      // Auto-reveal after rotate: the user JUST clicked Rotate; they
+      // need the fresh value visible to copy + redeploy. Defensible
+      // trade-off vs always-masked default.
       setRevealed(true);
       setConfirmingRotate(false);
+      setRotateConfirmText("");
     },
   });
 
@@ -178,10 +197,16 @@ init({ apiKey: process.env.ATO_API_KEY });`}
             </a>{" "}for OpenAI / Claude Agent SDK wrappers + a non-technical
             setup guide.
           </p>
+          <p className="text-[10px] text-cs-muted/70 leading-relaxed mt-2 italic">
+            Note: ATO's external-agent bundle generator deploys the same key
+            under the legacy env-var name <code className="not-italic">ATO_TRACE_KEY</code>. Both names refer to
+            the same secret; the SDK accepts whichever your code passes to{" "}
+            <code className="not-italic">init({"{ apiKey }"})</code>.
+          </p>
         </div>
       </details>
 
-      {/* Rotate */}
+      {/* Rotate — R1 fix: typed-confirm required before button arms */}
       <div className="pt-2 border-t border-cs-border/50">
         {!confirmingRotate ? (
           <button
@@ -201,17 +226,36 @@ init({ apiKey: process.env.ATO_API_KEY });`}
                 You'll need to redeploy with the new key.
               </p>
             </div>
+            <div className="pl-6 space-y-2">
+              <label className="block text-xs text-cs-muted">
+                Type <code className="text-cs-text bg-cs-border/30 px-1.5 py-0.5 rounded font-mono">rotate</code> to confirm:
+              </label>
+              <input
+                type="text"
+                value={rotateConfirmText}
+                onChange={(e) => setRotateConfirmText(e.target.value)}
+                placeholder="rotate"
+                autoFocus
+                className="w-full max-w-xs px-3 py-1.5 bg-cs-bg border border-cs-border rounded-md text-xs font-mono text-cs-text placeholder:text-cs-muted/50 focus:outline-none focus:border-amber-500/50"
+              />
+            </div>
             <div className="flex items-center gap-2 pl-6">
               <button
                 onClick={() => rotateMutation.mutate()}
-                disabled={rotateMutation.isPending}
-                className="px-3 py-1.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-medium hover:bg-amber-500/25 disabled:opacity-50 inline-flex items-center gap-1.5 transition-colors"
+                disabled={
+                  rotateMutation.isPending ||
+                  rotateConfirmText.trim().toLowerCase() !== "rotate"
+                }
+                className="px-3 py-1.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-medium hover:bg-amber-500/25 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5 transition-colors"
               >
                 {rotateMutation.isPending && <Loader2 size={12} className="animate-spin" />}
                 Rotate now
               </button>
               <button
-                onClick={() => setConfirmingRotate(false)}
+                onClick={() => {
+                  setConfirmingRotate(false);
+                  setRotateConfirmText("");
+                }}
                 className="text-xs text-cs-muted hover:text-cs-text transition-colors"
               >
                 Cancel
