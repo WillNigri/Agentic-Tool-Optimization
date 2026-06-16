@@ -448,3 +448,118 @@ pub fn decrypt(stored: &str) -> Result<String> {
 pub fn is_v1(stored: &str) -> bool {
     stored.starts_with(VERSION_PREFIX)
 }
+
+// ── v2.15.x heal-orphans helpers ──────────────────────────────────────────
+//
+// These exist for `ato master-key heal-orphans` (commands::master_key) —
+// the cleanup tool that walks llm_api_keys for rows whose key_version
+// disagrees with the active ledger row, decrypts each under its
+// original keychain account, and re-encrypts under the active one.
+// The bug they recover from (cross-process stale-cache during a dev-
+// build save that pre-dated f740381's revalidation rework, 2026-06-11)
+// is fixed in the read path; these helpers are the one-shot data-side
+// migration so users don't have to re-enter every key.
+//
+// They are intentionally NOT public to the rest of the CLI: only the
+// heal-orphans subcommand should reach for a specific-account key,
+// because the rest of the dispatch path is supposed to flow through
+// `master_key()` so the ledger stays the source of truth.
+
+/// Read a master key from the OS keychain at a specific account name,
+/// bypassing the cached resolve() path. The heal-orphans command needs
+/// the old (retired-version) key to decrypt orphan ciphertexts. Same
+/// timeout + thread-channel shape as master_key_resolve() so a hung
+/// Keychain Access dialog can't deadlock the caller.
+pub(crate) fn read_keychain_key_for_account(account: &str) -> Result<[u8; 32]> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel::<std::result::Result<[u8; 32], String>>();
+    let account_for_thread = account.to_string();
+    std::thread::spawn(move || {
+        let result = master_key_inner(&account_for_thread).map_err(|e| format!("{:#}", e));
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(Duration::from_secs(KEYCHAIN_TIMEOUT_SECS)) {
+        Ok(Ok(key)) => Ok(key),
+        Ok(Err(s)) => Err(anyhow!("{}", s)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "keychain read for account {}/{} timed out after {}s",
+            KEYCHAIN_SERVICE,
+            account,
+            KEYCHAIN_TIMEOUT_SECS
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(anyhow!("keychain reader thread disconnected unexpectedly"))
+        }
+    }
+}
+
+/// Decrypt a v1-prefixed ciphertext with an arbitrary key. Used by
+/// heal-orphans to decrypt rows under the RETIRED master-key account
+/// before re-encrypting under the active one. Returns InvalidTag (as
+/// "v1 decrypt failed") on key mismatch — the caller treats that as
+/// "this orphan doesn't decrypt under this candidate, try the next."
+pub(crate) fn decrypt_v1_with_key(stored: &str, key: &[u8; 32]) -> Result<String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Key, Nonce};
+    let b64 = stored
+        .strip_prefix(VERSION_PREFIX)
+        .ok_or_else(|| anyhow!("not a v1-prefixed ciphertext"))?;
+    let bytes = general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("decode v1 payload")?;
+    if bytes.len() < NONCE_LEN + TAG_LEN {
+        return Err(anyhow!("v1 payload too short ({} bytes)", bytes.len()));
+    }
+    let (nonce_bytes, ciphertext) = bytes.split_at(NONCE_LEN);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .map_err(|_| anyhow!("v1 decrypt failed (key mismatch)"))?;
+    String::from_utf8(plaintext).context("v1 plaintext not utf-8")
+}
+
+/// Return the active ledger version (`v1`, `v2`, …). Used by
+/// heal-orphans to decide which rows are orphans (those whose
+/// `llm_api_keys.key_version` does not match this value).
+pub(crate) fn read_active_master_key_version() -> Result<String> {
+    let db_path = crate::db::default_db_path();
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .with_context(|| format!("open db {} for ledger version", db_path.display()))?;
+    let v: String = conn
+        .query_row(
+            "SELECT version FROM master_key_ledger
+                WHERE retired_at IS NULL
+             ORDER BY created_at DESC
+                LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .with_context(|| "read active master_key_ledger version")?;
+    Ok(v)
+}
+
+/// Look up the keychain account name for a specific ledger version.
+/// Used by heal-orphans to find the keychain entry that the orphan
+/// row's `key_version` originally pointed at — that's the key we need
+/// to decrypt with before re-encrypting under the active one.
+pub(crate) fn keychain_account_for_version(version: &str) -> Result<String> {
+    let db_path = crate::db::default_db_path();
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .with_context(|| format!("open db {} for ledger lookup", db_path.display()))?;
+    let s: String = conn
+        .query_row(
+            "SELECT keychain_account FROM master_key_ledger WHERE version = ?1",
+            [version],
+            |r| r.get::<_, String>(0),
+        )
+        .with_context(|| format!("read ledger row for version {}", version))?;
+    Ok(s)
+}

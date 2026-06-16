@@ -70,13 +70,22 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
     // why a metadata-only "Save" in the GUI doesn't recover orphaned rows.
     crate::encryption::decrypt(&encrypted).with_context(|| {
         format!(
-            "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
-             cannot be authenticated under the current master key — almost always this means \
-             the macOS keychain master_key was rotated, orphaning the stored ciphertext. \
-             Fix: re-enter the {} API key in ATO → Settings → API Keys (paste the actual key \
-             value; just hitting Save bumps `updated_at` without re-encrypting). \
-             Alternative: set the provider's env var in the shell to bypass the stored key.",
-            provider, provider,
+            "Failed to decrypt the stored API key for '{0}'. The ciphertext is intact but \
+             cannot be authenticated under the current master key — the row is an orphan \
+             from before the f740381 cache-revalidation rework (2026-06-10 22:30 UTC).\n\
+             \n\
+             Three remedies in order of permanence:\n\
+             1. Fast bypass: set the provider env var in your shell — `export {1}_API_KEY=...` \
+                — the dispatch path checks env vars FIRST and never touches the orphan.\n\
+             2. Auto-heal where possible: `ato master-key heal-orphans --dry-run` shows \
+                which orphans can be recovered (decrypted under the retired keychain key \
+                that's still present), then re-run without --dry-run to migrate them.\n\
+             3. Manual re-enter: when heal-orphans reports the row is unrecoverable \
+                (encrypted under a third key that no longer exists), open ATO → Settings → \
+                API Keys, paste the actual key value (not just hit Save — that only bumps \
+                updated_at without re-encrypting).",
+            provider,
+            provider.to_uppercase(),
         )
     })
 }

@@ -103,15 +103,22 @@ pub fn resolve_api_key(provider: &ApiProvider, conn: &Connection) -> Result<Stri
         ato_llm_key_resolver::KeySource::Stored { key_id } => {
             let plaintext = crate::encryption::decrypt(&resolved.material).with_context(|| {
                 format!(
-                    "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
-                     cannot be authenticated under the current master key — almost always this means \
-                     the macOS keychain master_key entry was rotated or refreshed after the key was \
-                     saved, orphaning the stored ciphertext (the 2026-05-14 cliff pattern). \
-                     \n\nFix: re-enter the {} API key in ATO → Settings → API Keys. The masked preview \
-                     hides the value — you must paste the actual key text to trigger re-encryption \
-                     (just hitting Save bumps `updated_at` without re-encrypting).\
-                     \n\nAlternative: set ${}=<your-key> in the shell to bypass the stored key entirely.",
-                    provider.slug, provider.slug, provider.env_var,
+                    "Failed to decrypt the stored API key for '{0}'. The ciphertext is intact but \
+                     cannot be authenticated under the current master key — the row is an orphan \
+                     from a cross-process stale-cache save (the 2026-06-11 pattern, fixed in \
+                     f740381 on 2026-06-10 22:30 UTC for forward saves).\n\
+                     \n\
+                     Three remedies in order of permanence:\n\
+                     1. Fast bypass: `export {1}=<your-key>` in your shell — the dispatch path \
+                        checks env vars FIRST and never touches the orphan ciphertext.\n\
+                     2. Auto-heal where possible: `ato master-key heal-orphans --dry-run` shows \
+                        which orphans can be recovered (decrypted under a retired keychain key \
+                        that's still present), then re-run without --dry-run to migrate them.\n\
+                     3. Manual re-enter: when heal-orphans reports the row is unrecoverable, \
+                        open ATO → Settings → API Keys and paste the actual key value (not just \
+                        Save — the masked preview hides the value, so Save alone only bumps \
+                        updated_at without re-encrypting).",
+                    provider.slug, provider.env_var,
                 )
             })?;
             let _ = ato_llm_key_resolver::touch_usage_count(conn, &key_id);

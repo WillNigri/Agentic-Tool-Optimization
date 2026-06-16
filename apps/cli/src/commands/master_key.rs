@@ -19,7 +19,7 @@
 
 use crate::encryption;
 use crate::output::Opts;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 
 /// Print the master key (base64). Confirms the flag was set; refuses
@@ -63,6 +63,211 @@ pub fn rekey_from_stdin(_conn: &Connection, _opts: &Opts) -> Result<()> {
          app's rekey banner (PR-5) — or open an issue with your headless \
          dogfood scenario."
     ))
+}
+
+/// v2.15.x — `ato master-key heal-orphans`.
+///
+/// Walk `llm_api_keys` and re-encrypt every row whose `key_version`
+/// disagrees with the active ledger row. The bug that creates orphans
+/// (cross-process stale-cache during a pre-`f740381` dev build save,
+/// 2026-06-11) is fixed in the read path; this is the one-shot data-
+/// side migration so users don't have to re-enter every key.
+///
+/// For each orphan row:
+///   1. Look up the keychain account name the row's key_version
+///      originally pointed at (e.g. `master_key_v1`).
+///   2. Read that keychain entry — only works if it still exists
+///      (we never auto-delete retired entries; the ledger only
+///      marks them retired).
+///   3. Decrypt the row's `encrypted_key` with the retired key.
+///   4. Re-encrypt the plaintext with the ACTIVE key (the normal
+///      `encryption::encrypt()` path, which goes through the
+///      ledger-validated cache).
+///   5. Persist the new ciphertext + bump `key_version` + bump
+///      `updated_at`.
+///
+/// Behaviour:
+///   - Dry-run: prints what would change; touches nothing.
+///   - Idempotent: re-running after a successful heal is a no-op.
+///   - Per-row resilience: a row that fails to decrypt under its
+///     declared old account is reported but does NOT abort the rest
+///     of the run.
+///   - Skips rows with no ledger row for their declared version
+///     (unrecoverable data — the user must re-enter, separate UX work).
+pub fn heal_orphans(conn: &Connection, dry_run: bool, opts: &Opts) -> Result<()> {
+    let active_version = crate::encryption::read_active_master_key_version()
+        .context("read active master_key_ledger version")?;
+
+    // SELECT the candidate rows. We pull every row whose key_version
+    // != active so callers can see "nothing to do" reports clearly
+    // (rather than a silent zero-effect run).
+    let mut stmt = conn.prepare(
+        "SELECT id, provider, key_preview, key_version, encrypted_key
+           FROM llm_api_keys
+          WHERE key_version != ?1
+          ORDER BY created_at",
+    )?;
+    let rows: Vec<(String, String, String, String, String)> = stmt
+        .query_map([&active_version], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    let mut healed = 0usize;
+    let mut failed = 0usize;
+
+    for (id, provider, key_preview, row_version, encrypted_key) in &rows {
+        // 1. Resolve the keychain account that row_version originally pointed at.
+        let old_account = match crate::encryption::keychain_account_for_version(row_version) {
+            Ok(s) => s,
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "action": "skipped",
+                    "reason": format!("no ledger row for version {}: {}", row_version, e),
+                }));
+                continue;
+            }
+        };
+
+        // 2. Read the retired keychain entry. Most common failure here:
+        //    the entry was manually deleted from the user's keychain
+        //    (or never existed because the row carries a version that
+        //    pre-dates the ledger schema). Either way, we can't recover.
+        let old_key = match crate::encryption::read_keychain_key_for_account(&old_account) {
+            Ok(k) => k,
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "old_account": old_account,
+                    "action": "skipped",
+                    "reason": format!("keychain read failed for {}: {}", old_account, e),
+                }));
+                continue;
+            }
+        };
+
+        // 3. Decrypt under the retired key.
+        let plaintext = match crate::encryption::decrypt_v1_with_key(encrypted_key, &old_key) {
+            Ok(p) => p,
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "old_account": old_account,
+                    "action": "skipped",
+                    "reason": format!("decrypt under retired key failed: {} \
+                        (the row may have been encrypted with a third key — \
+                        re-enter via Settings)", e),
+                }));
+                continue;
+            }
+        };
+
+        if dry_run {
+            healed += 1;
+            results.push(serde_json::json!({
+                "id": id, "provider": provider, "key_preview": key_preview,
+                "from_version": row_version, "to_version": active_version,
+                "old_account": old_account,
+                "action": "would_heal",
+            }));
+            continue;
+        }
+
+        // 4. Re-encrypt under the active key (normal encryption path).
+        let new_ct = match crate::encryption::encrypt(&plaintext) {
+            Ok(c) => c,
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "old_account": old_account,
+                    "action": "failed",
+                    "reason": format!("re-encrypt under active key failed: {}", e),
+                }));
+                continue;
+            }
+        };
+
+        // 5. Write back. CURRENT_TIMESTAMP keeps the row's updated_at
+        //    in sync with the heal so anyone auditing the rotation
+        //    can see when each orphan was migrated.
+        match conn.execute(
+            "UPDATE llm_api_keys
+                SET encrypted_key = ?1,
+                    key_version   = ?2,
+                    updated_at    = CURRENT_TIMESTAMP
+              WHERE id = ?3",
+            rusqlite::params![new_ct, active_version, id],
+        ) {
+            Ok(_) => {
+                healed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "old_account": old_account,
+                    "action": "healed",
+                }));
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "old_account": old_account,
+                    "action": "failed",
+                    "reason": format!("UPDATE failed: {}", e),
+                }));
+            }
+        }
+    }
+
+    let report = serde_json::json!({
+        "active_version": active_version,
+        "dry_run": dry_run,
+        "candidates": rows.len(),
+        "healed": healed,
+        "failed": failed,
+        "rows": results,
+    });
+
+    if opts.human {
+        eprintln!(
+            "[heal-orphans] active={}  candidates={}  healed={}  failed={}{}",
+            active_version,
+            rows.len(),
+            healed,
+            failed,
+            if dry_run { "  (dry-run, no writes)" } else { "" }
+        );
+        for r in &results {
+            let id = r.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let provider = r.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
+            let from_v = r.get("from_version").and_then(|v| v.as_str()).unwrap_or("?");
+            let to_v = r.get("to_version").and_then(|v| v.as_str()).unwrap_or("?");
+            let action = r.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            let reason = r.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            eprintln!("  {} provider={} {}→{} action={} {}", id, provider, from_v, to_v, action, reason);
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

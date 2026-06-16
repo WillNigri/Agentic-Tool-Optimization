@@ -955,6 +955,19 @@ enum MasterKeySub {
         #[arg(long = "confirm-i-understand-this-prints-the-key", default_value_t = false)]
         confirm: bool,
     },
+    /// v2.15.x — walk llm_api_keys, find rows whose key_version no
+    /// longer matches the active master_key_ledger row, decrypt each
+    /// under its original (retired) keychain account, re-encrypt
+    /// under the active key. One-shot data migration for orphans
+    /// left over from before the f740381 cache-revalidation rework.
+    /// Idempotent; --dry-run prints what would change.
+    HealOrphans {
+        /// Print the planned changes as JSON without writing. Safe to
+        /// run unconditionally; mirrors the report shape of the live
+        /// run so you can diff dry-run vs real.
+        #[arg(long = "dry-run", default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2164,6 +2177,10 @@ fn main() -> Result<()> {
         },
         Commands::MasterKey { sub } => match sub {
             MasterKeySub::Export { confirm } => commands::master_key::export(confirm, &opts),
+            MasterKeySub::HealOrphans { dry_run } => {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                commands::master_key::heal_orphans(&conn, dry_run, &opts)
+            }
         },
         Commands::Bridge {
             session,
