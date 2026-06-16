@@ -95,7 +95,26 @@ pub fn rekey_from_stdin(_conn: &Connection, _opts: &Opts) -> Result<()> {
 ///   - Skips rows with no ledger row for their declared version
 ///     (unrecoverable data — the user must re-enter, separate UX work).
 pub fn heal_orphans(conn: &Connection, dry_run: bool, opts: &Opts) -> Result<()> {
-    let active_version = crate::encryption::read_active_master_key_version()
+    // R1 codex #2 fix — refuse live heals when ATO_MASTER_KEY_B64 is
+    // set. encrypt() honors that env var first; if it's stale or
+    // arbitrary, we'd write fresh ciphertext under the wrong key and
+    // stamp it as the active version. Lethal for a repair tool. The
+    // dry-run path is still allowed so a user can verify what would
+    // happen before unsetting the env var; live writes are blocked.
+    if !dry_run && std::env::var("ATO_MASTER_KEY_B64").map(|s| !s.trim().is_empty()).unwrap_or(false) {
+        return Err(anyhow!(
+            "ATO_MASTER_KEY_B64 is set in the environment. heal-orphans \
+             re-encrypts via the normal encrypt() path, which honors that \
+             env var ahead of the ledger. If the env var's key is stale \
+             or arbitrary, the heal would write ciphertext that no future \
+             process can read.\n\n\
+             Either:\n\
+              • `unset ATO_MASTER_KEY_B64` and re-run (recommended), OR\n\
+              • run with --dry-run to see what would change without writing."
+        ));
+    }
+
+    let active_version = crate::encryption::read_active_master_key_version_from(conn)
         .context("read active master_key_ledger version")?;
 
     // SELECT the candidate rows. We pull every row whose key_version
@@ -125,7 +144,8 @@ pub fn heal_orphans(conn: &Connection, dry_run: bool, opts: &Opts) -> Result<()>
 
     for (id, provider, key_preview, row_version, encrypted_key) in &rows {
         // 1. Resolve the keychain account that row_version originally pointed at.
-        let old_account = match crate::encryption::keychain_account_for_version(row_version) {
+        //    R1 codex #3 — use the caller's connection so --db is honored.
+        let old_account = match crate::encryption::keychain_account_for_version_from(conn, row_version) {
             Ok(s) => s,
             Err(e) => {
                 failed += 1;
@@ -139,12 +159,28 @@ pub fn heal_orphans(conn: &Connection, dry_run: bool, opts: &Opts) -> Result<()>
             }
         };
 
-        // 2. Read the retired keychain entry. Most common failure here:
-        //    the entry was manually deleted from the user's keychain
-        //    (or never existed because the row carries a version that
-        //    pre-dates the ledger schema). Either way, we can't recover.
-        let old_key = match crate::encryption::read_keychain_key_for_account(&old_account) {
-            Ok(k) => k,
+        // 2. Read the retired keychain entry — strict read-only path
+        //    (R1 codex #1 fix). NEVER writes the first-run sentinel,
+        //    NEVER generates a new key. Returns Ok(None) when the
+        //    entry doesn't exist so we can skip cleanly.
+        let old_key = match crate::encryption::read_keychain_key_for_account_readonly(&old_account) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": id, "provider": provider, "key_preview": key_preview,
+                    "from_version": row_version, "to_version": active_version,
+                    "old_account": old_account,
+                    "action": "skipped",
+                    "reason": format!(
+                        "keychain entry {} does not exist (retired key was \
+                         manually deleted or never created on this machine); \
+                         row is unrecoverable — delete + re-enter via Settings",
+                        old_account
+                    ),
+                }));
+                continue;
+            }
             Err(e) => {
                 failed += 1;
                 results.push(serde_json::json!({

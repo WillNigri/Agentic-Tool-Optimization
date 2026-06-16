@@ -465,23 +465,55 @@ pub fn is_v1(stored: &str) -> bool {
 // because the rest of the dispatch path is supposed to flow through
 // `master_key()` so the ledger stays the source of truth.
 
-/// Read a master key from the OS keychain at a specific account name,
-/// bypassing the cached resolve() path. The heal-orphans command needs
-/// the old (retired-version) key to decrypt orphan ciphertexts. Same
-/// timeout + thread-channel shape as master_key_resolve() so a hung
-/// Keychain Access dialog can't deadlock the caller.
-pub(crate) fn read_keychain_key_for_account(account: &str) -> Result<[u8; 32]> {
+/// R1 codex #1 fix — strict read-only keychain fetch for heal-orphans.
+///
+/// `master_key_inner()` has TWO side effects that are wrong for a
+/// repair tool:
+///   (a) on a successful read it writes the first-run sentinel if
+///       missing — so a heal-orphans dry-run could create the
+///       sentinel on a fresh machine and silently change behavior of
+///       future regenerate paths;
+///   (b) on `NoEntry` without a sentinel it GENERATES a new key and
+///       stores it — heal-orphans would then "decrypt" with a
+///       fabricated key (it wouldn't match, so it'd report failure;
+///       but the keychain side-effect of storing a brand new bogus
+///       account entry under the retired name is worse than a clear
+///       skip).
+///
+/// This helper does neither. It reads the keychain entry if present,
+/// returns `Ok(None)` on `NoEntry` (so the caller can skip with a
+/// clear reason), and never touches the sentinel.
+///
+/// Uses the same thread-channel timeout shape as master_key_resolve()
+/// so a hung Keychain Access dialog cannot deadlock the caller.
+pub(crate) fn read_keychain_key_for_account_readonly(
+    account: &str,
+) -> Result<Option<[u8; 32]>> {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let (tx, rx) = mpsc::channel::<std::result::Result<[u8; 32], String>>();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Option<[u8; 32]>, String>>();
     let account_for_thread = account.to_string();
     std::thread::spawn(move || {
-        let result = master_key_inner(&account_for_thread).map_err(|e| format!("{:#}", e));
+        let result = (|| -> Result<Option<[u8; 32]>> {
+            let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account_for_thread)
+                .with_context(|| {
+                    format!(
+                        "open keyring entry {}/{}",
+                        KEYCHAIN_SERVICE, account_for_thread
+                    )
+                })?;
+            match entry.get_password() {
+                Ok(b64) => Ok(Some(decode_key_b64(&b64)?)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(anyhow!("keyring get_password failed: {}", e)),
+            }
+        })()
+        .map_err(|e| format!("{:#}", e));
         let _ = tx.send(result);
     });
     match rx.recv_timeout(Duration::from_secs(KEYCHAIN_TIMEOUT_SECS)) {
-        Ok(Ok(key)) => Ok(key),
+        Ok(Ok(opt)) => Ok(opt),
         Ok(Err(s)) => Err(anyhow!("{}", s)),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
             "keychain read for account {}/{} timed out after {}s",
@@ -520,16 +552,15 @@ pub(crate) fn decrypt_v1_with_key(stored: &str, key: &[u8; 32]) -> Result<String
     String::from_utf8(plaintext).context("v1 plaintext not utf-8")
 }
 
-/// Return the active ledger version (`v1`, `v2`, …). Used by
-/// heal-orphans to decide which rows are orphans (those whose
-/// `llm_api_keys.key_version` does not match this value).
-pub(crate) fn read_active_master_key_version() -> Result<String> {
-    let db_path = crate::db::default_db_path();
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .with_context(|| format!("open db {} for ledger version", db_path.display()))?;
+/// Return the active ledger version (`v1`, `v2`, …) from the caller's
+/// `Connection`. Used by heal-orphans to decide which rows are
+/// orphans. R1 codex #3 fix — was opening default_db_path
+/// unconditionally, which broke `ato --db /other.db master-key
+/// heal-orphans` (candidates from one file, ledger metadata from
+/// another).
+pub(crate) fn read_active_master_key_version_from(
+    conn: &rusqlite::Connection,
+) -> Result<String> {
     let v: String = conn
         .query_row(
             "SELECT version FROM master_key_ledger
@@ -543,17 +574,13 @@ pub(crate) fn read_active_master_key_version() -> Result<String> {
     Ok(v)
 }
 
-/// Look up the keychain account name for a specific ledger version.
-/// Used by heal-orphans to find the keychain entry that the orphan
-/// row's `key_version` originally pointed at — that's the key we need
-/// to decrypt with before re-encrypting under the active one.
-pub(crate) fn keychain_account_for_version(version: &str) -> Result<String> {
-    let db_path = crate::db::default_db_path();
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .with_context(|| format!("open db {} for ledger lookup", db_path.display()))?;
+/// Look up the keychain account name for a specific ledger version
+/// using the caller's `Connection`. Same R1 codex #3 rationale —
+/// callsite-controlled DB.
+pub(crate) fn keychain_account_for_version_from(
+    conn: &rusqlite::Connection,
+    version: &str,
+) -> Result<String> {
     let s: String = conn
         .query_row(
             "SELECT keychain_account FROM master_key_ledger WHERE version = ?1",
