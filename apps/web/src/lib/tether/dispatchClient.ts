@@ -77,12 +77,7 @@ function applyComplete(
 export function useDispatchRequest(tetherClient: DispatchTransport) {
   const [current, setCurrent] = useState<DispatchRunState | null>(null);
   const [history, setHistory] = useState<DispatchRunState[]>([]);
-  const currentRef = useRef<DispatchRunState | null>(null);
   const lastPromotedRequestIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    currentRef.current = current;
-  }, [current]);
 
   useEffect(() => {
     if (!current) return;
@@ -112,11 +107,17 @@ export function useDispatchRequest(tetherClient: DispatchTransport) {
         case "dispatch_chunk":
           setCurrent((prev) => applyChunk(prev, rawFrame));
           break;
-        case "dispatch_complete": {
-          const next = applyComplete(currentRef.current, rawFrame);
-          setCurrent(next);
+        case "dispatch_complete":
+          // R2 codex fix: use a functional updater (same as chunk above)
+          // instead of reading currentRef. The useEffect that mirrors
+          // current → currentRef runs AFTER React commits, so if a
+          // dispatch_chunk and dispatch_complete arrive in the same
+          // render batch (or back-to-back before the mirror catches up),
+          // currentRef.current would be stale and applyComplete would
+          // drop the latest chunk's text. setCurrent(prev => …) reads
+          // the latest queued state, no staleness window.
+          setCurrent((prev) => applyComplete(prev, rawFrame));
           break;
-        }
         default:
           assertNever(rawFrame);
       }
