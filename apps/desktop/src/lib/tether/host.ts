@@ -38,6 +38,11 @@ async function tauriInvoke(cmd: string, args?: Record<string, unknown>): Promise
   await invoke(cmd, args);
 }
 
+async function tauriInvokeResult<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return (await invoke<T>(cmd, args));
+}
+
 // ── Request/reply shape (must match tether_host.rs + browser client) ─────
 
 interface DecryptRequest {
@@ -61,6 +66,51 @@ interface DecryptReply {
   ok: boolean;
   events?: DecryptedEvent[];
   error?: string;
+}
+
+// ── v2.18 Wave 1 — browser-driven dispatch frames ─────────────────────────
+//
+// Shape mirrors apps/web/src/lib/tether/dispatchFrames.ts. The browser
+// sends DispatchRequestFrame; the desktop bridge fires the dispatch
+// locally via the existing prompt_agent Tauri command, then replies
+// with one DispatchChunkFrame + one DispatchCompleteFrame. Wave 1 is
+// claude-only and batch-flushes at end (no real streaming yet).
+type DispatchRuntime =
+  | "claude" | "codex" | "gemini" | "openclaw" | "hermes"
+  | "minimax" | "grok" | "deepseek" | "qwen" | "openrouter";
+
+interface DispatchRequestFrame {
+  kind: "dispatch_request";
+  request_id: string;
+  runtime: DispatchRuntime;
+  prompt: string;
+  model?: string | null;
+  agent_slug?: string | null;
+  war_room_id?: string | null;
+  war_room_round?: number | null;
+  workspace_root?: string | null;
+}
+
+type DispatchStatus = "success" | "failed" | "denied" | "cancelled";
+
+interface DispatchChunkFrame {
+  kind: "dispatch_chunk";
+  request_id: string;
+  chunk_index: number;
+  text: string;
+}
+
+interface DispatchCompleteFrame {
+  kind: "dispatch_complete";
+  request_id: string;
+  status: DispatchStatus;
+  execution_log_id?: string | null;
+  cost_usd?: number | null;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  model?: string | null;
+  duration_ms?: number | null;
+  error?: string | null;
 }
 
 // ── Bridge state ──────────────────────────────────────────────────────────
@@ -116,18 +166,29 @@ async function handleDecryptRequest(payload: {
   const { session_id, request_id, plain_request_json } = payload;
 
   // Parse the request.
-  let req: DecryptRequest;
+  let raw: { kind?: string };
   try {
-    req = JSON.parse(plain_request_json) as DecryptRequest;
+    raw = JSON.parse(plain_request_json) as { kind?: string };
   } catch (err) {
     await replyError(session_id, request_id, `request JSON parse failed: ${String(err)}`);
     return;
   }
 
-  if (req.kind !== "decrypt_events") {
-    await replyError(session_id, request_id, `unknown request kind: ${req.kind}`);
+  // v2.18 Wave 1 — route dispatch_request frames to the dispatch handler.
+  // The browser sends these via sendTetherFrame (NOT tetherRpc), so there's
+  // no pending RPC on the browser side waiting for a request_id-matched
+  // reply — we respond with separate chunk + complete frames that the
+  // browser routes through hostFrameListeners.
+  if (raw.kind === "dispatch_request") {
+    await handleDispatchRequest(session_id, plain_request_json);
     return;
   }
+
+  if (raw.kind !== "decrypt_events") {
+    await replyError(session_id, request_id, `unknown request kind: ${raw.kind}`);
+    return;
+  }
+  const req = raw as DecryptRequest;
 
   try {
     // 1. Load the Team Key (from cache or keychain+cloud envelope).
@@ -224,5 +285,116 @@ async function replyError(
     });
   } catch (e) {
     console.error("[tether/host.ts] failed to send error reply:", e);
+  }
+}
+
+// ── v2.18 Wave 1 — dispatch_request handler ──────────────────────────────
+
+async function handleDispatchRequest(
+  sessionId: string,
+  plainRequestJson: string,
+): Promise<void> {
+  let req: DispatchRequestFrame;
+  try {
+    req = JSON.parse(plainRequestJson) as DispatchRequestFrame;
+  } catch (err) {
+    console.error("[tether/host.ts] dispatch_request parse failed:", err);
+    return;
+  }
+
+  // Wave 1 gate: claude only. Anything else replies denied immediately.
+  if (req.runtime !== "claude") {
+    await sendCompleteFrame(sessionId, {
+      kind: "dispatch_complete",
+      request_id: req.request_id,
+      status: "denied",
+      error: `Wave 1 supports claude only; got ${req.runtime}. More runtimes ship in next wave.`,
+    });
+    return;
+  }
+
+  const startedAt = performance.now();
+
+  try {
+    // Build the optional config payload — model override only for now.
+    // Matches the existing prompt_agent contract (commands/mod.rs:1224).
+    const config = req.model
+      ? JSON.stringify({ model: req.model })
+      : undefined;
+
+    const output = await tauriInvokeResult<string>("prompt_agent", {
+      runtime: req.runtime,
+      prompt: req.prompt,
+      config,
+      agentSlug: req.agent_slug ?? null,
+      // workspace is the registered project root; omit for Wave 1 per doc.
+      workspace: null,
+    });
+
+    const durationMs = Math.round(performance.now() - startedAt);
+
+    // CLI runtimes batch-flush at end (per [[codex-dispatch-no-stream]]).
+    // Wave 1 sends the entire output as a single chunk, then completes.
+    // Wave 2 will swap this for the actual streaming hook so the browser
+    // sees tokens as they're generated.
+    await sendChunkFrame(sessionId, {
+      kind: "dispatch_chunk",
+      request_id: req.request_id,
+      chunk_index: 0,
+      text: output,
+    });
+
+    await sendCompleteFrame(sessionId, {
+      kind: "dispatch_complete",
+      request_id: req.request_id,
+      status: "success",
+      model: req.model ?? null,
+      duration_ms: durationMs,
+      // Wave 1 doesn't surface execution_log_id / cost / tokens —
+      // prompt_agent returns the raw output string today. Wave 2 will
+      // either return a struct or query execution_logs by run_id.
+    });
+  } catch (err) {
+    const durationMs = Math.round(performance.now() - startedAt);
+    const message = err instanceof Error ? err.message : String(err);
+    await sendCompleteFrame(sessionId, {
+      kind: "dispatch_complete",
+      request_id: req.request_id,
+      status: "failed",
+      duration_ms: durationMs,
+      error: message,
+    });
+  }
+}
+
+async function sendChunkFrame(
+  sessionId: string,
+  frame: DispatchChunkFrame,
+): Promise<void> {
+  try {
+    await tauriInvoke("tether_decrypt_response", {
+      sessionId,
+      // request_id on the wire is informational — the browser routes
+      // chunk frames by kind, not by matching pending RPCs.
+      requestId: frame.request_id,
+      plainReplyJson: JSON.stringify(frame),
+    });
+  } catch (e) {
+    console.error("[tether/host.ts] sendChunkFrame failed:", e);
+  }
+}
+
+async function sendCompleteFrame(
+  sessionId: string,
+  frame: DispatchCompleteFrame,
+): Promise<void> {
+  try {
+    await tauriInvoke("tether_decrypt_response", {
+      sessionId,
+      requestId: frame.request_id,
+      plainReplyJson: JSON.stringify(frame),
+    });
+  } catch (e) {
+    console.error("[tether/host.ts] sendCompleteFrame failed:", e);
   }
 }
