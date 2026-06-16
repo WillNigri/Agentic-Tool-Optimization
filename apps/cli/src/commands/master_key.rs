@@ -117,6 +117,33 @@ pub fn heal_orphans(conn: &Connection, dry_run: bool, opts: &Opts) -> Result<()>
     let active_version = crate::encryption::read_active_master_key_version_from(conn)
         .context("read active master_key_ledger version")?;
 
+    // R2 codex finding — resolve the ACTIVE master key up-front using
+    // the caller's connection, NOT through encrypt() (which would
+    // re-read default_db_path() inside master_key()). With this,
+    // `ato --db /other.db master-key heal-orphans` re-encrypts under
+    // /other.db's active key, not the home DB's.
+    //
+    // Lazy: only resolve when we actually have work to do AND we're
+    // not in dry-run. Dry-run never re-encrypts so it doesn't need
+    // the active key. We initialise to None and unwrap inside the
+    // live-write branch below.
+    let active_key_for_writes: Option<[u8; 32]> = if dry_run {
+        None
+    } else {
+        let active_account = crate::encryption::read_active_master_key_account_from(conn)
+            .context("resolve active master-key account from caller's conn")?;
+        let key = crate::encryption::read_keychain_key_for_account_readonly(&active_account)
+            .with_context(|| format!("read active keychain entry {}", active_account))?
+            .ok_or_else(|| anyhow!(
+                "active master-key account {} is not in the OS keychain — \
+                 the ledger says {} is active but no keychain entry exists. \
+                 This is an inconsistent install; fix the ledger or the \
+                 keychain before retrying heal-orphans.",
+                active_account, active_account
+            ))?;
+        Some(key)
+    };
+
     // SELECT the candidate rows. We pull every row whose key_version
     // != active so callers can see "nothing to do" reports clearly
     // (rather than a silent zero-effect run).
@@ -223,8 +250,18 @@ pub fn heal_orphans(conn: &Connection, dry_run: bool, opts: &Opts) -> Result<()>
             continue;
         }
 
-        // 4. Re-encrypt under the active key (normal encryption path).
-        let new_ct = match crate::encryption::encrypt(&plaintext) {
+        // 4. Re-encrypt under the active key. R2 codex finding —
+        //    use the explicit active_key_for_writes we resolved up-
+        //    front from the caller's conn, NOT encrypt() (which would
+        //    re-resolve via default_db_path inside master_key()).
+        //    .expect() is safe because we proved Some(...) at the top
+        //    of the function under !dry_run, and we already know
+        //    dry_run is false here (the dry_run early-continue is in
+        //    the block above this one).
+        let active_key = active_key_for_writes
+            .as_ref()
+            .expect("active_key_for_writes resolved before writes; dry_run path returns earlier");
+        let new_ct = match crate::encryption::encrypt_v1_with_key(&plaintext, active_key) {
             Ok(c) => c,
             Err(e) => {
                 failed += 1;

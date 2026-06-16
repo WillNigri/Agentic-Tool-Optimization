@@ -574,6 +574,39 @@ pub(crate) fn read_active_master_key_version_from(
     Ok(v)
 }
 
+/// Look up the ACTIVE (retired_at IS NULL) keychain account name
+/// using the caller's `Connection`. R2 codex finding — the WRITE
+/// path of heal-orphans called encrypt() which used the cached
+/// master_key() that internally reads default_db_path(). Heal now
+/// resolves the active account from the caller's conn instead.
+pub(crate) fn read_active_master_key_account_from(
+    conn: &rusqlite::Connection,
+) -> Result<String> {
+    let s: String = conn
+        .query_row(
+            "SELECT keychain_account FROM master_key_ledger
+                WHERE retired_at IS NULL
+             ORDER BY created_at DESC
+                LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .with_context(|| "read active master_key_ledger account")?;
+    Ok(s)
+}
+
+/// Encrypt plaintext under an explicit key. Bypasses the cached
+/// master_key() resolution entirely. R2 codex finding — heal-orphans
+/// re-encryption uses this so the WRITE path stays under the same
+/// DB+keychain the READ path uses, instead of falling back to
+/// default_db_path() through encrypt().
+pub(crate) fn encrypt_v1_with_key(
+    plaintext: &str,
+    key_bytes: &[u8; 32],
+) -> Result<String> {
+    encrypt_with_key_internal(plaintext, key_bytes)
+}
+
 /// Look up the keychain account name for a specific ledger version
 /// using the caller's `Connection`. Same R1 codex #3 rationale —
 /// callsite-controlled DB.
