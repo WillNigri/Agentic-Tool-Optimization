@@ -265,20 +265,29 @@ export default function PromptBar() {
     enabled: isTauri,
   });
 
-  // #83 — read the saved model-picker override so we can pass it to
-  // AgentPicker for the precedence tooltip + amber-tint cue when the
-  // picker is overriding an agent's stored model. Same query key
-  // ModelPicker uses, so react-query dedupes the actual fetch. Only
-  // fires for API providers; CLI runtimes don't expose a picker.
-  const isApiProvider =
-    availableRuntimes?.find((r) => r.slug === runtime)?.kind === "api";
+  // Read the saved model-picker override once, then reuse it for both:
+  //   #83 — pass it to AgentPicker for the precedence tooltip + amber-tint
+  //         cue when the picker overrides an agent's stored model.
+  //   #82 — forward it to the chat dispatch path as config:{model} JSON
+  //         (backend appends `--model <id>` per CLI runtime).
+  // The picker surfaces for API providers always, and for CLI runtimes
+  // that have a curated CLI_RUNTIME_MODELS entry. Same query key ModelPicker
+  // uses, so react-query dedupes the actual fetch.
+  const runtimeMeta = availableRuntimes?.find((r) => r.slug === runtime);
+  const hasModelPicker =
+    runtimeMeta?.kind === "api" ||
+    (runtimeMeta?.kind === "cli" &&
+      !!CLI_RUNTIME_MODELS[runtime as RuntimeId]);
   const { data: savedModelConfig } = useQuery({
     queryKey: ["model-config", runtime, activeProject?.id ?? null],
     queryFn: () => getModelConfig(runtime, activeProject?.id),
     staleTime: 30_000,
-    enabled: isTauri && isApiProvider,
+    enabled: isTauri && hasModelPicker,
   });
-  const modelOverride = savedModelConfig?.modelId ?? null;
+  const modelOverride =
+    savedModelConfig?.modelId && savedModelConfig.modelId.length > 0
+      ? savedModelConfig.modelId
+      : null;
 
   const selectedAgent = useMemo(
     () => runtimeAgents.find((a) => a.id === agentId) ?? null,
@@ -642,12 +651,21 @@ export default function PromptBar() {
           // history travels, plus the agent's variables / hooks / memory
           // policy / role models all fire.
           const history: AgentMessage[] = messagesToAgentHistory(messages);
+          // #82 R1 fix — pass the user's saved model picker override to
+          // the Rust dispatch path so CLI runtimes actually use it.
+          // Rust reads `config` as JSON and looks for `.model` (see
+          // commands/mod.rs:1293-1301). modelOverride wins over the
+          // agent's stored model (matches #83 precedence semantics).
+          const cliConfig = modelOverride
+            ? JSON.stringify({ model: modelOverride })
+            : undefined;
           response = await promptAgentWithHistoryStream({
             agentId: selectedAgent.id,
             agentSlug: selectedAgent.slug,
             runtime,
             history,
             newPrompt: prompt,
+            config: cliConfig,
             source: "desktop:promptbar:stream",
             onChunk: (text) => setStreamingText((prev) => prev + text),
           });
@@ -688,9 +706,14 @@ export default function PromptBar() {
           // multi-turn when we don't manage the runtime's session.
           const history: AgentMessage[] = messagesToAgentHistory(messages);
           const stitched = stitchThreadIntoPrompt(history, prompt);
+          // #82 R1 fix — same modelOverride plumbing as the agent path.
+          const cliConfig = modelOverride
+            ? JSON.stringify({ model: modelOverride })
+            : undefined;
           response = await promptAgentStream({
             runtime,
             prompt: stitched,
+            config: cliConfig,
             onChunk: (text) => setStreamingText((prev) => prev + text),
           });
           // v2.1.0+ — no-agent path now uploads too. agent_slug uses

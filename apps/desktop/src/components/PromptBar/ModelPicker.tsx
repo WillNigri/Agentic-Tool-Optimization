@@ -112,7 +112,13 @@ export default function ModelPicker({
     },
   });
 
-  const currentId = savedConfig?.modelId ?? null;
+  // #82 R1 fix — treat empty string ("") as "no override" the same as
+  // null. The Rust dispatch path filters !s.is_empty() before passing
+  // --model, so the saved-empty-string state is the canonical "use
+  // runtime default" marker. Saves us from having to add a delete API
+  // just for this UX.
+  const rawId = savedConfig?.modelId ?? null;
+  const currentId = rawId && rawId.length > 0 ? rawId : null;
 
   return (
     <div className="relative shrink-0">
@@ -179,6 +185,25 @@ export default function ModelPicker({
             )}
 
             <div className="max-h-72 overflow-y-auto py-1">
+              {/* #82 R1 fix — "Use runtime default" row at the top.
+                  Persisting an empty modelId clears the override via
+                  the same code path Rust uses to detect "no model"
+                  (filter !is_empty before --model is appended). */}
+              <button
+                type="button"
+                onClick={() => setMutation.mutate("")}
+                disabled={setMutation.isPending}
+                className={cn(
+                  "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors disabled:opacity-50 border-b border-cs-border/40",
+                  !currentId
+                    ? "bg-cs-accent/10 text-cs-accent"
+                    : "hover:bg-cs-bg text-cs-muted",
+                )}
+              >
+                <span className="text-[10px] uppercase tracking-wider">
+                  {!currentId ? "✓ Using" : "Use"} runtime default
+                </span>
+              </button>
               {isLoading && (
                 <div className="px-3 py-3 text-xs text-cs-muted">
                   Fetching live model list…
