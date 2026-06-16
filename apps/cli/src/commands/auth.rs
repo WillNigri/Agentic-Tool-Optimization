@@ -673,11 +673,36 @@ mod embed_key_tests {
     }
 
     #[test]
-    fn full_key_alias_emits_drift_warning() {
+    fn full_key_camelcase_alias_emits_drift_warning() {
         let b = json(r#"{"data":{"embedKey":"eba_ABCD_full_token"}}"#);
         let (val, alias) = extract_full_key(&b);
         assert_eq!(val, Some("eba_ABCD_full_token"));
         assert_eq!(alias, Some("embedKey"));
+    }
+
+    #[test]
+    fn full_key_snake_case_alias_emits_drift_warning() {
+        // R2 codex gap fix — the snake_case path
+        // (`/data/embed_key`) was the only extraction branch the
+        // initial R1 tests missed. Adding parity with the prefix
+        // tests so all 3 extraction paths × 2 fields (prefix, key)
+        // are pinned.
+        let b = json(r#"{"data":{"embed_key":"eba_ABCD_full_token"}}"#);
+        let (val, alias) = extract_full_key(&b);
+        assert_eq!(val, Some("eba_ABCD_full_token"));
+        assert_eq!(alias, Some("embed_key"));
+    }
+
+    #[test]
+    fn full_key_canonical_wins_over_alias_when_both_present() {
+        // Mirror of the prefix canonical-wins test for symmetry.
+        // Defensive: if a server in mid-migration returns both
+        // canonical + alias, canonical wins and no drift warning
+        // fires.
+        let b = json(r#"{"data":{"key":"eba_CANONICAL","embedKey":"eba_ALIAS"}}"#);
+        let (val, alias) = extract_full_key(&b);
+        assert_eq!(val, Some("eba_CANONICAL"));
+        assert_eq!(alias, None);
     }
 
     #[test]
