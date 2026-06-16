@@ -63,6 +63,7 @@ interface TetherSingleton {
   rxSeq: bigint;
   pendingRpcs: Map<string, PendingRpc>;
   listeners: Set<(info: TetherInfo) => void>;
+  hostFrameListeners: Set<(frame: Record<string, unknown>) => void>;
 }
 
 const singleton: TetherSingleton = {
@@ -75,6 +76,7 @@ const singleton: TetherSingleton = {
   rxSeq: 0n,
   pendingRpcs: new Map(),
   listeners: new Set(),
+  hostFrameListeners: new Set(),
 };
 
 // ──────────────────────────────────────────────────────────────────
@@ -230,6 +232,15 @@ export function stopTether(): void {
   setState("idle", null, null);
 }
 
+export function subscribeHostFrames(
+  cb: (frame: Record<string, unknown>) => void,
+): () => void {
+  singleton.hostFrameListeners.add(cb);
+  return () => {
+    singleton.hostFrameListeners.delete(cb);
+  };
+}
+
 // ──────────────────────────────────────────────────────────────────
 // RPC
 // ──────────────────────────────────────────────────────────────────
@@ -245,40 +256,6 @@ export async function tetherRpc<TReq, TResp>(
   }
 
   const requestId = crypto.randomUUID();
-  const payload = JSON.stringify({ request_id: requestId, kind, ...(req as object) });
-  const plaintext = new TextEncoder().encode(payload);
-
-  // CSO #1 fix — derive the nonce via HKDF so both sides agree without
-  // sending it in the clear, and pack `nonce(24) || ciphertext` into a
-  // single payload_b64 field to match the Rust host's wire format.
-  // Direction 1 = browser→host (Rust host's aead_open expects dir=1 on
-  // inbound frames). txSeq is the per-direction monotonic counter.
-  const nonce = deriveNonce(singleton.sessionKey, 0x01, singleton.txSeq);
-  singleton.txSeq++;
-
-  let ciphertext: Uint8Array;
-  try {
-    ciphertext = aeadEncrypt(plaintext, singleton.sessionKey, nonce);
-  } catch (err) {
-    throw new Error(`AEAD encrypt failed: ${String(err)}`);
-  }
-
-  // Packed wire: base64(24-byte-nonce || ciphertext+tag). The receiver
-  // re-derives the expected nonce from (session, direction, seq) and
-  // rejects if the packed nonce doesn't match — same replay defense
-  // Rust's aead_open implements.
-  const packed = new Uint8Array(nonce.length + ciphertext.length);
-  packed.set(nonce, 0);
-  packed.set(ciphertext, nonce.length);
-
-  // Codex R1 fix — cloud relay's `forward` handler reads `session_id`,
-  // not `browser_session_id`. Pre-fix shape sent the wrong field name
-  // and every RPC was rejected with "session_id mismatch".
-  const frame = {
-    type: "forward",
-    session_id: singleton.sessionId,
-    payload_b64: toBase64(packed),
-  };
 
   return new Promise<TResp>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -293,13 +270,46 @@ export async function tetherRpc<TReq, TResp>(
     });
 
     try {
-      singleton.ws!.send(JSON.stringify(frame));
+      sendTetherFrame({ request_id: requestId, kind, ...(req as object) });
     } catch (err) {
       clearTimeout(timer);
       singleton.pendingRpcs.delete(requestId);
       reject(err instanceof Error ? err : new Error(String(err)));
     }
   });
+}
+
+export function sendTetherFrame(payload: Record<string, unknown>): void {
+  if (singleton.state !== "approved" || !singleton.sessionKey || !singleton.ws) {
+    throw new Error(`Tether not approved (state: ${singleton.state})`);
+  }
+
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const nonce = deriveNonce(singleton.sessionKey, 0x01, singleton.txSeq);
+  singleton.txSeq++;
+
+  let ciphertext: Uint8Array;
+  try {
+    ciphertext = aeadEncrypt(plaintext, singleton.sessionKey, nonce);
+  } catch (err) {
+    throw new Error(`AEAD encrypt failed: ${String(err)}`);
+  }
+
+  const packed = new Uint8Array(nonce.length + ciphertext.length);
+  packed.set(nonce, 0);
+  packed.set(ciphertext, nonce.length);
+
+  const frame = {
+    type: "forward",
+    session_id: singleton.sessionId,
+    payload_b64: toBase64(packed),
+  };
+
+  try {
+    singleton.ws.send(JSON.stringify(frame));
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -404,18 +414,27 @@ function handleFrame(
       }
 
       const requestId = parsed.request_id as string | undefined;
-      if (!requestId) break;
+      if (requestId) {
+        const pending = singleton.pendingRpcs.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          singleton.pendingRpcs.delete(requestId);
 
-      const pending = singleton.pendingRpcs.get(requestId);
-      if (!pending) break;
+          if (parsed.error) {
+            pending.reject(new Error(String(parsed.error)));
+          } else {
+            pending.resolve(parsed);
+          }
+          break;
+        }
+      }
 
-      clearTimeout(pending.timer);
-      singleton.pendingRpcs.delete(requestId);
-
-      if (parsed.error) {
-        pending.reject(new Error(String(parsed.error)));
-      } else {
-        pending.resolve(parsed);
+      for (const listener of singleton.hostFrameListeners) {
+        try {
+          listener(parsed);
+        } catch {
+          // Listener errors must not break the shared transport.
+        }
       }
       break;
     }
