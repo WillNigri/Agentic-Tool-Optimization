@@ -67,20 +67,30 @@ export default function EmbedKeyCard({ subscriptionTier, userId }: EmbedKeyCardP
     onSuccess: (fresh) => {
       // R1 fix — write under the per-account scope key.
       queryClient.setQueryData(["embed-key", userId ?? "anon"], fresh);
-      // Auto-reveal after rotate: the user JUST clicked Rotate; they
-      // need the fresh value visible to copy + redeploy. Defensible
-      // trade-off vs always-masked default.
-      setRevealed(true);
+      // R2 fix — keep masked-by-default posture after rotate. Codex
+      // insisted that auto-reveal weakens the security posture right at
+      // the moment a fresh secret is generated. Now the user must click
+      // Reveal explicitly to see the new key.
+      setRevealed(false);
       setConfirmingRotate(false);
       setRotateConfirmText("");
     },
   });
 
-  const copyKey = () => {
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const copyKey = async () => {
     if (!keyQuery.data) return;
-    navigator.clipboard.writeText(keyQuery.data);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    setCopyError(null);
+    try {
+      // R2 fix — await the promise + catch rejection. Without the
+      // await/try, a denied clipboard permission would silently lie
+      // to the user that the copy succeeded.
+      await navigator.clipboard.writeText(keyQuery.data);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      setCopyError(err instanceof Error ? err.message : "Copy failed");
+    }
   };
 
   if (!hasAccess) {
@@ -163,6 +173,11 @@ export default function EmbedKeyCard({ subscriptionTier, userId }: EmbedKeyCardP
               {copied ? <Check size={14} className="text-cs-accent" /> : <Copy size={14} />}
             </button>
           </div>
+        )}
+        {copyError && (
+          <p className="text-xs text-red-400 mt-2">
+            Copy failed: {copyError}. Try selecting + ⌘C manually.
+          </p>
         )}
       </div>
 
