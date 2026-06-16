@@ -488,6 +488,13 @@ export default function PromptBar() {
       // humans can follow the pipeline (and so each stage acts as a real
       // turn in the thread, which is how LLM-to-LLM relay works best).
       let pipelineStages: { agentSlug: string; runtime: string; response: string }[] = [];
+      // Will's 2026-06-16 ask: "chat is not showing the model that answered."
+      // Capture the resolved model wherever it's known at dispatch time so
+      // we can persist it on the assistant message metadata and render a
+      // badge in ChatRow next to the runtime label. Falls back to null
+      // when no model is known (e.g. an OpenClaw/Hermes dispatch with no
+      // override) — ChatRow just skips the badge in that case.
+      let dispatchedModel: string | null = null;
       // v2.1.0+ — capture dispatch start time for the trace upload that
       // fires after every dispatch path. Without this, the no-agent and
       // agent-without-variables paths never uploaded to cloud, which
@@ -547,6 +554,11 @@ export default function PromptBar() {
             });
             if (result.status === "success" && result.response) {
               response = result.response;
+              // API providers always return the actual model used in the
+              // result envelope; capture it for the assistant message
+              // metadata so ChatRow can render the "gemini-2.5-flash"
+              // badge.
+              dispatchedModel = result.model || null;
             } else {
               throw new Error(
                 result.error_message ?? `${runtime} dispatch failed`
@@ -632,6 +644,7 @@ export default function PromptBar() {
           // render an "est." badge.
           {
             const usage = estimateUsage(runtime, selectedAgent.model ?? null, prompt, response);
+            dispatchedModel = usage.model || null;
             void uploadAgentTrace({
               agentSlug: selectedAgent.slug,
               runtime,
@@ -671,6 +684,7 @@ export default function PromptBar() {
           // different empty buckets.
           {
             const usage = estimateUsage(runtime, null, prompt, response);
+            dispatchedModel = usage.model || null;
             void uploadAgentTrace({
               agentSlug: runtime,
               runtime,
@@ -778,6 +792,11 @@ export default function PromptBar() {
         if (routingReason) meta.routingReason = routingReason;
         if (selectedGroup) meta.viaGroup = selectedGroup.slug;
         if (detectedTools.length > 0) meta.toolsUsed = detectedTools;
+        // Will's 2026-06-16 ask — persist the resolved model so ChatRow
+        // can render a "gemini-2.5-flash" badge next to the runtime
+        // label. dispatchedModel is set in the branches above
+        // (API-provider result.model, agent/no-agent usage.model).
+        if (dispatchedModel) meta.model = dispatchedModel;
         await appendChatMessage({
           threadId: thread.id,
           role: "assistant",
