@@ -363,6 +363,131 @@ fn handle_resend_verify(email: Option<String>) {
     }
 }
 
+/// QA-identified gap (2026-06-16): `ato pro test` could fetch the
+/// embed key but there was no standalone subcommand to print it.
+/// Mirrors the same GET /api/auth/me/embed-key endpoint Pro's smoke
+/// test hits, with a `--full` + `--confirm-i-understand-this-prints-
+/// the-key` safety pattern identical to `ato master-key export` so
+/// the full key never lands in shell history by accident.
+fn handle_embed_key(full: bool, confirm: bool) {
+    if full && !confirm {
+        eprintln!(
+            "refusing to print embed key without `--confirm-i-understand-this-prints-the-key`.\n\
+             \n\
+             The full key prints to stdout and lands in shell history. Only run this if\n\
+             you immediately pipe it to a secure paste destination and DON'T leave it in\n\
+             your scrollback.\n\
+             \n\
+             Re-run with: ato auth embed-key --full --confirm-i-understand-this-prints-the-key\n\
+             \n\
+             Without `--full`, this command prints only the masked prefix — safe to share\n\
+             and identical to what the desktop's Settings → Cloud card displays."
+        );
+        std::process::exit(1);
+    }
+
+    let token = match read_token() {
+        Some(t) => t,
+        None => {
+            eprintln!("Not logged in. Run: ato login");
+            std::process::exit(1);
+        }
+    };
+
+    let client = match http_client() {
+        Ok(c) => c,
+        Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+    };
+
+    // api_base() in this module already includes `/api/auth`, so the
+    // path here is `/me/embed-key` not `/auth/me/embed-key`. Same
+    // shape as `handle_whoami`'s `format!("{}/me", api_base())` above.
+    // pro.rs uses a different api_base() (no `/auth` suffix) so it
+    // needs the full `/auth/me/embed-key` path — easy to confuse.
+    let resp = client
+        .get(format!("{}/me/embed-key", api_base()))
+        .bearer_auth(&token)
+        .send();
+
+    match resp {
+        Ok(response) => {
+            let status = response.status();
+            // Read the body as text first so we can both parse it and
+            // surface raw content if JSON parsing fails (helps debug
+            // future API shape drift). Mirrors pro.rs's lenient
+            // unwrap_or_default pattern.
+            let raw = response.text().unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+
+            if status.as_u16() == 403 {
+                let msg = body.pointer("/error/message").and_then(|v| v.as_str())
+                    .unwrap_or("Embed key requires Pro+ tier. Upgrade at https://agentictool.ai/pro");
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
+
+            if !status.is_success() {
+                let msg = body.pointer("/error/message").and_then(|v| v.as_str())
+                    .unwrap_or("Failed to fetch embed key — token may be expired. Run: ato login");
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
+
+            // Server can return the key under either /data/prefix or
+            // /data/embedKeyPrefix depending on API version. Try both.
+            // Same for the full key — surface field-name drift early.
+            let prefix = body.pointer("/data/prefix").and_then(|v| v.as_str())
+                .or_else(|| body.pointer("/data/embedKeyPrefix").and_then(|v| v.as_str()))
+                .or_else(|| body.pointer("/data/embed_key_prefix").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let key = body.pointer("/data/key").and_then(|v| v.as_str())
+                .or_else(|| body.pointer("/data/embedKey").and_then(|v| v.as_str()))
+                .or_else(|| body.pointer("/data/embed_key").and_then(|v| v.as_str()));
+
+            if full {
+                // Caller acknowledged the leakage risk via --confirm.
+                // Print the full key to stdout (only) so it can be
+                // piped to pbcopy / xclip cleanly. Warning preamble
+                // goes to stderr so the pipe captures ONLY the key.
+                eprintln!(
+                    "[auth embed-key] Printing FULL embed key. This key authorizes \
+                     anyone holding it to upload traces under your account. Paste it \
+                     into your bundle's ATO_EMBED_KEY env then clear your shell history."
+                );
+                match key {
+                    Some(k) => println!("{}", k),
+                    None => {
+                        eprintln!(
+                            "Server did not return the full key. The API may have been \
+                             updated to never disclose the key after first issuance. \
+                             Rotate via the desktop's Settings → Cloud embed key card \
+                             if you've lost the original."
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Default: print the masked prefix only. Same form
+                // the desktop's Settings → Cloud card displays.
+                if prefix.is_empty() {
+                    eprintln!("Server returned an empty prefix — unexpected. Report as a bug.");
+                    std::process::exit(1);
+                }
+                println!("Embed key prefix: {}", prefix);
+                eprintln!(
+                    "(Run `ato auth embed-key --full --confirm-i-understand-this-prints-the-key` \
+                     to print the full key. The masked prefix is safe to share — used to \
+                     identify the key in dashboards.)"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Request failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
     /// Sign in to ATO Cloud. Saves token to ~/.ato/auth.json.
@@ -397,6 +522,30 @@ pub enum AuthCommand {
         #[arg(long)]
         email: Option<String>,
     },
+    /// Show the embed key for this account (Pro+ tier required).
+    ///
+    /// Pro+ tier required. Prints the key prefix by default (safe to
+    /// share — used to identify the key in dashboards). Pass
+    /// `--full --confirm-i-understand-this-prints-the-key` to print
+    /// the full key for piping into external tools (the same safety
+    /// pattern `ato master-key export` uses — the full key lands in
+    /// shell history and is a real leakage risk).
+    ///
+    /// Without `--full`, output is the masked form (prefix + length)
+    /// — identical to what's shown in the desktop Settings → Cloud
+    /// embed key card.
+    #[command(name = "embed-key")]
+    EmbedKey {
+        /// Print the FULL key value instead of the masked prefix.
+        /// Requires `--confirm-i-understand-this-prints-the-key`.
+        #[arg(long, default_value_t = false)]
+        full: bool,
+        /// Required when `--full` is set. The full key lands in
+        /// shell history and can be exfiltrated; this flag forces
+        /// the caller to acknowledge the leakage risk.
+        #[arg(long = "confirm-i-understand-this-prints-the-key", default_value_t = false)]
+        confirm: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -412,5 +561,6 @@ pub fn run(args: AuthArgs) {
         AuthCommand::Logout => handle_logout(),
         AuthCommand::Whoami => handle_whoami(),
         AuthCommand::ResendVerify { email } => handle_resend_verify(email),
+        AuthCommand::EmbedKey { full, confirm } => handle_embed_key(full, confirm),
     }
 }
