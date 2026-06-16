@@ -18,6 +18,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useCloudStore, initializeCloudAuth } from '@/stores/useCloudStore';
 import { getGitHubAuthUrl } from '@/lib/cloud-api';
+import EmbedKeyCard from './EmbedKeyCard';
 
 type AuthMode = 'login' | 'register';
 
@@ -214,6 +215,9 @@ export default function CloudAuth() {
             </div>
           </div>
         )}
+
+        {/* #86 — SDK trace key surface for the Onboarding ATO_API_KEY workflow */}
+        <EmbedKeyCard subscriptionTier={user?.subscription_tier as any} />
 
         {/* Sync Status */}
         <div className="card">
