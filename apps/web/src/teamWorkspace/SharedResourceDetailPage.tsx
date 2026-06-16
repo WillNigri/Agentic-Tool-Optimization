@@ -17,6 +17,13 @@ import { subscribeTeamEvents } from '../lib/teamEventStream';
 import SessionTurnsRenderer, { type SnapshotTurn } from './renderers/SessionTurnsRenderer';
 import WarRoomSeatsRenderer, { type SnapshotSeat } from './renderers/WarRoomSeatsRenderer';
 import ChatMessagesRenderer, { type SnapshotMessage } from './renderers/ChatMessagesRenderer';
+import WorkstationDispatchCard from './WorkstationDispatchCard';
+import {
+  getTether,
+  listOnlineHosts,
+  subscribeTetherState,
+  type TetherInfo,
+} from '../lib/tether/client';
 
 // ──────────────────────────────────────────────────────────────────
 // Helpers
@@ -366,13 +373,49 @@ interface Props {
   onBack(): void;
 }
 
+const HOST_POLL_MS = 15_000;
+
 export default function SharedResourceDetailPage({ teamId, kind, resourceId, onBack }: Props) {
   const { data: detail, isLoading, error } = useQuery<SharedDetail>({
     queryKey: ['detail', teamId, kind, resourceId],
     queryFn: () => getSharedDetail(teamId, kind, resourceId),
   });
+  const [tether, setTether] = useState<TetherInfo>(() => getTether());
+  const [hostOnline, setHostOnline] = useState(false);
 
   const kindLabel = RESOURCE_KIND_META[kind].label.replace(/s$/, ''); // singular
+
+  useEffect(() => subscribeTetherState(setTether), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshHosts(): Promise<void> {
+      if (!tether.machineName) {
+        if (!cancelled) setHostOnline(false);
+        return;
+      }
+      try {
+        const hosts = await listOnlineHosts();
+        if (cancelled) return;
+        setHostOnline(hosts.some((host) => host.machine_name === tether.machineName));
+      } catch {
+        if (!cancelled) setHostOnline(false);
+      }
+    }
+
+    void refreshHosts();
+    const timer = setInterval(() => {
+      void refreshHosts();
+    }, HOST_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [tether.machineName]);
+
+  const showDispatchCard = tether.state === 'approved' && hostOnline && !!tether.machineName;
 
   return (
     <div className="space-y-6">
@@ -417,6 +460,10 @@ export default function SharedResourceDetailPage({ teamId, kind, resourceId, onB
             </p>
           </div>
         </div>
+      )}
+
+      {showDispatchCard && tether.machineName && (
+        <WorkstationDispatchCard machineName={tether.machineName} />
       )}
 
       {/* E2E gate — no further calls */}
