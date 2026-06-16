@@ -40,7 +40,7 @@ import { getModelConfig } from "@/lib/tauri-api";
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 import { estimateUsage } from "@/lib/pricing";
 import type { AgentRuntime } from "@/components/cron/types";
-import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
+import { RUNTIME_REGISTRY, CLI_RUNTIME_MODELS, type RuntimeId } from "@/lib/runtimes";
 import ApprovalDialog, { extractSkillFromResponse } from "../ApprovalDialog";
 
 import {
@@ -1047,22 +1047,36 @@ export default function PromptBar() {
           setOpen={setShowRuntimePicker}
         />
 
-        {/* v2.15.0 Slice C — model picker. Renders only for API-provider
-            runtimes; CLI runtimes (claude/codex/openclaw/hermes) handle
-            model selection inside the CLI binary itself. The chip shows
-            the user's saved model_configs override (or "default" if
-            none saved). Click opens a popover with the LIVE model list
-            from the provider, with a "live" or "curated" badge. */}
-        {availableRuntimes
-          ?.find((r) => r.slug === runtime)
-          ?.kind === "api" && (
-          <ModelPicker
-            providerSlug={runtime}
-            projectId={activeProject?.id}
-            open={showModelPicker}
-            setOpen={setShowModelPicker}
-          />
-        )}
+        {/* v2.15.0 Slice C — model picker. Originally hidden for CLI
+            runtimes since claude/codex/gemini CLIs were assumed to manage
+            their own model selection. #82 — surfaces it for CLI runtimes
+            too: backend already pipes `--model <id>` through to the
+            spawned CLI (mod.rs:1362,1444,9418,9442); we just needed the
+            UI. CLI runtimes use a curated list from CLI_RUNTIME_MODELS
+            (binaries don't expose a list endpoint); API providers
+            still use the live fetch. The runtimeKind prop is the
+            discriminator. */}
+        {(() => {
+          const r = availableRuntimes?.find((r) => r.slug === runtime);
+          if (!r) return null;
+          // CLI runtimes without a curated model list (openclaw,
+          // hermes today) — keep the picker hidden.
+          if (
+            r.kind === "cli" &&
+            !CLI_RUNTIME_MODELS[runtime as RuntimeId]
+          ) {
+            return null;
+          }
+          return (
+            <ModelPicker
+              providerSlug={runtime}
+              runtimeKind={r.kind}
+              projectId={activeProject?.id}
+              open={showModelPicker}
+              setOpen={setShowModelPicker}
+            />
+          );
+        })()}
 
         {/* Agent / Group selector — extracted to AgentPicker.tsx per
             the 2026-05-19 elegance war-room. Same shared-popover-state

@@ -17,7 +17,7 @@
 //     still type and the dispatch will use whatever's saved (or the
 //     registry default)
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { ChevronDown, ChevronUp, Sparkles, RefreshCw } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -30,10 +30,20 @@ import {
   saveModelConfig,
   type ProviderModelInfo,
 } from "@/lib/tauri-api";
+import { CLI_RUNTIME_MODELS, type RuntimeId } from "@/lib/runtimes";
 
 interface Props {
-  /** API-provider slug (google / openai / anthropic / minimax / ...). */
+  /** Provider/runtime slug — works for BOTH API providers (live model
+   *  list from the provider) and CLI runtimes (curated list from
+   *  CLI_RUNTIME_MODELS). The runtimeKind discriminates. */
   providerSlug: string;
+  /**
+   * #82 — discriminator between "api" (live fetch via useProviderModels)
+   * and "cli" (curated hardcoded list from runtimes.ts). The backend
+   * already pipes `--model <id>` for both paths; this just makes the
+   * picker show for CLI runtimes too.
+   */
+  runtimeKind: "api" | "cli";
   /** Active project's id for per-project model overrides (optional). */
   projectId?: string;
   open: boolean;
@@ -42,6 +52,7 @@ interface Props {
 
 export default function ModelPicker({
   providerSlug,
+  runtimeKind,
   projectId,
   open,
   setOpen,
@@ -56,12 +67,40 @@ export default function ModelPicker({
     staleTime: 30_000,
   });
 
-  // Live model list — only fetched when the picker is open, to avoid
-  // hammering provider list-models endpoints on every PromptBar render.
-  const { data: live, isLoading, error } = useProviderModels(
-    open ? providerSlug : null
-  );
+  // Live model list — only fetched for API providers when the picker is
+  // open. CLI runtimes use the curated CLI_RUNTIME_MODELS list (see
+  // below) since the binaries don't expose a list endpoint.
+  const { data: liveApi, isLoading: liveLoading, error: liveError } =
+    useProviderModels(
+      runtimeKind === "api" && open ? providerSlug : null
+    );
 
+  // #82 — for CLI runtimes, synthesize a `live`-shaped object from the
+  // curated list. Source = "curated" so the existing badge UI honestly
+  // labels it. liveLoading / liveError stay false for CLI since there's
+  // nothing to fetch.
+  const cliCurated = useMemo(() => {
+    if (runtimeKind !== "cli") return null;
+    const models = CLI_RUNTIME_MODELS[providerSlug as RuntimeId];
+    if (!models || models.length === 0) return null;
+    return {
+      source: "curated" as const,
+      models: models.map((m) => ({
+        id: m.id,
+        display_name: m.display,
+        owned_by: providerSlug,
+      })) as ProviderModelInfo[],
+      fallback_reason:
+        "Curated CLI model list — binaries don't expose live list endpoints",
+    };
+  }, [runtimeKind, providerSlug]);
+
+  const live = liveApi ?? cliCurated;
+  const isLoading = runtimeKind === "api" ? liveLoading : false;
+  const error = runtimeKind === "api" ? liveError : null;
+
+  // Refresh only meaningful for API providers (force-refetch the live
+  // list). For CLI we keep the curated list as-is.
   const refresh = useRefreshProviderModels(providerSlug);
 
   const setMutation = useMutation({
@@ -106,6 +145,7 @@ export default function ModelPicker({
                 type="button"
                 onClick={() => refresh.mutate()}
                 disabled={refresh.isPending}
+                hidden={runtimeKind === "cli"}
                 className="flex items-center gap-1 text-[10px] text-cs-muted hover:text-cs-text disabled:opacity-50"
                 title="Bypass the cache and re-fetch live from the provider"
               >
