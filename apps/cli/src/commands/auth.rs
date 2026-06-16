@@ -433,16 +433,33 @@ fn handle_embed_key(full: bool, confirm: bool) {
                 std::process::exit(1);
             }
 
-            // Server can return the key under either /data/prefix or
-            // /data/embedKeyPrefix depending on API version. Try both.
-            // Same for the full key — surface field-name drift early.
-            let prefix = body.pointer("/data/prefix").and_then(|v| v.as_str())
-                .or_else(|| body.pointer("/data/embedKeyPrefix").and_then(|v| v.as_str()))
-                .or_else(|| body.pointer("/data/embed_key_prefix").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            let key = body.pointer("/data/key").and_then(|v| v.as_str())
-                .or_else(|| body.pointer("/data/embedKey").and_then(|v| v.as_str()))
-                .or_else(|| body.pointer("/data/embed_key").and_then(|v| v.as_str()));
+            // R1 codex #1 fix — actually surface drift instead of
+            // masking it. Try the canonical field name first
+            // (`/data/prefix` / `/data/key`, matching pro.rs's smoke
+            // test). If we have to fall back to a camelCase or
+            // snake_case alias, emit a stderr warning so the CLI
+            // user (and any CI watching stderr) sees the schema
+            // drift. The fallback still produces a working command —
+            // we're not blocking on the drift — but the warning makes
+            // sure no one ships a renamed-field backend in silence.
+            let (prefix, prefix_alias) = extract_prefix(&body);
+            let (key, key_alias) = extract_full_key(&body);
+            if let Some(alias) = prefix_alias {
+                eprintln!(
+                    "[auth embed-key] WARNING: server returned the key prefix under alias `{}` \
+                     instead of the canonical `prefix` field. Update the CLI's expected \
+                     shape; falling back this run.",
+                    alias
+                );
+            }
+            if let Some(alias) = key_alias {
+                eprintln!(
+                    "[auth embed-key] WARNING: server returned the full key under alias `{}` \
+                     instead of the canonical `key` field. Update the CLI's expected \
+                     shape; falling back this run.",
+                    alias
+                );
+            }
 
             if full {
                 // Caller acknowledged the leakage risk via --confirm.
@@ -562,5 +579,160 @@ pub fn run(args: AuthArgs) {
         AuthCommand::Whoami => handle_whoami(),
         AuthCommand::ResendVerify { email } => handle_resend_verify(email),
         AuthCommand::EmbedKey { full, confirm } => handle_embed_key(full, confirm),
+    }
+}
+
+// ── R1 codex #1 fix — surface field-name drift instead of masking it ──
+//
+// Each extractor returns (value, Some(alias)) when it had to fall
+// back to a non-canonical field name. The handler emits a stderr
+// warning so any CI / operator watching stderr learns the API has
+// drifted. The fallback still produces a working command — we're
+// not blocking the user — but the drift is no longer silent.
+//
+// Pure functions so they can be unit-tested without a live server
+// (R1 codex #2 — no test coverage for the secret-printing path).
+
+fn extract_prefix(body: &serde_json::Value) -> (&str, Option<&'static str>) {
+    if let Some(s) = body.pointer("/data/prefix").and_then(|v| v.as_str()) {
+        return (s, None);
+    }
+    if let Some(s) = body.pointer("/data/embedKeyPrefix").and_then(|v| v.as_str()) {
+        return (s, Some("embedKeyPrefix"));
+    }
+    if let Some(s) = body.pointer("/data/embed_key_prefix").and_then(|v| v.as_str()) {
+        return (s, Some("embed_key_prefix"));
+    }
+    ("", None)
+}
+
+fn extract_full_key(body: &serde_json::Value) -> (Option<&str>, Option<&'static str>) {
+    if let Some(s) = body.pointer("/data/key").and_then(|v| v.as_str()) {
+        return (Some(s), None);
+    }
+    if let Some(s) = body.pointer("/data/embedKey").and_then(|v| v.as_str()) {
+        return (Some(s), Some("embedKey"));
+    }
+    if let Some(s) = body.pointer("/data/embed_key").and_then(|v| v.as_str()) {
+        return (Some(s), Some("embed_key"));
+    }
+    (None, None)
+}
+
+#[cfg(test)]
+mod embed_key_tests {
+    use super::{extract_full_key, extract_prefix};
+
+    fn json(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("test fixture must parse")
+    }
+
+    #[test]
+    fn prefix_canonical_field() {
+        let b = json(r#"{"data":{"prefix":"eba_ABCD"}}"#);
+        assert_eq!(extract_prefix(&b), ("eba_ABCD", None));
+    }
+
+    #[test]
+    fn prefix_camelcase_alias_emits_drift_warning() {
+        let b = json(r#"{"data":{"embedKeyPrefix":"eba_ABCD"}}"#);
+        let (val, alias) = extract_prefix(&b);
+        assert_eq!(val, "eba_ABCD");
+        assert_eq!(alias, Some("embedKeyPrefix"));
+    }
+
+    #[test]
+    fn prefix_snake_case_alias_emits_drift_warning() {
+        let b = json(r#"{"data":{"embed_key_prefix":"eba_ABCD"}}"#);
+        let (val, alias) = extract_prefix(&b);
+        assert_eq!(val, "eba_ABCD");
+        assert_eq!(alias, Some("embed_key_prefix"));
+    }
+
+    #[test]
+    fn prefix_missing_returns_empty_no_alias() {
+        let b = json(r#"{"data":{}}"#);
+        assert_eq!(extract_prefix(&b), ("", None));
+    }
+
+    #[test]
+    fn prefix_canonical_wins_over_alias_when_both_present() {
+        // If both canonical and alias are populated (shouldn't happen
+        // but defensive — server in mid-migration), the canonical
+        // field wins and no drift warning fires.
+        let b = json(r#"{"data":{"prefix":"eba_CANONICAL","embedKeyPrefix":"eba_ALIAS"}}"#);
+        let (val, alias) = extract_prefix(&b);
+        assert_eq!(val, "eba_CANONICAL");
+        assert_eq!(alias, None);
+    }
+
+    #[test]
+    fn full_key_canonical_field() {
+        let b = json(r#"{"data":{"key":"eba_ABCD_full_token"}}"#);
+        assert_eq!(extract_full_key(&b), (Some("eba_ABCD_full_token"), None));
+    }
+
+    #[test]
+    fn full_key_alias_emits_drift_warning() {
+        let b = json(r#"{"data":{"embedKey":"eba_ABCD_full_token"}}"#);
+        let (val, alias) = extract_full_key(&b);
+        assert_eq!(val, Some("eba_ABCD_full_token"));
+        assert_eq!(alias, Some("embedKey"));
+    }
+
+    #[test]
+    fn full_key_missing_returns_none() {
+        let b = json(r#"{"data":{"prefix":"eba_ABCD"}}"#);
+        assert_eq!(extract_full_key(&b), (None, None));
+    }
+
+    #[test]
+    fn confirm_without_full_is_ignored_at_arg_level() {
+        // The handler itself owns the gating logic; this test just
+        // documents the arg shape — calling `--confirm` without
+        // `--full` is a no-op (the masked-prefix path runs). The
+        // negative path (`--full` without `--confirm`) is exercised
+        // in the live smoke under feature/ato-auth-embed-key.
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct TestArgs {
+            #[command(subcommand)]
+            sub: super::AuthCommand,
+        }
+        let args = TestArgs::parse_from([
+            "ato",
+            "embed-key",
+            "--confirm-i-understand-this-prints-the-key",
+        ]);
+        match args.sub {
+            super::AuthCommand::EmbedKey { full, confirm } => {
+                assert!(!full);
+                assert!(confirm);
+            }
+            _ => panic!("expected EmbedKey variant"),
+        }
+    }
+
+    #[test]
+    fn full_plus_confirm_arg_parse() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct TestArgs {
+            #[command(subcommand)]
+            sub: super::AuthCommand,
+        }
+        let args = TestArgs::parse_from([
+            "ato",
+            "embed-key",
+            "--full",
+            "--confirm-i-understand-this-prints-the-key",
+        ]);
+        match args.sub {
+            super::AuthCommand::EmbedKey { full, confirm } => {
+                assert!(full);
+                assert!(confirm);
+            }
+            _ => panic!("expected EmbedKey variant"),
+        }
     }
 }
