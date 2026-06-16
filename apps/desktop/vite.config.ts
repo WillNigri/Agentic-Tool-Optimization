@@ -18,7 +18,12 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    // #88 — pin to 1420 (Tauri's documented dev port) and refuse to
+    // fall back to another port. Frees 5173 for apps/web to use without
+    // collision when both dev servers run on the same machine.
+    // tauri.conf.json's devUrl must stay aligned at 1420.
+    port: 1420,
+    strictPort: true,
     proxy: {
       "/api": {
         target: "http://localhost:3000",
