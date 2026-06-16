@@ -184,18 +184,15 @@ async function handleDecryptRequest(payload: {
     return;
   }
 
-  // v2.18 Wave 1 R1 (codex #1) — dispatch_cancel is in the published
-  // contract but the runtime hook isn't wired yet (Wave 2 work — the
-  // Tauri-side prompt_agent has no abort handle today). The browser
-  // surface that ships in Wave 1 doesn't actually send this frame yet,
-  // but if a future client or replay does, we don't want to log it as
-  // "unknown request kind" — that would mask the real Wave 2 gap.
-  // For now, accept-and-ignore; Wave 2 will wire it through to
-  // prompt_agent_cancel.
+  // v2.18 Wave 2 — dispatch_cancel honors the request via the
+  // existing active_runs::kill_active_run Tauri command. The map
+  // from request_id → run_id is populated by the StreamEvent::Started
+  // event that spawn_streaming_dispatch emits before its first chunk.
+  // If the request_id isn't in the map yet (cancel raced the Started
+  // event, or the dispatch already completed), we just log and skip —
+  // no harm; the dispatch either never started or already ended.
   if (raw.kind === "dispatch_cancel") {
-    console.warn(
-      "[tether/host.ts] dispatch_cancel received but not yet honored (Wave 2 feature). Ignoring.",
-    );
+    await handleDispatchCancel(plain_request_json);
     return;
   }
 
@@ -303,7 +300,97 @@ async function replyError(
   }
 }
 
-// ── v2.18 Wave 1 — dispatch_request handler ──────────────────────────────
+// ── v2.18 Wave 2 — dispatch_request streaming handler ────────────────────
+
+/** Wave 2 enabled runtimes — CLI runtimes only. API providers
+ *  (minimax/grok/deepseek/qwen/openrouter) require different billing
+ *  semantics + budget caps; deferred to Wave 2.2. */
+const WAVE2_ENABLED_RUNTIMES: ReadonlySet<DispatchRuntime> = new Set([
+  "claude",
+  "codex",
+  "gemini",
+  "openclaw",
+  "hermes",
+]);
+
+/** request_id → active_run_id. Populated by StreamEvent::Started; consumed
+ *  by handleDispatchCancel. Entries are removed when dispatch terminates
+ *  (Done or Error) so the map doesn't leak across a long-lived session.
+ *  Per-process state — there is only ever one tether host process per
+ *  desktop install, so we don't need a per-session prefix here. */
+const requestIdToRunId = new Map<string, string>();
+
+/** StreamEvent shape from Rust apps/desktop/src-tauri/src/commands/mod.rs.
+ *  Keep in sync with the `pub enum StreamEvent` definition there. */
+type StreamEvent =
+  | { kind: "started"; runId: string }
+  | { kind: "chunk"; text: string }
+  | {
+      kind: "done";
+      full: string;
+      receipt?: {
+        executionLogId: string;
+        status: string;
+        model?: string | null;
+        costUsd?: number | null;
+        tokensIn?: number | null;
+        tokensOut?: number | null;
+        durationMs: number;
+      };
+    }
+  | { kind: "error"; message: string };
+
+async function makeChannel<T>(): Promise<{
+  channel: unknown;
+  onMessage: (cb: (event: T) => void) => void;
+}> {
+  // The Tauri Channel API is constructed once and exposes `onmessage`.
+  // We wrap it so the dispatch handler can register a typed callback
+  // before passing the channel into `invoke('prompt_agent_stream', …)`.
+  const { Channel } = await import("@tauri-apps/api/core");
+  const channel = new Channel<T>();
+  return {
+    channel,
+    onMessage: (cb) => {
+      channel.onmessage = cb;
+    },
+  };
+}
+
+/** v2.18 Wave 2 — workspace_root validation against the registered
+ *  projects table. Strict equality (per codex pre-war finding):
+ *  silently allowing descendants weakens the trust boundary because
+ *  a tampered browser could escape into sibling directories via
+ *  symlinks or unicode tricks. If you want descendant matching, do
+ *  it explicitly with path normalization in Wave 2.x. */
+async function validateWorkspaceRoot(
+  workspaceRoot: string | null | undefined,
+): Promise<{ ok: true; resolved: string | null } | { ok: false; error: string }> {
+  if (!workspaceRoot) {
+    // Omitted → run against the desktop's CWD (Wave 1 behavior). The
+    // dispatch_request frame is allowed to omit workspace_root; the
+    // browser UI just doesn't surface a project picker yet.
+    return { ok: true, resolved: null };
+  }
+  try {
+    const projects = await tauriInvokeResult<Array<{ path: string }>>(
+      "list_projects",
+    );
+    const match = projects.find((p) => p.path === workspaceRoot);
+    if (!match) {
+      return {
+        ok: false,
+        error: `workspace_root ${JSON.stringify(workspaceRoot)} is not a registered project on this desktop. Add it via Settings → Projects first.`,
+      };
+    }
+    return { ok: true, resolved: workspaceRoot };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `workspace_root validation failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
 
 async function handleDispatchRequest(
   sessionId: string,
@@ -317,75 +404,171 @@ async function handleDispatchRequest(
     return;
   }
 
-  // Wave 1 gate: claude only. Anything else replies denied immediately.
-  if (req.runtime !== "claude") {
+  // v2.18 Wave 2 gate — CLI runtimes only. API providers come in 2.2.
+  if (!WAVE2_ENABLED_RUNTIMES.has(req.runtime)) {
     await sendCompleteFrame(sessionId, {
       kind: "dispatch_complete",
       request_id: req.request_id,
       status: "denied",
-      error: `Wave 1 supports claude only; got ${req.runtime}. More runtimes ship in next wave.`,
+      error: `Wave 2 supports ${[...WAVE2_ENABLED_RUNTIMES].join(", ")}; got ${req.runtime}. API providers ship in next wave.`,
+    });
+    return;
+  }
+
+  // v2.18 Wave 2 (codex pre-war #E) — validate workspace_root against
+  // the registered projects table. Strict equality. A tampered browser
+  // cannot make the desktop dispatch run against an arbitrary path.
+  const wsCheck = await validateWorkspaceRoot(req.workspace_root);
+  if (!wsCheck.ok) {
+    await sendCompleteFrame(sessionId, {
+      kind: "dispatch_complete",
+      request_id: req.request_id,
+      status: "denied",
+      error: wsCheck.error,
     });
     return;
   }
 
   const startedAt = performance.now();
+  let chunkIndex = 0;
+  // Set when we get StreamEvent::Started; cleared when the dispatch
+  // terminates. handleDispatchCancel looks here for the run_id.
+  let activeRunId: string | null = null;
+
+  const config = req.model ? JSON.stringify({ model: req.model }) : undefined;
+  const { channel, onMessage } = await makeChannel<StreamEvent>();
+
+  // We need a Promise that resolves when the dispatch terminates so
+  // handleDispatchRequest doesn't return before the final frame is
+  // sealed. The channel callback drives resolution.
+  let resolveTerminate: () => void = () => {};
+  const terminated = new Promise<void>((res) => {
+    resolveTerminate = res;
+  });
+
+  onMessage((event) => {
+    void (async () => {
+      try {
+        switch (event.kind) {
+          case "started":
+            activeRunId = event.runId;
+            requestIdToRunId.set(req.request_id, event.runId);
+            break;
+          case "chunk":
+            await sendChunkFrame(sessionId, {
+              kind: "dispatch_chunk",
+              request_id: req.request_id,
+              chunk_index: chunkIndex++,
+              text: event.text,
+            });
+            break;
+          case "done": {
+            if (activeRunId) requestIdToRunId.delete(req.request_id);
+            const durationMs = event.receipt?.durationMs
+              ?? Math.round(performance.now() - startedAt);
+            await sendCompleteFrame(sessionId, {
+              kind: "dispatch_complete",
+              request_id: req.request_id,
+              status: "success",
+              execution_log_id: event.receipt?.executionLogId ?? null,
+              cost_usd: event.receipt?.costUsd ?? null,
+              tokens_in: event.receipt?.tokensIn ?? null,
+              tokens_out: event.receipt?.tokensOut ?? null,
+              model: event.receipt?.model ?? req.model ?? null,
+              duration_ms: durationMs,
+            });
+            resolveTerminate();
+            break;
+          }
+          case "error": {
+            if (activeRunId) requestIdToRunId.delete(req.request_id);
+            await sendCompleteFrame(sessionId, {
+              kind: "dispatch_complete",
+              request_id: req.request_id,
+              status: "failed",
+              duration_ms: Math.round(performance.now() - startedAt),
+              error: event.message,
+            });
+            resolveTerminate();
+            break;
+          }
+        }
+      } catch (innerErr) {
+        console.error("[tether/host.ts] dispatch event-handler failed:", innerErr);
+        // Don't leak the inner error to the browser — the dispatch
+        // itself may have completed; just log.
+      }
+    })();
+  });
 
   try {
-    // Build the optional config payload — model override only for now.
-    // Matches the existing prompt_agent contract (commands/mod.rs:1224).
-    const config = req.model
-      ? JSON.stringify({ model: req.model })
-      : undefined;
-
-    const output = await tauriInvokeResult<string>("prompt_agent", {
+    // prompt_agent_stream resolves AFTER the stream loop ends (when
+    // the child process exits / stderr is drained). The channel
+    // events are what actually drive the dispatch_complete frame —
+    // the resolved value from invoke() is just () (no payload).
+    await tauriInvokeResult<void>("prompt_agent_stream", {
       runtime: req.runtime,
       prompt: req.prompt,
       config,
-      agentSlug: req.agent_slug ?? null,
-      // v2.18 Wave 1 R1 (codex #3) — workspace_root is in the published
-      // frame contract but Wave 1 intentionally drops it on both sides.
-      // Wave 2 adds the validation step (workspace_root MUST match one
-      // of the user's registered project roots on the desktop) before
-      // surfacing it to prompt_agent. Until then, defense in depth: even
-      // if a tampered browser includes workspace_root in the frame, we
-      // ignore it here so the dispatch runs against the desktop's CWD
-      // — never an attacker-controlled path.
-      workspace: null,
-    });
-
-    const durationMs = Math.round(performance.now() - startedAt);
-
-    // CLI runtimes batch-flush at end (per [[codex-dispatch-no-stream]]).
-    // Wave 1 sends the entire output as a single chunk, then completes.
-    // Wave 2 will swap this for the actual streaming hook so the browser
-    // sees tokens as they're generated.
-    await sendChunkFrame(sessionId, {
-      kind: "dispatch_chunk",
-      request_id: req.request_id,
-      chunk_index: 0,
-      text: output,
-    });
-
-    await sendCompleteFrame(sessionId, {
-      kind: "dispatch_complete",
-      request_id: req.request_id,
-      status: "success",
-      model: req.model ?? null,
-      duration_ms: durationMs,
-      // Wave 1 doesn't surface execution_log_id / cost / tokens —
-      // prompt_agent returns the raw output string today. Wave 2 will
-      // either return a struct or query execution_logs by run_id.
+      onEvent: channel,
     });
   } catch (err) {
-    const durationMs = Math.round(performance.now() - startedAt);
+    // The Rust side errored before the StreamEvent::Error path could
+    // emit (e.g. shell-out failed, channel registration error). Emit
+    // a final complete frame ourselves so the browser doesn't hang.
+    if (requestIdToRunId.has(req.request_id)) {
+      requestIdToRunId.delete(req.request_id);
+    }
     const message = err instanceof Error ? err.message : String(err);
     await sendCompleteFrame(sessionId, {
       kind: "dispatch_complete",
       request_id: req.request_id,
       status: "failed",
-      duration_ms: durationMs,
+      duration_ms: Math.round(performance.now() - startedAt),
       error: message,
     });
+    resolveTerminate();
+  }
+
+  // Wait for the channel's terminal event (Done/Error) to be sealed
+  // and forwarded before returning. If the channel never delivered a
+  // terminal — defensive timeout — we still return after 5 minutes
+  // so the bridge isn't held hostage. The dispatch's own process
+  // already exited (invoke returned), so this is just channel drain.
+  const timeout = new Promise<void>((res) => setTimeout(res, 5 * 60 * 1000));
+  await Promise.race([terminated, timeout]);
+}
+
+// ── v2.18 Wave 2 — dispatch_cancel handler ───────────────────────────────
+
+async function handleDispatchCancel(plainRequestJson: string): Promise<void> {
+  interface DispatchCancelFrame {
+    kind: "dispatch_cancel";
+    request_id: string;
+  }
+  let req: DispatchCancelFrame;
+  try {
+    req = JSON.parse(plainRequestJson) as DispatchCancelFrame;
+  } catch (err) {
+    console.error("[tether/host.ts] dispatch_cancel parse failed:", err);
+    return;
+  }
+  const runId = requestIdToRunId.get(req.request_id);
+  if (!runId) {
+    // Cancel raced the Started event, or dispatch already terminated.
+    console.warn(
+      `[tether/host.ts] dispatch_cancel: no active run for request ${req.request_id} (already completed or never started).`,
+    );
+    return;
+  }
+  try {
+    await tauriInvokeResult<boolean>("kill_active_run", { runId });
+    // The kill triggers the child process's terminate; the streaming
+    // dispatch's Error path fires; the channel emits StreamEvent::Error,
+    // which the request handler turns into a dispatch_complete frame
+    // with status="failed" + an error mentioning the cancel.
+  } catch (err) {
+    console.error("[tether/host.ts] kill_active_run invoke failed:", err);
   }
 }
 

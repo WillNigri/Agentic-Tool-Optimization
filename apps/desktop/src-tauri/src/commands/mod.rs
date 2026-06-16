@@ -1597,6 +1597,22 @@ pub struct ObservationTag<'a> {
 /// token counts from runtime SDK responses are a follow-up; estimation
 /// is honest enough that Compare/Cost Recs/Replay show real numbers
 /// instead of "—" for every model in the pricing table.
+/// v2.18 Wave 2 — receipt returned from persist_execution_log so
+/// streaming dispatches can surface execution_log_id / cost / tokens
+/// without a follow-up SELECT (race-prone under concurrent war-room
+/// seats per codex pre-war finding).
+#[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)]
+pub(crate) struct DispatchReceipt {
+    pub execution_log_id: String,
+    pub status: String,
+    pub model: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub duration_ms: i64,
+}
+
 pub(crate) fn persist_execution_log(
     runtime: &str,
     prompt: &str,
@@ -1605,11 +1621,11 @@ pub(crate) fn persist_execution_log(
     model_override: Option<&str>,
     agent_slug: Option<&str>,
     observation: Option<&ObservationTag<'_>>,
-) {
+) -> Option<DispatchReceipt> {
     let db_path = crate::get_db_path();
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return None,
     };
     let id = uuid::Uuid::new_v4().to_string();
     let now = observation
@@ -1719,6 +1735,19 @@ pub(crate) fn persist_execution_log(
         };
         crate::events::bus::publish(event);
     }
+
+    // v2.18 Wave 2 — return the receipt so streaming dispatch callers
+    // (browser tether path) can include it in the dispatch_complete
+    // frame without a follow-up SELECT.
+    Some(DispatchReceipt {
+        execution_log_id: id,
+        status: status.to_string(),
+        model: effective_model.map(|s| s.to_string()),
+        cost_usd,
+        tokens_in,
+        tokens_out,
+        duration_ms: duration_ms as i64,
+    })
 }
 
 // ── v2.2.0 cost estimation helpers ────────────────────────────────────
@@ -9290,8 +9319,24 @@ struct PerAgentRollup {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StreamEvent {
+    /// v2.18 Wave 2 — emitted before the first Chunk, carries the
+    /// active_runs registry id. The browser-tether host uses it to
+    /// build the request_id → run_id map for cancel forwarding
+    /// (cancel calls kill_active_run with this id). Existing
+    /// callers (chat pane streaming) ignore Started events — the
+    /// JS dispatcher only acts on Chunk/Done/Error.
+    Started { run_id: String },
     Chunk { text: String },
-    Done { full: String },
+    /// v2.18 Wave 2 — optional receipt populated for streaming dispatches
+    /// that go through persist_execution_log. Pre-v2.18 streams (chat pane,
+    /// any caller that doesn't care about IDs/cost) accept None and behave
+    /// exactly as before. The browser tether path reads the receipt and
+    /// forwards it as the dispatch_complete frame's payload.
+    Done {
+        full: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        receipt: Option<DispatchReceipt>,
+    },
     Error { message: String },
 }
 
@@ -9515,6 +9560,14 @@ async fn spawn_streaming_dispatch(
         workspace,
         Some("desktop:stream"),
     );
+    // v2.18 Wave 2 — emit the run id BEFORE the first stdout chunk so
+    // the browser-tether host can build a request_id → run_id map for
+    // cancel forwarding. Pre-Wave-2 callers (chat pane streaming) just
+    // ignore Started events; the type-system makes the receiver opt-
+    // in to honoring them.
+    let _ = on_event.send(StreamEvent::Started {
+        run_id: run_id.clone(),
+    });
     // Guard so we always finish_run on early returns / errors.
     struct FinishOnDrop(String);
     impl Drop for FinishOnDrop {
@@ -9632,7 +9685,11 @@ async fn spawn_streaming_dispatch(
         // if execution_logs is empty when the link command runs, the
         // ±10s temporal match has nothing to attach the cloud trace
         // ID to, and replay fails with prompt-not-local.
-        persist_execution_log(
+        // v2.18 Wave 2 — capture the receipt so the browser tether path
+        // can surface execution_log_id + cost + tokens on dispatch_complete
+        // without a follow-up SELECT (race-prone under concurrent war-room
+        // seats per codex pre-war finding).
+        let receipt = persist_execution_log(
             runtime,
             prompt,
             &Ok(full.clone()),
@@ -9641,7 +9698,7 @@ async fn spawn_streaming_dispatch(
             agent_slug,
             None,
         );
-        let _ = on_event.send(StreamEvent::Done { full });
+        let _ = on_event.send(StreamEvent::Done { full, receipt });
     } else {
         // Drain stderr for the error message — best-effort.
         let mut err_text = String::new();
