@@ -338,7 +338,20 @@ type StreamEvent =
         durationMs: number;
       };
     }
+  /** R1 codex #3 fix — distinguish user-initiated cancel from spontaneous
+   *  errors so the dispatch_complete frame carries status="cancelled"
+   *  instead of "failed". The Rust kill path now emits Cancelled (was
+   *  emitting Error { message: "killed by user" } pre-fix). */
+  | { kind: "cancelled" }
   | { kind: "error"; message: string };
+
+/** R1 codex #2 + gemini #2 fix — pending-cancel set keyed by request_id.
+ *  Browser cancels that arrive BEFORE StreamEvent::Started land here;
+ *  when Started fires, the dispatch handler checks the set and
+ *  immediately calls kill_active_run if the request_id is queued.
+ *  Without this set, fast cancels were silently dropped and the
+ *  dispatch continued to completion (spending tokens). */
+const pendingCancels = new Set<string>();
 
 async function makeChannel<T>(): Promise<{
   channel: unknown;
@@ -358,11 +371,21 @@ async function makeChannel<T>(): Promise<{
 }
 
 /** v2.18 Wave 2 — workspace_root validation against the registered
- *  projects table. Strict equality (per codex pre-war finding):
- *  silently allowing descendants weakens the trust boundary because
- *  a tampered browser could escape into sibling directories via
- *  symlinks or unicode tricks. If you want descendant matching, do
- *  it explicitly with path normalization in Wave 2.x. */
+ *  projects table. Strict equality after path normalization (per
+ *  codex pre-war finding + R1 codex/gemini #5): silently allowing
+ *  descendants weakens the trust boundary because a tampered browser
+ *  could escape into sibling directories via symlinks or unicode
+ *  tricks. But trailing-slash mismatches between `/Users/foo` and
+ *  `/Users/foo/` shouldn't reject a real registered project — so we
+ *  normalize (strip trailing slashes) before equality. */
+function normalizePath(p: string): string {
+  // Strip trailing slashes but preserve "/" itself; collapse runs of
+  // duplicate slashes. No tilde expansion or symlink follow on
+  // purpose — the registered project paths are what the user
+  // explicitly added, so any normalization here must be reversible.
+  return p.replace(/\/+$/, "").replace(/\/+/g, "/") || "/";
+}
+
 async function validateWorkspaceRoot(
   workspaceRoot: string | null | undefined,
 ): Promise<{ ok: true; resolved: string | null } | { ok: false; error: string }> {
@@ -376,14 +399,19 @@ async function validateWorkspaceRoot(
     const projects = await tauriInvokeResult<Array<{ path: string }>>(
       "list_projects",
     );
-    const match = projects.find((p) => p.path === workspaceRoot);
+    const norm = normalizePath(workspaceRoot);
+    const match = projects.find((p) => normalizePath(p.path) === norm);
     if (!match) {
       return {
         ok: false,
         error: `workspace_root ${JSON.stringify(workspaceRoot)} is not a registered project on this desktop. Add it via Settings → Projects first.`,
       };
     }
-    return { ok: true, resolved: workspaceRoot };
+    // Return the registered project's canonical path (not the browser's
+    // submitted one) so the dispatch uses the exact string the user
+    // approved at registration time — defense in depth against case-only
+    // mismatches if a future change loosens normalization.
+    return { ok: true, resolved: match.path };
   } catch (err) {
     return {
       ok: false,
@@ -453,6 +481,24 @@ async function handleDispatchRequest(
           case "started":
             activeRunId = event.runId;
             requestIdToRunId.set(req.request_id, event.runId);
+            // R1 codex #2 + gemini #2 fix — if a cancel arrived before
+            // Started, it's queued in pendingCancels. Now that we have
+            // the run_id, fire the kill immediately. The streaming
+            // dispatch's kill_rx branch will emit Cancelled, which the
+            // case below maps to dispatch_complete status="cancelled".
+            if (pendingCancels.has(req.request_id)) {
+              pendingCancels.delete(req.request_id);
+              try {
+                await tauriInvokeResult<boolean>("kill_active_run", {
+                  runId: event.runId,
+                });
+              } catch (killErr) {
+                console.error(
+                  "[tether/host.ts] late kill after Started failed:",
+                  killErr,
+                );
+              }
+            }
             break;
           case "chunk":
             await sendChunkFrame(sessionId, {
@@ -463,7 +509,7 @@ async function handleDispatchRequest(
             });
             break;
           case "done": {
-            if (activeRunId) requestIdToRunId.delete(req.request_id);
+            requestIdToRunId.delete(req.request_id);
             const durationMs = event.receipt?.durationMs
               ?? Math.round(performance.now() - startedAt);
             await sendCompleteFrame(sessionId, {
@@ -480,8 +526,23 @@ async function handleDispatchRequest(
             resolveTerminate();
             break;
           }
+          case "cancelled": {
+            // R1 codex #3 fix — user-initiated kill maps to the
+            // dispatch_complete frame's "cancelled" status (NOT
+            // "failed" — the browser frame contract has a separate
+            // terminal for clean cancels).
+            requestIdToRunId.delete(req.request_id);
+            await sendCompleteFrame(sessionId, {
+              kind: "dispatch_complete",
+              request_id: req.request_id,
+              status: "cancelled",
+              duration_ms: Math.round(performance.now() - startedAt),
+            });
+            resolveTerminate();
+            break;
+          }
           case "error": {
-            if (activeRunId) requestIdToRunId.delete(req.request_id);
+            requestIdToRunId.delete(req.request_id);
             await sendCompleteFrame(sessionId, {
               kind: "dispatch_complete",
               request_id: req.request_id,
@@ -516,9 +577,8 @@ async function handleDispatchRequest(
     // The Rust side errored before the StreamEvent::Error path could
     // emit (e.g. shell-out failed, channel registration error). Emit
     // a final complete frame ourselves so the browser doesn't hang.
-    if (requestIdToRunId.has(req.request_id)) {
-      requestIdToRunId.delete(req.request_id);
-    }
+    requestIdToRunId.delete(req.request_id);
+    pendingCancels.delete(req.request_id);
     const message = err instanceof Error ? err.message : String(err);
     await sendCompleteFrame(sessionId, {
       kind: "dispatch_complete",
@@ -530,13 +590,24 @@ async function handleDispatchRequest(
     resolveTerminate();
   }
 
-  // Wait for the channel's terminal event (Done/Error) to be sealed
-  // and forwarded before returning. If the channel never delivered a
-  // terminal — defensive timeout — we still return after 5 minutes
-  // so the bridge isn't held hostage. The dispatch's own process
-  // already exited (invoke returned), so this is just channel drain.
-  const timeout = new Promise<void>((res) => setTimeout(res, 5 * 60 * 1000));
+  // Wait for the channel's terminal event (Done/Error/Cancelled) to be
+  // sealed and forwarded before returning. If the channel never
+  // delivered a terminal — defensive timeout — we still return after
+  // 5 minutes so the bridge isn't held hostage. The dispatch's own
+  // process already exited (invoke returned), so this is just channel
+  // drain. R1 codex #4 fix — clean up requestIdToRunId AND
+  // pendingCancels in the timeout-fallthrough path so the map can't
+  // leak across a long-lived host process.
+  const timeoutHandle: { id: ReturnType<typeof setTimeout> | null } = { id: null };
+  const timeout = new Promise<void>((res) => {
+    timeoutHandle.id = setTimeout(res, 5 * 60 * 1000);
+  });
   await Promise.race([terminated, timeout]);
+  if (timeoutHandle.id) clearTimeout(timeoutHandle.id);
+  // Idempotent — onMessage handlers already deleted on terminal events;
+  // these calls are no-ops in the happy path.
+  requestIdToRunId.delete(req.request_id);
+  pendingCancels.delete(req.request_id);
 }
 
 // ── v2.18 Wave 2 — dispatch_cancel handler ───────────────────────────────
@@ -555,18 +626,25 @@ async function handleDispatchCancel(plainRequestJson: string): Promise<void> {
   }
   const runId = requestIdToRunId.get(req.request_id);
   if (!runId) {
-    // Cancel raced the Started event, or dispatch already terminated.
+    // R1 codex #2 + gemini #2 fix — instead of silently dropping the
+    // cancel (which kept the dispatch running and spending tokens),
+    // queue it. handleDispatchRequest's onMessage "started" case
+    // checks pendingCancels and fires kill_active_run as soon as the
+    // run_id lands. If the dispatch is already done by the time we
+    // get here, the pendingCancels entry is a tombstone — the timeout-
+    // fallthrough cleanup wipes it on its own.
+    pendingCancels.add(req.request_id);
     console.warn(
-      `[tether/host.ts] dispatch_cancel: no active run for request ${req.request_id} (already completed or never started).`,
+      `[tether/host.ts] dispatch_cancel: queued for request ${req.request_id} (Started not yet observed).`,
     );
     return;
   }
   try {
     await tauriInvokeResult<boolean>("kill_active_run", { runId });
     // The kill triggers the child process's terminate; the streaming
-    // dispatch's Error path fires; the channel emits StreamEvent::Error,
-    // which the request handler turns into a dispatch_complete frame
-    // with status="failed" + an error mentioning the cancel.
+    // dispatch's kill_rx branch fires; the channel emits
+    // StreamEvent::Cancelled, which the request handler turns into a
+    // dispatch_complete frame with status="cancelled".
   } catch (err) {
     console.error("[tether/host.ts] kill_active_run invoke failed:", err);
   }

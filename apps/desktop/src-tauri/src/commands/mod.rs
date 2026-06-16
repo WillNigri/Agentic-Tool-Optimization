@@ -1601,7 +1601,15 @@ pub struct ObservationTag<'a> {
 /// streaming dispatches can surface execution_log_id / cost / tokens
 /// without a follow-up SELECT (race-prone under concurrent war-room
 /// seats per codex pre-war finding).
+///
+/// R1 codex #1 + gemini #4 fix — explicit `rename_all = "camelCase"`
+/// on the struct itself. `StreamEvent`'s rename_all only covers the
+/// enum's payload field names, NOT the nested struct's. Without this,
+/// the receipt serialized with snake_case (execution_log_id, cost_usd,
+/// tokens_in, ...) and host.ts received undefined for every field that
+/// expected camelCase (executionLogId / costUsd / tokensIn / ...).
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub(crate) struct DispatchReceipt {
     pub execution_log_id: String,
@@ -9337,6 +9345,14 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         receipt: Option<DispatchReceipt>,
     },
+    /// v2.18 Wave 2 R1 codex #3 — distinguish user-initiated cancel
+    /// from spontaneous errors so the browser frame contract's
+    /// status="cancelled" actually fires (was being mapped to "failed"
+    /// because the kill-path used StreamEvent::Error). Pre-Wave-2
+    /// callers see this as a "successful" terminal but without `full`
+    /// — chat pane treats it as "stream ended without output," which
+    /// is the right behavior for a killed run.
+    Cancelled,
     Error { message: String },
 }
 
@@ -9642,12 +9658,14 @@ async fn spawn_streaming_dispatch(
         tokio::select! {
             biased;
             _ = &mut kill_rx => {
-                // User clicked Kill. SIGKILL the child, surface a
-                // clean "killed by user" error to the UI, and stop.
+                // User clicked Kill. SIGKILL the child, emit the
+                // Wave-2-distinguishable Cancelled variant (was
+                // StreamEvent::Error pre-Wave-2 — but the browser
+                // frame contract has a separate cancelled status,
+                // so this needs its own variant for the tether path
+                // to map correctly).
                 let _ = child.kill().await;
-                let _ = on_event.send(StreamEvent::Error {
-                    message: "killed by user".into(),
-                });
+                let _ = on_event.send(StreamEvent::Cancelled);
                 return Ok(());
             }
             read_result = reader.read(&mut buf) => match read_result {
