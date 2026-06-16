@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentRuntime } from "@/components/cron/types";
 import {
   isDispatchFrame,
@@ -77,6 +77,24 @@ function applyComplete(
 export function useDispatchRequest(tetherClient: DispatchTransport) {
   const [current, setCurrent] = useState<DispatchRunState | null>(null);
   const [history, setHistory] = useState<DispatchRunState[]>([]);
+  const currentRef = useRef<DispatchRunState | null>(null);
+  const lastPromotedRequestIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    currentRef.current = current;
+  }, [current]);
+
+  useEffect(() => {
+    if (!current) return;
+    if (!["success", "failed", "denied", "cancelled"].includes(current.status)) return;
+    if (lastPromotedRequestIdRef.current === current.requestId) return;
+
+    lastPromotedRequestIdRef.current = current.requestId;
+    setHistory((existing) => [
+      current,
+      ...existing.filter((run) => run.requestId !== current.requestId),
+    ]);
+  }, [current]);
 
   useEffect(() => {
     return tetherClient.subscribeHostFrames((rawFrame) => {
@@ -94,15 +112,11 @@ export function useDispatchRequest(tetherClient: DispatchTransport) {
         case "dispatch_chunk":
           setCurrent((prev) => applyChunk(prev, rawFrame));
           break;
-        case "dispatch_complete":
-          setCurrent((prev) => {
-            const next = applyComplete(prev, rawFrame);
-            if (next && next.requestId === rawFrame.request_id) {
-              setHistory((existing) => [next, ...existing.filter((run) => run.requestId !== next.requestId)]);
-            }
-            return next;
-          });
+        case "dispatch_complete": {
+          const next = applyComplete(currentRef.current, rawFrame);
+          setCurrent(next);
           break;
+        }
         default:
           assertNever(rawFrame);
       }
@@ -131,6 +145,15 @@ export function useDispatchRequest(tetherClient: DispatchTransport) {
       war_room_round: input.war_room_round ?? null,
     };
 
+    // Only mark a run as in-flight after the transport accepts the frame.
+    // If sendTetherFrame throws, leaving local state untouched avoids a phantom
+    // "running" dispatch that the host never actually received.
+    try {
+      tetherClient.sendTetherFrame(frame);
+    } catch (error) {
+      throw error;
+    }
+
     setCurrent({
       requestId,
       runtime: frame.runtime,
@@ -139,7 +162,6 @@ export function useDispatchRequest(tetherClient: DispatchTransport) {
       status: "running",
       model: frame.model ?? null,
     });
-    tetherClient.sendTetherFrame(frame);
     return requestId;
   }
 

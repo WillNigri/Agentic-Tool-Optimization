@@ -2,7 +2,6 @@ import { useState } from "react";
 import {
   CheckCircle2,
   LoaderCircle,
-  Square,
   Terminal,
   XCircle,
 } from "lucide-react";
@@ -62,17 +61,6 @@ export default function WorkstationDispatchCard({ machineName }: Props) {
     }
   }
 
-  function handleCancel(): void {
-    if (!current?.requestId || !isRunning) return;
-
-    try {
-      setSendError(null);
-      send({ kind: "dispatch_cancel", request_id: current.requestId });
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to cancel dispatch");
-    }
-  }
-
   return (
     <div className="rounded-lg border border-[#2a2a3a] bg-[#16161e] p-4 space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -84,16 +72,7 @@ export default function WorkstationDispatchCard({ machineName }: Props) {
             Pair-level auth is active for this workstation.
           </p>
         </div>
-        {isRunning && (
-          <button
-            type="button"
-            onClick={handleCancel}
-            className="inline-flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/15"
-          >
-            <Square className="h-3.5 w-3.5" />
-            Cancel
-          </button>
-        )}
+        {/* Cancel ships in v2.18 Wave 2 — host-side dispatch_cancel handler needed first. */}
       </div>
 
       {!isRunning && (
