@@ -56,33 +56,6 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
         ) : null}
       </div>
 
-      {/* #89 — Free-tier upsell. Shown above the (empty) teams grid so
-          users know they CAN create one once they upgrade. */}
-      {!meQuery.isLoading && !canCreateTeam && (
-        <div className="rounded-lg border border-[#00FFB2]/20 bg-[#00FFB2]/5 p-4 flex items-start gap-3">
-          <div className="w-9 h-9 rounded-lg bg-[#00FFB2]/15 flex items-center justify-center shrink-0">
-            <Sparkles className="w-4 h-4 text-[#00FFB2]" />
-          </div>
-          <div className="flex-1">
-            <p className="text-sm font-medium text-white">
-              Team workspaces are a Pro feature
-            </p>
-            <p className="text-xs text-[#aaaab8] mt-1 leading-relaxed">
-              Share sessions, war-rooms, and missions with teammates. Upgrade to
-              create your first team and invite members.
-            </p>
-            <a
-              href="https://agentictool.ai/#pricing"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-block mt-2 text-xs text-[#00FFB2] hover:underline font-medium"
-            >
-              See plans →
-            </a>
-          </div>
-        </div>
-      )}
-
       <CreateTeamModal
         open={showCreate}
         onClose={() => setShowCreate(false)}
@@ -110,23 +83,51 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
         </div>
       )}
 
-      {/* Empty state */}
+      {/* Empty state — R1 fix: gate the upsell on meQuery.isSuccess +
+          confirmed free tier, so a transient /me fetch failure doesn't
+          mistakenly show "upgrade to Pro" to a paid user. Also living
+          INSIDE the empty state (not above the team list) so free users
+          with existing memberships in Pro teams don't get nag content
+          pushed at them every visit. */}
       {!isLoading && !error && teams?.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 bg-[#16161e] border border-[#2a2a3a] rounded-lg text-center px-6">
-          <Users className="w-10 h-10 text-[#2a2a3a] mb-4" />
-          <p className="text-white text-sm font-medium">No teams yet</p>
-          <p className="text-[#8888a0] text-xs mt-1">
-            {canCreateTeam
-              ? 'Create one to share sessions, war rooms, and missions with teammates.'
-              : 'Once you upgrade to Pro you can create teams here.'}
-          </p>
-          {canCreateTeam && (
-            <button
-              onClick={() => setShowCreate(true)}
-              className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
-            >
-              <Plus className="w-3.5 h-3.5" /> Create your first team
-            </button>
+          {meQuery.isSuccess && !canCreateTeam ? (
+            <>
+              <div className="w-12 h-12 rounded-xl bg-[#00FFB2]/15 flex items-center justify-center mb-4">
+                <Sparkles className="w-5 h-5 text-[#00FFB2]" />
+              </div>
+              <p className="text-white text-sm font-medium">
+                Team workspaces are a Pro feature
+              </p>
+              <p className="text-[#8888a0] text-xs mt-2 max-w-sm leading-relaxed">
+                Share sessions, war-rooms, and missions with teammates. Upgrade
+                to create your first team and invite members.
+              </p>
+              <a
+                href="https://agentictool.ai/#pricing"
+                target="_blank"
+                rel="noreferrer"
+                className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+              >
+                See plans →
+              </a>
+            </>
+          ) : (
+            <>
+              <Users className="w-10 h-10 text-[#2a2a3a] mb-4" />
+              <p className="text-white text-sm font-medium">No teams yet</p>
+              <p className="text-[#8888a0] text-xs mt-1">
+                Create one to share sessions, war rooms, and missions with teammates.
+              </p>
+              {canCreateTeam && (
+                <button
+                  onClick={() => setShowCreate(true)}
+                  className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Create your first team
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
