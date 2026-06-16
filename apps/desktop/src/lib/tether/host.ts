@@ -184,6 +184,21 @@ async function handleDecryptRequest(payload: {
     return;
   }
 
+  // v2.18 Wave 1 R1 (codex #1) — dispatch_cancel is in the published
+  // contract but the runtime hook isn't wired yet (Wave 2 work — the
+  // Tauri-side prompt_agent has no abort handle today). The browser
+  // surface that ships in Wave 1 doesn't actually send this frame yet,
+  // but if a future client or replay does, we don't want to log it as
+  // "unknown request kind" — that would mask the real Wave 2 gap.
+  // For now, accept-and-ignore; Wave 2 will wire it through to
+  // prompt_agent_cancel.
+  if (raw.kind === "dispatch_cancel") {
+    console.warn(
+      "[tether/host.ts] dispatch_cancel received but not yet honored (Wave 2 feature). Ignoring.",
+    );
+    return;
+  }
+
   if (raw.kind !== "decrypt_events") {
     await replyError(session_id, request_id, `unknown request kind: ${raw.kind}`);
     return;
@@ -327,7 +342,14 @@ async function handleDispatchRequest(
       prompt: req.prompt,
       config,
       agentSlug: req.agent_slug ?? null,
-      // workspace is the registered project root; omit for Wave 1 per doc.
+      // v2.18 Wave 1 R1 (codex #3) — workspace_root is in the published
+      // frame contract but Wave 1 intentionally drops it on both sides.
+      // Wave 2 adds the validation step (workspace_root MUST match one
+      // of the user's registered project roots on the desktop) before
+      // surfacing it to prompt_agent. Until then, defense in depth: even
+      // if a tampered browser includes workspace_root in the frame, we
+      // ignore it here so the dispatch runs against the desktop's CWD
+      // — never an attacker-controlled path.
       workspace: null,
     });
 
