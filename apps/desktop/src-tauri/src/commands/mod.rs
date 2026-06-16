@@ -9576,14 +9576,14 @@ async fn spawn_streaming_dispatch(
         workspace,
         Some("desktop:stream"),
     );
-    // v2.18 Wave 2 — emit the run id BEFORE the first stdout chunk so
-    // the browser-tether host can build a request_id → run_id map for
-    // cancel forwarding. Pre-Wave-2 callers (chat pane streaming) just
-    // ignore Started events; the type-system makes the receiver opt-
-    // in to honoring them.
-    let _ = on_event.send(StreamEvent::Started {
-        run_id: run_id.clone(),
-    });
+    // v2.18 Wave 2 R2 codex #1 — DO NOT emit Started here. We must
+    // wait until the kill handler is installed below. Otherwise a
+    // browser cancel reacting to Started can call kill_active_run
+    // BEFORE the handler is attached; kill_run returns false (known
+    // run, no handler) and the cancel is silently dropped. Emit
+    // Started ONLY after attach_kill_handler so the browser's
+    // request_id → run_id map is built at a point where a kill is
+    // guaranteed to fire.
     // Guard so we always finish_run on early returns / errors.
     struct FinishOnDrop(String);
     impl Drop for FinishOnDrop {
@@ -9628,6 +9628,14 @@ async fn spawn_streaming_dispatch(
             // finished); fine — kill becomes a no-op.
             let _ = tx.send(());
         }
+    });
+    // v2.18 Wave 2 R2 codex #1 fix — emit Started AFTER
+    // attach_kill_handler so any browser cancel reacting to Started
+    // hits a real handler and the kill actually fires. Without this
+    // ordering, kill_active_run could find the run but no handler
+    // (returns false), silently dropping the cancel.
+    let _ = on_event.send(StreamEvent::Started {
+        run_id: run_id.clone(),
     });
     let mut kill_rx = kill_rx;
 

@@ -257,9 +257,27 @@ export interface AgentMessage {
 }
 
 // v1.5.0 — Streaming events emitted by prompt_agent_*_stream commands.
+// v2.18 Wave 2 — added Started (carries the active_runs run_id for
+// browser-tether cancel forwarding; chat-pane callers ignore it) and
+// Cancelled (distinguishes user-initiated kill from spontaneous errors
+// so the browser frame contract's status="cancelled" path can fire).
+// Done now optionally carries a receipt for callers that want the
+// execution_log_id + cost/tokens without a follow-up SELECT.
+export interface DispatchReceiptDto {
+  executionLogId: string;
+  status: string;
+  model?: string | null;
+  costUsd?: number | null;
+  tokensIn?: number | null;
+  tokensOut?: number | null;
+  durationMs: number;
+}
+
 export type StreamEvent =
+  | { kind: "started"; runId: string }
   | { kind: "chunk"; text: string }
-  | { kind: "done"; full: string }
+  | { kind: "done"; full: string; receipt?: DispatchReceiptDto }
+  | { kind: "cancelled" }
   | { kind: "error"; message: string };
 
 /** Streaming counterpart of promptAgentWithHistory. Calls onChunk for every
@@ -288,6 +306,10 @@ export async function promptAgentWithHistoryStream(input: {
       if (settled) return;
       if (msg.kind === "chunk") {
         input.onChunk(msg.text);
+      } else if (msg.kind === "started") {
+        // v2.18 Wave 2 — Started carries the active_runs run_id for
+        // the tether path's cancel forwarding. Chat-pane doesn't need
+        // it; ignore (but don't fall through to the unknown-kind path).
       } else if (msg.kind === "done") {
         settled = true;
         void (async () => {
@@ -311,6 +333,24 @@ export async function promptAgentWithHistoryStream(input: {
           });
         })();
         resolve(msg.full);
+      } else if (msg.kind === "cancelled") {
+        // v2.18 Wave 2 R2 codex #2 fix — chat-pane was hanging when
+        // the user killed a streaming run because we didn't settle
+        // on Cancelled (only on Done / Error). Reject with a clear
+        // "cancelled by user" error so the caller's .catch() can
+        // render the cancel state.
+        settled = true;
+        void uploadAgentTrace({
+          agentSlug: input.agentSlug ?? input.agentId,
+          runtime: input.runtime,
+          startedAt,
+          durationMs: Date.now() - t0,
+          ok: false,
+          error: "cancelled by user",
+          source: input.source ?? "desktop:promptbar:stream",
+          promptSummary: summarizePrompt(input.newPrompt),
+        });
+        reject(new Error("cancelled by user"));
       } else if (msg.kind === "error") {
         settled = true;
         void uploadAgentTrace({
@@ -356,9 +396,17 @@ export async function promptAgentStream(input: {
       if (settled) return;
       if (msg.kind === "chunk") {
         input.onChunk(msg.text);
+      } else if (msg.kind === "started") {
+        // v2.18 Wave 2 — Started carries the active_runs run_id for
+        // the tether path; chat-pane ignores it.
       } else if (msg.kind === "done") {
         settled = true;
         resolve(msg.full);
+      } else if (msg.kind === "cancelled") {
+        // v2.18 Wave 2 R2 codex #2 — settle on Cancelled so a killed
+        // chat-pane run doesn't hang its Promise.
+        settled = true;
+        reject(new Error("cancelled by user"));
       } else if (msg.kind === "error") {
         settled = true;
         reject(new Error(msg.message));
