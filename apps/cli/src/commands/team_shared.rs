@@ -157,9 +157,11 @@ fn is_success(status: reqwest::StatusCode, body: &Value) -> bool {
 }
 
 fn handle_cloud_error(status: reqwest::StatusCode, body: &Value) -> anyhow::Error {
+    let code = status.as_u16();
+    let err = body.get("error");
+    let err_code = err.and_then(|e| e.get("code")).and_then(|c| c.as_str());
     // Try the canonical { error: { message } } or { error: "string" } shapes.
-    let msg = body
-        .get("error")
+    let msg = err
         .and_then(|e| {
             e.get("message")
                 .and_then(|m| m.as_str())
@@ -170,10 +172,39 @@ fn handle_cloud_error(status: reqwest::StatusCode, body: &Value) -> anyhow::Erro
             body.get("message")
                 .and_then(|m| m.as_str())
                 .map(String::from)
-        })
-        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+        });
 
-    anyhow!("{} (HTTP {})", msg, status.as_u16())
+    // Tier gate: the API returns 402 PRO_REQUIRED with required_tier +
+    // upgrade_url for Team-tier-only features (shared workspaces). Surface the
+    // upgrade path instead of a bare status — otherwise this reads as a generic
+    // failure and sends you debugging the wrong thing.
+    if code == 402 || err_code == Some("PRO_REQUIRED") {
+        let required = err
+            .and_then(|e| e.get("required_tier"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("team");
+        let base = msg.unwrap_or_else(|| {
+            format!("This feature requires the {required} subscription tier.")
+        });
+        return match err.and_then(|e| e.get("upgrade_url")).and_then(|u| u.as_str()) {
+            Some(url) => anyhow!("{base} (HTTP 402 — requires {required} tier). Upgrade: {url}"),
+            None => anyhow!("{base} (HTTP 402 — requires {required} tier)"),
+        };
+    }
+
+    // A status error with no JSON error body (e.g. an Express HTML 404
+    // "Cannot POST /…") almost always means the route isn't available on the
+    // server — the cloud backend is behind this CLI, or the route isn't
+    // deployed yet — NOT a client mistake. Say so explicitly.
+    match msg {
+        Some(m) => anyhow!("{m} (HTTP {code})"),
+        None if code == 404 => anyhow!(
+            "Endpoint not available on the server (HTTP 404). The cloud backend may be \
+             behind this CLI version, or this route isn't deployed yet — not a problem \
+             with your command."
+        ),
+        None => anyhow!("Request failed (HTTP {code})"),
+    }
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
