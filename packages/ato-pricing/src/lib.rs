@@ -91,6 +91,16 @@ pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
         "deepseek-coder" => Some((0.27, 1.10)),
         "deepseek-reasoner" | "deepseek-r1" => Some((0.55, 2.19)),
 
+        // ---- Z.AI (Zhipu GLM) ----
+        // Verified 2026-06-17 against docs.z.ai/guides/overview/pricing.
+        "glm-5.2" => Some((1.40, 4.40)),
+        "glm-4.6" => Some((0.60, 2.20)),
+        "glm-4.5" => Some((0.60, 2.20)),
+        "glm-4.5-air" => Some((0.20, 1.10)),
+        // Currently "limited-time free" per z.ai; (0,0) is accurate today —
+        // revisit when the promo ends.
+        "glm-4.7-flash" | "glm-4.5-flash" => Some((0.0, 0.0)),
+
         // ---- Alibaba Qwen (DashScope-Intl) ----
         "qwen-plus" => Some((0.40, 1.20)),
         "qwen-max" => Some((1.40, 5.60)),
@@ -126,13 +136,14 @@ pub fn models_for_provider(provider: &str) -> &'static [&'static str] {
         "qwen" => &["qwen-turbo", "qwen-plus", "qwen-max"],
         "minimax" => &["MiniMax-Text-01", "MiniMax-M2", "MiniMax-M2.7-highspeed"],
         "grok" => &["grok-2-latest", "grok-3"],
+        "zai" => &["glm-4.5-flash", "glm-4.7-flash", "glm-4.5-air", "glm-4.5", "glm-4.6", "glm-5.2"],
         _ => &[],
     }
 }
 
 /// All known providers.
 pub fn all_providers() -> &'static [&'static str] {
-    &["anthropic", "openai", "google", "deepseek", "qwen", "minimax", "grok"]
+    &["anthropic", "openai", "google", "deepseek", "qwen", "minimax", "grok", "zai"]
 }
 
 /// Model → provider. Returns `None` for unknown models.
@@ -144,6 +155,7 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
         m if m.starts_with("deepseek-") => Some("deepseek"),
         m if m.starts_with("qwen-") => Some("qwen"),
         m if m.starts_with("MiniMax-") => Some("minimax"),
+        m if m.starts_with("glm-") => Some("zai"),
         m if m.starts_with("grok-") => Some("grok"),
         _ => None,
     }

@@ -1893,7 +1893,7 @@ pub async fn prompt_api_provider(
 ) -> Result<ApiDispatchResult, String> {
     let provider = crate::api_dispatch::find_provider(&runtime).ok_or_else(|| {
         format!(
-            "'{}' is not a known API provider (expected one of: minimax, grok, deepseek, qwen, openrouter)",
+            "'{}' is not a known API provider (expected one of: minimax, grok, deepseek, qwen, openrouter, zai)",
             runtime
         )
     })?;

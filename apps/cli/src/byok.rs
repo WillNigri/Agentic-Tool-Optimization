@@ -84,6 +84,7 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
             "deepseek" => "DEEPSEEK_API_KEY",
             "qwen" => "DASHSCOPE_API_KEY",
             "openrouter" => "OPENROUTER_API_KEY",
+            "zai" => "ZAI_API_KEY",
             _ => "PROVIDER_API_KEY",
         };
         format!(
@@ -185,6 +186,7 @@ pub fn has_byok_key_for_provider(db_path: &Path, provider_slug: &str) -> bool {
         "deepseek" => "DEEPSEEK_API_KEY",
         "qwen" => "DASHSCOPE_API_KEY",
         "openrouter" => "OPENROUTER_API_KEY",
+        "zai" => "ZAI_API_KEY",
         _ => return false,
     };
     if std::env::var(env_var)

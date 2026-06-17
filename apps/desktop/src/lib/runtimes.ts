@@ -14,6 +14,7 @@
 
 import {
   Bot,
+  Brain,
   Cloud,
   Cpu,
   Globe,
@@ -72,6 +73,7 @@ export const RUNTIME_REGISTRY = {
   deepseek:   { label: "DeepSeek",   icon: Layers,   hex: "#4d6bfe", tw: "text-indigo-400 bg-indigo-400/10", kind: "api" },
   qwen:       { label: "Qwen",       icon: Bot,      hex: "#7c3aed", tw: "text-amber-400 bg-amber-400/10",  kind: "api" },
   openrouter: { label: "OpenRouter", icon: Network,  hex: "#10b981", tw: "text-violet-400 bg-violet-400/10", kind: "api" },
+  zai:        { label: "Z.AI",       icon: Brain,    hex: "#14b8a6", tw: "text-teal-400 bg-teal-400/10",    kind: "api" },
 } as const satisfies Record<string, RuntimeMeta>;
 
 /** Every known runtime id, derived from the registry keys. Use this
