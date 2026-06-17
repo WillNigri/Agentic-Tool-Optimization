@@ -10,6 +10,7 @@
 //   error_message, war_room_round, initiator_*
 
 import InitiatorBadge from './InitiatorBadge';
+import AttributionBadge from './AttributionBadge';
 import {
   formatTime,
   runtimeChipClass,
@@ -46,6 +47,11 @@ export interface SnapshotSeat {
   client_surface?: string | null;
   initiatorId?: string | null;
   initiator_id?: string | null;
+  // Model A — who ran this seat (cloud member id) + on which machine.
+  memberId?: string | null;
+  member_id?: string | null;
+  machineId?: string | null;
+  machine_id?: string | null;
 }
 
 interface Props {
@@ -104,6 +110,8 @@ export default function WarRoomSeatsRenderer({ seats }: Props) {
                 const initiatorKind = seat.initiatorKind ?? seat.initiator_kind ?? null;
                 const clientSurface = seat.clientSurface ?? seat.client_surface ?? null;
                 const initiatorId = seat.initiatorId ?? seat.initiator_id ?? null;
+                const memberId = seat.memberId ?? seat.member_id ?? null;
+                const machineId = seat.machineId ?? seat.machine_id ?? null;
                 const isErr = seat.status && seat.status !== 'success';
 
                 return (
@@ -148,6 +156,7 @@ export default function WarRoomSeatsRenderer({ seats }: Props) {
                           initiatorId={initiatorId}
                         />
                       )}
+                      <AttributionBadge memberId={memberId} machineId={machineId} />
                       {createdAt && (
                         <span className="ml-auto text-xs text-[#8888a0]">
                           {formatTime(createdAt)}
