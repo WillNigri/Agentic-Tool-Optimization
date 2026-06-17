@@ -684,14 +684,62 @@ pub fn which_cli(name: &str) -> Option<String> {
     }
 
     // 2. Check common install locations.
-    let mut candidates: Vec<String> = vec![
+    let mut candidates: Vec<String> = vec![];
+    // Bug-fix 2026-06-16 — when `name == "ato"`, the desktop's own
+    // bundled CLI sidecar is the most reliable source. For the prod
+    // app it lives at /Applications/ATO.app/Contents/MacOS/ato
+    // alongside the desktop binary; for a dev-build cargo workspace
+    // it lives at apps/cli/target/release/ato (built by `cargo build
+    // --release` from apps/cli). Try those FIRST so a fresh install
+    // never hits the "spawn ato: No such file or directory" error
+    // before falling through to brew / npm / cargo paths.
+    if name == "ato" {
+        // Sibling of the running desktop binary (works for prod .app
+        // bundles where Tauri copies the sidecar next to the main
+        // binary). std::env::current_exe gives the path to the
+        // currently-running ato-desktop; the sidecar `ato` is in the
+        // same directory.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let sibling = dir.join("ato");
+                if let Some(s) = sibling.to_str() {
+                    candidates.push(s.to_string());
+                }
+            }
+        }
+        // Prod app's canonical bundled location on macOS.
+        candidates.push("/Applications/ATO.app/Contents/MacOS/ato".to_string());
+        // Dev-build cargo target — searched relative to current_exe
+        // so it works regardless of where the cargo workspace lives.
+        if let Ok(exe) = std::env::current_exe() {
+            // exe path on dev: <repo>/apps/desktop/src-tauri/target/{debug|release}/ato-desktop
+            // ato dev binary:  <repo>/apps/cli/target/release/ato
+            if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
+                if let Some(src_tauri) = target_dir.parent() {
+                    if let Some(desktop) = src_tauri.parent() {
+                        if let Some(apps) = desktop.parent() {
+                            let cli_target_release = apps.join("cli").join("target").join("release").join("ato");
+                            let cli_target_debug = apps.join("cli").join("target").join("debug").join("ato");
+                            if let Some(s) = cli_target_release.to_str() {
+                                candidates.push(s.to_string());
+                            }
+                            if let Some(s) = cli_target_debug.to_str() {
+                                candidates.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    candidates.extend([
         format!("/usr/local/bin/{}", name),
         format!("/opt/homebrew/bin/{}", name),
         format!("{}/.npm-global/bin/{}", home, name),
         format!("{}/bin/{}", home, name),
         format!("{}/.local/bin/{}", home, name),
         format!("{}/.cargo/bin/{}", home, name),
-    ];
+    ]);
     // Windows-specific candidates. npm shims land in %APPDATA%\npm\<name>.cmd
     // — `where` doesn't always pick these up if Tauri's GUI-launched PATH
     // misses %APPDATA%. Volta, scoop, and Cargo for Windows go elsewhere
