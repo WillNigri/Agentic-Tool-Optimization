@@ -1077,6 +1077,12 @@ pub struct SingleRunDetail {
     pub initiator_kind: Option<String>,
     pub client_surface: Option<String>,
     pub initiator_id: Option<String>,
+    /// Model A attribution — who (cloud member id) + which machine produced
+    /// this run. Surfaced in the shared war-room view so teammates can see
+    /// "member X ran this seat on machine Y". NULL on pre-attribution rows /
+    /// pure-local (not signed in) runs.
+    pub member_id: Option<String>,
+    pub machine_id: Option<String>,
 }
 
 /// First-Chat Wizard (2026-05-18) — fire a war-room from the
@@ -1112,7 +1118,8 @@ pub fn get_war_room_constituents(
             "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                     created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
                     war_room_round, tool_calls_summary,
-                    git_commit_sha, initiator_kind, client_surface, initiator_id
+                    git_commit_sha, initiator_kind, client_surface, initiator_id,
+                    member_id, machine_id
                FROM execution_logs
               WHERE war_room_id = ?1
               ORDER BY war_room_round ASC, created_at ASC",
@@ -1141,6 +1148,8 @@ pub fn get_war_room_constituents(
                 initiator_kind: r.get(17)?,
                 client_surface: r.get(18)?,
                 initiator_id: r.get(19)?,
+                member_id: r.get(20)?,
+                machine_id: r.get(21)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1166,7 +1175,8 @@ pub fn get_single_run_detail(
         "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                 created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated, auth_mode,
                 war_room_round, tool_calls_summary,
-                git_commit_sha, initiator_kind, client_surface, initiator_id
+                git_commit_sha, initiator_kind, client_surface, initiator_id,
+                member_id, machine_id
            FROM execution_logs
           WHERE id = ?1 AND session_id IS NULL",
         [&log_id],
@@ -1192,6 +1202,8 @@ pub fn get_single_run_detail(
                 initiator_kind: r.get(17)?,
                 client_surface: r.get(18)?,
                 initiator_id: r.get(19)?,
+                member_id: r.get(20)?,
+                machine_id: r.get(21)?,
             })
         },
     )

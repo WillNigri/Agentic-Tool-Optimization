@@ -58,6 +58,9 @@ interface WarRoomSeatSnapshot {
   initiatorKind?: string | null;
   clientSurface?: string | null;
   initiatorId?: string | null;
+  // Model A — who (cloud member id) ran this seat + on which machine.
+  memberId?: string | null;
+  machineId?: string | null;
 }
 
 interface WarRoomSnapshot {
@@ -247,6 +250,8 @@ export async function buildWarRoomSnapshot(
     initiator_kind?: string | null;
     client_surface?: string | null;
     initiator_id?: string | null;
+    member_id?: string | null;
+    machine_id?: string | null;
   }>;
 }>> {
   const [warRoom, seats] = await Promise.all([
@@ -285,6 +290,8 @@ export async function buildWarRoomSnapshot(
       initiator_kind: seat.initiatorKind,
       client_surface: seat.clientSurface,
       initiator_id: seat.initiatorId,
+      member_id: seat.memberId,
+      machine_id: seat.machineId,
     })),
   };
   return withTruncation(snapshot, "seats", "createdAt");
