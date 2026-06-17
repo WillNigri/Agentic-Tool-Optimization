@@ -1745,8 +1745,18 @@ pub(crate) fn persist_execution_log(
     let billing_surface: Option<&str> = observation.and_then(|o| o.billing_surface);
     let provider_session_id: Option<&str> = observation.and_then(|o| o.provider_session_id);
     let sequence_within_session: Option<i64> = observation.and_then(|o| o.sequence_within_session);
+    // Model A attribution — stamp the main desktop dispatch path too
+    // (prompt_agent_inner → persist_execution_log covers UI / MCP run_agent /
+    // cron). Passive-observation rows (non-active) are echoes of other CLIs'
+    // sessions, so member is left NULL for them; machine is still this host.
+    let machine_id_val = crate::schema::machine_id(&conn);
+    let member_id_val = if observation.map(|o| o.dispatch_kind == "active").unwrap_or(true) {
+        crate::schema::member_id(&conn)
+    } else {
+        None
+    };
     let _ = conn.execute(
-        "INSERT OR IGNORE INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model, auth_mode, dispatch_kind, billing_surface, provider_session_id, sequence_within_session) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT OR IGNORE INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, agent_slug, model, auth_mode, dispatch_kind, billing_surface, provider_session_id, sequence_within_session, member_id, machine_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         rusqlite::params![
             id,
             runtime,
@@ -1766,6 +1776,8 @@ pub(crate) fn persist_execution_log(
             billing_surface,
             provider_session_id,
             sequence_within_session,
+            member_id_val,
+            machine_id_val,
         ],
     );
 

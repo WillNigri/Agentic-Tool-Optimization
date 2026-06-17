@@ -100,6 +100,14 @@ export const useAuthStore = create<AuthState>()(
 
       logout: () => {
         clearTokens(); // wipe the localStorage mirror so cloud-api stops sending stale Bearer
+        // Model A: scrub the cached cloud member id so post-logout local
+        // dispatches aren't mis-attributed to the previous user. This is the
+        // chokepoint every logout path funnels through — including the
+        // 401/403 paths in agentTraceUpload/cloudAgentTraces that bypass
+        // syncToAuthStore. Fire-and-forget + Tauri-guarded.
+        import("@tauri-apps/api/core")
+          .then(({ invoke }) => invoke("set_local_member_id", { memberId: null }))
+          .catch(() => {});
         set({
           user: localUser,
           accessToken: null,

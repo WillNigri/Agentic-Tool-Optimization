@@ -26,18 +26,30 @@ import { useAuthStore } from '@/hooks/useAuth';
 // Model A — cache the signed-in cloud member id in the local DB (ato_meta)
 // so the Rust dispatch inserts can stamp execution_logs.member_id. The
 // member id only lives in the frontend cloud session, so we push it down to
-// the backend on every auth change. Fire-and-forget + Tauri-guarded: a no-op
-// under the web build / tests where invoke isn't available.
-function cacheMemberId(memberId: string | null) {
-  import('@tauri-apps/api/core')
-    .then(({ invoke }) => invoke('set_local_member_id', { memberId }))
+// the backend on every auth change. Tauri-guarded: a no-op under the web
+// build / tests where invoke isn't available. Returns the write promise so
+// login flows can await it (see syncToAuthStore).
+//
+// Race note: the post-LOGIN window is closed (login/register/init await this
+// before resolving, so the cache is set before the user can dispatch). The
+// post-LOGOUT window is left best-effort: it's attribution metadata, not
+// authz, and dispatching in the sub-second after sign-out is not a real flow;
+// persistence across sessions is fully handled (useAuth.logout chokepoint +
+// cold-start scrub). Closing it would require threading member_id through
+// every dispatch command — not worth it for a metadata edge.
+function cacheMemberId(memberId: string | null): Promise<void> {
+  return import('@tauri-apps/api/core')
+    .then(({ invoke }) => invoke<void>('set_local_member_id', { memberId }))
     .catch(() => {
       /* not running under Tauri, or command unavailable — non-critical */
     });
 }
 
-function syncToAuthStore(user: CloudUser | null) {
-  cacheMemberId(user ? user.id : null);
+function syncToAuthStore(user: CloudUser | null): Promise<void> {
+  // Return the member-cache write so async auth flows (login/register) can
+  // `await` it before they resolve — closing the post-login window where a
+  // dispatch could otherwise read a stale/empty member from ato_meta.
+  const cacheWrite = cacheMemberId(user ? user.id : null);
   if (user) {
     const tokens = getStoredTokens();
     if (tokens?.accessToken && tokens?.refreshToken) {
@@ -53,6 +65,7 @@ function syncToAuthStore(user: CloudUser | null) {
   } else {
     useAuthStore.getState().logout();
   }
+  return cacheWrite;
 }
 
 interface CloudState {
@@ -109,7 +122,7 @@ export const useCloudStore = create<CloudState>()(
             isAuthenticated: true,
             isLoading: false,
           });
-          syncToAuthStore(response.user);
+          await syncToAuthStore(response.user);
           // Fetch teams after login
           await get().fetchTeams();
           await get().fetchPendingInvitations();
@@ -133,7 +146,7 @@ export const useCloudStore = create<CloudState>()(
             isAuthenticated: true,
             isLoading: false,
           });
-          syncToAuthStore(response.user);
+          await syncToAuthStore(response.user);
         } catch (err) {
           set({
             isLoading: false,
@@ -154,7 +167,7 @@ export const useCloudStore = create<CloudState>()(
             isAuthenticated: true,
             isLoading: false,
           });
-          syncToAuthStore(user);
+          await syncToAuthStore(user);
           // Fetch teams after login
           await get().fetchTeams();
           await get().fetchPendingInvitations();
@@ -252,7 +265,7 @@ export async function initializeCloudAuth() {
     try {
       const { user } = await getCurrentUser();
       useCloudStore.setState({ user, isAuthenticated: true });
-      syncToAuthStore(user);
+      await syncToAuthStore(user);
       // Fetch teams in background
       useCloudStore.getState().fetchTeams();
       useCloudStore.getState().fetchPendingInvitations();
@@ -262,5 +275,9 @@ export async function initializeCloudAuth() {
       useCloudStore.setState({ user: null, isAuthenticated: false });
       syncToAuthStore(null);
     }
+  } else {
+    // Cold start with no tokens — scrub any member id cached by a prior
+    // session so local dispatches stay unattributed until the next sign-in.
+    cacheMemberId(null);
   }
 }
