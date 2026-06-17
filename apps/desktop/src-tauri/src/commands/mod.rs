@@ -1645,6 +1645,30 @@ pub struct ObservationTag<'a> {
 /// token counts from runtime SDK responses are a follow-up; estimation
 /// is honest enough that Compare/Cost Recs/Replay show real numbers
 /// instead of "—" for every model in the pricing table.
+/// v2.18 Wave 2 — receipt returned from persist_execution_log so
+/// streaming dispatches can surface execution_log_id / cost / tokens
+/// without a follow-up SELECT (race-prone under concurrent war-room
+/// seats per codex pre-war finding).
+///
+/// R1 codex #1 + gemini #4 fix — explicit `rename_all = "camelCase"`
+/// on the struct itself. `StreamEvent`'s rename_all only covers the
+/// enum's payload field names, NOT the nested struct's. Without this,
+/// the receipt serialized with snake_case (execution_log_id, cost_usd,
+/// tokens_in, ...) and host.ts received undefined for every field that
+/// expected camelCase (executionLogId / costUsd / tokensIn / ...).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct DispatchReceipt {
+    pub execution_log_id: String,
+    pub status: String,
+    pub model: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub duration_ms: i64,
+}
+
 pub(crate) fn persist_execution_log(
     runtime: &str,
     prompt: &str,
@@ -1653,11 +1677,11 @@ pub(crate) fn persist_execution_log(
     model_override: Option<&str>,
     agent_slug: Option<&str>,
     observation: Option<&ObservationTag<'_>>,
-) {
+) -> Option<DispatchReceipt> {
     let db_path = crate::get_db_path();
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return None,
     };
     let id = uuid::Uuid::new_v4().to_string();
     let now = observation
@@ -1767,6 +1791,19 @@ pub(crate) fn persist_execution_log(
         };
         crate::events::bus::publish(event);
     }
+
+    // v2.18 Wave 2 — return the receipt so streaming dispatch callers
+    // (browser tether path) can include it in the dispatch_complete
+    // frame without a follow-up SELECT.
+    Some(DispatchReceipt {
+        execution_log_id: id,
+        status: status.to_string(),
+        model: effective_model.map(|s| s.to_string()),
+        cost_usd,
+        tokens_in,
+        tokens_out,
+        duration_ms: duration_ms as i64,
+    })
 }
 
 // ── v2.2.0 cost estimation helpers ────────────────────────────────────
@@ -9338,9 +9375,76 @@ struct PerAgentRollup {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StreamEvent {
+    /// v2.18 Wave 2 — emitted before the first Chunk, carries the
+    /// active_runs registry id. The browser-tether host uses it to
+    /// build the request_id → run_id map for cancel forwarding
+    /// (cancel calls kill_active_run with this id). Existing
+    /// callers (chat pane streaming) ignore Started events — the
+    /// JS dispatcher only acts on Chunk/Done/Error.
+    Started { run_id: String },
     Chunk { text: String },
-    Done { full: String },
+    /// v2.18 Wave 2 — optional receipt populated for streaming dispatches
+    /// that go through persist_execution_log. Pre-v2.18 streams (chat pane,
+    /// any caller that doesn't care about IDs/cost) accept None and behave
+    /// exactly as before. The browser tether path reads the receipt and
+    /// forwards it as the dispatch_complete frame's payload.
+    Done {
+        full: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        receipt: Option<DispatchReceipt>,
+    },
+    /// v2.18 Wave 2 R1 codex #3 — distinguish user-initiated cancel
+    /// from spontaneous errors so the browser frame contract's
+    /// status="cancelled" actually fires (was being mapped to "failed"
+    /// because the kill-path used StreamEvent::Error). Pre-Wave-2
+    /// callers see this as a "successful" terminal but without `full`
+    /// — chat pane treats it as "stream ended without output," which
+    /// is the right behavior for a killed run.
+    Cancelled,
     Error { message: String },
+}
+
+/// SECURITY (#72 fix): re-validate a dispatch's workspace on the Rust side.
+/// Browser-side validation in `tether/host.ts` is NOT a trust boundary — a
+/// tampered or buggy bridge could hand us an arbitrary path. When a dispatch
+/// names a workspace we require it to be (1) absolute, (2) an existing
+/// directory, and (3) a project the user explicitly registered. A `None`
+/// workspace is the local chat-pane path (runs against the desktop CWD) and is
+/// left untouched — the browser bridge can never produce `None`, since it
+/// rejects a missing `workspace_root` before it ever invokes this command.
+fn validate_dispatch_workspace(workspace: &str) -> Result<(), String> {
+    let ws = workspace.trim();
+    if ws.is_empty() {
+        return Err("workspace path is empty".to_string());
+    }
+    let path = std::path::Path::new(ws);
+    if !path.is_absolute() {
+        return Err(format!("workspace '{}' must be an absolute path", ws));
+    }
+    if !path.is_dir() {
+        return Err(format!("workspace '{}' is not an existing directory", ws));
+    }
+    // Registered-project check is intentionally independent of the
+    // `trust_registered_projects` UX toggle: that toggle only governs the
+    // approval *prompt*, never whether an arbitrary path may be a dispatch
+    // sandbox. A browser dispatch must always target a path the user added.
+    let trimmed = ws.strip_suffix('/').unwrap_or(ws);
+    let conn = rusqlite::Connection::open(crate::get_db_path())
+        .map_err(|e| format!("workspace validation: cannot open db: {}", e))?;
+    let registered = conn
+        .query_row(
+            "SELECT 1 FROM projects WHERE path = ?1 OR path = ?2 LIMIT 1",
+            rusqlite::params![ws, trimmed],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !registered {
+        return Err(format!(
+            "workspace '{}' is not a registered project on this desktop",
+            ws
+        ));
+    }
+    Ok(())
 }
 
 /// Stream a single-shot dispatch. Caller must keep the channel alive until
@@ -9350,10 +9454,27 @@ pub async fn prompt_agent_stream(
     runtime: String,
     prompt: String,
     config: Option<String>,
+    // v2.18 Wave 2 (#72 fix) — the registered project path the agent must run
+    // inside. Some(_) for every browser-originated tether dispatch; None for
+    // the local desktop chat pane (desktop CWD, trusted).
+    workspace: Option<String>,
     on_event: tauri::ipc::Channel<StreamEvent>,
 ) -> Result<(), String> {
+    // SECURITY (#72 fix): re-validate browser-supplied workspaces here; host.ts
+    // is not a trust boundary. None = local chat pane (desktop CWD), allowed.
+    if let Some(ws) = workspace.as_deref() {
+        validate_dispatch_workspace(ws)?;
+    }
     // Ad-hoc — no agent context. Registry will show "no slug, runtime X".
-    spawn_streaming_dispatch(&runtime, &prompt, config.as_deref(), on_event, None, None).await
+    spawn_streaming_dispatch(
+        &runtime,
+        &prompt,
+        config.as_deref(),
+        on_event,
+        None,
+        workspace.as_deref(),
+    )
+    .await
 }
 
 /// Stream a multi-turn dispatch. Resolves variables / hooks / role models
@@ -9546,6 +9667,31 @@ async fn spawn_streaming_dispatch(
         // is aborted before we get to wait — important for keeping the
         // registry honest about what's actually running.
         .kill_on_drop(true);
+    // SECURITY (#72 fix): bind the child process cwd to the validated
+    // workspace so the agent actually runs inside the directory the user
+    // approved — not the desktop's ambient CWD. Threading `workspace` only
+    // into the active-runs registry (below) fixed the bookkeeping but left
+    // the real boundary open. `workspace` is already re-validated in
+    // `prompt_agent_stream` before we get here. None = local chat pane.
+    // The browser path is already strictly validated upstream; here we also
+    // serve the local history-chat path (active_project_path), so we only
+    // chdir into a directory that actually exists — a stale local project
+    // path then falls back to the desktop CWD (prior behavior) instead of
+    // failing the spawn.
+    //
+    // R2 (codex): the only OTHER caller that forwards a workspace here is
+    // `prompt_agent_with_history_stream`, which is invoked solely from the
+    // desktop frontend (apps/desktop/src/lib/agentVariables.ts) — it is NOT
+    // exposed across the browser↔desktop tether, which can only reach
+    // `prompt_agent_stream`. So the strict registered-project validation
+    // (the actual trust boundary) lives on `prompt_agent_stream`; the
+    // history path is local/trusted and intentionally keeps the lenient
+    // existing-dir guard so users can chat in not-yet-registered projects.
+    if let Some(ws) = workspace {
+        if std::path::Path::new(ws).is_dir() {
+            cmd.current_dir(ws);
+        }
+    }
     // BYOK: same env-var forwarding as the non-streaming dispatch path.
     if let Some((var, key)) = crate::byok::byok_env_value_from_path(&crate::get_db_path(), runtime)
     {
@@ -9563,6 +9709,14 @@ async fn spawn_streaming_dispatch(
         workspace,
         Some("desktop:stream"),
     );
+    // v2.18 Wave 2 R2 codex #1 — DO NOT emit Started here. We must
+    // wait until the kill handler is installed below. Otherwise a
+    // browser cancel reacting to Started can call kill_active_run
+    // BEFORE the handler is attached; kill_run returns false (known
+    // run, no handler) and the cancel is silently dropped. Emit
+    // Started ONLY after attach_kill_handler so the browser's
+    // request_id → run_id map is built at a point where a kill is
+    // guaranteed to fire.
     // Guard so we always finish_run on early returns / errors.
     struct FinishOnDrop(String);
     impl Drop for FinishOnDrop {
@@ -9608,6 +9762,14 @@ async fn spawn_streaming_dispatch(
             let _ = tx.send(());
         }
     });
+    // v2.18 Wave 2 R2 codex #1 fix — emit Started AFTER
+    // attach_kill_handler so any browser cancel reacting to Started
+    // hits a real handler and the kill actually fires. Without this
+    // ordering, kill_active_run could find the run but no handler
+    // (returns false), silently dropping the cancel.
+    let _ = on_event.send(StreamEvent::Started {
+        run_id: run_id.clone(),
+    });
     let mut kill_rx = kill_rx;
 
     let stdout = match child.stdout.take() {
@@ -9637,12 +9799,14 @@ async fn spawn_streaming_dispatch(
         tokio::select! {
             biased;
             _ = &mut kill_rx => {
-                // User clicked Kill. SIGKILL the child, surface a
-                // clean "killed by user" error to the UI, and stop.
+                // User clicked Kill. SIGKILL the child, emit the
+                // Wave-2-distinguishable Cancelled variant (was
+                // StreamEvent::Error pre-Wave-2 — but the browser
+                // frame contract has a separate cancelled status,
+                // so this needs its own variant for the tether path
+                // to map correctly).
                 let _ = child.kill().await;
-                let _ = on_event.send(StreamEvent::Error {
-                    message: "killed by user".into(),
-                });
+                let _ = on_event.send(StreamEvent::Cancelled);
                 return Ok(());
             }
             read_result = reader.read(&mut buf) => match read_result {
@@ -9680,7 +9844,11 @@ async fn spawn_streaming_dispatch(
         // if execution_logs is empty when the link command runs, the
         // ±10s temporal match has nothing to attach the cloud trace
         // ID to, and replay fails with prompt-not-local.
-        persist_execution_log(
+        // v2.18 Wave 2 — capture the receipt so the browser tether path
+        // can surface execution_log_id + cost + tokens on dispatch_complete
+        // without a follow-up SELECT (race-prone under concurrent war-room
+        // seats per codex pre-war finding).
+        let receipt = persist_execution_log(
             runtime,
             prompt,
             &Ok(full.clone()),
@@ -9689,7 +9857,7 @@ async fn spawn_streaming_dispatch(
             agent_slug,
             None,
         );
-        let _ = on_event.send(StreamEvent::Done { full });
+        let _ = on_event.send(StreamEvent::Done { full, receipt });
     } else {
         // Drain stderr for the error message — best-effort.
         let mut err_text = String::new();
