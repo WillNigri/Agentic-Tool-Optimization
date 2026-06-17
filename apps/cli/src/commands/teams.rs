@@ -242,6 +242,8 @@ fn run_list(opts: &Opts) -> Result<()> {
 fn run_delete(team: String, opts: &Opts) -> Result<()> {
     let token = read_token()?;
     let client = http_client()?;
+    // Cloud /teams/:id routes are keyed by UUID; accept a slug too.
+    let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
     let url = format!("{}/teams/{}", api_base(), team);
     let resp = client
         .delete(&url)
@@ -254,6 +256,7 @@ fn run_delete(team: String, opts: &Opts) -> Result<()> {
 fn run_invite(team: String, email: String, role: String, opts: &Opts) -> Result<()> {
     let token = read_token()?;
     let client = http_client()?;
+    let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
     let url = format!("{}/teams/{}/members", api_base(), team);
     let resp = client
         .post(&url)
@@ -267,6 +270,7 @@ fn run_invite(team: String, email: String, role: String, opts: &Opts) -> Result<
 fn run_members(team: String, opts: &Opts) -> Result<()> {
     let token = read_token()?;
     let client = http_client()?;
+    let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
     let url = format!("{}/teams/{}/members", api_base(), team);
     let resp = client
         .get(&url)
@@ -279,6 +283,7 @@ fn run_members(team: String, opts: &Opts) -> Result<()> {
 fn run_remove_member(team: String, user_id: String, opts: &Opts) -> Result<()> {
     let token = read_token()?;
     let client = http_client()?;
+    let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
     let url = format!("{}/teams/{}/members/{}", api_base(), team, user_id);
     let resp = client
         .delete(&url)
