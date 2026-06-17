@@ -17,14 +17,23 @@ import {
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chatThreads";
 import type { AgentRuntime } from "@/components/cron/types";
+import { resolveRuntime } from "@/lib/runtimes";
 import ApprovalDialog, { extractSkillFromResponse } from "../ApprovalDialog";
 import MarkdownContent from "../MarkdownContent";
 
-import { RUNTIME_OPTIONS } from "./_helpers";
-
 export function ChatRow({ msg }: { msg: ChatMessage }) {
-  const runtime = msg.runtime
-    ? RUNTIME_OPTIONS.find((r) => r.id === msg.runtime) ?? null
+  // Will 2026-06-16 bug — gemini chat replies had no runtime badge.
+  // Root cause: messages persisted with `runtime="google"` (the
+  // provider slug) didn't match RUNTIME_OPTIONS entries keyed by
+  // `id="gemini"` (the runtime slug). resolveRuntime() walks the
+  // canonical RUNTIME_REGISTRY first, then the PROVIDER_TO_RUNTIME
+  // alias table (google→gemini, anthropic→claude, openai→codex), so
+  // both shapes resolve to the same badge metadata. Other runtimes
+  // (claude, codex) already had matching id+provider so they
+  // weren't affected.
+  const resolved = msg.runtime ? resolveRuntime(msg.runtime) : undefined;
+  const runtime = resolved
+    ? { id: resolved.id, label: resolved.meta.label, icon: resolved.meta.icon, color: resolved.meta.hex }
     : null;
   const Icon = runtime?.icon ?? Sparkles;
   const color = runtime?.color ?? "#888";
