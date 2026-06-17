@@ -313,7 +313,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ato-desktop"
-version = "2.18.2"
+version = "2.18.3"
 dependencies = [
  "aes-gcm",
  "ato-agent-permissions",

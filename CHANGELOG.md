@@ -4,6 +4,20 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.3] — 2026-06-17
+
+### Added
+- **Model A attribution (#85).** Every dispatch now records `member_id`
+  (signed-in cloud user, decoded from the JWT) + `machine_id` (stable
+  per-install id) on `execution_logs`, so a shared war-room/session can
+  attribute each turn to {member, machine, runtime}. Stamped across all five
+  production dispatch paths (CLI, API-provider, remote, replay, subagent).
+
+### Fixed
+- **CLI `teams delete/members/invite/remove` now accept a team slug (#86)** —
+  they resolve slug→UUID like `share` already did, instead of 404/400ing when
+  given a slug. Pairs with the new cloud `GET /teams/:id/members` route.
+
 ## [2.18.2] — 2026-06-17
 
 ### Added
