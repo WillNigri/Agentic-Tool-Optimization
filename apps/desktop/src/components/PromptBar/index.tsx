@@ -36,6 +36,7 @@ import { useProjectStore } from "@/stores/useProjectStore";
 import { useDemoStore } from "@/stores/useDemoStore";
 import { useUiStore } from "@/stores/useUiStore";
 import { listAgentGroups, dispatchToGroup, type AgentGroup } from "@/lib/agentGroups";
+import { getModelConfig } from "@/lib/tauri-api";
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 import { estimateUsage } from "@/lib/pricing";
 import type { AgentRuntime } from "@/components/cron/types";
@@ -263,6 +264,21 @@ export default function PromptBar() {
     staleTime: 30_000,
     enabled: isTauri,
   });
+
+  // #83 — read the saved model-picker override so we can pass it to
+  // AgentPicker for the precedence tooltip + amber-tint cue when the
+  // picker is overriding an agent's stored model. Same query key
+  // ModelPicker uses, so react-query dedupes the actual fetch. Only
+  // fires for API providers; CLI runtimes don't expose a picker.
+  const isApiProvider =
+    availableRuntimes?.find((r) => r.slug === runtime)?.kind === "api";
+  const { data: savedModelConfig } = useQuery({
+    queryKey: ["model-config", runtime, activeProject?.id ?? null],
+    queryFn: () => getModelConfig(runtime, activeProject?.id),
+    staleTime: 30_000,
+    enabled: isTauri && isApiProvider,
+  });
+  const modelOverride = savedModelConfig?.modelId ?? null;
 
   const selectedAgent = useMemo(
     () => runtimeAgents.find((a) => a.id === agentId) ?? null,
@@ -1059,6 +1075,7 @@ export default function PromptBar() {
           setGroupSlug={setGroupSlug}
           selectedAgent={selectedAgent}
           selectedGroup={selectedGroup}
+          modelOverride={modelOverride}
           runtimeAgents={runtimeAgents}
           runtimeGroups={runtimeGroups}
           stickAgentToThread={stickAgentToThread}
