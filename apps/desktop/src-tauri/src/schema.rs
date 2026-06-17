@@ -2018,6 +2018,19 @@ pub fn init_database(conn: &Connection) {
         [],
     );
 
+    // Model A attribution (2026-06-17) — member_id + machine_id on
+    // execution_logs, mirroring the CLI migration (apps/cli/src/db.rs). The
+    // desktop and CLI share ~/.ato/local.db, so machine_id() resolves to the
+    // same per-install id from ato_meta regardless of which writes first.
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN member_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE execution_logs ADD COLUMN machine_id TEXT",
+        [],
+    );
+
     // Attribution PR-A (2026-06-13) — initiator provenance on every
     // conversation/run-bearing table. Three nullable TEXT columns:
     //   initiator_kind:  who/what started it (human, agent, schedule, hook, ...)
@@ -2113,6 +2126,47 @@ pub fn init_database(conn: &Connection) {
          ON tether_approvals(browser_ua_hash, browser_ip_class)",
         [],
     );
+}
+
+/// Model A — stable per-install machine id for dispatch attribution.
+/// Reads/generates ato_meta key `machine_id`. Identical logic + key to the
+/// CLI (apps/cli/src/db.rs::machine_id): both share ~/.ato/local.db, so the
+/// value is the same regardless of which process writes it first. NOT
+/// identity_probe (a binary/signing hash that collides across machines on the
+/// same signed build — war-room 642B657D).
+pub fn machine_id(conn: &rusqlite::Connection) -> String {
+    let read = |c: &rusqlite::Connection| -> Option<String> {
+        c.query_row(
+            "SELECT value FROM ato_meta WHERE key = 'machine_id'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if let Some(v) = read(conn) {
+        return v;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO ato_meta (key, value) VALUES ('machine_id', ?1)",
+        rusqlite::params![id],
+    );
+    read(conn).unwrap_or(id)
+}
+
+/// Model A — the signed-in cloud member id (users.id), cached in ato_meta by
+/// the frontend on login via the `set_local_member_id` command. None when not
+/// signed in (pure-local use). The desktop frontend holds the cloud session
+/// (useCloudStore); this cache makes the id reachable from the Rust dispatch
+/// insert without threading it through every command.
+pub fn member_id(conn: &rusqlite::Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM ato_meta WHERE key = 'cloud_member_id'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

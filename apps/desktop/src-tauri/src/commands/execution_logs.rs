@@ -106,10 +106,13 @@ pub fn add_execution_log(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    // Model A attribution.
+    let machine_id_val = crate::schema::machine_id(&conn);
+    let member_id_val = crate::schema::member_id(&conn);
 
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'human', 'desktop', NULL)",
-        params![id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, now],
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, created_at, initiator_kind, client_surface, initiator_id, member_id, machine_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'human', 'desktop', NULL, ?12, ?13)",
+        params![id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, now, member_id_val, machine_id_val],
     ).map_err(|e| e.to_string())?;
 
     Ok(ExecutionLog {
@@ -130,4 +133,30 @@ pub fn add_execution_log(
         agent_slug: None,
         model: None,
     })
+}
+
+/// Model A — cache the signed-in cloud member id so the Rust dispatch inserts
+/// can stamp `execution_logs.member_id`. The desktop frontend calls this on
+/// login (`Some(user.id)`) and on logout (`None`); stored in
+/// ato_meta('cloud_member_id') and read by schema::member_id().
+#[tauri::command]
+pub fn set_local_member_id(
+    db: State<'_, DbState>,
+    member_id: Option<String>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    match member_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => conn
+            .execute(
+                "INSERT INTO ato_meta (key, value) VALUES ('cloud_member_id', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        None => conn
+            .execute("DELETE FROM ato_meta WHERE key = 'cloud_member_id'", [])
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+    }
 }

@@ -478,6 +478,7 @@ pub fn run() {
             // Execution Logs
             get_execution_logs,
             add_execution_log,
+            set_local_member_id,
             // v2.1.0 Replay infra
             link_execution_log_to_cloud_trace,
             start_replay,
