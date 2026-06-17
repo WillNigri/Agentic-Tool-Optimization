@@ -60,6 +60,34 @@ pub fn machine_id(conn: &Connection) -> String {
     read(conn).unwrap_or(id)
 }
 
+/// Model A PR2 — reads/generates `ato_meta` key `machine_secret`: a 64-char
+/// hex proof-of-possession secret for this install, shared with the desktop
+/// (both read the same ~/.ato store, so the value is identical). The cloud
+/// stores only sha256(secret); the CLI presents the plaintext over TLS on a
+/// share so an enforcing workspace can verify this is a real authorized host
+/// — a leaked member token without it can't push the shared ledger.
+pub fn machine_secret(conn: &Connection) -> String {
+    let read = |c: &Connection| -> Option<String> {
+        c.query_row(
+            "SELECT value FROM ato_meta WHERE key = 'machine_secret'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|s| !s.is_empty())
+    };
+    if let Some(v) = read(conn) {
+        return v;
+    }
+    let secret = uuid::Uuid::new_v4().simple().to_string()
+        + &uuid::Uuid::new_v4().simple().to_string(); // 64 hex chars
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO ato_meta (key, value) VALUES ('machine_secret', ?1)",
+        rusqlite::params![secret],
+    );
+    read(conn).unwrap_or(secret)
+}
+
 /// 5 second busy_timeout — when desktop and CLI overlap on the same
 /// SQLite, the loser waits up to this long for the lock to clear
 /// before failing with `database is locked`. Without it, concurrent

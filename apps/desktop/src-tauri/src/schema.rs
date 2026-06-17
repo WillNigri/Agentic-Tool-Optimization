@@ -2154,6 +2154,36 @@ pub fn machine_id(conn: &rusqlite::Connection) -> String {
     read(conn).unwrap_or(id)
 }
 
+/// Model A PR2 — reads/generates ato_meta key `machine_secret`: a 64-char
+/// hex (32 random bytes) proof-of-possession secret for this install. It is
+/// the credential behind authorized-hosts enforcement: the cloud stores only
+/// sha256(secret) and the client presents the plaintext (over TLS) on enroll
+/// + each share. machine_id is a public identifier (it appears in shared
+/// listings); the SECRET is what proves this machine is the real one, so a
+/// leaked member JWT without it can't share into an enforcing workspace.
+/// Generated once, never leaves the box except as the hash the cloud keeps.
+pub fn machine_secret(conn: &rusqlite::Connection) -> String {
+    let read = |c: &rusqlite::Connection| -> Option<String> {
+        c.query_row(
+            "SELECT value FROM ato_meta WHERE key = 'machine_secret'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|s| !s.is_empty())
+    };
+    if let Some(v) = read(conn) {
+        return v;
+    }
+    let secret = uuid::Uuid::new_v4().simple().to_string()
+        + &uuid::Uuid::new_v4().simple().to_string(); // 64 hex chars
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO ato_meta (key, value) VALUES ('machine_secret', ?1)",
+        rusqlite::params![secret],
+    );
+    read(conn).unwrap_or(secret)
+}
+
 /// Model A — the signed-in cloud member id (users.id), cached in ato_meta by
 /// the frontend on login via the `set_local_member_id` command. None when not
 /// signed in (pure-local use). The desktop frontend holds the cloud session

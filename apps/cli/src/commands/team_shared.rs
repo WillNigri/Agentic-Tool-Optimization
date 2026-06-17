@@ -231,7 +231,23 @@ pub fn share_resource(
     let client = http_client()?;
 
     let url = format!("{}/teams/{}/{}/share", api_base(), team_id, url_kind);
-    let body = serde_json::json!({ id_field: resource_id });
+    let mut body = serde_json::json!({ id_field: resource_id });
+    // Model A PR2 — attach this install's machine id + proof-of-possession
+    // secret so an authorized-hosts-enforcing workspace can verify the CLI is
+    // a real authorized host. Best-effort: if the local store can't be opened
+    // we still attempt the share (enforcement-off teams are unaffected).
+    if let Ok(conn) = crate::db::open_readwrite(&crate::db::default_db_path()) {
+        if let Value::Object(ref mut map) = body {
+            map.insert(
+                "initiator_machine_id".into(),
+                Value::String(crate::db::machine_id(&conn)),
+            );
+            map.insert(
+                "initiator_machine_secret".into(),
+                Value::String(crate::db::machine_secret(&conn)),
+            );
+        }
+    }
 
     let resp = client
         .post(&url)

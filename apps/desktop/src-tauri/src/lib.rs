@@ -479,6 +479,7 @@ pub fn run() {
             get_execution_logs,
             add_execution_log,
             set_local_member_id,
+            get_machine_credentials,
             // v2.1.0 Replay infra
             link_execution_log_to_cloud_trace,
             start_replay,

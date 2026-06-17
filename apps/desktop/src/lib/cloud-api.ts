@@ -450,26 +450,50 @@ export async function unshareMethodologyFromTeam(teamId: string, methodologyId: 
   await apiRequest(`/api/teams/${teamId}/methodologies/${methodologyId}/share`, { method: 'DELETE' });
 }
 
+// Model A PR2 — attach this machine's id + proof-of-possession secret to a
+// share request. The cloud uses them for authorized-hosts enforcement: the
+// id is a public identifier, the secret is the credential it only stores as a
+// hash. Tauri-guarded: under the web build / tests where invoke is absent it
+// resolves to {} and the share still goes through (enforcement-off teams are
+// unaffected; enforcing teams need the desktop app, which has invoke).
+async function machineAttribution(): Promise<Record<string, string>> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const creds = await invoke<{ machineId: string; machineSecret: string }>(
+      'get_machine_credentials'
+    );
+    return {
+      initiator_machine_id: creds.machineId,
+      initiator_machine_secret: creds.machineSecret,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export async function shareSessionWithTeam(teamId: string, sessionId: string, payload: unknown): Promise<{ team_id: string; session_id: string; shared_at: string }> {
+  const attribution = await machineAttribution();
   return apiRequest(`/api/teams/${teamId}/sessions/share`, {
     method: 'POST',
-    body: JSON.stringify({ session_id: sessionId, ...((payload as Record<string, unknown>) ?? {}) }),
+    body: JSON.stringify({ session_id: sessionId, ...((payload as Record<string, unknown>) ?? {}), ...attribution }),
   });
 }
 
 export async function shareWarRoomWithTeam(teamId: string, warRoomId: string, payload: unknown): Promise<{ team_id: string; war_room_id: string; shared_at: string }> {
+  const attribution = await machineAttribution();
   return apiRequest(`/api/teams/${teamId}/war-rooms/share`, {
     method: 'POST',
-    body: JSON.stringify({ war_room_id: warRoomId, ...((payload as Record<string, unknown>) ?? {}) }),
+    body: JSON.stringify({ war_room_id: warRoomId, ...((payload as Record<string, unknown>) ?? {}), ...attribution }),
   });
 }
 
 export async function shareChatWithTeam(teamId: string, chatId: string, payload: unknown): Promise<{ team_id: string; chat_thread_id: string; shared_at: string }> {
   // Codex final-review F2: cloud schema is chat_thread_id (matches
   // OSS chat_threads.id). Use the canonical key on the wire.
+  const attribution = await machineAttribution();
   return apiRequest(`/api/teams/${teamId}/chats/share`, {
     method: 'POST',
-    body: JSON.stringify({ chat_thread_id: chatId, ...((payload as Record<string, unknown>) ?? {}) }),
+    body: JSON.stringify({ chat_thread_id: chatId, ...((payload as Record<string, unknown>) ?? {}), ...attribution }),
   });
 }
 
