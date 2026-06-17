@@ -2156,9 +2156,11 @@ pub async fn prompt_api_provider(
             // MiniMax round-1 6.x-C: surface write failures instead
             // of swallowing them. The dispatch still succeeds; the
             // log row just doesn't exist, and the user sees why.
+            let machine_id_val = crate::schema::machine_id(&write_conn);
+            let member_id_val = crate::schema::member_id(&write_conn);
             if let Err(e) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary, cache_creation_tokens, cache_read_tokens, reasoning_tokens, initiator_kind, client_surface, initiator_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'human', 'desktop', NULL)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, tool_calls_count, tool_calls_summary, model, auth_mode, retry_count, attempt_summary, cache_creation_tokens, cache_read_tokens, reasoning_tokens, initiator_kind, client_surface, initiator_id, member_id, machine_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'human', 'desktop', NULL, ?21, ?22)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -2180,6 +2182,8 @@ pub async fn prompt_api_provider(
                     o.cache_creation_tokens,
                     o.cache_read_tokens,
                     o.reasoning_tokens,
+                    member_id_val,
+                    machine_id_val,
                 ],
             ) {
                 eprintln!("prompt_api_provider: execution_logs write failed: {}", e);
@@ -2214,9 +2218,11 @@ pub async fn prompt_api_provider(
             // explicit Option type annotation so the rusqlite params!
             // macro can infer the binding correctly.
             let cost_usd_opt: Option<f64> = cost_usd;
+            let machine_id_val = crate::schema::machine_id(&write_conn);
+            let member_id_val = crate::schema::member_id(&write_conn);
             if let Err(write_err) = write_conn.execute(
-                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, initiator_kind, client_surface, initiator_id)
-                 VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, 'error', ?5, NULL, NULL, ?6, ?7, ?8, ?9, 'human', 'desktop', NULL)",
+                "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, initiator_kind, client_surface, initiator_id, member_id, machine_id)
+                 VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, 'error', ?5, NULL, NULL, ?6, ?7, ?8, ?9, 'human', 'desktop', NULL, ?10, ?11)",
                 rusqlite::params![
                     id,
                     provider.slug,
@@ -2227,6 +2233,8 @@ pub async fn prompt_api_provider(
                     cost_usd_opt,
                     requested_model,
                     "api_key",
+                    member_id_val,
+                    machine_id_val,
                 ],
             ) {
                 eprintln!(

@@ -23,7 +23,21 @@ import { useAuthStore } from '@/hooks/useAuth';
 // empty — Beatriz hit this when sign-in worked in Settings but
 // History tab + sidebar still asked her to log in. Mirroring
 // state on every auth-mutating action is the smallest fix.
+// Model A — cache the signed-in cloud member id in the local DB (ato_meta)
+// so the Rust dispatch inserts can stamp execution_logs.member_id. The
+// member id only lives in the frontend cloud session, so we push it down to
+// the backend on every auth change. Fire-and-forget + Tauri-guarded: a no-op
+// under the web build / tests where invoke isn't available.
+function cacheMemberId(memberId: string | null) {
+  import('@tauri-apps/api/core')
+    .then(({ invoke }) => invoke('set_local_member_id', { memberId }))
+    .catch(() => {
+      /* not running under Tauri, or command unavailable — non-critical */
+    });
+}
+
 function syncToAuthStore(user: CloudUser | null) {
+  cacheMemberId(user ? user.id : null);
   if (user) {
     const tokens = getStoredTokens();
     if (tokens?.accessToken && tokens?.refreshToken) {
