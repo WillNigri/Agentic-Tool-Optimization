@@ -4,6 +4,18 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.2] — 2026-06-17
+
+### Added
+- **Z.AI (Zhipu GLM) as a first-class API provider (#83).** OpenAI-compatible
+  coding endpoint (`https://api.z.ai/api/coding/paas/v4`), env `ZAI_API_KEY`,
+  default `glm-5.2`. Because both CLI and desktop dispatch share the
+  `ato_api_providers` registry, z.ai has full parity: `ato dispatch zai`,
+  war-room seats, sessions, desktop runtime/model pickers, desktop chat, BYOK
+  key entry, and the OpenAI tool loop (read/write/grep/bash). Verified GLM
+  pricing wired into cost tracking (glm-5.2 $1.4/$4.4, glm-4.6/4.5 $0.6/$2.2,
+  glm-4.5-air $0.2/$1.1, flash models free).
+
 ## [2.18.1] — 2026-06-17
 
 Security patch.
