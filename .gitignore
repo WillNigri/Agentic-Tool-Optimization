@@ -1,4 +1,7 @@
+# Match both real dirs and stray symlinks named node_modules (a trailing-slash
+# pattern ignores dirs only — symlinks slipped through and got committed once).
 node_modules/
+node_modules
 dist/
 target/
 .env
