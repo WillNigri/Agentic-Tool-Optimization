@@ -97,6 +97,20 @@ pub fn registry() -> &'static [ApiProvider] {
             env_var: "OPENROUTER_API_KEY",
             flavor: "openai",
         },
+        // last verified: UNVERIFIED (needs ZAI_API_KEY on dev machine).
+        // v2.18.x — Z.AI (Zhipu GLM). OpenAI-compatible coding endpoint
+        // per https://docs.z.ai/devpack/tool/others — base URL ends at
+        // /api/coding/paas/v4 and the chat-completions path is appended.
+        // Bearer auth. glm-5.2 is the 1M-context flagship; other GLM
+        // model ids may be passed via --model.
+        ApiProvider {
+            slug: "zai",
+            base_url: "https://api.z.ai/api/coding/paas/v4",
+            path: "/chat/completions",
+            default_model: "glm-5.2",
+            env_var: "ZAI_API_KEY",
+            flavor: "openai",
+        },
         // last verified: 2026-05-13 ✓ (dispatch returned 2-char reply
         //                                with model gemini-2.5-flash)
         // v2.4.2 — Google Gemini API. Slug intentionally `google`
@@ -226,6 +240,7 @@ pub fn label_for(slug: &str) -> Option<&'static str> {
         "deepseek" => Some("DeepSeek"),
         "qwen" => Some("Qwen"),
         "openrouter" => Some("OpenRouter"),
+        "zai" => Some("Z.AI"),
         "google" => Some("Google (Gemini)"),
         _ => None,
     }
@@ -255,7 +270,7 @@ mod tests {
         assert_eq!(
             slugs,
             vec![
-                "minimax", "grok", "deepseek", "qwen", "openrouter",
+                "minimax", "grok", "deepseek", "qwen", "openrouter", "zai",
                 "anthropic", "google", "openai",
             ]
         );

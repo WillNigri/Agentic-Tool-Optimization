@@ -475,6 +475,7 @@ fn resolve_reviewers(explicit: Vec<String>, db_path: &PathBuf) -> Result<Vec<Rev
         "deepseek",
         "qwen",
         "openrouter",
+        "zai",
     ];
     let mut out = Vec::new();
     for slug in preferred {

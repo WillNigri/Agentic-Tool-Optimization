@@ -51,6 +51,7 @@ function providerForRuntime(runtime: AgentRuntime): string | null {
     case "deepseek":   return "deepseek";
     case "qwen":       return "qwen";
     case "openrouter": return "openrouter";
+    case "zai":        return "zai";
   }
 }
 
@@ -66,6 +67,7 @@ function providerLabel(provider: string): string {
     case "xai":       return "xAI Grok";
     case "together":  return "Together AI";
     case "fireworks": return "Fireworks";
+    case "zai":       return "Z.AI";
     default:          return provider;
   }
 }
@@ -83,6 +85,7 @@ function signupUrl(provider: string): string {
     case "xai":       return "https://console.x.ai/";
     case "together":  return "https://api.together.ai/settings/api-keys";
     case "fireworks": return "https://fireworks.ai/account/api-keys";
+    case "zai":       return "https://z.ai/manage-apikey/apikey-list";
     default:          return "";
   }
 }

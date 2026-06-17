@@ -768,6 +768,7 @@ fn runtime_slug_for_model(model: &str) -> &'static str {
         Some("deepseek") => "deepseek",
         Some("qwen") => "qwen",
         Some("grok") => "grok",
+        Some("zai") => "zai",
         _ => "claude",
     }
 }

@@ -44,6 +44,7 @@ const SUPPORTED_COORDINATORS: { slug: string; label: string }[] = [
   { slug: "deepseek", label: "DeepSeek" },
   { slug: "qwen", label: "Qwen" },
   { slug: "openrouter", label: "OpenRouter" },
+  { slug: "zai", label: "Z.AI (GLM)" },
 ];
 
 export type ConversationType = "session" | "war_room" | "chat";

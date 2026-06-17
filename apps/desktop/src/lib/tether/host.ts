@@ -77,7 +77,7 @@ interface DecryptReply {
 // claude-only and batch-flushes at end (no real streaming yet).
 type DispatchRuntime =
   | "claude" | "codex" | "gemini" | "openclaw" | "hermes"
-  | "minimax" | "grok" | "deepseek" | "qwen" | "openrouter";
+  | "minimax" | "grok" | "deepseek" | "qwen" | "openrouter" | "zai";
 
 interface DispatchRequestFrame {
   kind: "dispatch_request";
