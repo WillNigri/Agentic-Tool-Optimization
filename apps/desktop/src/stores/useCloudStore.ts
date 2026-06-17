@@ -207,9 +207,13 @@ export const useCloudStore = create<CloudState>()(
           const { user } = await getCurrentUser();
           set({ user, isAuthenticated: true });
         } catch {
-          // Token might be expired, try to use stored state
+          // Token expired/invalid — clear BOTH stores so the zustand
+          // auth store (ato-auth, read by api.ts getAuthHeaders) doesn't
+          // keep a stale bearer after ato_cloud_tokens is cleared. Routes
+          // through syncToAuthStore(null) → useAuthStore.logout().
           set({ isAuthenticated: false, user: null });
           clearTokens();
+          syncToAuthStore(null);
         }
       },
 

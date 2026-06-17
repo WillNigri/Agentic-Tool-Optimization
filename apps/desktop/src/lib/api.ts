@@ -99,8 +99,15 @@ export async function register(data: { name: string; email: string; password: st
   return fetchApi<AuthResponse>('/auth/register', { method: 'POST', body: JSON.stringify(data) });
 }
 
+/** The cloud ROTATES on refresh: /auth/refresh revokes the presented refresh
+ *  token and returns a NEW { accessToken, refreshToken } pair (nested under
+ *  `tokens`, like login/register). The previous type here claimed a flat
+ *  `{ accessToken }`, so callers (useAuth.refreshAccessToken) read
+ *  `result.accessToken` (undefined) and never persisted the rotated refresh
+ *  token — the next refresh then used a revoked token and the session died
+ *  ~one access-TTL later ("logged out every hour"). */
 export function refreshToken(token: string) {
-  return fetchApi<{ accessToken: string }>('/auth/refresh', {
+  return fetchApi<{ tokens: { accessToken: string; refreshToken: string } }>('/auth/refresh', {
     method: 'POST',
     body: JSON.stringify({ refreshToken: token }),
   });

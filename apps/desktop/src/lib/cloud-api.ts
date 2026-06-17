@@ -189,10 +189,38 @@ async function apiRequest<T>(
       try {
         const newTokens = await refreshTokens(tokens.refreshToken);
         storeTokens(newTokens);
+        // Keep the zustand auth store (persisted under 'ato-auth') in sync —
+        // api.ts's getAuthHeaders() reads its access token from there, so
+        // without this the two token stores diverge after a rotation and
+        // api.ts calls keep sending the stale (revoked) access token.
+        // Dynamic import avoids a static cycle (useAuth imports cloud-api).
+        try {
+          const { useAuthStore } = await import('@/hooks/useAuth');
+          // setState (not setAuth) — a token-only update with none of
+          // setAuth's side effects (trace backfill, trial latch) that must
+          // not re-fire on a routine refresh.
+          useAuthStore.setState({
+            accessToken: newTokens.accessToken,
+            refreshTokenValue: newTokens.refreshToken,
+          });
+        } catch {
+          /* store not available (web/tests) — localStorage mirror still updated */
+        }
         // Retry the request with new token
         return apiRequest<T>(endpoint, options, requireAuth);
       } catch {
         clearTokens();
+        // Converge the zustand auth store too — otherwise api.ts's
+        // getAuthHeaders() keeps reading a stale bearer from 'ato-auth' and
+        // useAuth.refreshAccessToken() falls back to the revoked refresh
+        // token still persisted there. logout() is the chokepoint that
+        // clears both + scrubs the Model A member cache.
+        try {
+          const { useAuthStore } = await import('@/hooks/useAuth');
+          useAuthStore.getState().logout();
+        } catch {
+          /* store not available (web/tests) */
+        }
         throw new CloudApiError('SESSION_EXPIRED', 'Your session has expired. Please log in again.');
       }
     }
