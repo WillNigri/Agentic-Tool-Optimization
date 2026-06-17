@@ -78,6 +78,43 @@ export const RUNTIME_REGISTRY = {
  *  instead of hand-maintained string-literal unions. */
 export type RuntimeId = keyof typeof RUNTIME_REGISTRY;
 
+/** #82 — Curated list of well-known models per CLI runtime, surfaced by
+ *  the PromptBar's ModelPicker when the runtime is `kind: "cli"`. CLI
+ *  binaries can't enumerate their own models for us (no list endpoint),
+ *  so we hardcode the canonical ones each vendor ships. The backend
+ *  already pipes `--model <id>` through to claude/codex/gemini CLI
+ *  spawns (apps/desktop/src-tauri/src/commands/mod.rs:1362,1444,9418,
+ *  9442) — this list just makes the UI surface it.
+ *
+ *  When the picker has no override saved, the CLI runs with its own
+ *  default. Updating: keep the list short and current (newest model
+ *  first). For runtimes that don't ship a `--model` flag (openclaw,
+ *  hermes), omit them here — the picker stays hidden.
+ */
+export const CLI_RUNTIME_MODELS: Partial<Record<RuntimeId, ReadonlyArray<{ id: string; display: string }>>> = {
+  // #82 rework (2026-06-17): refreshed + aligned to the pricing registry
+  // (packages/ato-pricing) so every id here is also cost-tracked. Keep this
+  // list short and newest-first; when a model lands in the pricing registry,
+  // surface it here too.
+  claude: [
+    { id: "claude-opus-4-8",    display: "Opus 4.8 (most capable)" },
+    { id: "claude-sonnet-4-6",  display: "Sonnet 4.6 (balanced)" },
+    { id: "claude-haiku-4-5",   display: "Haiku 4.5 (fastest)" },
+  ],
+  codex: [
+    { id: "gpt-5",              display: "GPT-5 (most capable)" },
+    { id: "o3",                 display: "o3 (reasoning)" },
+    { id: "gpt-4.1",            display: "GPT-4.1" },
+    { id: "gpt-4o-mini",        display: "GPT-4o mini (fast)" },
+  ],
+  gemini: [
+    { id: "gemini-3-pro",       display: "Gemini 3 Pro (most capable)" },
+    { id: "gemini-3-flash",     display: "Gemini 3 Flash (fast)" },
+    { id: "gemini-2.5-pro",     display: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash",   display: "Gemini 2.5 Flash" },
+  ],
+};
+
 /** Stable backwards-compat alias. `AgentRuntime` historically only
  *  covered the four CLI runtimes; many callsites already import it
  *  generically. Aliasing to `RuntimeId` widens the type for those

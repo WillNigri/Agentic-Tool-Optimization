@@ -40,7 +40,7 @@ import { getModelConfig } from "@/lib/tauri-api";
 import { uploadAgentTrace, summarizePrompt } from "@/lib/agentTraceUpload";
 import { estimateUsage } from "@/lib/pricing";
 import type { AgentRuntime } from "@/components/cron/types";
-import { RUNTIME_REGISTRY, type RuntimeId } from "@/lib/runtimes";
+import { RUNTIME_REGISTRY, CLI_RUNTIME_MODELS, type RuntimeId } from "@/lib/runtimes";
 import ApprovalDialog, { extractSkillFromResponse } from "../ApprovalDialog";
 
 import {
@@ -265,20 +265,29 @@ export default function PromptBar() {
     enabled: isTauri,
   });
 
-  // #83 — read the saved model-picker override so we can pass it to
-  // AgentPicker for the precedence tooltip + amber-tint cue when the
-  // picker is overriding an agent's stored model. Same query key
-  // ModelPicker uses, so react-query dedupes the actual fetch. Only
-  // fires for API providers; CLI runtimes don't expose a picker.
-  const isApiProvider =
-    availableRuntimes?.find((r) => r.slug === runtime)?.kind === "api";
+  // Read the saved model-picker override once, then reuse it for both:
+  //   #83 — pass it to AgentPicker for the precedence tooltip + amber-tint
+  //         cue when the picker overrides an agent's stored model.
+  //   #82 — forward it to the chat dispatch path as config:{model} JSON
+  //         (backend appends `--model <id>` per CLI runtime).
+  // The picker surfaces for API providers always, and for CLI runtimes
+  // that have a curated CLI_RUNTIME_MODELS entry. Same query key ModelPicker
+  // uses, so react-query dedupes the actual fetch.
+  const runtimeMeta = availableRuntimes?.find((r) => r.slug === runtime);
+  const hasModelPicker =
+    runtimeMeta?.kind === "api" ||
+    (runtimeMeta?.kind === "cli" &&
+      !!CLI_RUNTIME_MODELS[runtime as RuntimeId]);
   const { data: savedModelConfig } = useQuery({
     queryKey: ["model-config", runtime, activeProject?.id ?? null],
     queryFn: () => getModelConfig(runtime, activeProject?.id),
     staleTime: 30_000,
-    enabled: isTauri && isApiProvider,
+    enabled: isTauri && hasModelPicker,
   });
-  const modelOverride = savedModelConfig?.modelId ?? null;
+  const modelOverride =
+    savedModelConfig?.modelId && savedModelConfig.modelId.length > 0
+      ? savedModelConfig.modelId
+      : null;
 
   const selectedAgent = useMemo(
     () => runtimeAgents.find((a) => a.id === agentId) ?? null,
@@ -642,12 +651,21 @@ export default function PromptBar() {
           // history travels, plus the agent's variables / hooks / memory
           // policy / role models all fire.
           const history: AgentMessage[] = messagesToAgentHistory(messages);
+          // #82 R1 fix — pass the user's saved model picker override to
+          // the Rust dispatch path so CLI runtimes actually use it.
+          // Rust reads `config` as JSON and looks for `.model` (see
+          // commands/mod.rs:1293-1301). modelOverride wins over the
+          // agent's stored model (matches #83 precedence semantics).
+          const cliConfig = modelOverride
+            ? JSON.stringify({ model: modelOverride })
+            : undefined;
           response = await promptAgentWithHistoryStream({
             agentId: selectedAgent.id,
             agentSlug: selectedAgent.slug,
             runtime,
             history,
             newPrompt: prompt,
+            config: cliConfig,
             source: "desktop:promptbar:stream",
             onChunk: (text) => setStreamingText((prev) => prev + text),
           });
@@ -659,7 +677,15 @@ export default function PromptBar() {
           // Marked `costEstimated:true` in metadata so the UI can
           // render an "est." badge.
           {
-            const usage = estimateUsage(runtime, selectedAgent.model ?? null, prompt, response);
+            // #82 R2 fix — the picker override is what the dispatch actually
+            // ran with (cliConfig above), so attribute cost/trace to it too;
+            // fall back to the agent's stored model when no override is set.
+            const usage = estimateUsage(
+              runtime,
+              modelOverride ?? selectedAgent.model ?? null,
+              prompt,
+              response,
+            );
             dispatchedModel = usage.model || null;
             void uploadAgentTrace({
               agentSlug: selectedAgent.slug,
@@ -688,9 +714,14 @@ export default function PromptBar() {
           // multi-turn when we don't manage the runtime's session.
           const history: AgentMessage[] = messagesToAgentHistory(messages);
           const stitched = stitchThreadIntoPrompt(history, prompt);
+          // #82 R1 fix — same modelOverride plumbing as the agent path.
+          const cliConfig = modelOverride
+            ? JSON.stringify({ model: modelOverride })
+            : undefined;
           response = await promptAgentStream({
             runtime,
             prompt: stitched,
+            config: cliConfig,
             onChunk: (text) => setStreamingText((prev) => prev + text),
           });
           // v2.1.0+ — no-agent path now uploads too. agent_slug uses
@@ -699,7 +730,8 @@ export default function PromptBar() {
           // entry in Compare/Pipelines instead of scattering across
           // different empty buckets.
           {
-            const usage = estimateUsage(runtime, null, prompt, response);
+            // #82 R2 fix — attribute to the picker override actually dispatched.
+            const usage = estimateUsage(runtime, modelOverride ?? null, prompt, response);
             dispatchedModel = usage.model || null;
             void uploadAgentTrace({
               agentSlug: runtime,
@@ -1047,22 +1079,36 @@ export default function PromptBar() {
           setOpen={setShowRuntimePicker}
         />
 
-        {/* v2.15.0 Slice C — model picker. Renders only for API-provider
-            runtimes; CLI runtimes (claude/codex/openclaw/hermes) handle
-            model selection inside the CLI binary itself. The chip shows
-            the user's saved model_configs override (or "default" if
-            none saved). Click opens a popover with the LIVE model list
-            from the provider, with a "live" or "curated" badge. */}
-        {availableRuntimes
-          ?.find((r) => r.slug === runtime)
-          ?.kind === "api" && (
-          <ModelPicker
-            providerSlug={runtime}
-            projectId={activeProject?.id}
-            open={showModelPicker}
-            setOpen={setShowModelPicker}
-          />
-        )}
+        {/* v2.15.0 Slice C — model picker. Originally hidden for CLI
+            runtimes since claude/codex/gemini CLIs were assumed to manage
+            their own model selection. #82 — surfaces it for CLI runtimes
+            too: backend already pipes `--model <id>` through to the
+            spawned CLI (mod.rs:1362,1444,9418,9442); we just needed the
+            UI. CLI runtimes use a curated list from CLI_RUNTIME_MODELS
+            (binaries don't expose a list endpoint); API providers
+            still use the live fetch. The runtimeKind prop is the
+            discriminator. */}
+        {(() => {
+          const r = availableRuntimes?.find((r) => r.slug === runtime);
+          if (!r) return null;
+          // CLI runtimes without a curated model list (openclaw,
+          // hermes today) — keep the picker hidden.
+          if (
+            r.kind === "cli" &&
+            !CLI_RUNTIME_MODELS[runtime as RuntimeId]
+          ) {
+            return null;
+          }
+          return (
+            <ModelPicker
+              providerSlug={runtime}
+              runtimeKind={r.kind}
+              projectId={activeProject?.id}
+              open={showModelPicker}
+              setOpen={setShowModelPicker}
+            />
+          );
+        })()}
 
         {/* Agent / Group selector — extracted to AgentPicker.tsx per
             the 2026-05-19 elegance war-room. Same shared-popover-state
