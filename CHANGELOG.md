@@ -4,6 +4,26 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.1] — 2026-06-17
+
+Security patch.
+
+### Security
+- **Mission `check_command` RCE (HIGH).** Success-criteria `check_command`s
+  ran via `sh -c` under the assumption they were always operator-authored —
+  but v2.15 Wave 4 team-shared missions can carry attacker-controlled commands
+  that would execute on a victim's `ato missions tick`. Untrusted (non-`manual`
+  origin) missions are now confined to a no-shell, allowlisted argv execution
+  path; locally-authored missions keep full `sh -c` ergonomics. Fail-closed
+  provenance gate (#82).
+
+### Fixed
+- CLI team-share errors are now self-diagnosing — 402 surfaces the required
+  tier + upgrade URL; a route-missing 404 says so explicitly instead of an
+  opaque `HTTP 404` (#81).
+- Removed stray committed `node_modules` symlinks that broke `npm install` on
+  CI / release builds; hardened `.gitignore` to ignore symlinked node_modules.
+
 ## [2.18.0] — 2026-06-15
 
 The "every AI in one war room" release. Three clusters land together:
