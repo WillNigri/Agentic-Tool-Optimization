@@ -160,3 +160,25 @@ pub fn set_local_member_id(
             .map_err(|e| e.to_string()),
     }
 }
+
+/// Model A PR2 — this install's machine id + proof-of-possession secret, for
+/// the cloud share/enroll calls (authorized-hosts enforcement). machine_id is
+/// a public identifier; machine_secret is the credential the cloud only ever
+/// sees as a hash. Both are generated-on-first-read in the local DB.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineCredentials {
+    pub machine_id: String,
+    pub machine_secret: String,
+}
+
+#[tauri::command]
+pub fn get_machine_credentials(
+    db: State<'_, DbState>,
+) -> Result<MachineCredentials, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    Ok(MachineCredentials {
+        machine_id: crate::schema::machine_id(&conn),
+        machine_secret: crate::schema::machine_secret(&conn),
+    })
+}
