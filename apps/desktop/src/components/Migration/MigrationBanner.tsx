@@ -24,11 +24,17 @@ import { useTranslation } from "react-i18next";
 // only the pure helpers; the hook is co-located with useTier in tier.ts).
 import { useTrialStatus } from "@/lib/tier";
 
-const STORAGE_KEY = "ato.v2.8.x.banner.dismissed";
+// Bumped 2026-06-16 from v2.8.x → v2.18 — Will flagged the banner
+// was still showing the stale v2.8.x re-tier copy after the v2.18
+// cluster shipped. New storage key forces existing users to see the
+// updated banner once (their previous dismissal of the v2.8.x
+// version doesn't suppress the v2.18 version).
+const STORAGE_KEY = "ato.v2.18.x.banner.dismissed";
 
-// Public OSS comparison doc — describes the re-tier from the user's POV.
+// Current release notes — points at the live CHANGELOG so the
+// banner copy stays in sync with what shipped.
 const SEE_WHATS_NEW_URL =
-  "https://github.com/WillNigri/Agentic-Tool-Optimization/blob/main/docs/comparison.md";
+  "https://github.com/WillNigri/Agentic-Tool-Optimization/blob/main/CHANGELOG.md";
 
 function isLocalStorageAvailable(): boolean {
   try {
@@ -88,7 +94,7 @@ export default function MigrationBanner() {
             <div className="mb-1 flex items-center gap-2">
               <Sparkles size={14} className="shrink-0 text-cs-accent" />
               <span className="text-[10px] font-medium uppercase tracking-wider text-cs-accent">
-                {t("migration.update", "Update — v2.8.x")}
+                {t("migration.update", "Update — v2.18")}
               </span>
             </div>
 
@@ -96,33 +102,33 @@ export default function MigrationBanner() {
               tabIndex={-1}
               className="mb-2 text-base font-bold text-cs-text focus:outline-none sm:text-lg"
             >
-              {t("migration.headline", "Your local ATO just got more powerful")}
+              {t("migration.headline", "v2.18 is here — your war room reaches the browser")}
             </h2>
 
             <p className="mb-3 text-sm text-cs-muted">
               {t(
                 "migration.subheadline",
-                "We moved 6 features into the Free tier. Free is now the most capable local agent stack you can download.",
+                "The cluster you've been seeing in the changelog: web Team Workspaces, browser ⇄ desktop tether, multi-LLM methodology runs with real cost ledgers. All Free.",
               )}
             </p>
 
             <ul className="mb-4 space-y-1.5">
               {[
                 t(
-                  "migration.bullet.unlimitedGroups",
-                  "Unlimited child agents in groups (was capped at 3)",
+                  "migration.bullet.webWorkspaces",
+                  "v2.16 + v2.17 — read-only Team Workspaces on the web, then browser ⇄ desktop AEAD-sealed tether",
                 ),
                 t(
-                  "migration.bullet.advancedVariables",
-                  "Advanced variables — file, db, MCP, computed resolvers",
+                  "migration.bullet.activeWorkstation",
+                  "v2.18 Wave 1 — browser-driven dispatch over the tether (claude only for Wave 1; more runtimes incoming)",
                 ),
                 t(
-                  "migration.bullet.roleModels",
-                  "Per-task model selection (role-models)",
+                  "migration.bullet.methodology",
+                  "v2.10 — Methodology runner: reusable test recipes, Welch t + 95% CI, dual cost ledger",
                 ),
                 t(
-                  "migration.bullet.contextHooks",
-                  "Pre-call context hooks + tunable summarizer",
+                  "migration.bullet.missions",
+                  "v2.16 — Missions (proactive coordinator): coordinator tick, worktrees, merge strategies, decision briefs, board UI",
                 ),
               ].map((bullet, i) => (
                 <li
