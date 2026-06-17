@@ -64,21 +64,56 @@ pub fn detect_initiator_id() -> Option<String> {
     }
 }
 
-/// The resolved attribution triple for a dispatch.
+/// Detect the signed-in cloud member id (Model A attribution).
+///
+/// Reads `~/.ato/auth.json` and decodes the `userId` claim out of the JWT
+/// access token (the auth service signs `{ userId, email }` — see ato-cloud
+/// packages/shared/src/auth.ts). Returns `None` for pure-local use (not
+/// signed in), which is correct: such turns carry no member and are not
+/// eligible to append into a shared team workspace.
+///
+/// Decode-only, NOT verify: this is attribution metadata, not an authz
+/// decision. The cloud re-verifies the token's signature on every API call;
+/// a forged local member_id only mislabels the user's own local rows.
+pub fn detect_member_id() -> Option<String> {
+    use base64::Engine;
+    let path = crate::db::home_dir().join(".ato").join("auth.json");
+    let contents = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let token = json.get("token")?.as_str()?;
+    // JWT = header.payload.signature; payload is base64url(JSON claims).
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// The resolved attribution fields for a dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribution {
     pub kind: String,
     pub surface: String,
     pub id: Option<String>,
+    /// Model A — signed-in cloud member id (users.id), or None if local-only.
+    pub member: Option<String>,
 }
 
 impl Attribution {
-    /// Resolve all three fields from the environment.
+    /// Resolve all fields from the environment + local auth state.
+    /// `machine_id` is resolved separately at the insert site (it needs a
+    /// DB connection — see db::machine_id).
     pub fn detect() -> Self {
         Attribution {
             kind: detect_initiator_kind(),
             surface: detect_client_surface(),
             id: detect_initiator_id(),
+            member: detect_member_id(),
         }
     }
 }
@@ -165,5 +200,46 @@ mod tests {
         assert_eq!(a.surface, "desktop");
         assert_eq!(a.id, Some("user-42".to_string()));
         clear_env();
+    }
+
+    // Build a minimal JWT (header.payload.sig) with the given claims JSON.
+    // Only the payload segment matters to detect_member_id (decode-only).
+    fn fake_jwt(claims_json: &str) -> String {
+        use base64::Engine;
+        let b64 = |s: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        format!("{}.{}.{}", b64(b"{}"), b64(claims_json.as_bytes()), "sig")
+    }
+
+    #[test]
+    fn member_id_decoded_from_jwt_user_id_claim() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ato")).unwrap();
+        let token = fake_jwt(r#"{"userId":"user-abc-123","email":"t@e.com"}"#);
+        std::fs::write(
+            tmp.path().join(".ato/auth.json"),
+            serde_json::json!({ "token": token, "email": "t@e.com" }).to_string(),
+        )
+        .unwrap();
+        let prev = env::var("HOME").ok();
+        env::set_var("HOME", tmp.path());
+        assert_eq!(detect_member_id(), Some("user-abc-123".to_string()));
+        match prev {
+            Some(h) => env::set_var("HOME", h),
+            None => env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn member_id_none_when_not_signed_in() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap(); // no .ato/auth.json
+        let prev = env::var("HOME").ok();
+        env::set_var("HOME", tmp.path());
+        assert_eq!(detect_member_id(), None);
+        match prev {
+            Some(h) => env::set_var("HOME", h),
+            None => env::remove_var("HOME"),
+        }
     }
 }

@@ -1537,8 +1537,9 @@ pub fn run(
     // v2.3.41 — write session_id when present so the History panel
     // can group multi-turn conversations under one header.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
+    let machine_id_val = db::machine_id(&conn);
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode, agent_slug, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, model, auth_mode, agent_slug, initiator_kind, client_surface, initiator_id, member_id, machine_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         rusqlite::params![
             id,
             runtime_name,
@@ -1558,6 +1559,8 @@ pub fn run(
             attribution.kind,
             attribution.surface,
             attribution.id,
+            attribution.member,
+            machine_id_val,
         ],
     ).context("Failed to write execution_logs row")?;
     // v2.17 git provenance — stamp the git HEAD SHA captured at run()
@@ -2321,8 +2324,9 @@ fn run_api(
     // v2.3.41 — link the api-provider dispatch back to its session
     // so History grouping works for cross-runtime conversations.
     let session_id_for_log: Option<&str> = session.as_ref().map(|s| s.id.as_str());
+    let machine_id_val = db::machine_id(&conn);
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug, retry_count, attempt_summary, fallback_of, cache_creation_tokens, cache_read_tokens, reasoning_tokens, initiator_kind, client_surface, initiator_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, session_id, tool_calls_count, tool_calls_summary, model, auth_mode, agent_slug, retry_count, attempt_summary, fallback_of, cache_creation_tokens, cache_read_tokens, reasoning_tokens, initiator_kind, client_surface, initiator_id, member_id, machine_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         rusqlite::params![
             id,
             provider.slug,
@@ -2350,6 +2354,8 @@ fn run_api(
             attribution.kind,
             attribution.surface,
             attribution.id,
+            attribution.member,
+            machine_id_val,
         ],
     )
     .context("Failed to write execution_logs row")?;
@@ -2777,9 +2783,10 @@ fn run_remote(
     let now = chrono::Utc::now().to_rfc3339();
 
     let conn = db::open_readwrite(db_path)?;
+    let machine_id_val = db::machine_id(&conn);
     conn.execute(
-        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, agent_slug, initiator_kind, client_surface, initiator_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO execution_logs (id, runtime, prompt, response, tokens_in, tokens_out, duration_ms, status, error_message, skill_name, cloud_trace_id, created_at, cost_usd_estimated, model, auth_mode, agent_slug, initiator_kind, client_surface, initiator_id, member_id, machine_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         rusqlite::params![
             id,
             remote.slug,
@@ -2798,6 +2805,8 @@ fn run_remote(
             attribution.kind,
             attribution.surface,
             attribution.id,
+            attribution.member,
+            machine_id_val,
         ],
     )
     .context("Failed to write execution_logs row (remote)")?;
