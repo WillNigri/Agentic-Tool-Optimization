@@ -92,22 +92,26 @@ export type RuntimeId = keyof typeof RUNTIME_REGISTRY;
  *  hermes), omit them here — the picker stays hidden.
  */
 export const CLI_RUNTIME_MODELS: Partial<Record<RuntimeId, ReadonlyArray<{ id: string; display: string }>>> = {
+  // #82 rework (2026-06-17): refreshed + aligned to the pricing registry
+  // (packages/ato-pricing) so every id here is also cost-tracked. Keep this
+  // list short and newest-first; when a model lands in the pricing registry,
+  // surface it here too.
   claude: [
-    { id: "claude-opus-4-7",    display: "Opus 4.7 (most capable)" },
+    { id: "claude-opus-4-8",    display: "Opus 4.8 (most capable)" },
     { id: "claude-sonnet-4-6",  display: "Sonnet 4.6 (balanced)" },
     { id: "claude-haiku-4-5",   display: "Haiku 4.5 (fastest)" },
   ],
   codex: [
+    { id: "gpt-5",              display: "GPT-5 (most capable)" },
+    { id: "o3",                 display: "o3 (reasoning)" },
     { id: "gpt-4.1",            display: "GPT-4.1" },
-    { id: "gpt-4o",             display: "GPT-4o" },
-    { id: "gpt-4o-mini",        display: "GPT-4o mini" },
-    { id: "o1-preview",         display: "o1-preview (reasoning)" },
-    { id: "o1-mini",            display: "o1-mini" },
+    { id: "gpt-4o-mini",        display: "GPT-4o mini (fast)" },
   ],
   gemini: [
+    { id: "gemini-3-pro",       display: "Gemini 3 Pro (most capable)" },
+    { id: "gemini-3-flash",     display: "Gemini 3 Flash (fast)" },
     { id: "gemini-2.5-pro",     display: "Gemini 2.5 Pro" },
-    { id: "gemini-2.5-flash",   display: "Gemini 2.5 Flash (fast)" },
-    { id: "gemini-2.0-flash",   display: "Gemini 2.0 Flash" },
+    { id: "gemini-2.5-flash",   display: "Gemini 2.5 Flash" },
   ],
 };
 
