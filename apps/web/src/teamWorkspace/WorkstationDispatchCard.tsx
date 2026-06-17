@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   CheckCircle2,
-  LoaderCircle,
+  Loader2,
   Terminal,
   XCircle,
 } from "lucide-react";
@@ -156,7 +156,7 @@ export default function WorkstationDispatchCard({ machineName }: Props) {
         <div className="space-y-3 rounded-lg border border-[#2a2a3a] bg-[#0a0a0f]/70 p-4">
           <div className="flex flex-wrap items-center gap-2">
             {isRunning ? (
-              <LoaderCircle className="h-4 w-4 animate-spin text-[#00FFB2]" />
+              <Loader2 className="h-4 w-4 animate-spin text-[#00FFB2]" />
             ) : current.status === "success" ? (
               <CheckCircle2 className="h-4 w-4 text-[#00FFB2]" />
             ) : (
