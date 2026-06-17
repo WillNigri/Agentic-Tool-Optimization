@@ -363,6 +363,148 @@ fn handle_resend_verify(email: Option<String>) {
     }
 }
 
+/// QA-identified gap (2026-06-16): `ato pro test` could fetch the
+/// embed key but there was no standalone subcommand to print it.
+/// Mirrors the same GET /api/auth/me/embed-key endpoint Pro's smoke
+/// test hits, with a `--full` + `--confirm-i-understand-this-prints-
+/// the-key` safety pattern identical to `ato master-key export` so
+/// the full key never lands in shell history by accident.
+fn handle_embed_key(full: bool, confirm: bool) {
+    if full && !confirm {
+        eprintln!(
+            "refusing to print embed key without `--confirm-i-understand-this-prints-the-key`.\n\
+             \n\
+             The full key prints to stdout and lands in shell history. Only run this if\n\
+             you immediately pipe it to a secure paste destination and DON'T leave it in\n\
+             your scrollback.\n\
+             \n\
+             Re-run with: ato auth embed-key --full --confirm-i-understand-this-prints-the-key\n\
+             \n\
+             Without `--full`, this command prints only the masked prefix — safe to share\n\
+             and identical to what the desktop's Settings → Cloud card displays."
+        );
+        std::process::exit(1);
+    }
+
+    let token = match read_token() {
+        Some(t) => t,
+        None => {
+            eprintln!("Not logged in. Run: ato login");
+            std::process::exit(1);
+        }
+    };
+
+    let client = match http_client() {
+        Ok(c) => c,
+        Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+    };
+
+    // api_base() in this module already includes `/api/auth`, so the
+    // path here is `/me/embed-key` not `/auth/me/embed-key`. Same
+    // shape as `handle_whoami`'s `format!("{}/me", api_base())` above.
+    // pro.rs uses a different api_base() (no `/auth` suffix) so it
+    // needs the full `/auth/me/embed-key` path — easy to confuse.
+    let resp = client
+        .get(format!("{}/me/embed-key", api_base()))
+        .bearer_auth(&token)
+        .send();
+
+    match resp {
+        Ok(response) => {
+            let status = response.status();
+            // Read the body as text first so we can both parse it and
+            // surface raw content if JSON parsing fails (helps debug
+            // future API shape drift). Mirrors pro.rs's lenient
+            // unwrap_or_default pattern.
+            let raw = response.text().unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+
+            if status.as_u16() == 403 {
+                let msg = body.pointer("/error/message").and_then(|v| v.as_str())
+                    .unwrap_or("Embed key requires Pro+ tier. Upgrade at https://agentictool.ai/pro");
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
+
+            if !status.is_success() {
+                let msg = body.pointer("/error/message").and_then(|v| v.as_str())
+                    .unwrap_or("Failed to fetch embed key — token may be expired. Run: ato login");
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
+
+            // R1 codex #1 fix — actually surface drift instead of
+            // masking it. Try the canonical field name first
+            // (`/data/prefix` / `/data/key`, matching pro.rs's smoke
+            // test). If we have to fall back to a camelCase or
+            // snake_case alias, emit a stderr warning so the CLI
+            // user (and any CI watching stderr) sees the schema
+            // drift. The fallback still produces a working command —
+            // we're not blocking on the drift — but the warning makes
+            // sure no one ships a renamed-field backend in silence.
+            let (prefix, prefix_alias) = extract_prefix(&body);
+            let (key, key_alias) = extract_full_key(&body);
+            if let Some(alias) = prefix_alias {
+                eprintln!(
+                    "[auth embed-key] WARNING: server returned the key prefix under alias `{}` \
+                     instead of the canonical `prefix` field. Update the CLI's expected \
+                     shape; falling back this run.",
+                    alias
+                );
+            }
+            if let Some(alias) = key_alias {
+                eprintln!(
+                    "[auth embed-key] WARNING: server returned the full key under alias `{}` \
+                     instead of the canonical `key` field. Update the CLI's expected \
+                     shape; falling back this run.",
+                    alias
+                );
+            }
+
+            if full {
+                // Caller acknowledged the leakage risk via --confirm.
+                // Print the full key to stdout (only) so it can be
+                // piped to pbcopy / xclip cleanly. Warning preamble
+                // goes to stderr so the pipe captures ONLY the key.
+                eprintln!(
+                    "[auth embed-key] Printing FULL embed key. This key authorizes \
+                     anyone holding it to upload traces under your account. Paste it \
+                     into your bundle's ATO_EMBED_KEY env then clear your shell history."
+                );
+                match key {
+                    Some(k) => println!("{}", k),
+                    None => {
+                        eprintln!(
+                            "Server did not return the full key. The API may have been \
+                             updated to never disclose the key after first issuance. \
+                             Rotate via the desktop's Settings → Cloud embed key card \
+                             if you've lost the original."
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Default: print the masked prefix only. Same form
+                // the desktop's Settings → Cloud card displays.
+                if prefix.is_empty() {
+                    eprintln!("Server returned an empty prefix — unexpected. Report as a bug.");
+                    std::process::exit(1);
+                }
+                println!("Embed key prefix: {}", prefix);
+                eprintln!(
+                    "(Run `ato auth embed-key --full --confirm-i-understand-this-prints-the-key` \
+                     to print the full key. The masked prefix is safe to share — used to \
+                     identify the key in dashboards.)"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Request failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
     /// Sign in to ATO Cloud. Saves token to ~/.ato/auth.json.
@@ -397,6 +539,30 @@ pub enum AuthCommand {
         #[arg(long)]
         email: Option<String>,
     },
+    /// Show the embed key for this account (Pro+ tier required).
+    ///
+    /// Pro+ tier required. Prints the key prefix by default (safe to
+    /// share — used to identify the key in dashboards). Pass
+    /// `--full --confirm-i-understand-this-prints-the-key` to print
+    /// the full key for piping into external tools (the same safety
+    /// pattern `ato master-key export` uses — the full key lands in
+    /// shell history and is a real leakage risk).
+    ///
+    /// Without `--full`, output is the masked form (prefix + length)
+    /// — identical to what's shown in the desktop Settings → Cloud
+    /// embed key card.
+    #[command(name = "embed-key")]
+    EmbedKey {
+        /// Print the FULL key value instead of the masked prefix.
+        /// Requires `--confirm-i-understand-this-prints-the-key`.
+        #[arg(long, default_value_t = false)]
+        full: bool,
+        /// Required when `--full` is set. The full key lands in
+        /// shell history and can be exfiltrated; this flag forces
+        /// the caller to acknowledge the leakage risk.
+        #[arg(long = "confirm-i-understand-this-prints-the-key", default_value_t = false)]
+        confirm: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -412,5 +578,186 @@ pub fn run(args: AuthArgs) {
         AuthCommand::Logout => handle_logout(),
         AuthCommand::Whoami => handle_whoami(),
         AuthCommand::ResendVerify { email } => handle_resend_verify(email),
+        AuthCommand::EmbedKey { full, confirm } => handle_embed_key(full, confirm),
+    }
+}
+
+// ── R1 codex #1 fix — surface field-name drift instead of masking it ──
+//
+// Each extractor returns (value, Some(alias)) when it had to fall
+// back to a non-canonical field name. The handler emits a stderr
+// warning so any CI / operator watching stderr learns the API has
+// drifted. The fallback still produces a working command — we're
+// not blocking the user — but the drift is no longer silent.
+//
+// Pure functions so they can be unit-tested without a live server
+// (R1 codex #2 — no test coverage for the secret-printing path).
+
+fn extract_prefix(body: &serde_json::Value) -> (&str, Option<&'static str>) {
+    if let Some(s) = body.pointer("/data/prefix").and_then(|v| v.as_str()) {
+        return (s, None);
+    }
+    if let Some(s) = body.pointer("/data/embedKeyPrefix").and_then(|v| v.as_str()) {
+        return (s, Some("embedKeyPrefix"));
+    }
+    if let Some(s) = body.pointer("/data/embed_key_prefix").and_then(|v| v.as_str()) {
+        return (s, Some("embed_key_prefix"));
+    }
+    ("", None)
+}
+
+fn extract_full_key(body: &serde_json::Value) -> (Option<&str>, Option<&'static str>) {
+    if let Some(s) = body.pointer("/data/key").and_then(|v| v.as_str()) {
+        return (Some(s), None);
+    }
+    if let Some(s) = body.pointer("/data/embedKey").and_then(|v| v.as_str()) {
+        return (Some(s), Some("embedKey"));
+    }
+    if let Some(s) = body.pointer("/data/embed_key").and_then(|v| v.as_str()) {
+        return (Some(s), Some("embed_key"));
+    }
+    (None, None)
+}
+
+#[cfg(test)]
+mod embed_key_tests {
+    use super::{extract_full_key, extract_prefix};
+
+    fn json(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("test fixture must parse")
+    }
+
+    #[test]
+    fn prefix_canonical_field() {
+        let b = json(r#"{"data":{"prefix":"eba_ABCD"}}"#);
+        assert_eq!(extract_prefix(&b), ("eba_ABCD", None));
+    }
+
+    #[test]
+    fn prefix_camelcase_alias_emits_drift_warning() {
+        let b = json(r#"{"data":{"embedKeyPrefix":"eba_ABCD"}}"#);
+        let (val, alias) = extract_prefix(&b);
+        assert_eq!(val, "eba_ABCD");
+        assert_eq!(alias, Some("embedKeyPrefix"));
+    }
+
+    #[test]
+    fn prefix_snake_case_alias_emits_drift_warning() {
+        let b = json(r#"{"data":{"embed_key_prefix":"eba_ABCD"}}"#);
+        let (val, alias) = extract_prefix(&b);
+        assert_eq!(val, "eba_ABCD");
+        assert_eq!(alias, Some("embed_key_prefix"));
+    }
+
+    #[test]
+    fn prefix_missing_returns_empty_no_alias() {
+        let b = json(r#"{"data":{}}"#);
+        assert_eq!(extract_prefix(&b), ("", None));
+    }
+
+    #[test]
+    fn prefix_canonical_wins_over_alias_when_both_present() {
+        // If both canonical and alias are populated (shouldn't happen
+        // but defensive — server in mid-migration), the canonical
+        // field wins and no drift warning fires.
+        let b = json(r#"{"data":{"prefix":"eba_CANONICAL","embedKeyPrefix":"eba_ALIAS"}}"#);
+        let (val, alias) = extract_prefix(&b);
+        assert_eq!(val, "eba_CANONICAL");
+        assert_eq!(alias, None);
+    }
+
+    #[test]
+    fn full_key_canonical_field() {
+        let b = json(r#"{"data":{"key":"eba_ABCD_full_token"}}"#);
+        assert_eq!(extract_full_key(&b), (Some("eba_ABCD_full_token"), None));
+    }
+
+    #[test]
+    fn full_key_camelcase_alias_emits_drift_warning() {
+        let b = json(r#"{"data":{"embedKey":"eba_ABCD_full_token"}}"#);
+        let (val, alias) = extract_full_key(&b);
+        assert_eq!(val, Some("eba_ABCD_full_token"));
+        assert_eq!(alias, Some("embedKey"));
+    }
+
+    #[test]
+    fn full_key_snake_case_alias_emits_drift_warning() {
+        // R2 codex gap fix — the snake_case path
+        // (`/data/embed_key`) was the only extraction branch the
+        // initial R1 tests missed. Adding parity with the prefix
+        // tests so all 3 extraction paths × 2 fields (prefix, key)
+        // are pinned.
+        let b = json(r#"{"data":{"embed_key":"eba_ABCD_full_token"}}"#);
+        let (val, alias) = extract_full_key(&b);
+        assert_eq!(val, Some("eba_ABCD_full_token"));
+        assert_eq!(alias, Some("embed_key"));
+    }
+
+    #[test]
+    fn full_key_canonical_wins_over_alias_when_both_present() {
+        // Mirror of the prefix canonical-wins test for symmetry.
+        // Defensive: if a server in mid-migration returns both
+        // canonical + alias, canonical wins and no drift warning
+        // fires.
+        let b = json(r#"{"data":{"key":"eba_CANONICAL","embedKey":"eba_ALIAS"}}"#);
+        let (val, alias) = extract_full_key(&b);
+        assert_eq!(val, Some("eba_CANONICAL"));
+        assert_eq!(alias, None);
+    }
+
+    #[test]
+    fn full_key_missing_returns_none() {
+        let b = json(r#"{"data":{"prefix":"eba_ABCD"}}"#);
+        assert_eq!(extract_full_key(&b), (None, None));
+    }
+
+    #[test]
+    fn confirm_without_full_is_ignored_at_arg_level() {
+        // The handler itself owns the gating logic; this test just
+        // documents the arg shape — calling `--confirm` without
+        // `--full` is a no-op (the masked-prefix path runs). The
+        // negative path (`--full` without `--confirm`) is exercised
+        // in the live smoke under feature/ato-auth-embed-key.
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct TestArgs {
+            #[command(subcommand)]
+            sub: super::AuthCommand,
+        }
+        let args = TestArgs::parse_from([
+            "ato",
+            "embed-key",
+            "--confirm-i-understand-this-prints-the-key",
+        ]);
+        match args.sub {
+            super::AuthCommand::EmbedKey { full, confirm } => {
+                assert!(!full);
+                assert!(confirm);
+            }
+            _ => panic!("expected EmbedKey variant"),
+        }
+    }
+
+    #[test]
+    fn full_plus_confirm_arg_parse() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct TestArgs {
+            #[command(subcommand)]
+            sub: super::AuthCommand,
+        }
+        let args = TestArgs::parse_from([
+            "ato",
+            "embed-key",
+            "--full",
+            "--confirm-i-understand-this-prints-the-key",
+        ]);
+        match args.sub {
+            super::AuthCommand::EmbedKey { full, confirm } => {
+                assert!(full);
+                assert!(confirm);
+            }
+            _ => panic!("expected EmbedKey variant"),
+        }
     }
 }
