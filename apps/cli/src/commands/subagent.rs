@@ -290,20 +290,24 @@ fn create(
     let git_commit_sha = crate::commands::dispatch::capture_git_head(None);
 
     let conn = db::open_readwrite(db_path).context("open db")?;
+    let machine_id_val = db::machine_id(&conn);
     conn.execute(
         "INSERT INTO execution_logs
            (id, runtime, prompt, status, created_at,
             agent_slug, war_room_id, war_room_round, model,
             initiator_kind, client_surface, initiator_id,
-            auth_mode, billing_surface, git_commit_sha)
+            auth_mode, billing_surface, git_commit_sha,
+            member_id, machine_id)
          VALUES
            (?1, 'claude', ?2, 'pending', ?3,
             ?4, ?5, ?6, ?7,
             'agent:claude', 'subagent', 'claude-code',
-            ?8, ?9, ?10)",
+            ?8, ?9, ?10,
+            ?11, ?12)",
         params![
             id, prompt_text, now, persona, war_room_id, round, model,
-            auth_mode, billing_surface, git_commit_sha
+            auth_mode, billing_surface, git_commit_sha,
+            crate::attribution::detect_member_id(), machine_id_val
         ],
     )
     .context("INSERT pending execution_log")?;
