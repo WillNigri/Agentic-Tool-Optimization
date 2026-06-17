@@ -36,6 +36,10 @@ use serde::Serialize;
 pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
     match model {
         // ---- Anthropic ----
+        // opus-4-8 priced at the established Opus tier (same as 4-7/4-6) so the
+        // refreshed CLI model picker (#82) stays cost-tracked. Adjust if
+        // Anthropic publishes different opus-4-8 rates.
+        "claude-opus-4-8" => Some((15.0, 75.0)),
         "claude-opus-4-7" => Some((15.0, 75.0)),
         "claude-opus-4-6" => Some((15.0, 75.0)),
         "claude-sonnet-4-6" => Some((3.0, 15.0)),
@@ -109,7 +113,7 @@ pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
 /// Used by the optimizer to enumerate cheaper alternatives.
 pub fn models_for_provider(provider: &str) -> &'static [&'static str] {
     match provider {
-        "anthropic" => &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
+        "anthropic" => &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"],
         "openai" => &["gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1-mini", "o3-mini", "gpt-4.1", "o3", "gpt-4o", "gpt-5"],
         "google" => &[
             "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-2.0-flash",

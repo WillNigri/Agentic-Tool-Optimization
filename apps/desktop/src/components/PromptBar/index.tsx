@@ -677,7 +677,15 @@ export default function PromptBar() {
           // Marked `costEstimated:true` in metadata so the UI can
           // render an "est." badge.
           {
-            const usage = estimateUsage(runtime, selectedAgent.model ?? null, prompt, response);
+            // #82 R2 fix — the picker override is what the dispatch actually
+            // ran with (cliConfig above), so attribute cost/trace to it too;
+            // fall back to the agent's stored model when no override is set.
+            const usage = estimateUsage(
+              runtime,
+              modelOverride ?? selectedAgent.model ?? null,
+              prompt,
+              response,
+            );
             dispatchedModel = usage.model || null;
             void uploadAgentTrace({
               agentSlug: selectedAgent.slug,
@@ -722,7 +730,8 @@ export default function PromptBar() {
           // entry in Compare/Pipelines instead of scattering across
           // different empty buckets.
           {
-            const usage = estimateUsage(runtime, null, prompt, response);
+            // #82 R2 fix — attribute to the picker override actually dispatched.
+            const usage = estimateUsage(runtime, modelOverride ?? null, prompt, response);
             dispatchedModel = usage.model || null;
             void uploadAgentTrace({
               agentSlug: runtime,
