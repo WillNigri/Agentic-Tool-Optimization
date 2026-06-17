@@ -388,12 +388,20 @@ function normalizePath(p: string): string {
 
 async function validateWorkspaceRoot(
   workspaceRoot: string | null | undefined,
-): Promise<{ ok: true; resolved: string | null } | { ok: false; error: string }> {
-  if (!workspaceRoot) {
-    // Omitted → run against the desktop's CWD (Wave 1 behavior). The
-    // dispatch_request frame is allowed to omit workspace_root; the
-    // browser UI just doesn't surface a project picker yet.
-    return { ok: true, resolved: null };
+): Promise<{ ok: true; resolved: string } | { ok: false; error: string }> {
+  if (!workspaceRoot || !workspaceRoot.trim()) {
+    // SECURITY (#72 fix): a browser-originated dispatch MUST name a
+    // workspace_root. The pre-fix Wave 1 behavior silently fell back to
+    // the desktop process CWD, so a paired (or tampered) browser could
+    // run an agent against whatever directory the desktop happened to be
+    // in — an ambient-authority escape across the tether trust boundary.
+    // Deny instead. The browser UI must surface a project picker and send
+    // a registered project path.
+    return {
+      ok: false,
+      error:
+        "workspace_root is required for a browser-originated dispatch. Pick a registered project on the desktop first.",
+    };
   }
   try {
     const projects = await tauriInvokeResult<Array<{ path: string }>>(
@@ -571,6 +579,12 @@ async function handleDispatchRequest(
       runtime: req.runtime,
       prompt: req.prompt,
       config,
+      // SECURITY (#72 fix): bind the dispatch to the validated, registered
+      // project path (not the browser's submitted string) so the agent runs
+      // inside the workspace the user approved — and so the Rust side can
+      // re-validate + set the child process cwd. Browser-side validation is
+      // not a trust boundary; Rust re-checks this.
+      workspace: wsCheck.resolved,
       onEvent: channel,
     });
   } catch (err) {

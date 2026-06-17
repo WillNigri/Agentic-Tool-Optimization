@@ -9356,6 +9356,49 @@ pub enum StreamEvent {
     Error { message: String },
 }
 
+/// SECURITY (#72 fix): re-validate a dispatch's workspace on the Rust side.
+/// Browser-side validation in `tether/host.ts` is NOT a trust boundary — a
+/// tampered or buggy bridge could hand us an arbitrary path. When a dispatch
+/// names a workspace we require it to be (1) absolute, (2) an existing
+/// directory, and (3) a project the user explicitly registered. A `None`
+/// workspace is the local chat-pane path (runs against the desktop CWD) and is
+/// left untouched — the browser bridge can never produce `None`, since it
+/// rejects a missing `workspace_root` before it ever invokes this command.
+fn validate_dispatch_workspace(workspace: &str) -> Result<(), String> {
+    let ws = workspace.trim();
+    if ws.is_empty() {
+        return Err("workspace path is empty".to_string());
+    }
+    let path = std::path::Path::new(ws);
+    if !path.is_absolute() {
+        return Err(format!("workspace '{}' must be an absolute path", ws));
+    }
+    if !path.is_dir() {
+        return Err(format!("workspace '{}' is not an existing directory", ws));
+    }
+    // Registered-project check is intentionally independent of the
+    // `trust_registered_projects` UX toggle: that toggle only governs the
+    // approval *prompt*, never whether an arbitrary path may be a dispatch
+    // sandbox. A browser dispatch must always target a path the user added.
+    let trimmed = ws.strip_suffix('/').unwrap_or(ws);
+    let conn = rusqlite::Connection::open(crate::get_db_path())
+        .map_err(|e| format!("workspace validation: cannot open db: {}", e))?;
+    let registered = conn
+        .query_row(
+            "SELECT 1 FROM projects WHERE path = ?1 OR path = ?2 LIMIT 1",
+            rusqlite::params![ws, trimmed],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !registered {
+        return Err(format!(
+            "workspace '{}' is not a registered project on this desktop",
+            ws
+        ));
+    }
+    Ok(())
+}
+
 /// Stream a single-shot dispatch. Caller must keep the channel alive until
 /// it observes a `done` or `error` event.
 #[tauri::command]
@@ -9363,10 +9406,27 @@ pub async fn prompt_agent_stream(
     runtime: String,
     prompt: String,
     config: Option<String>,
+    // v2.18 Wave 2 (#72 fix) — the registered project path the agent must run
+    // inside. Some(_) for every browser-originated tether dispatch; None for
+    // the local desktop chat pane (desktop CWD, trusted).
+    workspace: Option<String>,
     on_event: tauri::ipc::Channel<StreamEvent>,
 ) -> Result<(), String> {
+    // SECURITY (#72 fix): re-validate browser-supplied workspaces here; host.ts
+    // is not a trust boundary. None = local chat pane (desktop CWD), allowed.
+    if let Some(ws) = workspace.as_deref() {
+        validate_dispatch_workspace(ws)?;
+    }
     // Ad-hoc — no agent context. Registry will show "no slug, runtime X".
-    spawn_streaming_dispatch(&runtime, &prompt, config.as_deref(), on_event, None, None).await
+    spawn_streaming_dispatch(
+        &runtime,
+        &prompt,
+        config.as_deref(),
+        on_event,
+        None,
+        workspace.as_deref(),
+    )
+    .await
 }
 
 /// Stream a multi-turn dispatch. Resolves variables / hooks / role models
@@ -9559,6 +9619,31 @@ async fn spawn_streaming_dispatch(
         // is aborted before we get to wait — important for keeping the
         // registry honest about what's actually running.
         .kill_on_drop(true);
+    // SECURITY (#72 fix): bind the child process cwd to the validated
+    // workspace so the agent actually runs inside the directory the user
+    // approved — not the desktop's ambient CWD. Threading `workspace` only
+    // into the active-runs registry (below) fixed the bookkeeping but left
+    // the real boundary open. `workspace` is already re-validated in
+    // `prompt_agent_stream` before we get here. None = local chat pane.
+    // The browser path is already strictly validated upstream; here we also
+    // serve the local history-chat path (active_project_path), so we only
+    // chdir into a directory that actually exists — a stale local project
+    // path then falls back to the desktop CWD (prior behavior) instead of
+    // failing the spawn.
+    //
+    // R2 (codex): the only OTHER caller that forwards a workspace here is
+    // `prompt_agent_with_history_stream`, which is invoked solely from the
+    // desktop frontend (apps/desktop/src/lib/agentVariables.ts) — it is NOT
+    // exposed across the browser↔desktop tether, which can only reach
+    // `prompt_agent_stream`. So the strict registered-project validation
+    // (the actual trust boundary) lives on `prompt_agent_stream`; the
+    // history path is local/trusted and intentionally keeps the lenient
+    // existing-dir guard so users can chat in not-yet-registered projects.
+    if let Some(ws) = workspace {
+        if std::path::Path::new(ws).is_dir() {
+            cmd.current_dir(ws);
+        }
+    }
     // BYOK: same env-var forwarding as the non-streaming dispatch path.
     if let Some((var, key)) = crate::byok::byok_env_value_from_path(&crate::get_db_path(), runtime)
     {
