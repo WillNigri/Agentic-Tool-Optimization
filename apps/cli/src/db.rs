@@ -29,6 +29,37 @@ pub fn home_dir() -> PathBuf {
     }
 }
 
+/// Stable per-install machine id for dispatch attribution (Model A).
+///
+/// Generated once with a v4 UUID and persisted in `ato_meta` (key
+/// `machine_id`). Deliberately NOT `identity_probe::compute_probe()` — that
+/// is `sha256(team_id‖bundle_id)`, a binary/signing-identity hash for
+/// master-key tamper detection, which collides across different machines
+/// running the same signed build (codex, war-room 642B657D). This id is per
+/// SQLite store (i.e. per install/home), which is the right granularity for
+/// "which machine produced this turn".
+pub fn machine_id(conn: &Connection) -> String {
+    let read = |c: &Connection| -> Option<String> {
+        c.query_row(
+            "SELECT value FROM ato_meta WHERE key = 'machine_id'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if let Some(v) = read(conn) {
+        return v;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    // INSERT OR IGNORE so a concurrent writer (desktop + CLI on the same
+    // store) doesn't clobber; then re-read to return whoever won the race.
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO ato_meta (key, value) VALUES ('machine_id', ?1)",
+        rusqlite::params![id],
+    );
+    read(conn).unwrap_or(id)
+}
+
 /// 5 second busy_timeout — when desktop and CLI overlap on the same
 /// SQLite, the loser waits up to this long for the lock to clear
 /// before failing with `database is locked`. Without it, concurrent
@@ -191,6 +222,18 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
                 [],
             );
         }
+    }
+
+    // Model A attribution (2026-06-17) — per-member + per-machine provenance
+    // on every dispatch. `member_id` = signed-in cloud user id (NULL for
+    // pure-local use); `machine_id` = stable per-install id (see machine_id()).
+    // Together they let a shared war-room/session attribute each turn to
+    // {member, machine, runtime}. Nullable; ALTER fails silently if present.
+    for col in ["member_id", "machine_id"] {
+        let _ = conn.execute(
+            &format!("ALTER TABLE execution_logs ADD COLUMN {col} TEXT"),
+            [],
+        );
     }
 
     // ato_meta: tiny key/value table for migration markers.
