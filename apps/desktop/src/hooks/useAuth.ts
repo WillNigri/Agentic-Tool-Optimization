@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { refreshToken as refreshTokenApi } from "@/lib/api";
-import { getCurrentUser, storeTokens, clearTokens } from "@/lib/cloud-api";
+import { getCurrentUser, storeTokens, clearTokens, getStoredTokens } from "@/lib/cloud-api";
 import { markEverPaid, startTrialIfUnset, hasEverPaid } from "@/lib/trial";
 
 // Phase 1 PR-B (2026-05-21) — `latchEverPaidIfPaid` runs at every store
@@ -119,13 +119,26 @@ export const useAuthStore = create<AuthState>()(
       },
 
       refreshAccessToken: async () => {
-        const { refreshTokenValue } = get();
-        if (!refreshTokenValue) return true; // local mode, always ok
+        // localStorage is the single source of truth for the refresh token:
+        // cloud-api.ts's own auto-refresh writes the rotated token there, so
+        // reading zustand here could pick up a token it already rotated away
+        // (now revoked server-side). Fall back to the store only if absent.
+        const stored = getStoredTokens();
+        const currentRefresh = stored?.refreshToken ?? get().refreshTokenValue;
+        if (!currentRefresh) return true; // local mode, always ok
         try {
-          const result = await refreshTokenApi(refreshTokenValue);
-          set({ accessToken: result.accessToken });
-          // Keep the cloud-api localStorage mirror in sync after rotation.
-          storeTokens({ accessToken: result.accessToken, refreshToken: refreshTokenValue });
+          const result = await refreshTokenApi(currentRefresh);
+          // The server rotates: it revokes `currentRefresh` and returns a NEW
+          // pair under `tokens`. Persist BOTH — to zustand and the localStorage
+          // mirror — or the next refresh replays a revoked token and the
+          // session dies ~one access-TTL later (the "logged out every hour"
+          // bug). Be defensive about the shape: a bad/empty response must not
+          // wipe a still-valid session.
+          const newAccess = result?.tokens?.accessToken;
+          const newRefresh = result?.tokens?.refreshToken;
+          if (!newAccess || !newRefresh) return true;
+          set({ accessToken: newAccess, refreshTokenValue: newRefresh });
+          storeTokens({ accessToken: newAccess, refreshToken: newRefresh });
           return true;
         } catch {
           return true; // don't break local mode
