@@ -1,10 +1,12 @@
 // v2.16 Wave 1 — read-only Team Workspaces: teams list.
 // v2.18.1 — adds "+ New team" button + CreateTeamModal wiring.
+// #89 — gates "+ New team" visibility on subscription_tier !== 'free'
+// so free-tier users don't get a dead-end 403 from cloud when they click.
 
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Users, ChevronRight, AlertCircle, Plus } from 'lucide-react';
-import { listTeams, type TeamRow } from '../lib/api';
+import { Users, ChevronRight, AlertCircle, Plus, Sparkles } from 'lucide-react';
+import { listTeams, getMe, type TeamRow } from '../lib/api';
 import CreateTeamModal from './CreateTeamModal';
 
 const ROLE_PILL: Record<TeamRow['role'], { label: string; classes: string }> = {
@@ -22,6 +24,13 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
     queryKey: ['teams'],
     queryFn: listTeams,
   });
+  // #89 — fetch the current user so we can gate team-creation on plan tier.
+  // Same ['me'] cache key UserSettingsPage uses, so React Query dedupes
+  // the request across the app.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: getMe });
+  const canCreateTeam =
+    !!meQuery.data && meQuery.data.subscription_tier !== 'free';
+
   const [showCreate, setShowCreate] = useState(false);
 
   return (
@@ -37,12 +46,14 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
             Browse shared sessions, war rooms, and missions across your teams.
           </p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="shrink-0 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
-        >
-          <Plus className="w-3.5 h-3.5" /> New team
-        </button>
+        {canCreateTeam ? (
+          <button
+            onClick={() => setShowCreate(true)}
+            className="shrink-0 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+          >
+            <Plus className="w-3.5 h-3.5" /> New team
+          </button>
+        ) : null}
       </div>
 
       <CreateTeamModal
@@ -72,20 +83,52 @@ export default function TeamsListPage({ onSelectTeam }: Props) {
         </div>
       )}
 
-      {/* Empty state */}
+      {/* Empty state — R1 fix: gate the upsell on meQuery.isSuccess +
+          confirmed free tier, so a transient /me fetch failure doesn't
+          mistakenly show "upgrade to Pro" to a paid user. Also living
+          INSIDE the empty state (not above the team list) so free users
+          with existing memberships in Pro teams don't get nag content
+          pushed at them every visit. */}
       {!isLoading && !error && teams?.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 bg-[#16161e] border border-[#2a2a3a] rounded-lg text-center px-6">
-          <Users className="w-10 h-10 text-[#2a2a3a] mb-4" />
-          <p className="text-white text-sm font-medium">No teams yet</p>
-          <p className="text-[#8888a0] text-xs mt-1">
-            Create one to share sessions, war rooms, and missions with teammates.
-          </p>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
-          >
-            <Plus className="w-3.5 h-3.5" /> Create your first team
-          </button>
+          {meQuery.isSuccess && !canCreateTeam ? (
+            <>
+              <div className="w-12 h-12 rounded-xl bg-[#00FFB2]/15 flex items-center justify-center mb-4">
+                <Sparkles className="w-5 h-5 text-[#00FFB2]" />
+              </div>
+              <p className="text-white text-sm font-medium">
+                Team workspaces are a Pro feature
+              </p>
+              <p className="text-[#8888a0] text-xs mt-2 max-w-sm leading-relaxed">
+                Share sessions, war-rooms, and missions with teammates. Upgrade
+                to create your first team and invite members.
+              </p>
+              <a
+                href="https://agentictool.ai/#pricing"
+                target="_blank"
+                rel="noreferrer"
+                className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+              >
+                See plans →
+              </a>
+            </>
+          ) : (
+            <>
+              <Users className="w-10 h-10 text-[#2a2a3a] mb-4" />
+              <p className="text-white text-sm font-medium">No teams yet</p>
+              <p className="text-[#8888a0] text-xs mt-1">
+                Create one to share sessions, war rooms, and missions with teammates.
+              </p>
+              {canCreateTeam && (
+                <button
+                  onClick={() => setShowCreate(true)}
+                  className="mt-4 px-3 py-2 rounded-md bg-[#00FFB2] text-black text-sm font-semibold hover:bg-[#00FFB2]/90 transition-colors inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Create your first team
+                </button>
+              )}
+            </>
+          )}
         </div>
       )}
 
