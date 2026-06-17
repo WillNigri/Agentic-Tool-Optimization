@@ -69,14 +69,40 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
     // there for the full story on the 2026-05-14 master-key cliff and
     // why a metadata-only "Save" in the GUI doesn't recover orphaned rows.
     crate::encryption::decrypt(&encrypted).with_context(|| {
+        // R1 codex #4 — derive the actual env-var name from the same
+        // table api_dispatch uses; the prior `{PROVIDER}_API_KEY`
+        // template was wrong for google (real name: GEMINI_API_KEY)
+        // and qwen (DASHSCOPE_API_KEY). Keep this in sync with the
+        // env_var column in packages/ato-api-providers/src/lib.rs
+        // and with has_byok_key_for_provider() above.
+        let env_var = match provider {
+            "anthropic" => "ANTHROPIC_API_KEY",
+            "openai" => "OPENAI_API_KEY",
+            "google" => "GEMINI_API_KEY",
+            "minimax" => "MINIMAX_API_KEY",
+            "grok" => "GROK_API_KEY",
+            "deepseek" => "DEEPSEEK_API_KEY",
+            "qwen" => "DASHSCOPE_API_KEY",
+            "openrouter" => "OPENROUTER_API_KEY",
+            _ => "PROVIDER_API_KEY",
+        };
         format!(
-            "Failed to decrypt the stored API key for '{}'. The ciphertext is intact but \
-             cannot be authenticated under the current master key — almost always this means \
-             the macOS keychain master_key was rotated, orphaning the stored ciphertext. \
-             Fix: re-enter the {} API key in ATO → Settings → API Keys (paste the actual key \
-             value; just hitting Save bumps `updated_at` without re-encrypting). \
-             Alternative: set the provider's env var in the shell to bypass the stored key.",
-            provider, provider,
+            "Failed to decrypt the stored API key for '{0}'. The ciphertext is intact but \
+             cannot be authenticated under the current master key — the row is an orphan \
+             from before the f740381 cache-revalidation rework (2026-06-10 22:30 UTC).\n\
+             \n\
+             Three remedies in order of permanence:\n\
+             1. Fast bypass: `export {1}=<your-key>` in your shell — the dispatch path \
+                checks env vars FIRST and never touches the orphan ciphertext.\n\
+             2. Auto-heal where possible: `ato master-key heal-orphans --dry-run` shows \
+                which orphans can be recovered (decrypted under the retired keychain key \
+                that's still present), then re-run without --dry-run to migrate them.\n\
+             3. Manual re-enter: when heal-orphans reports the row is unrecoverable \
+                (encrypted under a third key that no longer exists), open ATO → Settings → \
+                API Keys, paste the actual key value (not just hit Save — that only bumps \
+                updated_at without re-encrypting).",
+            provider,
+            env_var,
         )
     })
 }
