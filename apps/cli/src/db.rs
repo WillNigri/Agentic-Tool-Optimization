@@ -243,6 +243,23 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
     // NULL = tick will escalate with reason="no_worker_config".
     let _ = conn.execute("ALTER TABLE missions ADD COLUMN worker_config TEXT", []);
 
+    // SECURITY (#49 fix) — `origin` provenance column, FAIL-CLOSED on write.
+    // R2 (codex): a column DEFAULT of 'manual' would be fail-OPEN — any future
+    // importer / older writer / partial insert that omits `origin` would
+    // silently mark imported mission data trusted and re-enable `sh -c`. So we
+    // add the column WITHOUT a default (NULL on omission) and backfill the
+    // existing rows — which are all operator-authored/local today, as there is
+    // no mission-import path yet — to 'manual' explicitly. The local create
+    // path also writes 'manual' explicitly. Net effect: only a row that was
+    // deliberately created as local reads back trusted; anything that omits
+    // origin (NULL) reads back untrusted in missions::mission_from_row, and a
+    // future ingest path that forgets to set origin fails closed.
+    let _ = conn.execute("ALTER TABLE missions ADD COLUMN origin TEXT", []);
+    let _ = conn.execute(
+        "UPDATE missions SET origin = 'manual' WHERE origin IS NULL",
+        [],
+    );
+
     // 2026-05-17 — SQL views from `packages/ato-db-views`. Mirror of
     // what the desktop applies on startup. Each `CREATE VIEW IF NOT
     // EXISTS` is a no-op after the first run, so applying on every
