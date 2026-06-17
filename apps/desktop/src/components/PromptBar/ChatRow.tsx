@@ -94,6 +94,12 @@ export function ChatRow({ msg }: { msg: ChatMessage }) {
             stageOf?: number;
             stageIndex?: number;
             stagedFrom?: string;
+            // Will's 2026-06-16 ask: chat assistant messages didn't
+            // show which model answered. PromptBar now persists the
+            // resolved model into metadata at dispatch time (API-
+            // provider result.model OR agent/no-agent usage.model);
+            // ChatRow renders it as a badge next to the runtime label.
+            model?: string;
           } = {};
           if (msg.metadata) {
             try {
@@ -111,6 +117,15 @@ export function ChatRow({ msg }: { msg: ChatMessage }) {
                 <Icon size={10} />
                 {runtime.label}
               </span>
+              {meta.model && (
+                <span
+                  className="inline-flex items-center gap-1 text-[9px] font-mono text-cs-muted"
+                  title={`Model that answered: ${meta.model}`}
+                >
+                  <span>·</span>
+                  {meta.model}
+                </span>
+              )}
               {msg.agentSlug && (
                 <span className="inline-flex items-center gap-1 text-[9px] font-mono text-cs-muted">
                   <span>·</span>
