@@ -1057,12 +1057,20 @@ fn is_denied_subcommand(first_token: &str, rest: &[String]) -> Option<String> {
     let sub = rest.first().map(|s| s.as_str()).unwrap_or("");
     match first_token {
         "ato" => {
+            // Introspection is read-only and SHOULD be reachable so a seat
+            // agent can learn the surface (found by the ATO-team CLI check:
+            // `ato schema` / `ato --help` were being refused here, defeating
+            // the agent-facing introspection feature). Bare `ato` + help just
+            // print usage; `ato schema` dumps the command tree as JSON.
+            let is_introspection = sub.is_empty()
+                || matches!(sub, "schema" | "--help" | "-h" | "help" | "--version" | "-V");
             // Q5: read-only ato subcommands only.
-            let allowed = matches!(
+            let read_only_group = matches!(
                 sub,
                 "sessions" | "dispatches" | "missions" | "traces" | "runtimes"
                 | "loops" | "agents" | "providers" | "events"
             ) && rest.get(1).map(|s| s.as_str()) != Some("run");
+            let allowed = is_introspection || read_only_group;
             // Refuse known-mutating ato subcommands.
             let denied = matches!(
                 sub,
@@ -1071,7 +1079,7 @@ fn is_denied_subcommand(first_token: &str, rest: &[String]) -> Option<String> {
             );
             if denied || !allowed {
                 Some(format!(
-                    "Q5 recursion guard: 'ato {}' is not in the read-only allowlist. Allowed: sessions show / dispatches show / missions show / traces show / runtimes health / loops show / agents show / providers show / events show. Refused: dispatch, war-rooms, missions tick/dispatch/merge, replay start, review, compare, bridge, methodology run, schedule.",
+                    "Q5 recursion guard: 'ato {}' is not in the read-only allowlist. Allowed: schema, --help, sessions show / dispatches show / missions show / traces show / runtimes health / loops show / agents show / providers show / events show. Refused: dispatch, war-rooms, missions tick/dispatch/merge, replay start, review, compare, bridge, methodology run, schedule.",
                     sub
                 ))
             } else {
@@ -1924,6 +1932,10 @@ mod tests {
             "ato traces show id",
             "ato runtimes health",
             "ato loops show slug",
+            // Introspection must be reachable (ATO-team CLI-check fix).
+            "ato schema",
+            "ato --help",
+            "ato help",
         ] {
             let r = execute_call_with_root(
                 root,
