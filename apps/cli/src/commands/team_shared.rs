@@ -219,6 +219,67 @@ fn handle_cloud_error(status: reqwest::StatusCode, body: &Value) -> anyhow::Erro
 /// CLI sends a lightweight stub that is enough to register the share row and
 /// allow teammates to look up the resource id. A richer --snapshot-file flag
 /// can be added in a follow-up without breaking the API contract.
+/// Build a war-room snapshot from local execution_logs so the shared view
+/// renders the seats (not "No seats in the snapshot"). Shape mirrors the
+/// desktop buildWarRoomSnapshot + what the web/desktop WarRoomSeatsRenderer
+/// reads (snake_case keys, incl. Model A member_id/machine_id attribution).
+/// Per-seat prompt/response is capped so a big war-room stays under the
+/// cloud's 1 MB snapshot limit.
+fn build_war_room_snapshot(
+    conn: &rusqlite::Connection,
+    war_room_id: &str,
+) -> Result<Value> {
+    const PER_FIELD_CAP: usize = 40_000; // chars; keeps multi-seat rooms < 1 MB
+    let cap = |s: Option<String>| -> Option<String> {
+        s.map(|t| {
+            if t.chars().count() > PER_FIELD_CAP {
+                let kept: String = t.chars().take(PER_FIELD_CAP).collect();
+                format!("{}…[truncated]", kept)
+            } else {
+                t
+            }
+        })
+    };
+    let mut stmt = conn.prepare(
+        "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
+                created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated,
+                war_room_round, tool_calls_summary, member_id, machine_id
+           FROM execution_logs
+          WHERE war_room_id = ?1
+          ORDER BY war_room_round ASC, created_at ASC",
+    )?;
+    let seats: Vec<Value> = stmt
+        .query_map([war_room_id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, Option<String>>(0)?,
+                "runtime": r.get::<_, Option<String>>(1)?,
+                "agent_slug": r.get::<_, Option<String>>(2)?,
+                "model": r.get::<_, Option<String>>(3)?,
+                "status": r.get::<_, Option<String>>(4)?,
+                "prompt": cap(r.get::<_, Option<String>>(5)?),
+                "response": cap(r.get::<_, Option<String>>(6)?),
+                "error_message": cap(r.get::<_, Option<String>>(7)?),
+                "created_at": r.get::<_, Option<String>>(8)?,
+                "duration_ms": r.get::<_, Option<i64>>(9)?,
+                "tokens_in": r.get::<_, Option<i64>>(10)?,
+                "tokens_out": r.get::<_, Option<i64>>(11)?,
+                "cost_usd_estimated": r.get::<_, Option<f64>>(12)?,
+                "war_room_round": r.get::<_, Option<i64>>(13)?,
+                "tool_calls_summary": r.get::<_, Option<String>>(14)?,
+                "member_id": r.get::<_, Option<String>>(15)?,
+                "machine_id": r.get::<_, Option<String>>(16)?,
+            }))
+        })?
+        .filter_map(|x| x.ok())
+        .collect();
+    Ok(serde_json::json!({
+        "kind": "war_room",
+        "id": war_room_id,
+        "seat_count": seats.len(),
+        "seats": seats,
+    }))
+}
+
 pub fn share_resource(
     url_kind: &str,
     id_field: &str,  // e.g. "session_id", "war_room_id"
@@ -246,6 +307,15 @@ pub fn share_resource(
                 "initiator_machine_secret".into(),
                 Value::String(crate::db::machine_secret(&conn)),
             );
+            // Build the actual snapshot so the shared view renders content.
+            // Previously the CLI sent only the id stub → teammates saw "No
+            // seats in the snapshot". War-rooms first (the multi-seat reviews);
+            // sessions/chats can follow the same pattern.
+            if url_kind == "war-rooms" {
+                if let Ok(snap) = build_war_room_snapshot(&conn, resource_id) {
+                    map.insert("snapshot".into(), snap);
+                }
+            }
         }
     }
 

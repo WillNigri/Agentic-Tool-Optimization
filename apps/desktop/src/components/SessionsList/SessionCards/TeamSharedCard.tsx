@@ -94,7 +94,7 @@ export function TeamSharedCard({ session: s, onOpen }: Props) {
             <span className="text-cs-text font-mono">{s.sharedTeamName}</span>
           </span>
         )}
-        <span>read-only · opens a placeholder until #6 lands the full view</span>
+        <span>read-only · click to view the shared snapshot</span>
       </div>
       {s.summary && (
         <div className="mt-2 text-xs text-cs-muted line-clamp-2">
