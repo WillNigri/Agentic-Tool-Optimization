@@ -109,11 +109,11 @@ fn read_active_key(db_path: &Path, provider: &str) -> Result<String> {
 }
 
 /// Per-runtime auth-mode preference, stored in `settings` as
-/// `runtime_auth_mode.<runtime>`. "subscription" forces the
-/// subscription path even when a key is configured; "api_key" forces
-/// the API-key path (and errors if no key is found). Absent rows fall
-/// back to "if key exists, use it" — matches behavior before this
-/// preference existed so existing installs see no change on upgrade.
+/// `runtime_auth_mode.<runtime>`. "api_key" injects the stored provider
+/// key into the runtime subprocess (real API billing); anything else —
+/// "subscription" OR an absent row — uses the CLI's subscription and does
+/// NOT inject a key. Default-subscription is deliberate: auto-injecting a
+/// stored key silently bills API credits (see byok_env_value).
 fn read_auth_mode_setting(db_path: &Path, runtime_name: &str) -> Option<String> {
     let conn = crate::db::open_readonly(db_path).ok()?;
     conn.query_row(
@@ -135,11 +135,17 @@ fn read_auth_mode_setting(db_path: &Path, runtime_name: &str) -> Option<String> 
 /// execution_logs.error_message.
 pub fn byok_env_value(db_path: &Path, runtime_name: &str) -> Option<(&'static str, String)> {
     let (env_var, provider_slug) = runtime_byok_env(runtime_name)?;
-    // User-chosen auth mode wins over the implicit "key configured →
-    // use key" default. "subscription" means "even if I have a key
-    // stored, use the OAuth subscription credentials" — useful when
-    // the user has both and wants to save the key for emergencies.
-    if read_auth_mode_setting(db_path, runtime_name).as_deref() == Some("subscription") {
+    // DEFAULT = subscription. claude/codex/gemini are CLI runtimes with their
+    // own subscription auth; a key stored in ATO is for api-provider dispatch
+    // (`ato dispatch openai …`), NOT for hijacking the CLI's subscription.
+    // The old default ("if a key is stored, inject it") silently billed API
+    // credits the moment a user added an Anthropic/OpenAI key — a money
+    // footgun (2026-06-18, Will hit it on alo.bot war-rooms). Only inject the
+    // stored key when the user EXPLICITLY opts into api_key mode
+    // (`ato runtimes auth-mode <runtime> api`). If the user exports the env
+    // var themselves, the subprocess inherits it naturally (we return None and
+    // don't re-apply), so that escape hatch still works.
+    if read_auth_mode_setting(db_path, runtime_name).as_deref() != Some("api_key") {
         return None;
     }
     if std::env::var(env_var)
@@ -150,6 +156,26 @@ pub fn byok_env_value(db_path: &Path, runtime_name: &str) -> Option<(&'static st
     }
     let key = read_active_key(db_path, provider_slug).ok()?;
     Some((env_var, key))
+}
+
+/// The auth mode a dispatch will ACTUALLY use, for honest labeling:
+///   "api_key"      — the stored key will be injected (api_key mode), OR the
+///                    env var is already exported (subprocess inherits it →
+///                    real API billing even though ATO doesn't inject it).
+///   "subscription" — runtime supports BYOK but neither of the above applies.
+///   None           — runtime has no BYOK mapping (hermes / openclaw).
+/// Mirrors the desktop's effective_auth_mode_from_path so both surfaces label
+/// billing identically.
+pub fn resolve_auth_mode(db_path: &Path, runtime_name: &str) -> Option<&'static str> {
+    let (env_var, _) = runtime_byok_env(runtime_name)?;
+    let env_present = std::env::var(env_var)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if env_present || byok_env_value(db_path, runtime_name).is_some() {
+        Some("api_key")
+    } else {
+        Some("subscription")
+    }
 }
 
 /// Convenience: set the env var if BYOK applies. Most callers want

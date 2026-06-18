@@ -631,7 +631,25 @@ pub struct DispatchResult {
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
     pub cost_usd_estimated: Option<f64>,
+    /// How this dispatch authenticated: "subscription" (CLI login, no API
+    /// billing — cost_usd_estimated is an ESTIMATE only, not a real charge),
+    /// "api_key" (real provider API billing), or None for runtimes without
+    /// the concept (hermes/openclaw). Surfaced so an agent can SEE whether it
+    /// is spending real money. See byok::byok_env_value + `ato runtimes
+    /// auth-mode`.
+    pub auth_mode: Option<String>,
+    /// Human one-liner derived from auth_mode for at-a-glance visibility.
+    pub billing: String,
     pub created_at: String,
+}
+
+/// Map an auth_mode to a short, unmistakable billing label.
+pub fn billing_label(auth_mode: Option<&str>) -> String {
+    match auth_mode {
+        Some("api_key") => "API KEY — real API billing".to_string(),
+        Some("subscription") => "subscription — no API billing".to_string(),
+        _ => "n/a".to_string(),
+    }
 }
 
 /// PR 14 (2026-05-18) — tag a freshly-inserted execution_log row
@@ -1567,13 +1585,9 @@ pub fn run(
     // credit pool after 2026-06-15). hermes/openclaw have no BYOK
     // concept at all — emit None so they don't pollute the
     // subscription bucket in the credit-burn meter. (claude #2)
-    let auth_mode: Option<&str> = if byok_applied_key.is_some() {
-        Some("api_key")
-    } else if crate::byok::runtime_supports_byok(runtime_name) {
-        Some("subscription")
-    } else {
-        None
-    };
+    // Honest label: resolve_auth_mode counts an exported env key as api_key
+    // even though we didn't inject it (the subprocess inherits it).
+    let auth_mode: Option<&str> = crate::byok::resolve_auth_mode(db_path, runtime_name);
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -1736,19 +1750,26 @@ pub fn run(
         tokens_in,
         tokens_out,
         cost_usd_estimated: cost_usd,
+        auth_mode: auth_mode.map(|s| s.to_string()),
+        billing: billing_label(auth_mode),
         created_at: now,
     };
 
     if opts.human {
-        let cost = result
-            .cost_usd_estimated
-            .map(|c| format!("${:.4}", c))
-            .unwrap_or_else(|| "—".to_string());
+        // Show the billing source FIRST + frame the cost honestly: on a
+        // subscription the dollar figure is an estimate, not a charge.
+        let cost = match (result.auth_mode.as_deref(), result.cost_usd_estimated) {
+            (Some("api_key"), Some(c)) => format!("${:.4} real", c),
+            (Some("subscription"), Some(c)) => format!("~${:.4} est (subscription, $0 real)", c),
+            (_, Some(c)) => format!("${:.4}", c),
+            (_, None) => "—".to_string(),
+        };
         let head = format!(
-            "[{}] {} {} ({}ms, {}, {})",
+            "[{}] {} {} · {} ({}ms, {}, {})",
             result.status,
             result.runtime,
             result.model.as_deref().unwrap_or("?"),
+            result.billing,
             result.duration_ms,
             &result.id[..8.min(result.id.len())],
             cost
@@ -1987,6 +2008,19 @@ mod truncate_tests {
         let s = format!("{}💥💥💥", prefix);
         let out = truncate(&s);
         assert!(out.ends_with("…[truncated]"));
+    }
+}
+
+#[cfg(test)]
+mod billing_label_tests {
+    use super::billing_label;
+
+    #[test]
+    fn labels_are_unmistakable() {
+        assert_eq!(billing_label(Some("api_key")), "API KEY — real API billing");
+        assert_eq!(billing_label(Some("subscription")), "subscription — no API billing");
+        assert_eq!(billing_label(None), "n/a");
+        assert_eq!(billing_label(Some("weird")), "n/a");
     }
 }
 
@@ -2741,6 +2775,9 @@ fn run_api(
         tokens_in,
         tokens_out,
         cost_usd_estimated: cost_usd,
+        // API-provider dispatch always bills the provider key (real cost).
+        auth_mode: Some(auth_mode.to_string()),
+        billing: billing_label(Some(auth_mode)),
         created_at: now,
     };
 
@@ -2751,13 +2788,21 @@ fn run_api(
         let done = serde_json::json!({"type": "done", "result": result});
         println!("{}", done);
     } else if opts.human {
+        // API-provider dispatch ALWAYS bills the provider key (real cost) —
+        // the old hardcoded "subscription" label here was wrong.
+        let cost = result
+            .cost_usd_estimated
+            .map(|c| format!("${:.4} real", c))
+            .unwrap_or_else(|| "—".to_string());
         let head = format!(
-            "[{}] {} {} ({}ms, {}, subscription)",
+            "[{}] {} {} · {} ({}ms, {}, {})",
             result.status,
             result.runtime,
             result.model.as_deref().unwrap_or("?"),
+            result.billing,
             result.duration_ms,
             &result.id[..8.min(result.id.len())],
+            cost,
         );
         emit_human(&head);
         if let Some(r) = &result.response {
@@ -2877,13 +2922,7 @@ fn run_remote(
     // SSH command. For runtimes outside the BYOK map (hermes /
     // openclaw) this stays None — those aren't credit-burn relevant
     // and shouldn't pollute the subscription bucket. (claude #2)
-    let auth_mode: Option<&str> = if applied_byok_key.is_some() {
-        Some("api_key")
-    } else if crate::byok::runtime_supports_byok(&remote.runtime) {
-        Some("subscription")
-    } else {
-        None
-    };
+    let auth_mode: Option<&str> = crate::byok::resolve_auth_mode(db_path, &remote.runtime);
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -2947,15 +2986,18 @@ fn run_remote(
         tokens_in,
         tokens_out,
         cost_usd_estimated: cost_usd,
+        auth_mode: auth_mode.map(|s| s.to_string()),
+        billing: billing_label(auth_mode),
         created_at: now,
     };
 
     if opts.human {
         let head = format!(
-            "[{}] {} (ssh→{}) model={} dur={}ms id={}",
+            "[{}] {} (ssh→{}) · {} model={} dur={}ms id={}",
             result.status,
             result.runtime,
             remote.host,
+            result.billing,
             result.model.as_deref().unwrap_or("?"),
             result.duration_ms,
             &result.id[..8.min(result.id.len())],

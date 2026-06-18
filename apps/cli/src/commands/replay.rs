@@ -375,6 +375,15 @@ fn run_replay_dispatch(
         ],
     )?;
 
+    // Mirror the dispatch auth-mode derivation so the replay result also
+    // makes the billing source visible.
+    let auth_mode: Option<&str> = if byok_applied_key.is_some() {
+        Some("api_key")
+    } else if crate::byok::runtime_supports_byok(runtime_name) {
+        Some("subscription")
+    } else {
+        None
+    };
     Ok(dispatch::DispatchResult {
         id,
         runtime: runtime_name.to_string(),
@@ -386,6 +395,8 @@ fn run_replay_dispatch(
         tokens_in,
         tokens_out,
         cost_usd_estimated: cost_usd,
+        auth_mode: auth_mode.map(|s| s.to_string()),
+        billing: dispatch::billing_label(auth_mode),
         created_at: now,
     })
 }

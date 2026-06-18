@@ -379,10 +379,10 @@ pub async fn prompt_claude(prompt: String) -> Result<String, String> {
         "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code".to_string()
     })?;
 
-    // Run claude with --print flag. After 2026-06-15 this counts against
-    // the Agent SDK credit (programmatic) instead of subscription unless
-    // the user has stored an Anthropic API key — in which case BYOK
-    // forwards ANTHROPIC_API_KEY and Anthropic bills the key directly.
+    // Run claude with --print flag on the SUBSCRIPTION by default. BYOK only
+    // forwards ANTHROPIC_API_KEY (→ Anthropic bills the key directly) when the
+    // user explicitly chose api_key mode — NOT merely because a key is stored.
+    // The old "stored key ⇒ API billing" default was a money footgun (2026-06-18).
     // Use the user's full PATH so claude can find node, npm, etc.
     let user_path = get_user_path();
     let mut cmd = Command::new(&claude_path);
