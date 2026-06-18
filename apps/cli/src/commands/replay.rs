@@ -375,15 +375,10 @@ fn run_replay_dispatch(
         ],
     )?;
 
-    // Mirror the dispatch auth-mode derivation so the replay result also
-    // makes the billing source visible.
-    let auth_mode: Option<&str> = if byok_applied_key.is_some() {
-        Some("api_key")
-    } else if crate::byok::runtime_supports_byok(runtime_name) {
-        Some("subscription")
-    } else {
-        None
-    };
+    // Route through resolve_auth_mode (like the local/remote dispatch sites)
+    // so an exported env key is honestly labeled api_key here too — the manual
+    // byok_applied_key derivation missed the env-var escape hatch (claude R2).
+    let auth_mode: Option<&str> = crate::byok::resolve_auth_mode(db_path, runtime_name);
     Ok(dispatch::DispatchResult {
         id,
         runtime: runtime_name.to_string(),
