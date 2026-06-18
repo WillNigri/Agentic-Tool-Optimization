@@ -277,7 +277,58 @@ fn run_members(team: String, opts: &Opts) -> Result<()> {
         .bearer_auth(&token)
         .send()
         .context("Failed to call GET /api/teams/.../members")?;
-    handle_list_response(resp, opts, "member")
+    handle_members_response(resp, opts)
+}
+
+/// Render a team's members. Distinct from `handle_list_response` (which is
+/// for SHARED RESOURCES: slug / display_name / shared_by_email). A member row
+/// is `{ role, joined_at, invited_by, user: { email, name } }` — using the
+/// shared-resource renderer printed every field as `?` ("? (?) — by ? at ?").
+/// JSON output is unchanged (the nested `user.email`/`user.name` is already
+/// present, so agents reading `--json` get identities directly).
+fn handle_members_response(resp: reqwest::blocking::Response, opts: &Opts) -> Result<()> {
+    let status = resp.status();
+    let body: Value = resp.json().unwrap_or(serde_json::json!({}));
+    if !is_success(status, &body) {
+        return handle_response_error(status, &body, opts);
+    }
+    let payload = body.get("data").cloned().unwrap_or_else(|| body.clone());
+    let arr = match payload.as_array() {
+        Some(a) => a,
+        None => {
+            let preview: String = payload.to_string().chars().take(256).collect();
+            eprintln!("[malformed-response] expected an array under `data`; body: {}", preview);
+            std::process::exit(1);
+        }
+    };
+    if !opts.human {
+        emit_json(&payload)?;
+        return Ok(());
+    }
+    if arr.is_empty() {
+        emit_human("No members in this team.");
+        return Ok(());
+    }
+    emit_human(&format!("Members ({}):", arr.len()));
+    for row in arr {
+        // email/name live under the nested `user` object; fall back to a
+        // flattened shape just in case the endpoint changes.
+        let email = row
+            .pointer("/user/email")
+            .or_else(|| row.get("email"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let name = row
+            .pointer("/user/name")
+            .or_else(|| row.get("name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(email);
+        let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("member");
+        let joined = row.get("joined_at").and_then(|v| v.as_str()).unwrap_or("?");
+        emit_human(&format!("  • {} <{}> — {} (joined {})", name, email, role, joined));
+    }
+    Ok(())
 }
 
 fn run_remove_member(team: String, user_id: String, opts: &Opts) -> Result<()> {
