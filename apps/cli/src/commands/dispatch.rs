@@ -1448,6 +1448,24 @@ pub fn run(
     // user-visible response and `.session_id` for sticky tracking.
     // For other runtimes (or no --session), stdout is the model
     // text directly.
+    // Populated when the claude stream-json path is parsed below, so the
+    // grounding tool-call receipt is written deterministically at insert time
+    // (rather than relying solely on the post-hoc reparse, which can't run on
+    // the clean text we now persist). Codex review of the stream-json fix.
+    let mut claude_tool_calls_json: Option<String> = None;
+    let mut claude_tool_calls_count: i64 = 0;
+
+    // Authoritative signal that claude was actually invoked with
+    // --output-format stream-json (must mirror the command-construction
+    // condition above). Gating on this — not just a stdout sniff — avoids
+    // misparsing a plain-text claude reply that merely happens to start with
+    // a JSON object (codex review). The sniff stays as a secondary guard.
+    let claude_stream_json_requested = std::env::var("ATO_CLAUDE_STREAM_JSON")
+        .ok()
+        .as_deref()
+        == Some("1")
+        && session.is_none();
+
     let (extracted_response, captured_runtime_session_id) = if session.is_some()
         && runtime_name == "claude"
         && output.status.success()
@@ -1460,6 +1478,33 @@ pub fn run(
             }
             Err(_) => (response_text.clone(), None),
         }
+    } else if runtime_name == "claude"
+        && output.status.success()
+        && claude_stream_json_requested
+        && looks_like_claude_stream_json(&response_text)
+    {
+        // Grounding / --require-tools path uses --output-format stream-json
+        // (NDJSON) with no --session. Without parsing, the RAW stream (every
+        // tool_use + tool_result, often huge) was stored and truncate()'s
+        // 64 KB cap chopped the END — exactly where claude's final `result`
+        // event (the verdict) lives, so only the preamble survived. Parse the
+        // stream HERE to the clean final text + tool calls so both the
+        // emitted result AND the stored row are correct, and the grounding
+        // verdict (which reads tool_calls_summary) works without depending on
+        // the post-hoc reparse re-reading a now-clean response. The reparse
+        // (main.rs) then harmlessly no-ops on the clean text. Falls back to
+        // raw if the stream had no result event (interrupted dispatch).
+        let parsed = crate::grounding::parse_claude_stream_json(&response_text);
+        if !parsed.tool_calls.is_empty() {
+            claude_tool_calls_json = serde_json::to_string(&parsed.tool_calls).ok();
+            claude_tool_calls_count = parsed.tool_calls.len() as i64;
+        }
+        let clean = if parsed.response_text.trim().is_empty() {
+            response_text.clone()
+        } else {
+            parsed.response_text
+        };
+        (clean, None)
     } else {
         (response_text.clone(), None)
     };
@@ -1563,6 +1608,16 @@ pub fn run(
             machine_id_val,
         ],
     ).context("Failed to write execution_logs row")?;
+    // Claude stream-json: persist the tool-call receipt parsed above, so the
+    // grounding verdict sees populated tool_calls_summary even though the
+    // stored `response` is now the clean final text (not the raw stream the
+    // post-hoc reparse used to read). Best-effort.
+    if let Some(summary) = &claude_tool_calls_json {
+        let _ = conn.execute(
+            "UPDATE execution_logs SET tool_calls_summary = ?1, tool_calls_count = ?2 WHERE id = ?3",
+            rusqlite::params![summary, claude_tool_calls_count, id],
+        );
+    }
     // v2.17 git provenance — stamp the git HEAD SHA captured at run()
     // entry. Best-effort: silent failures, never blocks the dispatch.
     stamp_git_head(&conn, &id, git_commit_sha.as_deref());
@@ -1875,6 +1930,23 @@ pub fn cli_slug_to_api_slug(slug: &str) -> &str {
 /// and fixed it; the same pattern existed here. Walk char_indices()
 /// and slice on the largest UTF-8 boundary ≤ MAX so any non-ASCII
 /// (emoji, accented Latin, CJK) near the 64KB mark doesn't crash.
+/// Heuristic: does this stdout look like claude `--output-format stream-json`
+/// (NDJSON, one JSON event per line, each with a `"type"` field)? Used to
+/// decide whether to run the stream parser before persisting the response.
+fn looks_like_claude_stream_json(s: &str) -> bool {
+    let first = s.lines().map(str::trim).find(|l| !l.is_empty());
+    match first {
+        Some(line) => {
+            line.starts_with('{')
+                && serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|_| ()))
+                    .is_some()
+        }
+        None => false,
+    }
+}
+
 fn truncate(s: &str) -> String {
     const MAX: usize = 64 * 1024;
     if s.len() <= MAX {
@@ -1915,6 +1987,40 @@ mod truncate_tests {
         let s = format!("{}💥💥💥", prefix);
         let out = truncate(&s);
         assert!(out.ends_with("…[truncated]"));
+    }
+}
+
+#[cfg(test)]
+mod claude_stream_sniff_tests {
+    use super::looks_like_claude_stream_json;
+
+    #[test]
+    fn detects_stream_json() {
+        let s = "{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"result\",\"result\":\"hi\"}";
+        assert!(looks_like_claude_stream_json(s));
+    }
+
+    #[test]
+    fn detects_with_leading_blank_lines() {
+        let s = "\n  \n{\"type\":\"assistant\",\"message\":{\"content\":[]}}";
+        assert!(looks_like_claude_stream_json(s));
+    }
+
+    #[test]
+    fn rejects_plain_text() {
+        assert!(!looks_like_claude_stream_json("VERDICT: ACCEPT\nlooks good"));
+    }
+
+    #[test]
+    fn rejects_session_json_envelope() {
+        // single JSON object WITHOUT a top-level "type" (the --output-format
+        // json envelope) is handled by the session branch, not the stream path
+        assert!(!looks_like_claude_stream_json("{\"result\":\"x\",\"session_id\":\"s\"}"));
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(!looks_like_claude_stream_json(""));
     }
 }
 
