@@ -17,7 +17,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   MessagesSquare,
-  ArrowLeft,
   Bot,
   User as UserIcon,
   Loader2,
@@ -26,7 +25,6 @@ import {
   Send,
   GitBranch,
   X,
-  Lock,
   Unlock,
   Tag,
   Search,
@@ -56,6 +54,9 @@ import {
   SessionCard,
   TeamSharedCard,
 } from "./SessionCards";
+import SharedDetailView, {
+  type SharedResourceKind,
+} from "@/components/TeamWorkspaces/SharedDetailView";
 // teamfilter (#1) — cloud-shared rows. getTeams returns the teams the
 // user belongs to (or throws for free/unauthenticated tiers — we swallow
 // that so the merge is a no-op); the three getShared* calls return the
@@ -610,41 +611,25 @@ export default function SessionsList() {
       />
     );
   }
-  // teamfilter (#1) — placeholder read-only view for a cloud-shared row.
-  // #6 replaces this with the real cross-machine transcript; until then we
-  // confirm the routing works (synthetic id decodes to team + original id)
-  // without pretending to render content we haven't fetched.
+  // teamfilter — render the real cross-machine transcript for a cloud-shared
+  // row. The cloud detail endpoint now returns the snapshot (ato-cloud #29),
+  // so SharedDetailView replaces the old read-only placeholder. id shape:
+  // `shared:<teamId>:<originalId>`; `war_room` → `war-room` for the
+  // SharedResourceKind contract.
   if (openSelection?.kind === "team_shared") {
-    // id shape: `shared:<teamId>:<originalId>`
-    const [, teamId, ...rest] = openSelection.id.split(":");
+    const [, sharedTeamId, ...rest] = openSelection.id.split(":");
     const originalId = rest.join(":");
+    const resourceKind: SharedResourceKind =
+      openSelection.sharedKind === "war_room"
+        ? "war-room"
+        : openSelection.sharedKind;
     return (
-      <div className="space-y-4">
-        <button
-          onClick={() => setOpenSelection(null)}
-          className="flex items-center gap-2 text-sm text-cs-muted hover:text-cs-text"
-        >
-          <ArrowLeft size={16} /> Back
-        </button>
-        <div className="border border-cs-border rounded-lg p-6 text-center">
-          <Lock size={32} className="mx-auto mb-3 text-cs-accent opacity-70" />
-          <p className="text-cs-text font-medium">
-            Shared {openSelection.sharedKind.replace("_", " ")} — read-only
-          </p>
-          <p className="text-sm text-cs-muted mt-2 max-w-md mx-auto">
-            The full cross-machine transcript view lands in a follow-up. For
-            now this confirms the routing: team{" "}
-            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text font-mono">
-              {teamId}
-            </code>
-            , original id{" "}
-            <code className="bg-cs-card px-1.5 py-0.5 rounded text-cs-text font-mono">
-              {originalId}
-            </code>
-            .
-          </p>
-        </div>
-      </div>
+      <SharedDetailView
+        resourceKind={resourceKind}
+        teamId={sharedTeamId}
+        resourceId={originalId}
+        onBack={() => setOpenSelection(null)}
+      />
     );
   }
 
