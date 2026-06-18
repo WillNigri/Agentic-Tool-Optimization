@@ -7,9 +7,10 @@
 // terminal-friendly view.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
+mod agent_errors;
 mod api_dispatch;
 mod api_dispatch_tools;
 mod byok;
@@ -537,6 +538,10 @@ enum Commands {
         #[command(subcommand)]
         sub: ObserveSub,
     },
+    /// Print the full command tree as JSON (every command, subcommand,
+    /// required arg + type) so an agent can introspect the exact surface
+    /// instead of guessing invocations. JSON by default; `--human` is ignored.
+    Schema,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1417,7 +1422,19 @@ fn parse_non_empty_string(s: &str) -> std::result::Result<String, String> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Agent-robust parsing: on a usage error, emit a structured JSON envelope
+    // (available subcommands / required args / example) instead of clap's
+    // human prose, so an agent self-corrects in one retry. See agent_errors.
+    // args_os + lossy: std::env::args() panics on non-UTF-8 args (e.g. an
+    // odd file path); we only need these for the error heuristic, so lossy is
+    // fine. Cli::try_parse() reads args_os itself, so real parsing is exact.
+    let raw_args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => agent_errors::handle_parse_error(e, &raw_args, Cli::command()),
+    };
 
     let db_path = cli.db.clone().unwrap_or_else(db::default_db_path);
 
@@ -1434,6 +1451,10 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
+        Commands::Schema => {
+            output::emit_json(&agent_errors::command_schema_json(&Cli::command()))?;
+            return Ok(());
+        }
         Commands::Auth(args) => {
             commands::auth::run(args);
             return Ok(());
