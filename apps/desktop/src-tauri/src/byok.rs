@@ -74,8 +74,12 @@ fn read_auth_mode(conn: &Connection, runtime_name: &str) -> Option<String> {
 /// stored).
 pub fn byok_env_value(conn: &Connection, runtime_name: &str) -> Option<(&'static str, String)> {
     let (env_var, provider_slug) = runtime_byok_env(runtime_name)?;
-    // User-chosen subscription mode wins over key-presence.
-    if read_auth_mode(conn, runtime_name).as_deref() == Some("subscription") {
+    // DEFAULT = subscription (mirrors apps/cli/src/byok.rs). Inject the stored
+    // key ONLY when the user explicitly chose api_key mode. The old "inject if
+    // a key is stored" default silently billed API credits the moment a user
+    // added a key — a money footgun (2026-06-18). Keep the CLI + desktop
+    // surfaces in lockstep or the GUI bills while the CLI doesn't.
+    if read_auth_mode(conn, runtime_name).as_deref() != Some("api_key") {
         return None;
     }
     if std::env::var(env_var)
@@ -175,10 +179,14 @@ pub fn effective_auth_mode_from_path(
     db_path: &std::path::Path,
     runtime_name: &str,
 ) -> Option<&'static str> {
-    if runtime_byok_env(runtime_name).is_none() {
-        return None;
-    }
-    if byok_env_value_from_path(db_path, runtime_name).is_some() {
+    let (env_var, _) = runtime_byok_env(runtime_name)?; // None for hermes/openclaw
+    // Honesty: an exported env key (e.g. ANTHROPIC_API_KEY) makes the
+    // subprocess bill API even though ATO doesn't inject it (natural
+    // inheritance), so label it api_key — don't claim "subscription / $0".
+    let env_present = std::env::var(env_var)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if env_present || byok_env_value_from_path(db_path, runtime_name).is_some() {
         Some("api_key")
     } else {
         Some("subscription")

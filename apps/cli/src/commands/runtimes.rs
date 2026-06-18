@@ -46,6 +46,75 @@ pub struct HealthRow {
     pub fix_command: Option<String>,
 }
 
+/// Show or set whether a CLI runtime dispatches on its subscription
+/// (default — no API billing) or the stored API key (`runtime_auth_mode.
+/// <runtime>` in settings). See byok::byok_env_value for how this is read.
+pub fn run_auth_mode(
+    db_path: &PathBuf,
+    runtime: &str,
+    mode: Option<&str>,
+    opts: &Opts,
+) -> Result<()> {
+    // Only the three CLI runtimes have a subscription-vs-key choice.
+    if !matches!(runtime, "claude" | "codex" | "gemini") {
+        anyhow::bail!(
+            "auth-mode applies to claude / codex / gemini (CLI runtimes with a subscription); '{}' has no such choice",
+            runtime
+        );
+    }
+    let key = format!("runtime_auth_mode.{}", runtime);
+
+    match mode {
+        None => {
+            // Show current (absent = subscription default).
+            let conn = crate::db::open_readonly(db_path)?;
+            let current: String = conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [&key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap_or_else(|_| "subscription".to_string());
+            if opts.human {
+                emit_human(&format!("{} auth mode: {} (default is subscription)", runtime, current));
+            } else {
+                emit_json(&serde_json::json!({
+                    "runtime": runtime,
+                    "auth_mode": current,
+                    "is_default": conn.query_row("SELECT 1 FROM settings WHERE key = ?1", [&key], |_| Ok(())).is_err(),
+                }))?;
+            }
+            Ok(())
+        }
+        Some(raw) => {
+            // Normalize: subscription | sub → subscription; api | api_key | key → api_key.
+            let normalized = match raw.to_lowercase().as_str() {
+                "subscription" | "sub" => "subscription",
+                "api" | "api_key" | "key" => "api_key",
+                other => anyhow::bail!(
+                    "invalid mode '{}'. Use 'subscription' (CLI login, no API billing) or 'api' (bill your stored API key)",
+                    other
+                ),
+            };
+            let conn = crate::db::open_readwrite(db_path)?;
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, normalized],
+            )?;
+            if opts.human {
+                let note = if normalized == "api_key" {
+                    " — dispatches will bill your stored API key (real cost)"
+                } else {
+                    " — dispatches use the CLI subscription (no API billing)"
+                };
+                emit_human(&format!("Set {} auth mode to {}{}", runtime, normalized, note));
+            } else {
+                emit_json(&serde_json::json!({ "runtime": runtime, "auth_mode": normalized }))?;
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn run_health_check(opts: &Opts) -> Result<()> {
     let rows: Vec<HealthRow> = RUNTIMES.iter().map(|r| check_one(r)).collect();
     if opts.human {

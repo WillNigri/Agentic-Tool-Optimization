@@ -1026,6 +1026,20 @@ enum RuntimesSub {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Choose whether a CLI runtime (claude / codex / gemini) dispatches on
+    /// its SUBSCRIPTION (default — no API billing) or your stored API KEY
+    /// (real API billing). With no <mode>, prints the current setting.
+    ///
+    ///   ato runtimes auth-mode claude               # show current
+    ///   ato runtimes auth-mode claude subscription  # use the CLI subscription
+    ///   ato runtimes auth-mode claude api           # bill API credits
+    #[command(name = "auth-mode")]
+    AuthMode {
+        /// Runtime: claude | codex | gemini.
+        runtime: String,
+        /// subscription | api  (omit to show the current setting).
+        mode: Option<String>,
+    },
     /// Register a remote machine that runs a runtime CLI. Once added,
     /// `ato dispatch <slug> "..."` routes over SSH instead of spawning
     /// a local binary. Phase 6.x-J — laptop ↔ server bridging.
@@ -2529,6 +2543,9 @@ fn main() -> Result<()> {
                     output::emit_json(&serde_json::json!({ "slug": name, "deleted": n }))?;
                 }
                 Ok(())
+            }
+            RuntimesSub::AuthMode { runtime, mode } => {
+                commands::runtimes::run_auth_mode(&db_path, &runtime, mode.as_deref(), &opts)
             }
         },
         Commands::Agents { sub } => {
