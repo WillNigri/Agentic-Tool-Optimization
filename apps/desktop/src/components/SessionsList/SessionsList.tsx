@@ -249,11 +249,15 @@ function teamSharedRow(args: {
     null;
 
   // FIX 4 — resolve runtimesUsed from seat_runtimes (war-rooms).
-  // Filter falsy entries so empty strings from the backend don't render
-  // as blank badges. For sessions/chats, fall back to [] so other card
-  // variants are unaffected.
-  const runtimesUsed: string[] =
-    Array.isArray(seatRuntimes) ? seatRuntimes.filter(Boolean) : [];
+  // Filter falsy entries, then DEDUPE: seat_runtimes lists every seat-round
+  // (e.g. 48 rows: claude/codex/google repeated), but the traditional
+  // WarRoomCard shows DISTINCT runtimes ("3 seats · Claude Codex Google")
+  // since participantCount = runtimesUsed.length. De-duplicating keeps the
+  // shared card at parity with the local card. For sessions/chats, [] so
+  // other card variants are unaffected.
+  const runtimesUsed: string[] = Array.isArray(seatRuntimes)
+    ? [...new Set(seatRuntimes.filter(Boolean))]
+    : [];
 
   // FIX 4 — turnCount: use backend value when present; for chats leave
   // it 0/undefined so the ChatCard omits the "N msgs" counter rather
