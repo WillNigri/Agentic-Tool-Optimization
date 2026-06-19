@@ -4,6 +4,27 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.8] — 2026-06-19
+
+### Added
+- **Google-Drive-style unified team-shared cards.** A shared war-room / session /
+  quick-chat now renders through the **same rich card** as a local one (full
+  title, summary, tags, coordinator, distinct seat count + runtime badges, and a
+  `👥 TEAM` badge + "shared by" + member avatars) instead of a sparse
+  "untitled · read-only" card. The owner sees **one** card (their local card,
+  team-badged) rather than a duplicate; recipients see the same rich card built
+  from the cloud snapshot. Dedupe is status-aware so a shared (closed) snapshot
+  still shows even when the local copy is still open. The sharer name + seat
+  data are resolved server-side (closed repo) to keep the OSS client thin.
+
+### Fixed
+- **Real-time team participation now works end-to-end** (cloud). Recovered the
+  append-event + live-WS-push loop and fixed three latent cross-service bugs
+  (migration FK to a dropped table, gateway presence-token route shadowing, and
+  the auth `x-user-id` header mapping) that had kept it from ever functioning.
+  Append a turn on one machine → it appears live on every teammate's machine,
+  both directions.
+
 ## [2.18.3] — 2026-06-17
 
 ### Added
