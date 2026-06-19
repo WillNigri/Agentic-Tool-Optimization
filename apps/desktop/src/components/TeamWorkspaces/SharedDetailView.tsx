@@ -589,13 +589,21 @@ interface SnapshotSeat {
   prompt?: string | null;
   response?: string | null;
   error_message?: string | null;
+  // The CLI producer (build_war_room_snapshot) emits snake_case created_at;
+  // the desktop producer (buildWarRoomSnapshot) historically emitted camelCase
+  // createdAt. Accept both so snapshots from either source render timestamps.
   created_at?: string | null;
+  createdAt?: string | null;
   duration_ms?: number | null;
   tokens_in?: number | null;
   tokens_out?: number | null;
   cost_usd_estimated?: number | null;
   war_room_round?: number | null;
   auth_mode?: string | null;
+  // Initiator metadata — only the desktop producer includes these today.
+  initiator_kind?: string | null;
+  client_surface?: string | null;
+  initiator_id?: string | null;
 }
 
 function SharedWarRoomBody({ data }: { data: SharedWarRoomDetail }) {
@@ -618,13 +626,16 @@ function SharedWarRoomBody({ data }: { data: SharedWarRoomDetail }) {
     prompt: s.prompt ?? null,
     response: s.response ?? null,
     errorMessage: s.error_message ?? null,
-    createdAt: s.created_at ?? null,
+    createdAt: s.created_at ?? s.createdAt ?? null,
     durationMs: s.duration_ms ?? null,
     tokensIn: s.tokens_in ?? null,
     tokensOut: s.tokens_out ?? null,
     costUsdEstimated: s.cost_usd_estimated ?? null,
     warRoomRound: s.war_room_round ?? null,
     authMode: s.auth_mode ?? null,
+    initiatorKind: s.initiator_kind ?? null,
+    clientSurface: s.client_surface ?? null,
+    initiatorId: s.initiator_id ?? null,
   }));
 
   return (
