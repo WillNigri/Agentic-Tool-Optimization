@@ -123,6 +123,85 @@ Loop steps of kind `dispatch` (and `review`, `war_room`, etc.) write a `loop_run
 6. **Receipt surface in loop_run_steps** — the `tool_calls_summary` should be visible in `ato loop runs show` as a per-step badge. Today the runtime captures `execution_log_id` but the human renderer doesn't follow the FK.
 7. **Update the `ato-warroom` skill** — the current SKILL.md (in `ato-cloud/.claude/skills/ato-warroom/`) tells agents that "API-only providers can only reason from what's in the prompt." That sentence shipped before v2.9 grounded mode and is now wrong. Replace with a reference to this playbook.
 
+## Team sharing & real-time participation (v2.18.7, Team tier)
+
+If you are operating inside a Team workspace you can share any war-room, session, or chat with your team and then have every teammate's machine receive live updates as new turns are appended — no refresh, both directions.
+
+### What "share" means
+
+- A shared item renders in every teammate's Sessions feed (Team filter) as the **same rich card** as a local one — title, summary, tags, coordinator, seats, runtime badges — plus a 👥 TEAM badge and "shared by <name>". The owner sees one card, not a duplicate.
+- Appending a turn to a shared item (via CLI or the UI) immediately pushes the update live to all connected members via HTTP → Postgres NOTIFY → WebSocket.
+- Requires **Team tier** and a signed-in prod binary (`ato login`). Always shell through `/Applications/ATO.app/Contents/MacOS/ato` — not the PATH-resolved dev build — so the keychain auth is available.
+
+### CLI commands
+
+**Share a war-room / session / chat into a team:**
+
+```bash
+PROD_ATO=/Applications/ATO.app/Contents/MacOS/ato
+
+"$PROD_ATO" war-rooms share <id> --team <slug>
+"$PROD_ATO" sessions  share <id> --team <slug>
+"$PROD_ATO" chats     share <id> --team <slug>
+```
+
+Each command builds a full snapshot so the card renders identically to a UI share.
+
+**Inspect and remove shares:**
+
+```bash
+"$PROD_ATO" war-rooms list-shared --team <slug>
+"$PROD_ATO" war-rooms unshare <id> --team <slug>
+```
+
+**Append a turn programmatically (appears live for all teammates):**
+
+```bash
+"$PROD_ATO" war-rooms append-event <id> --team <slug> \
+    --kind dispatch_result \
+    --json '{"seat":"claude","summary":"Recommends the migration. Receipts attached."}'
+```
+
+`--kind` accepts the same event kinds used internally (e.g. `dispatch_result`, `close_summary`). The payload in `--json` is free-form but should match the kind's expected shape so the desktop card renders it correctly.
+
+### Typical agent workflow
+
+```bash
+PROD_ATO=/Applications/ATO.app/Contents/MacOS/ato
+WR=$(uuidgen)
+
+# 1. Run the war-room as usual.
+"$PROD_ATO" dispatch claude --war-room-id "$WR" --human "scope the migration risk"
+"$PROD_ATO" dispatch codex  --war-room-id "$WR" --human "scope the migration risk"
+
+# 2. Close with a coordinator summary (subscription preferred, API key fallback).
+"$PROD_ATO" war-rooms close "$WR" --coordinator claude --human
+
+# 3. Share into the team so everyone sees the rich card live.
+"$PROD_ATO" war-rooms share "$WR" --team my-team
+
+# 4. Append a follow-up turn — teammates see it appear immediately.
+"$PROD_ATO" war-rooms append-event "$WR" --team my-team \
+    --kind dispatch_result \
+    --json '{"seat":"you","summary":"Migration approved. Scheduling for Friday."}'
+```
+
+### Coordinator close summaries (all tiers)
+
+`ato war-rooms close`, `ato sessions close`, and `ato chats close` all accept `--coordinator` to generate a logged summary. The default prefers the active Claude Code subscription (no API key or billing charge) and falls back to an API key if the subscription is unusable:
+
+```bash
+# Default — subscription first, API key fallback:
+"$PROD_ATO" war-rooms close $WR --human
+
+# Explicitly name a subscription-based coordinator:
+"$PROD_ATO" war-rooms close $WR --coordinator claude  --human
+"$PROD_ATO" war-rooms close $WR --coordinator codex  --human
+"$PROD_ATO" war-rooms close $WR --coordinator gemini --human
+```
+
+The desktop close dialog also exposes a Subscription vs API picker for the same choice.
+
 ## Related docs
 
 - `docs/grounding.md` — the design doc (human-facing — agent wizard UI, policy schema, verdict computation)
@@ -140,3 +219,5 @@ Loop steps of kind `dispatch` (and `review`, `war_room`, etc.) write a `loop_run
 4. **Read receipts** with `ato dispatches show <id> --human`. Look at `tool_calls_summary` and `grounded` verdict.
 5. **In war-rooms, name in the audit trail** which seats had tools active and which didn't.
 6. **When a feature you need isn't in the prod binary**, that's a ship-a-new-prod-app task, not a "switch to the dev binary" temptation.
+7. **To share a war-room/session/chat with your team** (Team tier), use `ato war-rooms share <id> --team <slug>`. Teammates see a live rich card. Append turns programmatically with `ato war-rooms append-event <id> --team <slug> --kind <kind> --json <payload>`.
+8. **Close summaries** prefer your active Claude Code subscription — no API key billing. Pass `--coordinator claude|codex|gemini` to be explicit.

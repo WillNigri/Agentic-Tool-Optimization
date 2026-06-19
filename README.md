@@ -52,7 +52,8 @@ curl -fsSL https://agentictool.ai/install.sh | sh && ato demo-war-room
 
 ## What's new in v2.18.0
 
-- **Browse your team workspaces from any browser.** Sign in to your cloud account on the web — every shared session, war-room, chat, loop, and mission renders with the same fidelity as the desktop. Read-only by default; mobile-responsive.
+- **Real-time team participation — now bidirectional.** Share any war-room, session, or chat into a team workspace and teammates see a live rich card (title, summary, tags, runtime badges, 👥 TEAM badge, member avatars) the moment it lands. Append a turn from the UI or CLI and every member's machine updates instantly — no refresh, both directions (HTTP append + Postgres NOTIFY + WebSocket push). Previously team shares were read-only snapshots. CLI: `ato war-rooms share <id> --team <slug>`, `ato sessions share`, `ato chats share`; append a turn live with `ato war-rooms append-event <id> --team <slug> --kind <kind> --json <payload>`. Requires Team tier + `ato login` on the prod app binary. Close summaries now prefer your **Claude Code subscription** (no API key billing): `ato war-rooms close <id> --coordinator claude`.
+- **Browse your team workspaces from any browser.** Sign in to your cloud account on the web — every shared session, war-room, chat, loop, and mission renders with the same fidelity as the desktop. Mobile-responsive.
 - **Pair your browser to your desktop.** v2.17 tether: X25519 DH + AEAD, fingerprint-verified pairing. Your laptop becomes a secure oracle for the page you're looking at — no plaintext through the cloud relay.
 - **Create + manage teams from the web.** New "+ New team", invite by email, role changes, danger-zone delete. Account page with profile + plan + sign-out. (LLM keys, runtimes, and skills still live in the desktop where the OS keychain is.)
 - **`ato war-rooms sweep`** — auto-closes idle war-rooms with a coordinator-summary, single-JSON envelope output, clap-layer validators. Wire to cron and one-shot R1 reviews self-close.
@@ -199,7 +200,7 @@ This is **chapter 2** — what happens once the cockpit has data on YOUR work. T
 | Cloud-relay mesh (NAT traversal) | — | ✓ | ✓ |
 | Auto-revert watch (7-day Langfuse trace monitor) | — | ✓ | ✓ |
 | Auto-PR after A/B wins | — | ✓ | ✓ |
-| Team workspaces (multi-user shared agents + skills) | — | — | ✓ |
+| Team workspaces (multi-user shared agents + skills) + **real-time shared conversations** | — | — | ✓ |
 | Encrypted provider key store (cron usage-poller) | — | — | ✓ |
 | Priority support | — | ✓ | ✓ |
 
