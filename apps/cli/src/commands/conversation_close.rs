@@ -93,6 +93,24 @@ pub struct CloseFields {
     pub duration_ms: i64,
 }
 
+/// Which backend will drive the close summarisation.
+///
+/// `Api` uses a registered API-provider (existing path, unchanged).
+/// `Subscription` shells out to a locally-installed CLI runtime
+/// (claude / codex / gemini) — no API key required.
+#[derive(Debug)]
+pub enum Coordinator {
+    Api {
+        provider: &'static crate::api_dispatch::ApiProvider,
+        model: Option<String>,
+        slug: Option<String>,
+    },
+    Subscription {
+        runtime: String,
+        model: Option<String>,
+    },
+}
+
 /// A conversation type that can be closed and reopened. Sessions, war
 /// rooms, and chat threads all implement this; future conversation
 /// types only need to mint a struct + impl this trait + add a clap
@@ -153,30 +171,54 @@ pub trait Closeable {
     fn persist_reopen(&self, conn: &Connection) -> Result<usize>;
 }
 
-/// Pick an API provider to summarize with. Priority chain:
-///   0. Explicit --coordinator <runtime> override (loudly errors when
-///      unregistered or unkeyed).
-///   1. Explicit --as <agent> override that resolves to an API-provider
-///      runtime.
-///   2. The conversation's stored agent_slug (when its runtime is an
-///      API provider).
-///   3. The conversation's anchor runtime (when it's an API provider).
-///   4. First registry provider with a resolvable key.
+/// Pick a coordinator to summarize with. Priority chain:
 ///
-/// The Closeable abstraction supplies #2 and #3 — sessions have both,
-/// war rooms have neither, chats have only the agent.
+///   0. Explicit `--coordinator <x>` override:
+///      - if `x` is a subscription runtime name (claude | codex | gemini)
+///        → `Coordinator::Subscription`.
+///      - else if `x` is a registered API provider slug → `Coordinator::Api`
+///        (existing behaviour, requires a resolvable key).
+///      - else error listing BOTH valid subscription runtimes AND api
+///        provider slugs.
+///   1. Default (no override): PREFER subscription — if `claude` is on
+///      PATH use `Coordinator::Subscription { runtime: "claude" }`.
+///   2. Otherwise fall through the EXISTING api-provider chain:
+///      --as agent → anchor runtime → first registry provider with a key.
+///
+/// The subscription-first default means `ato war-rooms close` works out
+/// of the box on any machine with Claude Code installed, even when the
+/// Anthropic API key is out of credits.
 pub fn resolve_summarizer<T: Closeable>(
     conn: &Connection,
     target: &T,
     agent_override: Option<&str>,
     model_override: Option<&str>,
     coordinator_override: Option<&str>,
-) -> Result<(&'static crate::api_dispatch::ApiProvider, Option<String>, Option<String>)> {
+) -> Result<Coordinator> {
+    const SUBSCRIPTION_RUNTIMES: &[&str] = &["claude", "codex", "gemini"];
+
+    // ── 0. Explicit --coordinator override ───────────────────────────────
     if let Some(slug) = coordinator_override {
+        // Is it a subscription runtime?
+        if SUBSCRIPTION_RUNTIMES.contains(&slug) {
+            crate::runtime::resolve_runtime_cli(slug).map_err(|e| {
+                anyhow!(
+                    "Coordinator '{}' is a subscription runtime but its CLI was not found on PATH: {}",
+                    slug, e
+                )
+            })?;
+            return Ok(Coordinator::Subscription {
+                runtime: slug.to_string(),
+                model: model_override.map(String::from),
+            });
+        }
+        // Is it a registered API provider?
         let p = crate::api_dispatch::find_provider(slug).ok_or_else(|| {
             anyhow!(
-                "Coordinator '{}' is not a registered API provider. Try one of: {}.",
+                "Coordinator '{}' is not a subscription runtime ({}), nor a registered API provider ({}). \
+                 Pass one of the subscription runtimes or one of the API provider slugs.",
                 slug,
+                SUBSCRIPTION_RUNTIMES.join(", "),
                 crate::api_dispatch::registry()
                     .iter()
                     .map(|p| p.slug)
@@ -191,20 +233,30 @@ pub fn resolve_summarizer<T: Closeable>(
                 e
             )
         })?;
-        return Ok((
-            p,
-            model_override.map(String::from),
-            target.stored_agent_slug().map(String::from),
-        ));
+        return Ok(Coordinator::Api {
+            provider: p,
+            model: model_override.map(String::from),
+            slug: target.stored_agent_slug().map(String::from),
+        });
     }
+
+    // ── 1. Default: prefer claude subscription if available ──────────────
+    if crate::runtime::resolve_runtime_cli("claude").is_ok() {
+        return Ok(Coordinator::Subscription {
+            runtime: "claude".to_string(),
+            model: model_override.map(String::from),
+        });
+    }
+
+    // ── 2. Fall through to existing API-provider chain ───────────────────
     if let Some(slug) = agent_override {
         if let Some(agent) = crate::commands::agents::lookup_by_slug(conn, slug, None)? {
             if let Some(p) = crate::api_dispatch::find_provider(&agent.runtime) {
-                return Ok((
-                    p,
-                    model_override.map(String::from).or(agent.model),
-                    Some(slug.to_string()),
-                ));
+                return Ok(Coordinator::Api {
+                    provider: p,
+                    model: model_override.map(String::from).or(agent.model),
+                    slug: Some(slug.to_string()),
+                });
             }
         } else {
             return Err(anyhow!("Agent '{}' not found.", slug));
@@ -213,30 +265,35 @@ pub fn resolve_summarizer<T: Closeable>(
     if let Some(slug) = target.stored_agent_slug() {
         if let Some(agent) = crate::commands::agents::lookup_by_slug(conn, slug, None)? {
             if let Some(p) = crate::api_dispatch::find_provider(&agent.runtime) {
-                return Ok((
-                    p,
-                    model_override.map(String::from).or(agent.model),
-                    Some(slug.to_string()),
-                ));
+                return Ok(Coordinator::Api {
+                    provider: p,
+                    model: model_override.map(String::from).or(agent.model),
+                    slug: Some(slug.to_string()),
+                });
             }
         }
     }
     if let Some(rt) = target.anchor_runtime() {
         if let Some(p) = crate::api_dispatch::find_provider(rt) {
-            return Ok((
-                p,
-                model_override.map(String::from),
-                target.stored_agent_slug().map(String::from),
-            ));
+            return Ok(Coordinator::Api {
+                provider: p,
+                model: model_override.map(String::from),
+                slug: target.stored_agent_slug().map(String::from),
+            });
         }
     }
     for p in crate::api_dispatch::registry() {
         if crate::api_dispatch::resolve_api_key(p, conn).is_ok() {
-            return Ok((p, model_override.map(String::from), None));
+            return Ok(Coordinator::Api {
+                provider: p,
+                model: model_override.map(String::from),
+                slug: None,
+            });
         }
     }
     Err(anyhow!(
-        "No API provider with a resolvable key found for summarization. Add a provider key in Settings → API Keys, or pass --as <agent> with an agent on an API-provider runtime."
+        "No summarizer available. Either install a subscription runtime (claude, codex, or gemini) \
+         or add an API provider key in Settings → API Keys."
     ))
 }
 
@@ -430,7 +487,7 @@ pub fn close_conversation<T: Closeable>(
         ));
     }
 
-    let (provider, model, coordinator_slug) = resolve_summarizer(
+    let coordinator = resolve_summarizer(
         conn,
         target,
         agent_slug_override,
@@ -522,19 +579,57 @@ band most responsible for follow-up.\n\
         transcript = transcript,
     );
 
-    let outcome =
-        crate::api_dispatch::dispatch_with_history(provider, &[], &prompt, model.as_deref(), conn)
-            .context("calling summarizer LLM")?;
-    let response_text = outcome.response.as_ref().ok_or_else(|| {
-        anyhow!(
-            "Summarizer returned no response: {}",
-            outcome
-                .error_message
-                .as_deref()
-                .unwrap_or("(no error message)")
-        )
-    })?;
-    let parsed = extract_json_object(response_text)?;
+    // Dispatch to the resolved coordinator — API path or subscription path.
+    // Both yield a response_text string; all downstream parsing is shared.
+    // The 5-tuple carries: (text, runtime_str, model_str, slug, duration_ms).
+    let (response_text_owned, coordinator_runtime_str, coordinator_model_str, coordinator_slug, summarizer_duration_ms) =
+        match coordinator {
+            Coordinator::Api { provider, model, slug } => {
+                let outcome = crate::api_dispatch::dispatch_with_history(
+                    provider,
+                    &[],
+                    &prompt,
+                    model.as_deref(),
+                    conn,
+                )
+                .context("calling summarizer LLM")?;
+                let duration = outcome.duration_ms;
+                let model_used = outcome.model_used.clone();
+                let error_msg = outcome
+                    .error_message
+                    .as_deref()
+                    .unwrap_or("(no error message)")
+                    .to_string();
+                let text = outcome.response.ok_or_else(|| {
+                    anyhow!("Summarizer returned no response: {}", error_msg)
+                })?;
+                (
+                    text,
+                    provider.slug.to_string(),
+                    Some(model_used),
+                    slug,
+                    duration,
+                )
+            }
+            Coordinator::Subscription { runtime, model } => {
+                let started = std::time::Instant::now();
+                let text =
+                    crate::commands::dispatch::dispatch_oneshot_subscription(
+                        &runtime,
+                        &prompt,
+                        model.as_deref(),
+                    )
+                    .context("calling subscription summarizer")?;
+                let duration = started.elapsed().as_millis() as i64;
+                let model_str = model
+                    .or_else(|| {
+                        crate::runtime::default_model_for_runtime(&runtime)
+                            .map(String::from)
+                    });
+                (text, runtime, model_str, None, duration)
+            }
+        };
+    let parsed = extract_json_object(&response_text_owned)?;
 
     let auto_title = parsed
         .get("title")
@@ -596,10 +691,10 @@ band most responsible for follow-up.\n\
         team,
         project_id: suggested_project_id,
         human_comment: human_comment_normalized,
-        coordinator_runtime: provider.slug.to_string(),
-        coordinator_model: Some(outcome.model_used.clone()),
+        coordinator_runtime: coordinator_runtime_str,
+        coordinator_model: coordinator_model_str,
         coordinator_slug,
-        duration_ms: outcome.duration_ms,
+        duration_ms: summarizer_duration_ms,
     };
 
     let changed = target.persist_close(conn, &fields)?;
