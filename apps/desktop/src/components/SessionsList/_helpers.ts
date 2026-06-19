@@ -368,7 +368,11 @@ export function inferCoordinatorTarget(text: string): string | null {
 // Two-letter avatar from the speaker label. "MiniMax" → "Mi",
 // "Google Gemini" → "GG", "ATO Coordinator" → "AC". Easier to scan
 // in a chat list than a generic robot icon.
-export function avatarInitials(label: string): string {
+export function avatarInitials(label: string | null | undefined): string {
+  // Guard: a member row with no resolved name/email must not crash the card.
+  // (Regression that blanked the entire Team feed: "undefined is not an object
+  // (evaluating 'label.split')" when filtering Sessions by Team.)
+  if (!label) return "?";
   const words = label.split(/\s+/).filter(Boolean);
   if (words.length >= 2) {
     return (words[0][0] + words[1][0]).toUpperCase();

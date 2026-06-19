@@ -337,7 +337,17 @@ export interface TeamMemberSimple {
 
 export async function getTeamMembers(teamId: string): Promise<TeamMemberSimple[]> {
   try {
-    return await apiRequest<TeamMemberSimple[]>(`/api/teams/${teamId}/members`);
+    // The backend returns full TeamMember rows with the user nested under
+    // `.user` (json_build_object) — NOT flat name/email. Map to the flat
+    // TeamMemberSimple the cards consume; falling back to email/user_id so a
+    // missing display name never yields an undefined label.
+    const rows = await apiRequest<TeamMember[]>(`/api/teams/${teamId}/members`);
+    return rows.map((r) => ({
+      user_id: r.user_id,
+      name: r.user?.name ?? null,
+      email: r.user?.email ?? '',
+      role: r.role,
+    }));
   } catch {
     return [];
   }

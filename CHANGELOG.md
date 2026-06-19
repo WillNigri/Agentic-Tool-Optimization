@@ -4,6 +4,15 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.9] — 2026-06-19
+
+### Fixed
+- **Team filter crash.** Filtering Sessions by "Team" (introduced in 2.18.8)
+  threw `undefined is not an object (evaluating 'label.split')` and blanked the
+  feed: `getTeamMembers` returned the raw backend rows where name/email are
+  nested under `.user`, so the member avatars called `avatarInitials(undefined)`.
+  Now maps members to a flat shape and `avatarInitials` is null-safe.
+
 ## [2.18.8] — 2026-06-19
 
 ### Added
