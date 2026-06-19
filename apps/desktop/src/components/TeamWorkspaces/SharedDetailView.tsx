@@ -40,6 +40,9 @@ import {
 import { loadTeamKey, TeamKeyUnsealError } from "@/lib/e2e/teamKey";
 import { fromBase64 } from "@/lib/e2e/crypto";
 import { formatTime } from "@/components/SessionsList/_helpers";
+import WarRoomRoundsView, {
+  type WarRoomSeat,
+} from "@/components/SessionsList/WarRoomRoundsView";
 import { useTeamEventStream } from "./useTeamEventStream";
 import type { DecryptorFn } from "@/lib/teamEventStream";
 import AppendTurnComposer from "./AppendTurnComposer";
@@ -573,20 +576,57 @@ function SharedSessionBody({ data }: { data: SharedSessionDetail }) {
   );
 }
 
+// Raw snapshot seat as produced by build_war_room_snapshot (CLI) /
+// buildWarRoomSnapshot (desktop) — snake_case keys. Carries the full per-seat
+// metadata (round, model, status, metrics, error), so the shared snapshot can
+// render with the SAME UI/UX as a local war room.
 interface SnapshotSeat {
+  id?: string | null;
   runtime?: string;
   agent_slug?: string | null;
-  prompt?: string;
-  response?: string;
+  model?: string | null;
   status?: string;
+  prompt?: string | null;
+  response?: string | null;
+  error_message?: string | null;
+  created_at?: string | null;
+  duration_ms?: number | null;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  cost_usd_estimated?: number | null;
+  war_room_round?: number | null;
+  auth_mode?: string | null;
 }
 
 function SharedWarRoomBody({ data }: { data: SharedWarRoomDetail }) {
   const snap = data.snapshot ?? {};
-  const seats = Array.isArray((snap as { seats?: unknown }).seats)
+  const rawSeats = Array.isArray((snap as { seats?: unknown }).seats)
     ? (snap as { seats: SnapshotSeat[] }).seats
     : [];
   const framing = (snap as { framing?: string }).framing;
+
+  // Normalize snake_case snapshot seats → the camelCase shape WarRoomRoundsView
+  // consumes, so the shared snapshot renders round-by-round with seat cards +
+  // receipts, identical to a local war room (read-only: no receipt links since
+  // the source execution_logs rows don't exist on this machine).
+  const seats: WarRoomSeat[] = rawSeats.map((s) => ({
+    id: s.id ?? null,
+    runtime: s.runtime ?? "unknown",
+    agentSlug: s.agent_slug ?? null,
+    model: s.model ?? null,
+    status: s.status ?? null,
+    prompt: s.prompt ?? null,
+    response: s.response ?? null,
+    errorMessage: s.error_message ?? null,
+    createdAt: s.created_at ?? null,
+    durationMs: s.duration_ms ?? null,
+    tokensIn: s.tokens_in ?? null,
+    tokensOut: s.tokens_out ?? null,
+    costUsdEstimated: s.cost_usd_estimated ?? null,
+    warRoomRound: s.war_room_round ?? null,
+    authMode: s.auth_mode ?? null,
+  }));
+
   return (
     <div className="space-y-3">
       <div className="rounded-lg border border-cs-border bg-cs-card p-3 text-xs">
@@ -602,40 +642,7 @@ function SharedWarRoomBody({ data }: { data: SharedWarRoomDetail }) {
           No seats in the snapshot.
         </div>
       ) : (
-        <div className="space-y-2">
-          {seats.map((seat, i) => (
-            <div
-              key={i}
-              className="rounded-md border border-cs-border/60 bg-cs-card/40 p-2 text-xs"
-            >
-              <div className="flex items-center gap-2 mb-1 text-[10px] text-cs-muted">
-                {seat.runtime && <span>{seat.runtime}</span>}
-                {seat.agent_slug && <span>{seat.agent_slug}</span>}
-                {seat.status && (
-                  <span className="uppercase">{seat.status}</span>
-                )}
-              </div>
-              {seat.prompt && (
-                <div className="mb-1 rounded bg-cs-bg-raised/40 p-1 text-cs-muted">
-                  <span className="text-[9px] uppercase">prompt</span>
-                  <pre className="whitespace-pre-wrap font-sans">
-                    {seat.prompt}
-                  </pre>
-                </div>
-              )}
-              {seat.response && (
-                <div className="rounded bg-cs-bg-raised/40 p-1 text-cs-text">
-                  <span className="text-[9px] uppercase text-cs-muted">
-                    response
-                  </span>
-                  <pre className="whitespace-pre-wrap font-sans">
-                    {seat.response}
-                  </pre>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+        <WarRoomRoundsView seats={seats} showReceiptLinks={false} />
       )}
     </div>
   );
