@@ -4,6 +4,21 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.10] — 2026-06-19
+
+### Added
+- **CLI shares render as rich cards.** `ato war-rooms share`, `ato sessions
+  share`, and `ato chats share` now build the full snapshot (title, summary,
+  tags, coordinator, seats/turns/messages) — parity with the desktop — so an
+  agent sharing from the terminal produces the same rich Team card as the UI.
+  Previously war-room CLI shares packed only seats (rendered "untitled") and
+  session/chat shares packed nothing. Includes the desktop's 1 MB size-budget
+  truncation so large transcripts share instead of being rejected.
+
+### Fixed
+- Rolls up the v2.18.9 Team-filter crash fix (`undefined is not an object
+  (label.split)`) so this is the single release to update to.
+
 ## [2.18.9] — 2026-06-19
 
 ### Fixed
