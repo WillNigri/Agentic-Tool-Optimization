@@ -403,6 +403,13 @@ class TeamEventStreamManager {
       clearTimeout(state.reconnectTimer);
       state.reconnectTimer = null;
     }
+    // Clear the stability timer directly on teardown rather than relying on the
+    // async "close" event firing — a torn-down connection (deleted from the map)
+    // must not leave a 10s timer holding the state alive (codex R1).
+    if (state.stabilityTimer) {
+      clearTimeout(state.stabilityTimer);
+      state.stabilityTimer = null;
+    }
     if (state.ws) {
       try { state.ws.close(); } catch { /* ignore */ }
       state.ws = null;
