@@ -717,6 +717,12 @@ export default function SessionsList() {
   // We compute this lazily below, after clusteredData is available.
   // Placeholder — will be populated after clusteredData is known.
   const localKeys = new Set<string>();
+  // R3 (codex): map each local key → that local row's live status so the
+  // dedupe can be status-aware. A shared snapshot is always "closed"; the
+  // local copy may still be "open". We must only suppress the shared row when
+  // the local row would actually survive the active status filter — otherwise
+  // "Team + Closed" on an open-but-shared conversation would hide both.
+  const localStatusByKey = new Map<string, string | null>();
 
   // Backend search across turn text. Returns the set of session ids
   // whose turns contain all the search tokens. Combined with the
@@ -776,6 +782,7 @@ export default function SessionsList() {
       if (TEAM_SHARED_KINDS.has(row.rowKind)) continue;
       const localKey = `${row.rowKind}:${row.id}`;
       localKeys.add(localKey);
+      localStatusByKey.set(localKey, row.status);
     }
     // Now walk every share entry; if the owner has a matching local row,
     // annotate that local row so it gets a TEAM badge under the Team filter.
@@ -812,9 +819,16 @@ export default function SessionsList() {
           ? "session"
           : "chat";
     const localKey = `${localKind}:${info.originalId}`;
-    // Drop this shared row only when a matching LOCAL row exists (owner).
-    // Recipients (no local row) always keep it.
-    return !localKeys.has(localKey);
+    if (!localKeys.has(localKey)) return true; // recipient — always keep
+    // Owner has a local copy. R3 (codex): only drop the shared row when that
+    // local row would survive the active status filter — i.e. it will actually
+    // render in its place. The shared snapshot is "closed"; if the local copy
+    // is "open" and the user filtered to "closed", the local row is hidden, so
+    // keep the (closed) shared snapshot rather than show nothing.
+    if (statusFilter === "all") return false; // local row renders → drop shared
+    const localStatus = localStatusByKey.get(localKey);
+    const localSurvives = localStatus === statusFilter;
+    return !localSurvives; // drop shared only if the local row will render
   });
 
   // teamfilter (#1) — merge cloud-shared rows into the local feed when the
