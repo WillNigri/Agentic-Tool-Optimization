@@ -22,10 +22,32 @@
 // libsodium Rust binding — both deferred to a follow-up wave. See TODO below.
 
 use anyhow::{anyhow, Context, Result};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
+
+/// Per-field text cap so a multi-seat/long-transcript snapshot stays under the
+/// cloud's 1 MB row limit. Shared by all three snapshot builders.
+const SNAPSHOT_PER_FIELD_CAP: usize = 40_000;
+fn cap_field(s: Option<String>) -> Option<String> {
+    s.map(|t| {
+        if t.chars().count() > SNAPSHOT_PER_FIELD_CAP {
+            let kept: String = t.chars().take(SNAPSHOT_PER_FIELD_CAP).collect();
+            format!("{}…[truncated]", kept)
+        } else {
+            t
+        }
+    })
+}
+/// Parse a `tags_json` TEXT column into a string array (empty on null/garbage).
+fn parse_tags(tags_json: Option<String>) -> Vec<String> {
+    tags_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default()
+}
 
 // ── Auth / HTTP primitives ────────────────────────────────────────────────────
 
@@ -229,17 +251,6 @@ fn build_war_room_snapshot(
     conn: &rusqlite::Connection,
     war_room_id: &str,
 ) -> Result<Value> {
-    const PER_FIELD_CAP: usize = 40_000; // chars; keeps multi-seat rooms < 1 MB
-    let cap = |s: Option<String>| -> Option<String> {
-        s.map(|t| {
-            if t.chars().count() > PER_FIELD_CAP {
-                let kept: String = t.chars().take(PER_FIELD_CAP).collect();
-                format!("{}…[truncated]", kept)
-            } else {
-                t
-            }
-        })
-    };
     let mut stmt = conn.prepare(
         "SELECT id, runtime, agent_slug, model, status, prompt, response, error_message,
                 created_at, duration_ms, tokens_in, tokens_out, cost_usd_estimated,
@@ -256,9 +267,9 @@ fn build_war_room_snapshot(
                 "agent_slug": r.get::<_, Option<String>>(2)?,
                 "model": r.get::<_, Option<String>>(3)?,
                 "status": r.get::<_, Option<String>>(4)?,
-                "prompt": cap(r.get::<_, Option<String>>(5)?),
-                "response": cap(r.get::<_, Option<String>>(6)?),
-                "error_message": cap(r.get::<_, Option<String>>(7)?),
+                "prompt": cap_field(r.get::<_, Option<String>>(5)?),
+                "response": cap_field(r.get::<_, Option<String>>(6)?),
+                "error_message": cap_field(r.get::<_, Option<String>>(7)?),
                 "created_at": r.get::<_, Option<String>>(8)?,
                 "duration_ms": r.get::<_, Option<i64>>(9)?,
                 "tokens_in": r.get::<_, Option<i64>>(10)?,
@@ -272,11 +283,195 @@ fn build_war_room_snapshot(
         })?
         .filter_map(|x| x.ok())
         .collect();
+
+    // Coordinator-card metadata from the war_rooms lifecycle row. Without these
+    // the shared card rendered "untitled / no summary / no tags" even though the
+    // seats were present (the backend list projection reads auto_title, summary,
+    // tags, coordinator_runtime out of the snapshot). Mirrors the desktop's
+    // buildWarRoomSnapshot. Legacy rooms with no war_rooms row default to open.
+    type WarRoomMeta = (
+        String,         // status
+        Option<String>, // closed_at
+        Option<String>, // auto_title
+        Option<String>, // summary
+        Option<String>, // coordinator_runtime
+        Option<String>, // human_comment
+        Option<String>, // tags_json
+    );
+    let meta: Option<WarRoomMeta> = conn
+        .query_row(
+            "SELECT status, closed_at, auto_title, summary, coordinator_runtime,
+                    human_comment, tags_json
+               FROM war_rooms WHERE id = ?1",
+            [war_room_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (status, closed_at, auto_title, summary, coordinator_runtime, human_comment, tags_json) =
+        meta.unwrap_or_else(|| ("open".to_string(), None, None, None, None, None, None));
+
     Ok(serde_json::json!({
         "kind": "war_room",
         "id": war_room_id,
+        "status": status,
+        "closed_at": closed_at,
+        "auto_title": auto_title,
+        "summary": summary,
+        "coordinator_runtime": coordinator_runtime,
+        "human_comment": human_comment,
+        "tags": parse_tags(tags_json),
         "seat_count": seats.len(),
         "seats": seats,
+    }))
+}
+
+/// Build a rich session snapshot (metadata + turns) mirroring the desktop's
+/// buildSessionSnapshot so a CLI/agent share renders the full card.
+fn build_session_snapshot(conn: &rusqlite::Connection, session_id: &str) -> Result<Value> {
+    type SessionMeta = (
+        Option<String>, // runtime
+        Option<String>, // agent_slug
+        Option<String>, // title
+        String,         // status
+        Option<String>, // closed_at
+        Option<String>, // auto_title
+        Option<String>, // summary
+        Option<String>, // tags_json
+        Option<String>, // project_id
+        Option<String>, // human_comment
+        i64,            // turn_count
+    );
+    let meta: SessionMeta = conn
+        .query_row(
+            "SELECT runtime, agent_slug, title, status, closed_at, auto_title, summary,
+                    tags_json, project_id, human_comment, turn_count
+               FROM sessions WHERE id = ?1",
+            [session_id],
+            |r| {
+                Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                    r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("No session found with id '{}'", session_id))?;
+    let (runtime, agent_slug, title, status, closed_at, auto_title, summary, tags_json, project_id, human_comment, turn_count) =
+        meta;
+
+    let mut stmt = conn.prepare(
+        "SELECT turn_index, role, text, runtime, created_at, agent_slug
+           FROM session_turns WHERE session_id = ?1 ORDER BY turn_index ASC",
+    )?;
+    let turns: Vec<Value> = stmt
+        .query_map([session_id], |r| {
+            Ok(serde_json::json!({
+                "turn_index": r.get::<_, Option<i64>>(0)?,
+                "role": r.get::<_, Option<String>>(1)?,
+                "text": cap_field(r.get::<_, Option<String>>(2)?),
+                "runtime": r.get::<_, Option<String>>(3)?,
+                "createdAt": r.get::<_, Option<String>>(4)?,
+                "agent_slug": r.get::<_, Option<String>>(5)?,
+            }))
+        })?
+        .filter_map(|x| x.ok())
+        .collect();
+
+    Ok(serde_json::json!({
+        "kind": "session",
+        "id": session_id,
+        "runtime": runtime,
+        "agent_slug": agent_slug,
+        "title": title,
+        "status": status,
+        "closed_at": closed_at,
+        "auto_title": auto_title,
+        "summary": summary,
+        "tags": parse_tags(tags_json),
+        "project_id": project_id,
+        "human_comment": human_comment,
+        "turn_count": turn_count,
+        "turns": turns,
+    }))
+}
+
+/// Build a rich chat snapshot (metadata + messages) mirroring the desktop's
+/// buildChatSnapshot.
+fn build_chat_snapshot(conn: &rusqlite::Connection, chat_id: &str) -> Result<Value> {
+    type ChatMeta = (
+        Option<String>, // title
+        String,         // status
+        Option<String>, // closed_at
+        Option<String>, // auto_title
+        Option<String>, // summary
+        Option<String>, // coordinator_runtime
+        Option<String>, // human_comment
+        Option<String>, // tags_json
+        i64,            // message_count
+        Option<String>, // agent_id
+    );
+    let meta: ChatMeta = conn
+        .query_row(
+            "SELECT title, status, closed_at, auto_title, summary, coordinator_runtime,
+                    human_comment, tags_json, message_count, agent_id
+               FROM chat_threads WHERE id = ?1",
+            [chat_id],
+            |r| {
+                Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                    r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("No chat thread found with id '{}'", chat_id))?;
+    let (title, status, closed_at, auto_title, summary, coordinator_runtime, human_comment, tags_json, message_count, agent_id) =
+        meta;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at
+           FROM chat_messages WHERE thread_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let messages: Vec<Value> = stmt
+        .query_map([chat_id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, Option<String>>(0)?,
+                "thread_id": r.get::<_, Option<String>>(1)?,
+                "role": r.get::<_, Option<String>>(2)?,
+                "content": cap_field(r.get::<_, Option<String>>(3)?),
+                "runtime": r.get::<_, Option<String>>(4)?,
+                "agent_slug": r.get::<_, Option<String>>(5)?,
+                "metadata": r.get::<_, Option<String>>(6)?,
+                "createdAt": r.get::<_, Option<String>>(7)?,
+            }))
+        })?
+        .filter_map(|x| x.ok())
+        .collect();
+
+    Ok(serde_json::json!({
+        "kind": "chat",
+        "id": chat_id,
+        "title": title,
+        "status": status,
+        "closed_at": closed_at,
+        "auto_title": auto_title,
+        "summary": summary,
+        "coordinator_runtime": coordinator_runtime,
+        "human_comment": human_comment,
+        "tags": parse_tags(tags_json),
+        "message_count": message_count,
+        "agent_id": agent_id,
+        "messages": messages,
     }))
 }
 
@@ -307,13 +502,28 @@ pub fn share_resource(
                 "initiator_machine_secret".into(),
                 Value::String(crate::db::machine_secret(&conn)),
             );
-            // Build the actual snapshot so the shared view renders content.
-            // Previously the CLI sent only the id stub → teammates saw "No
-            // seats in the snapshot". War-rooms first (the multi-seat reviews);
-            // sessions/chats can follow the same pattern.
-            if url_kind == "war-rooms" {
-                if let Ok(snap) = build_war_room_snapshot(&conn, resource_id) {
-                    map.insert("snapshot".into(), snap);
+            // Build the rich snapshot so the shared card renders the full
+            // coordinator metadata (title / summary / tags / coordinator) +
+            // transcript — parity with the desktop share builders. On failure
+            // we warn (not silently share an empty snapshot, which previously
+            // produced "untitled / 0 seats" cards) but still attempt the share.
+            let snap_result = match url_kind {
+                "war-rooms" => Some(build_war_room_snapshot(&conn, resource_id)),
+                "sessions" => Some(build_session_snapshot(&conn, resource_id)),
+                "chats" => Some(build_chat_snapshot(&conn, resource_id)),
+                _ => None,
+            };
+            if let Some(res) = snap_result {
+                match res {
+                    Ok(snap) => {
+                        map.insert("snapshot".into(), snap);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: could not build snapshot for {} {} ({}); sharing without it",
+                            url_kind, resource_id, e
+                        );
+                    }
                 }
             }
         }
