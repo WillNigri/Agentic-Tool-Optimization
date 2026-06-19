@@ -14,7 +14,7 @@
 // 2026-05-21: the card used to show only the prompt + "kind: parallel"
 // intro text even after close, burying the work the coordinator did.
 
-import { Lock, Tag } from "lucide-react";
+import { Lock, Tag, Users } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import {
@@ -23,15 +23,25 @@ import {
   personaBadge,
   personaDisplay,
   formatTime,
+  avatarInitials,
 } from "../_helpers";
 import type { SessionListRow } from "../_helpers";
+
+interface TeamShareAnnotation {
+  teamName: string | null;
+  sharedByLabel: string | null;
+  isOwner: boolean;
+  members?: { userId: string; name: string | null; email: string }[];
+  onManageAccess?: () => void;
+}
 
 interface Props {
   session: SessionListRow;
   onOpen: () => void;
+  teamShare?: TeamShareAnnotation;
 }
 
-export function WarRoomCard({ session: s, onOpen }: Props) {
+export function WarRoomCard({ session: s, onOpen, teamShare }: Props) {
   const participantCount = s.runtimesUsed.length;
   const isClosed = s.status === "closed";
   // Prefer the coordinator-generated auto_title once closed; for open
@@ -55,6 +65,48 @@ export function WarRoomCard({ session: s, onOpen }: Props) {
           : "border-cs-border bg-cs-card hover:border-cs-accent/40 hover:bg-cs-border/20",
       )}
     >
+      {/* Part D — team-share annotation banner */}
+      {teamShare && (
+        <div className="mb-3 flex items-center gap-2 flex-wrap pb-3 border-b border-cs-border/40">
+          <span
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-cs-accent/15 text-cs-accent ring-1 ring-cs-accent/40"
+            title={`Shared into team: ${teamShare.teamName ?? "unknown"}`}
+          >
+            <Users size={10} />
+            {teamShare.teamName ?? "Team"}
+          </span>
+          {!teamShare.isOwner && teamShare.sharedByLabel && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cs-accent/10 text-cs-accent">
+              shared by {teamShare.sharedByLabel}
+            </span>
+          )}
+          {teamShare.members && teamShare.members.length > 0 && (
+            <div className="flex items-center gap-1">
+              {teamShare.members.slice(0, 4).map((m) => (
+                <span
+                  key={m.userId}
+                  title={m.name ?? m.email}
+                  className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-cs-accent/20 text-cs-accent text-[9px] font-bold uppercase"
+                >
+                  {avatarInitials(m.name ?? m.email)}
+                </span>
+              ))}
+              {teamShare.members.length > 4 && (
+                <span className="text-[10px] text-cs-muted">+{teamShare.members.length - 4}</span>
+              )}
+            </div>
+          )}
+          {teamShare.onManageAccess && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); teamShare.onManageAccess?.(); }}
+              className="ml-auto text-[10px] text-cs-accent hover:underline"
+            >
+              Manage access
+            </button>
+          )}
+        </div>
+      )}
       <div className="flex items-center gap-3 flex-wrap">
         <span
           aria-label="war room"

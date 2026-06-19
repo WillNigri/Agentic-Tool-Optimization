@@ -7,4 +7,5 @@ export { ChatCard } from "./ChatCard";
 export { WarRoomCard } from "./WarRoomCard";
 export { SingleRunCard } from "./SingleRunCard";
 export { SessionCard } from "./SessionCard";
-export { TeamSharedCard } from "./TeamSharedCard";
+// FIX 6 — TeamSharedCard removed; shared rows now route through the rich
+// WarRoomCard / ChatCard / SessionCard variants with a teamShare banner.

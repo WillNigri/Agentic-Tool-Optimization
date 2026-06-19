@@ -52,7 +52,6 @@ import {
   WarRoomCard,
   SingleRunCard,
   SessionCard,
-  TeamSharedCard,
 } from "./SessionCards";
 import SharedDetailView, {
   type SharedResourceKind,
@@ -66,6 +65,8 @@ import {
   getSharedSessions,
   getSharedWarRooms,
   getSharedChats,
+  getTeamMembers,
+  type TeamMemberSimple,
 } from "@/lib/cloud-api";
 // v2.10.0 PR-1 (UI) — eval-cluster card. Imported as a default-style
 // named import so re-exports from ./SessionCards/index don't have to
@@ -151,10 +152,11 @@ function snapshotString(
   return null;
 }
 
-// teamfilter (#1) — fold one shared payload into a SessionListRow so it
-// flows through the same filter/render pipeline as local rows. Synthetic
-// id is `shared:<teamId>:<originalId>` so the click handler can recover
-// the team + original id when routing to the placeholder view (#6).
+// Part C — enriched teamSharedRow: accepts optional rich fields from the
+// cloud list endpoint (card_title, summary, tags, category, coordinator,
+// shared_by_name, shared_by_email) so the rich card variants render fully.
+// FIX 4 — also accepts seat_count/seat_runtimes (war-rooms) and
+// turn_count (sessions) so the reused cards show REAL metadata.
 function teamSharedRow(args: {
   teamId: string;
   teamName: string;
@@ -163,41 +165,161 @@ function teamSharedRow(args: {
   sharedByUserId: string;
   sharedAt: string;
   snapshot: unknown;
+  // Part C — optional rich fields from the cloud list endpoint
+  cardTitle?: string | null;
+  richSummary?: string | null;
+  richTags?: string[] | null;
+  richCategory?: string | null;
+  coordinator?: string | null;
+  sharedByName?: string | null;
+  sharedByEmail?: string | null;
+  // Part F — anchor runtime for chats
+  anchorRt?: string | null;
+  richRuntime?: string | null;
+  // FIX 4 — real seat / turn metadata
+  seatCount?: string | null;
+  seatRuntimes?: string[] | null;
+  turnCount?: number | null;
 }): SessionListRow {
-  const { teamId, teamName, rowKind, originalId, sharedByUserId, sharedAt, snapshot } =
-    args;
+  const {
+    teamId,
+    teamName,
+    rowKind,
+    originalId,
+    sharedByUserId,
+    sharedAt,
+    snapshot,
+    cardTitle,
+    richSummary,
+    richTags,
+    richCategory,
+    coordinator,
+    sharedByName,
+    sharedByEmail,
+    anchorRt,
+    richRuntime,
+    seatCount,
+    seatRuntimes,
+    turnCount,
+  } = args;
+
+  // Resolve display label: prefer resolved name/email over truncated userId.
+  const sharedByLabel =
+    sharedByName ??
+    (sharedByEmail ? sharedByEmail.split("@")[0] : null) ??
+    (sharedByUserId ? sharedByUserId.slice(0, 8) : null);
+
+  // Resolve runtime: prefer the explicit richRuntime (from list endpoint),
+  // then snapshot fields.
+  const runtime =
+    richRuntime ??
+    snapshotString(snapshot, "runtime", "anchorRuntime") ??
+    "claude";
+
+  // Resolve anchor runtime: explicit field first, then snapshot.
+  const anchorRuntime =
+    anchorRt ??
+    snapshotString(snapshot, "anchorRuntime") ??
+    null;
+
+  // Title resolution: prefer card_title (coordinator-distilled), then
+  // snapshot autoTitle/title, then snapshot summary as last resort.
+  const title =
+    cardTitle ??
+    snapshotString(snapshot, "autoTitle", "title", "summary");
+
+  // Summary resolution: prefer cloud-provided, then snapshot.
+  const summary =
+    richSummary ??
+    snapshotString(snapshot, "summary", "lastAssistantPreview");
+
+  // Tags: prefer cloud-provided array; snapshot fallback is a no-op
+  // since snapshots don't always carry tags as arrays.
+  // FIX 5 — guard: node-pg may return JSONB tags as a non-array object;
+  // fall back to [] to prevent cards' tags.map(...) from throwing.
+  const tags: string[] = Array.isArray(richTags) ? richTags : [];
+
+  // Category: prefer cloud-provided.
+  const category = richCategory ?? null;
+
+  // Coordinator runtime: prefer explicit field, then snapshot.
+  const coordinatorRuntime =
+    coordinator ??
+    snapshotString(snapshot, "coordinator", "coordinatorRuntime") ??
+    null;
+
+  // FIX 4 — resolve runtimesUsed from seat_runtimes (war-rooms).
+  // Filter falsy entries, then DEDUPE: seat_runtimes lists every seat-round
+  // (e.g. 48 rows: claude/codex/google repeated), but the traditional
+  // WarRoomCard shows DISTINCT runtimes ("3 seats · Claude Codex Google")
+  // since participantCount = runtimesUsed.length. De-duplicating keeps the
+  // shared card at parity with the local card. For sessions/chats, [] so
+  // other card variants are unaffected.
+  const runtimesUsed: string[] = Array.isArray(seatRuntimes)
+    ? [...new Set(seatRuntimes.filter(Boolean))]
+    : [];
+
+  // FIX 4 — turnCount: use backend value when present; for chats leave
+  // it 0/undefined so the ChatCard omits the "N msgs" counter rather
+  // than showing a fake "1 msg". For war-rooms we don't show turnCount
+  // (WarRoomCard uses runtimesUsed.length as participantCount instead).
+  const resolvedTurnCount: number =
+    typeof turnCount === "number" && turnCount >= 0 ? turnCount : 0;
+
   return {
     id: `shared:${teamId}:${originalId}`,
-    runtime: snapshotString(snapshot, "runtime", "anchorRuntime") ?? "claude",
+    runtime,
     agentSlug: null,
-    title: snapshotString(snapshot, "autoTitle", "title", "summary"),
+    title,
     createdAt: sharedAt,
     lastUsedAt: sharedAt,
-    turnCount: 1,
-    runtimesUsed: [],
+    // FIX 4 — session: real turn_count from backend; war-room/chat: 0
+    // so cards that don't show turnCount (WarRoomCard) are unaffected,
+    // and ChatCard with 0 omits the "N msgs" counter cleanly.
+    turnCount: resolvedTurnCount,
+    // FIX 4 — war-room: real seat runtimes so WarRoomCard's
+    // participantCount (= runtimesUsed.length) reflects real data.
+    runtimesUsed,
     agentsUsed: [],
     totalCostUsd: null,
     lastAssistantPreview: null,
-    status: "open",
-    closedAt: null,
-    autoTitle: snapshotString(snapshot, "autoTitle"),
-    summary: snapshotString(snapshot, "summary", "lastAssistantPreview"),
-    tags: [],
+    // Part C — shared snapshots are closed conversations.
+    status: "closed",
+    closedAt: sharedAt,
+    autoTitle: cardTitle ?? snapshotString(snapshot, "autoTitle"),
+    summary,
+    tags,
     projectId: null,
     projectName: null,
-    category: null,
-    team: null,
-    coordinatorRuntime: null,
+    category,
+    team: teamName,
+    coordinatorRuntime,
     humanComment: null,
-    anchorRuntime: null,
+    anchorRuntime,
     rowKind,
     sharedAt,
-    // No display name on the shared-* payloads yet — show the (shortened)
-    // sharer id. #6 can resolve this to a member name.
-    sharedByLabel: sharedByUserId ? sharedByUserId.slice(0, 8) : null,
+    sharedByLabel,
     sharedTeamId: teamId,
     sharedTeamName: teamName,
   };
+}
+
+// Part D/E — carries team-share annotation for the owner-dedupe and
+// the teamShare prop on the rich cards.
+//
+// FIX 3 — one conversation can be shared into multiple teams; we now
+// store a TeamShareInfo per (teamId, originalId) pair, keyed by
+// "teamId:rowKind:originalId" in the shareInfoMap.  The per-local-row
+// annotation (localRowShareAnnotations) stores the FIRST share found
+// for convenience (card shows one team badge + "(+N)" when N>1).
+interface TeamShareInfo {
+  teamId: string;
+  teamName: string;
+  sharedByLabel: string | null;
+  isOwner: boolean;
+  members: { userId: string; name: string | null; email: string }[];
+  originalId: string;
+  rowKind: "team_shared_session" | "team_shared_war_room" | "team_shared_chat";
 }
 
 /// Case-insensitive substring search across every human-readable
@@ -222,6 +344,10 @@ function rowMatchesFilters(
   s: SessionListRow,
   f: FilterFields,
   skip?: keyof FilterFields,
+  // FIX 2 — set of local row ids that are annotated with a team share
+  // (owner sees their local card under the Team filter). Passed through
+  // from SessionsList so the predicate can admit annotated local rows.
+  annotatedLocalIds?: Set<string>,
 ): boolean {
   if (skip !== "kind") {
     if (f.kind === "sessions" && s.rowKind !== "session") return false;
@@ -230,7 +356,16 @@ function rowMatchesFilters(
     if (f.kind === "chats" && s.rowKind !== "chat") return false;
     // teamfilter (#1) — "team" scopes to cloud-shared rows; every other
     // kind excludes them so a shared row never leaks into "all" etc.
-    if (f.kind === "team" && !TEAM_SHARED_KINDS.has(s.rowKind)) return false;
+    //
+    // FIX 2 — ALSO admit local rows that have a teamShare annotation:
+    // when the owner has shared a war_room/session/chat, we suppress the
+    // duplicate shared row and show the annotated local card instead.
+    // Without this exception the owner sees ZERO cards for a shared+local
+    // item (shared row dropped by dedupe, local row excluded here).
+    if (f.kind === "team" && !TEAM_SHARED_KINDS.has(s.rowKind)) {
+      // Allow annotated local rows through.
+      if (!annotatedLocalIds?.has(s.id)) return false;
+    }
     if (f.kind !== "team" && TEAM_SHARED_KINDS.has(s.rowKind)) return false;
   }
   if (skip !== "status") {
@@ -258,12 +393,13 @@ function filterSessions(
   category: string | null,
   team: string | null,
   tag: string | null,
+  annotatedLocalIds?: Set<string>,
 ): SessionListRow[] {
   const trimmed = query.trim().toLowerCase();
   const tokens = trimmed.length === 0 ? [] : trimmed.split(/\s+/);
   const f: FilterFields = { status, kind, category, team, tag };
   return sessions.filter((s) => {
-    if (!rowMatchesFilters(s, f)) return false;
+    if (!rowMatchesFilters(s, f, undefined, annotatedLocalIds)) return false;
     if (tokens.length === 0) return true;
     // Build a single haystack string per row so each token can run a
     // cheap String.includes. Avoids re-allocating arrays inside the
@@ -428,34 +564,32 @@ export default function SessionsList() {
     refetchInterval: 30_000,
   });
 
-  // teamfilter (#1) — cloud-shared rows. Fetched lazily: the query is only
-  // enabled while the Team chip is picked, and TanStack's 30s staleTime
-  // means toggling the chip on/off within that window reuses the cache
-  // instead of re-hitting the network (requirement D).
-  //
-  // Free-tier safe (requirement E): getTeams throws for free/unauthed
-  // users; we catch and return [] so the merge is a no-op. Per-team
-  // getShared* calls are individually caught so one team erroring (e.g.
-  // permissions) doesn't blank the whole feed. Rows are sorted shared_at
-  // DESC so the most recently shared surface first (requirement A).
-  const teamSharedQ = useQuery<SessionListRow[]>({
+  const teamSharedQ = useQuery<{ rows: SessionListRow[]; shareInfoMap: Map<string, TeamShareInfo> }>({
     queryKey: ["team-shared-rows"],
     enabled: kindFilter === "team",
     staleTime: 30_000,
     queryFn: async () => {
-      // getTeams throws for free/unauthenticated tiers; `.catch(() => [])`
-      // turns that into an empty teams list → empty feed (requirement E).
       const teams = await getTeams().catch(() => []);
+      const shareInfoMap = new Map<string, TeamShareInfo>();
       const perTeam = await Promise.all(
         teams.map(async (t) => {
-          const [sessions, warRooms, chats] = await Promise.all([
+          const [sessions, warRooms, chats, members] = await Promise.all([
             getSharedSessions(t.id).catch(() => []),
             getSharedWarRooms(t.id).catch(() => []),
             getSharedChats(t.id).catch(() => []),
+            getTeamMembers(t.id).catch(() => [] as TeamMemberSimple[]),
           ]);
-          return [
-            ...sessions.map((x) =>
-              teamSharedRow({
+          const memberList = members.map((m) => ({
+            userId: m.user_id,
+            name: m.name,
+            email: m.email,
+          }));
+          // FIX 3 — key the shareInfoMap by "teamId:rowKind:originalId" so
+          // the same conversation shared into two different teams gets two
+          // distinct entries instead of the second overwriting the first.
+          const rows: SessionListRow[] = [
+            ...sessions.map((x) => {
+              const row = teamSharedRow({
                 teamId: t.id,
                 teamName: t.name,
                 rowKind: "team_shared_session",
@@ -463,10 +597,31 @@ export default function SessionsList() {
                 sharedByUserId: x.shared_by_user_id,
                 sharedAt: x.shared_at,
                 snapshot: x.snapshot,
-              }),
-            ),
-            ...warRooms.map((x) =>
-              teamSharedRow({
+                cardTitle: x.card_title,
+                richSummary: x.summary,
+                richTags: x.tags,
+                richCategory: x.category,
+                coordinator: x.coordinator,
+                sharedByName: x.shared_by_name,
+                sharedByEmail: x.shared_by_email,
+                richRuntime: x.runtime,
+                // FIX 4 — sessions carry turn_count from the list endpoint.
+                turnCount: x.turn_count ?? null,
+              });
+              // FIX 3 — key includes teamId to prevent cross-team collision.
+              shareInfoMap.set(`${t.id}:team_shared_session:${x.session_id}`, {
+                teamId: t.id,
+                teamName: t.name,
+                sharedByLabel: row.sharedByLabel ?? null,
+                isOwner: false, // resolved in Part E
+                members: memberList,
+                originalId: x.session_id,
+                rowKind: "team_shared_session",
+              });
+              return row;
+            }),
+            ...warRooms.map((x) => {
+              const row = teamSharedRow({
                 teamId: t.id,
                 teamName: t.name,
                 rowKind: "team_shared_war_room",
@@ -474,10 +629,31 @@ export default function SessionsList() {
                 sharedByUserId: x.shared_by_user_id,
                 sharedAt: x.shared_at,
                 snapshot: x.snapshot,
-              }),
-            ),
-            ...chats.map((x) =>
-              teamSharedRow({
+                cardTitle: x.card_title,
+                richSummary: x.summary,
+                richTags: x.tags,
+                richCategory: x.category,
+                coordinator: x.coordinator,
+                sharedByName: x.shared_by_name,
+                sharedByEmail: x.shared_by_email,
+                // FIX 4 — war-rooms: real seat metadata from list endpoint.
+                seatCount: x.seat_count ?? null,
+                seatRuntimes: x.seat_runtimes ?? null,
+              });
+              // FIX 3 — key includes teamId.
+              shareInfoMap.set(`${t.id}:team_shared_war_room:${x.war_room_id}`, {
+                teamId: t.id,
+                teamName: t.name,
+                sharedByLabel: row.sharedByLabel ?? null,
+                isOwner: false,
+                members: memberList,
+                originalId: x.war_room_id,
+                rowKind: "team_shared_war_room",
+              });
+              return row;
+            }),
+            ...chats.map((x) => {
+              const row = teamSharedRow({
                 teamId: t.id,
                 teamName: t.name,
                 rowKind: "team_shared_chat",
@@ -485,19 +661,68 @@ export default function SessionsList() {
                 sharedByUserId: x.shared_by_user_id,
                 sharedAt: x.shared_at,
                 snapshot: x.snapshot,
-              }),
-            ),
+                cardTitle: x.card_title,
+                richSummary: x.summary,
+                richTags: x.tags,
+                richCategory: x.category,
+                coordinator: x.coordinator,
+                sharedByName: x.shared_by_name,
+                sharedByEmail: x.shared_by_email,
+                richRuntime: x.runtime,
+                anchorRt: x.runtime, // chats: runtime is the anchor
+                // FIX 4 — chats: leave turnCount absent (0); ChatCard
+                // renders "0 msgs" which we suppress below.
+              });
+              // FIX 3 — key includes teamId.
+              shareInfoMap.set(`${t.id}:team_shared_chat:${x.chat_thread_id}`, {
+                teamId: t.id,
+                teamName: t.name,
+                sharedByLabel: row.sharedByLabel ?? null,
+                isOwner: false,
+                members: memberList,
+                originalId: x.chat_thread_id,
+                rowKind: "team_shared_chat",
+              });
+              return row;
+            }),
           ];
+          return rows;
         }),
       );
-      // ISO-8601 timestamps sort lexicographically, so a string compare is
-      // a correct shared_at DESC ordering.
-      return perTeam
+      const rows = perTeam
         .flat()
         .sort((a, b) => (b.sharedAt ?? "").localeCompare(a.sharedAt ?? ""));
+      return { rows, shareInfoMap };
     },
   });
-  const teamRows = teamSharedQ.data ?? [];
+  const teamRows = teamSharedQ.data?.rows ?? [];
+  const teamShareInfoMap = teamSharedQ.data?.shareInfoMap ?? new Map<string, TeamShareInfo>();
+
+  // FIX 1/3 — helper: derive the shareInfoMap lookup key from a shared row's
+  // synthetic id ("shared:<teamId>:<originalId>") and its rowKind.
+  // The map is now keyed by "teamId:rowKind:originalId" (FIX 3).
+  function shareInfoKey(row: SessionListRow): string {
+    // id shape: "shared:<teamId>:<originalId>"
+    const [, teamId, ...rest] = row.id.split(":");
+    const originalId = rest.join(":");
+    return `${teamId}:${row.rowKind}:${originalId}`;
+  }
+
+  // FIX 1 — The old code built localToShareMap from teamShareInfoMap entries
+  // (the shared rows themselves) then checked `!localToShareMap.has(localKey)`
+  // — since the map was populated from the same set, the predicate was ALWAYS
+  // false and every shared row was dropped → empty Team feed.
+  //
+  // Correct approach: source the key-set from the LOCAL rows (clusteredData).
+  // We compute this lazily below, after clusteredData is available.
+  // Placeholder — will be populated after clusteredData is known.
+  const localKeys = new Set<string>();
+  // R3 (codex): map each local key → that local row's live status so the
+  // dedupe can be status-aware. A shared snapshot is always "closed"; the
+  // local copy may still be "open". We must only suppress the shared row when
+  // the local row would actually survive the active status filter — otherwise
+  // "Team + Closed" on an open-but-shared conversation would hide both.
+  const localStatusByKey = new Map<string, string | null>();
 
   // Backend search across turn text. Returns the set of session ids
   // whose turns contain all the search tokens. Combined with the
@@ -538,15 +763,85 @@ export default function SessionsList() {
   const clusteredData = nonEmptyData
     ? clusterEvalRuns(nonEmptyData)
     : undefined;
+  // Part E — FIX 1: Build the local key-set from clusteredData (local rows),
+  // NOT from teamShareInfoMap.  A local key has the shape
+  // "localRowKind:localRowId" where localRowKind is the non-prefixed kind
+  // (war_room / session / chat).  We compare it against every share entry's
+  // "localKind:originalId" to decide whether the owner has a local copy.
+  //
+  // FIX 2 — also populate localRowShareAnnotations: the owner's local card
+  // gets a teamShare annotation so it survives the "team" kind filter and
+  // renders with the TEAM badge.  The corresponding shared row is suppressed
+  // (dedupe keeps exactly one card).
+  //
+  // Keyed by local row id for O(1) lookup at render time.
+  const localRowShareAnnotations = new Map<string, TeamShareInfo>();
+  if (clusteredData) {
+    for (const row of clusteredData) {
+      // Only local (non-shared) rows can have a local copy.
+      if (TEAM_SHARED_KINDS.has(row.rowKind)) continue;
+      const localKey = `${row.rowKind}:${row.id}`;
+      localKeys.add(localKey);
+      localStatusByKey.set(localKey, row.status);
+    }
+    // Now walk every share entry; if the owner has a matching local row,
+    // annotate that local row so it gets a TEAM badge under the Team filter.
+    for (const [, info] of teamShareInfoMap) {
+      const localKind =
+        info.rowKind === "team_shared_war_room"
+          ? "war_room"
+          : info.rowKind === "team_shared_session"
+            ? "session"
+            : "chat";
+      const localKey = `${localKind}:${info.originalId}`;
+      if (localKeys.has(localKey)) {
+        // Owner has local copy — annotate the local row.
+        // If already annotated (shared into >1 team), keep the first
+        // annotation; the card will pick it up and can show "+N" later.
+        if (!localRowShareAnnotations.has(info.originalId)) {
+          localRowShareAnnotations.set(info.originalId, { ...info, isOwner: true });
+        }
+      }
+    }
+  }
+
+  // FIX 1 — dedupe: keep a shared row ONLY when the owner does NOT have a
+  // local copy (i.e. the local key is absent from localKeys).  Recipients
+  // (no local copy) always see the shared row.  Owners see the annotated
+  // local row instead (one card, one badge).
+  const deduplicatedTeamRows = teamRows.filter((r) => {
+    const info = teamShareInfoMap.get(shareInfoKey(r));
+    if (!info) return true; // no info → keep (defensive)
+    const localKind =
+      info.rowKind === "team_shared_war_room"
+        ? "war_room"
+        : info.rowKind === "team_shared_session"
+          ? "session"
+          : "chat";
+    const localKey = `${localKind}:${info.originalId}`;
+    if (!localKeys.has(localKey)) return true; // recipient — always keep
+    // Owner has a local copy. R3 (codex): only drop the shared row when that
+    // local row would survive the active status filter — i.e. it will actually
+    // render in its place. The shared snapshot is "closed"; if the local copy
+    // is "open" and the user filtered to "closed", the local row is hidden, so
+    // keep the (closed) shared snapshot rather than show nothing.
+    if (statusFilter === "all") return false; // local row renders → drop shared
+    const localStatus = localStatusByKey.get(localKey);
+    const localSurvives = localStatus === statusFilter;
+    return !localSurvives; // drop shared only if the local row will render
+  });
+
   // teamfilter (#1) — merge cloud-shared rows into the local feed when the
-  // Team chip is active. teamRows is pre-sorted shared_at DESC and prepended,
-  // and the kind="team" predicate in rowMatchesFilters scopes the visible
-  // set to exactly these rows; for every other kind teamRows is empty
-  // (query disabled) so the local list is unchanged.
+  // Team chip is active. deduplicatedTeamRows is pre-sorted shared_at DESC
+  // and prepended; duplicate rows where the owner has the local copy are
+  // filtered out in favor of the annotated local card.
   const sourceRows =
     clusteredData && kindFilter === "team"
-      ? [...teamRows, ...clusteredData]
+      ? [...deduplicatedTeamRows, ...clusteredData]
       : clusteredData;
+  // FIX 2 — build the annotated-ids set once for O(1) lookup in filters.
+  const annotatedLocalIdSet = new Set(localRowShareAnnotations.keys());
+
   const filteredSessions = sourceRows
     ? (() => {
         const metaMatched = filterSessions(
@@ -557,6 +852,7 @@ export default function SessionsList() {
           categoryFilter,
           teamFilter,
           tagFilter,
+          annotatedLocalIdSet,
         );
         if (!contentSearchEnabled || contentMatchIds.size === 0) {
           return metaMatched;
@@ -573,7 +869,7 @@ export default function SessionsList() {
           tag: tagFilter,
         };
         return sourceRows.filter((s) => {
-          if (!rowMatchesFilters(s, f)) return false;
+          if (!rowMatchesFilters(s, f, undefined, annotatedLocalIdSet)) return false;
           return metaIds.has(s.id) || contentMatchIds.has(s.id);
         });
       })()
@@ -1040,17 +1336,24 @@ export default function SessionsList() {
             // Pick by rowKind; chat/war-room/single-run render before the
             // default session path so type-narrowing flows cleanly.
             if (s.rowKind === "chat") {
+              const ownerShareInfo = localRowShareAnnotations.get(s.id);
               return (
                 <ChatCard
                   key={s.id}
                   session={s}
                   onOpen={() => setOpenSelection({ kind: "chat", id: s.id })}
+                  teamShare={ownerShareInfo ? {
+                    teamName: ownerShareInfo.teamName,
+                    sharedByLabel: null,
+                    isOwner: true,
+                    members: ownerShareInfo.members,
+                  } : undefined}
                 />
               );
             }
-            // teamfilter (#1) — cloud-shared rows. Route to the read-only
-            // placeholder, threading the synthetic id + which shared kind
-            // so the detail view (and #6's replacement) can decode it.
+            // teamfilter (#1) — cloud-shared rows. Part D: route through
+            // rich card variants (WarRoomCard / ChatCard / SessionCard) with
+            // a teamShare annotation banner instead of the old TeamSharedCard.
             if (
               s.rowKind === "team_shared_session" ||
               s.rowKind === "team_shared_war_room" ||
@@ -1062,21 +1365,58 @@ export default function SessionsList() {
                   : s.rowKind === "team_shared_war_room"
                     ? "war_room"
                     : "chat";
+              // FIX 3 — map is now keyed by "teamId:rowKind:originalId";
+              // use shareInfoKey() to derive the correct key from the row.
+              const info = teamShareInfoMap.get(shareInfoKey(s));
+              const teamShareProp = info
+                ? {
+                    teamName: info.teamName,
+                    sharedByLabel: info.sharedByLabel,
+                    isOwner: info.isOwner,
+                    members: info.members,
+                  }
+                : {
+                    teamName: s.sharedTeamName ?? null,
+                    sharedByLabel: s.sharedByLabel ?? null,
+                    isOwner: false,
+                    members: [],
+                  };
+              const openHandler = () =>
+                setOpenSelection({ kind: "team_shared", id: s.id, sharedKind });
+              if (s.rowKind === "team_shared_war_room") {
+                return (
+                  <WarRoomCard
+                    key={s.id}
+                    session={s}
+                    onOpen={openHandler}
+                    teamShare={teamShareProp}
+                  />
+                );
+              }
+              if (s.rowKind === "team_shared_chat") {
+                return (
+                  <ChatCard
+                    key={s.id}
+                    session={s}
+                    onOpen={openHandler}
+                    teamShare={teamShareProp}
+                  />
+                );
+              }
+              // team_shared_session
               return (
-                <TeamSharedCard
+                <SessionCard
                   key={s.id}
                   session={s}
-                  onOpen={() =>
-                    setOpenSelection({
-                      kind: "team_shared",
-                      id: s.id,
-                      sharedKind,
-                    })
-                  }
+                  onOpen={openHandler}
+                  tagFilter={tagFilter}
+                  setTagFilter={setTagFilter}
+                  teamShare={teamShareProp}
                 />
               );
             }
             if (s.rowKind === "war_room") {
+              const ownerShareInfo = localRowShareAnnotations.get(s.id);
               return (
                 <WarRoomCard
                   key={s.id}
@@ -1084,6 +1424,12 @@ export default function SessionsList() {
                   onOpen={() =>
                     setOpenSelection({ kind: "war_room", id: s.id })
                   }
+                  teamShare={ownerShareInfo ? {
+                    teamName: ownerShareInfo.teamName,
+                    sharedByLabel: null,
+                    isOwner: true,
+                    members: ownerShareInfo.members,
+                  } : undefined}
                 />
               );
             }
@@ -1113,6 +1459,7 @@ export default function SessionsList() {
                 />
               );
             }
+            const ownerShareInfoSess = localRowShareAnnotations.get(s.id);
             return (
               <SessionCard
                 key={s.id}
@@ -1120,6 +1467,12 @@ export default function SessionsList() {
                 onOpen={() => setOpenSelection({ kind: "session", id: s.id })}
                 tagFilter={tagFilter}
                 setTagFilter={setTagFilter}
+                teamShare={ownerShareInfoSess ? {
+                  teamName: ownerShareInfoSess.teamName,
+                  sharedByLabel: null,
+                  isOwner: true,
+                  members: ownerShareInfoSess.members,
+                } : undefined}
               />
             );
           })}
