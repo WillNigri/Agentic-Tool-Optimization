@@ -47,6 +47,18 @@ const SUPPORTED_COORDINATORS: { slug: string; label: string }[] = [
   { slug: "zai", label: "Z.AI (GLM)" },
 ];
 
+// Subscription coordinators — summarize via the logged-in CLI runtime
+// (Claude Code / Codex / Gemini CLI) with NO API key + NO API billing.
+// The CLI `--coordinator <runtime>` accepts these; the close subprocess
+// shells out to the runtime's `--print`/`exec`/`-p`. Always offered (the
+// modal can't tell if you're logged in — the close surfaces a clear error
+// if the runtime isn't authed, and the default auto-falls-back to an API key).
+const SUBSCRIPTION_COORDINATORS: { slug: string; label: string }[] = [
+  { slug: "claude", label: "Claude Code (subscription — no API cost)" },
+  { slug: "codex", label: "Codex (subscription — no API cost)" },
+  { slug: "gemini", label: "Gemini CLI (subscription — no API cost)" },
+];
+
 export type ConversationType = "session" | "war_room" | "chat";
 
 /** Per-type copy. Centralized so a future fourth conversation type
@@ -131,7 +143,6 @@ export default function CloseConversationModal({
       configured: configured.has(c.slug),
     }));
   }, [apiKeys]);
-  const anyConfigured = coordinatorOptions.some((c) => c.configured);
 
   if (!open) return null;
 
@@ -194,24 +205,30 @@ export default function CloseConversationModal({
             className="w-full rounded-md border border-cs-border bg-cs-bg px-3 py-2 text-sm text-cs-text focus:border-cs-accent focus:outline-none disabled:opacity-50"
           >
             <option value="">
-              {anyConfigured
-                ? "Default (auto-pick from session agent → anchor → first key)"
-                : "(no API keys configured — backend default will be used)"}
+              Default — prefer subscription (Claude Code), fall back to an API key
             </option>
-            {coordinatorOptions.map((c) => (
-              <option key={c.slug} value={c.slug} disabled={!c.configured}>
-                {c.label}
-                {!c.configured ? " — no API key configured" : ""}
-              </option>
-            ))}
+            <optgroup label="Subscription (no API cost)">
+              {SUBSCRIPTION_COORDINATORS.map((c) => (
+                <option key={c.slug} value={c.slug}>
+                  {c.label}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="API key">
+              {coordinatorOptions.map((c) => (
+                <option key={c.slug} value={c.slug} disabled={!c.configured}>
+                  {c.label}
+                  {!c.configured ? " — no API key configured" : ""}
+                </option>
+              ))}
+            </optgroup>
           </select>
-          {!anyConfigured && (
-            <p className="text-[10px] text-cs-muted">
-              Add a provider key in Settings → API Keys to enable the picker.
-              Note: Claude Code / Codex / Gemini CLI subscriptions don't
-              count — the summarizer dispatches via the provider's API.
-            </p>
-          )}
+          <p className="text-[10px] text-cs-muted">
+            Subscription coordinators summarize via your logged-in CLI runtime
+            (no API billing). API options need a key in Settings → API Keys.
+            The default prefers your Claude Code subscription and falls back to
+            an API key if it isn’t available.
+          </p>
         </div>
 
         <div className="space-y-1.5">

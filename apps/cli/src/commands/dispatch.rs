@@ -3017,6 +3017,81 @@ fn run_remote(
     Ok(())
 }
 
+/// One-shot subscription-runtime call for internal summarisation.
+///
+/// This is intentionally minimal: no execution_logs write, no
+/// live-runs registration, no grounding, no session continuity.
+/// It exists solely so `conversation_close::close_conversation`
+/// can use a locally-installed CLI subscription (claude/codex/gemini)
+/// as the summariser without requiring an API key.
+///
+/// Supported runtimes: claude, codex, gemini.
+/// All others return an error listing the accepted names.
+pub fn dispatch_oneshot_subscription(
+    runtime: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> anyhow::Result<String> {
+    let cli_path = crate::runtime::resolve_runtime_cli(runtime)?;
+    let mut cmd = std::process::Command::new(&cli_path);
+    match runtime {
+        "claude" => {
+            // --print gives plain-text stdout, no session, no streaming.
+            cmd.arg("--print").arg(prompt);
+            if let Some(m) = model {
+                cmd.arg("--model").arg(m);
+            }
+            // Allow no tools — summariser only reads the prompt.
+            cmd.arg("--allowedTools").arg("");
+        }
+        "codex" => {
+            cmd.arg("exec")
+                .arg("--skip-git-repo-check")
+                .arg("--sandbox")
+                .arg("read-only")
+                .arg("-c")
+                .arg("approval_policy=\"never\"");
+            if let Some(m) = model {
+                cmd.arg("--model").arg(m);
+            }
+            cmd.arg(prompt);
+        }
+        "gemini" => {
+            cmd.arg("-p").arg(prompt);
+            if let Some(m) = model {
+                cmd.arg("-m").arg(m);
+            }
+        }
+        other => {
+            anyhow::bail!(
+                "dispatch_oneshot_subscription: unsupported runtime '{}'. \
+                 Subscription runtimes are: claude, codex, gemini.",
+                other
+            );
+        }
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to spawn {} CLI for summarisation", runtime))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "{} summariser exited non-zero ({}): {}",
+            runtime,
+            output.status,
+            stderr.trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        anyhow::bail!(
+            "{} summariser returned empty output — check that the CLI is authenticated.",
+            runtime
+        );
+    }
+    Ok(text)
+}
+
 // PR-A.5 — tests for prepend_agent_persona_with_conn. The three
 // dispatch paths (`run`, `run_api`, `run_remote`) all funnel through
 // this single helper for persona prepend, so coverage here is the
