@@ -4,6 +4,20 @@ All notable changes to ATO are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.11] — 2026-06-19
+
+### Added
+- **Close summaries can run on a subscription, not just an API key.** The
+  war-room / session / chat close coordinator can now summarize via a logged-in
+  CLI runtime (Claude Code / Codex / Gemini) with no API key and no API
+  billing. CLI: `--coordinator claude|codex|gemini` (subscription) or
+  `--coordinator <provider>` (API). The **default now prefers your Claude Code
+  subscription and falls back to an API key** if it isn't usable — so a close
+  no longer fails just because one provider's API balance is empty. The desktop
+  close dialog's Coordinator picker groups "Subscription (no API cost)" and
+  "API key" accordingly. Explicit choices fail loudly (no silent fallback);
+  `--as`/anchor agents still take precedence over the subscription default.
+
 ## [2.18.10] — 2026-06-19
 
 ### Added
