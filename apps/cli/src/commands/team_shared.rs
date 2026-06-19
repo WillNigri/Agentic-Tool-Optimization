@@ -49,6 +49,44 @@ fn parse_tags(tags_json: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Enforce the cloud's 1 MB snapshot-row limit (the backend hard-rejects above
+/// it). Per-field capping alone is not enough: many capped seats/turns/messages
+/// can still serialize over the limit. Mirrors the desktop's withTruncation —
+/// drop the OLDEST children (index 0) of `child_key` until the serialized
+/// snapshot is under budget, and stamp `truncated_at` so readers know history
+/// was trimmed. Top-level counts (seat_count / turn_count / message_count) are
+/// intentionally left at their true totals; only the embedded transcript shrinks.
+fn enforce_size_budget(mut snap: Value, child_key: &str) -> Value {
+    const BUDGET: usize = 950_000; // bytes; headroom under the 1 MB cap
+    let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
+    let mut truncated = false;
+    loop {
+        if size(&snap) <= BUDGET {
+            break;
+        }
+        let popped = match snap.get_mut(child_key).and_then(|v| v.as_array_mut()) {
+            Some(arr) if !arr.is_empty() => {
+                arr.remove(0);
+                true
+            }
+            _ => false, // can't shrink further (no array / already empty)
+        };
+        if !popped {
+            break;
+        }
+        truncated = true;
+    }
+    if truncated {
+        if let Some(obj) = snap.as_object_mut() {
+            obj.insert(
+                "truncated_at".into(),
+                Value::String("size-capped".into()),
+            );
+        }
+    }
+    snap
+}
+
 // ── Auth / HTTP primitives ────────────────────────────────────────────────────
 
 fn auth_file_path() -> PathBuf {
@@ -270,7 +308,6 @@ fn build_war_room_snapshot(
                 "prompt": cap_field(r.get::<_, Option<String>>(5)?),
                 "response": cap_field(r.get::<_, Option<String>>(6)?),
                 "error_message": cap_field(r.get::<_, Option<String>>(7)?),
-                "created_at": r.get::<_, Option<String>>(8)?,
                 "duration_ms": r.get::<_, Option<i64>>(9)?,
                 "tokens_in": r.get::<_, Option<i64>>(10)?,
                 "tokens_out": r.get::<_, Option<i64>>(11)?,
@@ -279,10 +316,10 @@ fn build_war_room_snapshot(
                 "tool_calls_summary": r.get::<_, Option<String>>(14)?,
                 "member_id": r.get::<_, Option<String>>(15)?,
                 "machine_id": r.get::<_, Option<String>>(16)?,
+                "createdAt": r.get::<_, Option<String>>(8)?,
             }))
         })?
-        .filter_map(|x| x.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<Value>>>()?;
 
     // Coordinator-card metadata from the war_rooms lifecycle row. Without these
     // the shared card rendered "untitled / no summary / no tags" even though the
@@ -320,19 +357,22 @@ fn build_war_room_snapshot(
     let (status, closed_at, auto_title, summary, coordinator_runtime, human_comment, tags_json) =
         meta.unwrap_or_else(|| ("open".to_string(), None, None, None, None, None, None));
 
-    Ok(serde_json::json!({
-        "kind": "war_room",
-        "id": war_room_id,
-        "status": status,
-        "closed_at": closed_at,
-        "auto_title": auto_title,
-        "summary": summary,
-        "coordinator_runtime": coordinator_runtime,
-        "human_comment": human_comment,
-        "tags": parse_tags(tags_json),
-        "seat_count": seats.len(),
-        "seats": seats,
-    }))
+    Ok(enforce_size_budget(
+        serde_json::json!({
+            "kind": "war_room",
+            "id": war_room_id,
+            "status": status,
+            "closed_at": closed_at,
+            "auto_title": auto_title,
+            "summary": summary,
+            "coordinator_runtime": coordinator_runtime,
+            "human_comment": human_comment,
+            "tags": parse_tags(tags_json),
+            "seat_count": seats.len(),
+            "seats": seats,
+        }),
+        "seats",
+    ))
 }
 
 /// Build a rich session snapshot (metadata + turns) mirroring the desktop's
@@ -370,7 +410,8 @@ fn build_session_snapshot(conn: &rusqlite::Connection, session_id: &str) -> Resu
         meta;
 
     let mut stmt = conn.prepare(
-        "SELECT turn_index, role, text, runtime, created_at, agent_slug
+        "SELECT turn_index, role, text, runtime, created_at, agent_slug,
+                initiator_kind, client_surface, initiator_id
            FROM session_turns WHERE session_id = ?1 ORDER BY turn_index ASC",
     )?;
     let turns: Vec<Value> = stmt
@@ -382,27 +423,32 @@ fn build_session_snapshot(conn: &rusqlite::Connection, session_id: &str) -> Resu
                 "runtime": r.get::<_, Option<String>>(3)?,
                 "createdAt": r.get::<_, Option<String>>(4)?,
                 "agent_slug": r.get::<_, Option<String>>(5)?,
+                "initiator_kind": r.get::<_, Option<String>>(6)?,
+                "client_surface": r.get::<_, Option<String>>(7)?,
+                "initiator_id": r.get::<_, Option<String>>(8)?,
             }))
         })?
-        .filter_map(|x| x.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<Value>>>()?;
 
-    Ok(serde_json::json!({
-        "kind": "session",
-        "id": session_id,
-        "runtime": runtime,
-        "agent_slug": agent_slug,
-        "title": title,
-        "status": status,
-        "closed_at": closed_at,
-        "auto_title": auto_title,
-        "summary": summary,
-        "tags": parse_tags(tags_json),
-        "project_id": project_id,
-        "human_comment": human_comment,
-        "turn_count": turn_count,
-        "turns": turns,
-    }))
+    Ok(enforce_size_budget(
+        serde_json::json!({
+            "kind": "session",
+            "id": session_id,
+            "runtime": runtime,
+            "agent_slug": agent_slug,
+            "title": title,
+            "status": status,
+            "closed_at": closed_at,
+            "auto_title": auto_title,
+            "summary": summary,
+            "tags": parse_tags(tags_json),
+            "project_id": project_id,
+            "human_comment": human_comment,
+            "turn_count": turn_count,
+            "turns": turns,
+        }),
+        "turns",
+    ))
 }
 
 /// Build a rich chat snapshot (metadata + messages) mirroring the desktop's
@@ -439,7 +485,8 @@ fn build_chat_snapshot(conn: &rusqlite::Connection, chat_id: &str) -> Result<Val
         meta;
 
     let mut stmt = conn.prepare(
-        "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at
+        "SELECT id, thread_id, role, content, runtime, agent_slug, metadata, created_at,
+                initiator_kind, client_surface, initiator_id
            FROM chat_messages WHERE thread_id = ?1 ORDER BY created_at ASC",
     )?;
     let messages: Vec<Value> = stmt
@@ -453,26 +500,31 @@ fn build_chat_snapshot(conn: &rusqlite::Connection, chat_id: &str) -> Result<Val
                 "agent_slug": r.get::<_, Option<String>>(5)?,
                 "metadata": r.get::<_, Option<String>>(6)?,
                 "createdAt": r.get::<_, Option<String>>(7)?,
+                "initiator_kind": r.get::<_, Option<String>>(8)?,
+                "client_surface": r.get::<_, Option<String>>(9)?,
+                "initiator_id": r.get::<_, Option<String>>(10)?,
             }))
         })?
-        .filter_map(|x| x.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<Value>>>()?;
 
-    Ok(serde_json::json!({
-        "kind": "chat",
-        "id": chat_id,
-        "title": title,
-        "status": status,
-        "closed_at": closed_at,
-        "auto_title": auto_title,
-        "summary": summary,
-        "coordinator_runtime": coordinator_runtime,
-        "human_comment": human_comment,
-        "tags": parse_tags(tags_json),
-        "message_count": message_count,
-        "agent_id": agent_id,
-        "messages": messages,
-    }))
+    Ok(enforce_size_budget(
+        serde_json::json!({
+            "kind": "chat",
+            "id": chat_id,
+            "title": title,
+            "status": status,
+            "closed_at": closed_at,
+            "auto_title": auto_title,
+            "summary": summary,
+            "coordinator_runtime": coordinator_runtime,
+            "human_comment": human_comment,
+            "tags": parse_tags(tags_json),
+            "message_count": message_count,
+            "agent_id": agent_id,
+            "messages": messages,
+        }),
+        "messages",
+    ))
 }
 
 pub fn share_resource(
