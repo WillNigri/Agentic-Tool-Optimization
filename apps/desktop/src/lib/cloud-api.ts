@@ -328,6 +328,21 @@ export async function updateTeamMemberRole(teamId: string, userId: string, role:
   });
 }
 
+export interface TeamMemberSimple {
+  user_id: string;
+  name: string | null;
+  email: string;
+  role: 'owner' | 'admin' | 'member';
+}
+
+export async function getTeamMembers(teamId: string): Promise<TeamMemberSimple[]> {
+  try {
+    return await apiRequest<TeamMemberSimple[]>(`/api/teams/${teamId}/members`);
+  } catch {
+    return [];
+  }
+}
+
 export async function getPendingInvitations(): Promise<TeamInvitation[]> {
   return apiRequest<TeamInvitation[]>('/api/teams/invitations/pending');
 }
@@ -418,6 +433,13 @@ export interface SharedTeamSession {
   agent_slug?: string | null;
   turn_count?: number | null;
   expires_at?: string | null;
+  card_title?: string | null;
+  summary?: string | null;
+  tags?: string[] | null;
+  category?: string | null;
+  coordinator?: string | null;
+  shared_by_name?: string | null;
+  shared_by_email?: string | null;
 }
 
 export interface SharedTeamWarRoom {
@@ -428,6 +450,13 @@ export interface SharedTeamWarRoom {
   snapshot: unknown;
   title?: string | null;
   expires_at?: string | null;
+  card_title?: string | null;
+  summary?: string | null;
+  tags?: string[] | null;
+  category?: string | null;
+  coordinator?: string | null;
+  shared_by_name?: string | null;
+  shared_by_email?: string | null;
 }
 
 export interface SharedTeamChat {
@@ -443,6 +472,13 @@ export interface SharedTeamChat {
   title?: string | null;
   runtime?: string | null;
   expires_at?: string | null;
+  card_title?: string | null;
+  summary?: string | null;
+  tags?: string[] | null;
+  category?: string | null;
+  coordinator?: string | null;
+  shared_by_name?: string | null;
+  shared_by_email?: string | null;
 }
 
 export async function getTeamSharedAgents(teamId: string): Promise<SharedTeamAgent[]> {
