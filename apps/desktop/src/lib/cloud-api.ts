@@ -457,6 +457,11 @@ export interface SharedTeamWarRoom {
   coordinator?: string | null;
   shared_by_name?: string | null;
   shared_by_email?: string | null;
+  // FIX 4 — real seat metadata from the cloud list endpoint.
+  // seat_count is the persisted string label (e.g. "3"); seat_runtimes
+  // is the ordered array of runtimes that ran (e.g. ["claude","codex"]).
+  seat_count?: string | null;
+  seat_runtimes?: string[] | null;
 }
 
 export interface SharedTeamChat {

@@ -163,9 +163,15 @@ export function ChatCard({ session: s, onOpen, teamShare }: Props) {
           </span>
         )}
         <div className="ml-auto inline-flex items-center gap-3 text-xs text-cs-muted">
-          <span>
-            {s.turnCount} msg{s.turnCount !== 1 ? "s" : ""}
-          </span>
+          {/* FIX 4 — omit the counter when turnCount is 0/absent so
+              shared chat cards (no native message counter) don't show
+              a misleading "0 msgs". Local chats always have >0 turns
+              by the time they appear (nonEmptyData filter). */}
+          {s.turnCount > 0 && (
+            <span>
+              {s.turnCount} msg{s.turnCount !== 1 ? "s" : ""}
+            </span>
+          )}
           <span>{formatTime(s.lastUsedAt)}</span>
         </div>
       </div>
