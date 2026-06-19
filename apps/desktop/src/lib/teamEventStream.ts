@@ -95,6 +95,11 @@ interface ConnectionState {
   reconnectDelayMs: number;
   intentionalClose: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
+  /** Fires ~10s after a WS opens; only then is the backoff reset to 1s, so an
+   *  open-then-instantly-close socket (e.g. server has no events handler) can't
+   *  reset the backoff and hammer mesh-presence-token every second. Cleared on
+   *  close so a quick close never resets. */
+  stabilityTimer: ReturnType<typeof setTimeout> | null;
   // Store last open parameters for reconnect.
   teamId: string;
   kind: SharedResourceKind;
@@ -142,6 +147,7 @@ class TeamEventStreamManager {
         reconnectDelayMs: 1_000,
         intentionalClose: false,
         reconnectTimer: null,
+        stabilityTimer: null,
         teamId,
         kind,
         resourceId,
@@ -199,6 +205,7 @@ class TeamEventStreamManager {
         reconnectDelayMs: 1_000,
         intentionalClose: false,
         reconnectTimer: null,
+        stabilityTimer: null,
         teamId,
         kind,
         resourceId,
@@ -305,7 +312,17 @@ class TeamEventStreamManager {
     state.ws = ws;
 
     ws.addEventListener("open", () => {
-      state.reconnectDelayMs = 1_000;
+      // Only reset the backoff once the socket proves STABLE (still open after
+      // ~10s). Resetting immediately on open let an open-then-instantly-close
+      // socket (server with no events handler) loop every 1s and hammer
+      // mesh-presence-token. Cleared in the close handler.
+      if (state.stabilityTimer) clearTimeout(state.stabilityTimer);
+      state.stabilityTimer = setTimeout(() => {
+        state.stabilityTimer = null;
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          state.reconnectDelayMs = 1_000;
+        }
+      }, 10_000);
       // Drop the cached token on open so the next reconnect re-mints.
       // (The token TTL is 15 min; we cache it for reuse across short
       //  reconnects but drop it here in case the WS lived long enough
@@ -339,6 +356,13 @@ class TeamEventStreamManager {
 
     ws.addEventListener("close", () => {
       state.ws = null;
+      // Cancel the stability timer — a socket that closed before proving
+      // stable must NOT reset the backoff, so repeated quick closes keep
+      // backing off (1s→2→4…→30s) instead of looping every second.
+      if (state.stabilityTimer) {
+        clearTimeout(state.stabilityTimer);
+        state.stabilityTimer = null;
+      }
       // Evict token so next reconnect re-mints (guards against stale
       // token at ~15-min TTL boundary).
       this.cachedToken = null;
