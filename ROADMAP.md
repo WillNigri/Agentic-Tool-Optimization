@@ -78,13 +78,17 @@ Closes YC's "self-improving company" loop YC's framework calls out: failure dete
 - ✅ PR-12.0 — schema deltas for v2.11 (`parent_run_id` on methodology_runs, new tables `agent_variant_lineage` + `production_signals`) + `VariantMatrix.holdout_prompts` field (Q7 overfitting defense #1)
 - ✅ PR-12.05 — open-core tier gate (`apps/cli/src/tier.rs` with cached `/auth/me` resolution + structured upgrade prompt). Re-tiers `methodology.schedule create` to Pro (existing schedules grandfathered). Pre-registers `methodology.diagnose` Pro flag for PR-12.1.
 
-**Planned (next PRs):**
-- 🟡 PR-12.1 — `ato evaluations methodology diagnose <run-id>` CLI (read failing cells + propose structured agent-definition change). Pure diagnose; no `--apply` yet. ~250 LOC. Pro from day one.
-- 🟡 PR-12.2 — `--apply` (write variant file with `require --yes` confirmation) + `--ab` (run variant methodology + compare against baseline) + the three win-condition predicates (`any_significant_improvement`, `any_significant_regression`, `cost_inflation_unjustified`). ~300 LOC.
-- 🟡 PR-12.3 — MCP tool `diagnose_methodology_run` + "Propose improvement" button on MethodologiesPanel. ~150 LOC.
-- 🟡 PR-12.3a — Interactive approval card in the desktop activity feed (currently read-only; needs Approve / Reject / View-diff buttons). ~200 LOC.
-- 🟡 PR-12.4 — `agent_variant_lineage` writes + the depth-≥3-in-14-days warning. ~100 LOC.
-- 🟡 PR-12.5 — Langfuse/Helicone Mode A ingestion → `production_signals` table → `production_signal:` block in diagnose prompt. Plus 7-day auto-revert watch on shipped variants. Cloud-side dependency, lands in v2.11.x.
+**Shipped (verified in code 2026-06-20):**
+- ✅ PR-12.1 — `ato evaluations methodology diagnose <run-id>` CLI (`apps/cli/src/commands/methodology.rs:197`, pipeline in `methodology/diagnose.rs`). Pro-gated, dispatches to `ato-pro`.
+- ✅ PR-12.2 — `--apply` (writes variant file, `--yes` gate, `methodology.rs:224` + `diagnose.rs:1395`) + `--ab`/`compare` (`methodology.rs:184`, cell-by-cell Welch t + three-gate ship bar in `compose.rs::compare_runs`).
+- ✅ PR-12.5 (partial) — `production_signals` table + OSS consumer `ato production-signals add/list/delete` (`commands/production_signals.rs`) + diagnose reads them at §Q6 (`diagnose.rs:631`). The Langfuse/Helicone ingest **connectors** stay in `ato-cloud` (closed-source) by design — see tiers table below.
+- ✅ Cross-runtime diagnose (PR-13) — `--cross-runtime` / `--diagnose-models` / `--picker` flags wired (`methodology.rs:233+`).
+
+**Still planned:**
+- 🟡 PR-12.3 — MCP tool `diagnose_methodology_run` + "Propose improvement" button on MethodologiesPanel.
+- 🟡 PR-12.3a — Interactive approval card in the desktop activity feed (Approve / Reject / View-diff).
+- 🟡 PR-12.4 — `agent_variant_lineage` writes + the depth-≥3-in-14-days warning.
+- 🟡 Langfuse/Helicone Mode A ingest connectors (cloud-side) + 7-day auto-revert watch on shipped variants → land in `ato-cloud`.
 
 **Design lock**: [`docs/v2.11-learning-loop.md`](./docs/v2.11-learning-loop.md) (war-room verdict from claude + gemini synthesized; both reviewers converged on every architectural question; both flagged the Q7 overfitting risk independently). Three defenses baked in **before** shipping:
 1. Holdout prompts — diagnose agent never sees them; A/B win condition must hold on holdout cells too.
@@ -206,8 +210,10 @@ Sully (@SullyOmarr) flagged on X (10/06/2026) that with Fable-class models no lo
 | PR-2.5 `missions dispatch --loop <slug>` + `loops::execute_loop()` programmatic surface; fixed latent v2.14 step read-back bug (execution_log_id was NULL since v2.14) | ✅ Shipped | `8819ba7` |
 | PR-3 per-agent worktrees (lazy create, `missions.repo_root`, explicit `workspace_root` chain, cleanup per policy, `ato missions cleanup`) — war-room 4B37F9FB codex+gemini unanimous | ✅ Shipped | v2.16.0-alpha.3 |
 | Dispatch hardening: with_tools survives gemini→google CLI fallback; bare dispatch offers trio ∪ `--require-tools` (write tools opt-in); per-round retry in dispatch_with_tools; gemini-3 thought-part handling + maxOutputTokens 16384; agent gate = allowlist ∩ check()==Allow (3-round war-room AAED7A3E) | ✅ Shipped | v2.16.0-alpha.3 |
-| PR-4 coordinator tick | ⏳ In design (war-room) | — |
-| PR-5..PR-8 (merge strategies, briefs, board UI, narrative) | Queued | — |
+| PR-4 coordinator tick | ✅ Shipped — `tick_one_mission()` at `missions.rs:3490` (real spawn/advance loop: in-flight check, `max_loops` + `token_budget_usd` gates, single_cwd concurrency, detached dispatch children) | — |
+| `ignored`-category (owner-said-skip), per-mission narrative file `~/.ato/missions/<slug>.md`, abandon decision-briefs, resume pre-flight check | ✅ Shipped (Steinberger/codex borrows — `missions.rs:441/651/1569`, `loops.rs:1315/1677`) | — |
+| No-subdelegation rule | 🟡 Documented in `docs/v2.16-missions.md` + schema comments; **no runtime enforcement code yet** | — |
+| PR-5..PR-8 (merge strategies, board UI) | Queued | — |
 
 ### v2.16.x — URGENT: cost-accounting accuracy review (Fable-led)
 
@@ -258,40 +264,22 @@ Sully (@SullyOmarr) flagged on X (10/06/2026) that with Fable-class models no lo
 - `merge_strategy` is the **coordinator integration strategy** (`human_approves_each` / `coordinator_merges_all` / `coordinator_picks_winner` / `ranked_by_score`), NOT git mechanics (squash/merge/ff/rebase). Don't conflate.
 - `category` is **operational policy** (gates coordinator behavior), NOT organizational metadata. Removing it collapses the Steinberger triage primitive.
 
-### v2.15.x — URGENT blocker: cross-process keychain mismatch orphans saved API keys
+### v2.15.x — ✅ RESOLVED: cross-process keychain mismatch orphaned saved API keys
 
-**Discovered 2026-06-11 during v2.16 war-room dispatch. Diagnosis refined 2026-06-12 after empirical test refuted the initial theory.**
+**Discovered 2026-06-11 during v2.16 war-room dispatch. Diagnosis refined 2026-06-12. Fixed 2026-06-16 (read-path prevention `f740381` + data-side `heal-orphans` migration `de7b838` / PR #71).**
 
-**Initial (WRONG) theory:** `apps/desktop/src-tauri/src/encryption.rs:42-43` hardcodes `VERSION_PREFIX = "v1:"` and `MASTER_KEY_ACCOUNT_FALLBACK = "master_key_v1"`, so every save would encrypt under v1 even after the ledger advanced to v2.
+**The fix (two parts):**
+1. **Read-path prevention (new orphans)** — `f740381` (v2.15.0 slice A): `master_key_resolve()` now re-validates the cached master-key account against the active ledger on **every read** (ledger-driven account + canary precondition + cache revalidation). This kills the cross-process drift that was minting orphans.
+2. **Data-side migration (existing orphans)** — `de7b838` / PR #71: `ato master-key heal-orphans [--dry-run]` walks `llm_api_keys` for rows whose `key_version != active`, decrypts each under its retired keychain account, re-encrypts under the active key, bumps `key_version` + `updated_at`. Idempotent, per-row resilient (a garbage row doesn't abort the rest). Refuses to run when `ATO_MASTER_KEY_B64` is set. Wired at `apps/cli/src/main.rs:2217`; logic in `apps/cli/src/commands/master_key.rs:97`; retired-account decrypt helpers in `apps/cli/src/encryption.rs:452+`.
+3. **Error UX** — `byok.rs` + `api_dispatch.rs` orphan-row messages now point users at the three-step ladder (env-var bypass → `heal-orphans --dry-run` → manual re-enter), replacing the old broken "just re-enter in Settings" advice (Save without a fresh paste only bumped `updated_at`).
 
-**Why that theory was wrong:** Empirical decrypt test on 2026-06-12 against Will's actual stored google row:
-- `master_key_resolve()` (encryption.rs:156) DOES read the active ledger account via `read_active_master_key_account()` (line 170).
-- `simple_encrypt()` (commands/llm_api_keys.rs:50) round-trips at save time: encrypt → decrypt → assert plaintext matches. If the save used a wrong key, the round-trip would fail and the row wouldn't be written.
-- Tested: the stored google ciphertext `v1:lY5fMo/4gHt3vyRU2EIuinCHq4N...` (111 bytes) **fails AES-GCM auth with BOTH the v1 AND v2 keychain entries** (InvalidTag). The save used a third key that exists nowhere accessible from the current process.
+**One unrecoverable historical casualty (documented, not a regression):** Will's google row from the 2026-06-11 dev-build save was encrypted under a *third* key the dev build cached from before the v1→v2 ledger transition. `heal-orphans` correctly identifies it but cannot recover it — that one key must be re-entered. Every other orphan and every new save are handled.
 
-**Three candidate root causes (none confirmed — needs codex war-room before fix):**
-1. **Dev build ACL split.** The save happened in the `npm run dev:desktop` build (ad-hoc signed) which has a different macOS keychain DR string than the prod `/Applications/ATO.app` (Apple-Developer signed). macOS may have routed reads/writes to a different ACL view of the same `master_key_v2` keychain entry. Prod CLI reads its own view; bytes differ → InvalidTag.
-2. **`ATO_MASTER_KEY_B64` env-var pollution.** If that env var was set in the shell that launched the dev build, `master_key_resolve()` line 160-167 returns the b64-decoded env bytes instead of the keychain entry. Save encrypts with arbitrary env bytes. Prod CLI without that env var falls back to keychain → different key → InvalidTag.
-3. **Stale process cache.** The dev build process may have cached a master key from before the v1→v2 ledger transition, used it for save, then died — leaving the orphan.
+**Root cause (confirmed):** the original orphan was created by a `npm run dev:desktop` (ad-hoc signed) save whose process cached a master key that diverged from the prod `/Applications/ATO.app` (Apple-Developer signed) keychain view — the "stale process cache" + "dev build ACL split" candidates, combined. The standing rule (`docs/agent-playbook.md`) is to shell dispatches through the prod app binary, not the PATH-resolved dev `ato`.
 
-**Required diagnostic steps before any code change:**
-1. Check shell history: was `ATO_MASTER_KEY_B64` set when desktop dev build ran on 2026-06-11?
-2. Test A: prod-only save → prod-only dispatch. Should succeed if ACL-split is the cause (no dev build in the picture).
-3. Test B: dev save → prod dispatch. Should fail if ACL-split is the cause.
-4. War-room codex with the empirical findings before fix design.
+**Env-var BYOK remains the deterministic override** (not a workaround for a bug anymore, just the explicit-key path): `packages/ato-llm-key-resolver/src/lib.rs:80-88` checks `provider.env_var` FIRST. `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in `~/.zshrc` bypass the encryption path entirely. Setup script: `setup_ato_env.sh` (idempotent rc-append helper).
 
-**Empirical workaround (in effect today):** `packages/ato-llm-key-resolver/src/lib.rs:80-88` checks `provider.env_var` FIRST. Setting `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` in `~/.zshrc` bypasses the encryption path entirely. Confirmed working 2026-06-12 — used to unblock v2.16 design war-rooms. Setup script: `setup_ato_env.sh` (idempotent rc-append helper).
-
-**Why NOT to touch `encryption.rs` until diagnosis lands:** the file gates every stored key. A speculative fix targeting the wrong root cause could orphan more keys, not fewer. The `simple_encrypt` round-trip guarantees the save flow itself is correct under whatever key it picked. The mismatch is between save-process and dispatch-process — which is the cross-process bug we don't yet understand.
-
-**Out of scope for this work (verified 2026-06-12):** the queued `session-master-key-pr2..pr6` branches. PR-2 is a -56977-LOC scope-cut cleanup, not a save-flow migration. Don't merge those expecting them to fix this.
-
-### v2.15.x — UX gap: read-time error message points to a remedy that doesn't work
-
-Today's `byok.rs::read_active_key` error message (line 71-81) and `api_dispatch::resolve_api_key` mirror advise users to "re-enter the {provider} API key in ATO → Settings → API Keys." Under the cross-process mismatch described above, **re-entering doesn't work** if the save happens in a different binary context than the dispatch. Update once the diagnostic identifies which cause is real:
-- If dev-build ACL split: error should detect dev-binary save and direct user to re-enter via prod app
-- If env-var pollution: error should warn when `ATO_MASTER_KEY_B64` differs between save and dispatch
-- Always recommend env-var BYOK (`GEMINI_API_KEY`, etc.) as the deterministic workaround
+**Out of scope (verified 2026-06-12, still true):** the queued `session-master-key-pr2..pr6` branches. PR-2 is a -56977-LOC scope-cut cleanup, not a save-flow migration.
 
 ### v2.16+ — Collison gap-matrix items still open
 
@@ -299,10 +287,10 @@ From the 2026-06-10 Collison/Steinberger gap-matrix conversation, items still no
 
 | Item | Maps to | Status |
 |---|---|---|
-| **Inputs panel** — markdown context bundles any agent/loop can reference | Collison #1 "stored set of prompts" | Planned |
-| **Live team workspace** — WebSocket-backed presence on sessions/war-rooms (extends v2.13 Team tier) | Collison #2 "real-time collab" | Planned |
-| **Output bundles** — packaged inference results, signed URL, shareable externally | Collison #5 "compiled outputs / shareable results" | Planned |
-| **Git linkage on every dispatch** — auto-stamp current commit SHA so we can answer "what run produced this commit?" | Collison #2 (VCS) | Planned |
+| **Inputs panel** — markdown context bundles any agent/loop can reference | Collison #1 "stored set of prompts" | ✅ Shipped — `inputs` table + `ato inputs add/list/get/edit/delete` + `<InputPicker>` (used in Loop Composer node config) |
+| **Live team workspace** — WebSocket-backed presence on sessions/war-rooms (extends v2.13 Team tier) | Collison #2 "real-time collab" | ✅ Shipped v2.18.4–.11 (real-time team participation + shared cards + shared transcript view; ato-cloud #35/#36/#37, prod E2E green 2026-06-19) |
+| **Output bundles** — packaged inference results, signed URL, shareable externally | Collison #5 "compiled outputs / shareable results" | ✅ Shipped (CLI) — `output_bundles` table + `ato bundles create/list/show/export/delete`; tarball = manifest + source + dispatches.jsonl + artifacts/. Remaining: signed-URL cloud upload (`ato-cloud`, writes back `signed_url`) + desktop UI |
+| **Git linkage on every dispatch** — auto-stamp current commit SHA so we can answer "what run produced this commit?" | Collison #2 (VCS) | ✅ Shipped — `capture_git_head()` (`git rev-parse HEAD`, 2s timeout) → `execution_logs.git_commit_sha` (`dispatch.rs:843`) |
 
 Already shipped from the matrix:
 - ✅ Loop Composer UI (Steinberger ask) — v2.14
@@ -1094,13 +1082,13 @@ The day was a single-themed push: drive every layer of the codebase to **85-90% 
 
 Build matrix green throughout — `cargo check rc=0`, `vite build rc=0`, `vitest 20/20` after every commit. Full progress + status in `docs/CONTINUATION_PLAN.md` § "Elegance day — 2026-05-18".
 
-### v2.6 — Universal multi-LLM observation tier (Planned, next milestone)
+### v2.6 — Universal multi-LLM observation tier (Tier 1 SHIPPED; Tiers 2-3 planned)
 
 Passive observation of native CLI sessions (Claude Code, Codex CLI, etc.) plus billing-surface tagging on every dispatch — under the war-room mission, this is the layer that lets you see what every LLM ran on this machine, not just what ATO dispatched. Plan locked 2026-05-14; full doc at `/Users/beatriznigri/.claude/plans/peaceful-strolling-kay.md`.
 
 Three tiers of observation, plus an honest Tier 4 callout:
 
-- **Tier 1 (PR-A, next ship)** — local watcher for terminal LLM CLIs. `execution_logs` gains `dispatch_kind` (`active` vs `passive_observation`), `billing_surface` (`claude_code_subscription` / `anthropic_api` / etc.), and `provider_session_id` (dedup key). New `passive_observer.rs` Rust module mirrors `log_watcher.rs`; parses Claude Code's `~/.claude/projects/<slug>/<uuid>.jsonl` and Codex CLI's `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Insights → Live gets a billing-surface chip + Source filter; Insights → Usage gets a group-by-billing-surface toggle + a "Last 7 days at a glance" header card.
+- **Tier 1 (PR-A) — ✅ SHIPPED (verified in code 2026-06-20).** Full passive-observer crate at `packages/ato-passive-observer/` (worker/sources/parsers/persist). Tails Claude Code (`~/.claude/projects/*.jsonl`), Codex (`~/.codex/sessions/*/rollout-*.jsonl`), and Gemini (`~/.gemini/**/*.jsonl`). `execution_logs` gained `dispatch_kind` (`active` vs `passive_observation`) + `billing_surface` (`claude_code_subscription` / `codex_cli_subscription` / `gemini_cli_subscription` / `anthropic_api` / etc.); `dispatch_kind='active'` filter applied across 11 read paths; `active_dispatches` view shipped. Auto-started on desktop launch.
 - **Tier 2 (PR-C, opt-in, Pro+, Team-admin gated)** — local mitmproxy-style traffic capture for power users / orgs. Bodies stored encrypted at rest under the existing AES-256-GCM-under-keychain scheme. Default off. Team-admin policy flag can require it on company PCs. Phase-2 cloud sync uses customer-managed keys.
 - **Tier 3 (PR-B)** — cloud-side polling of provider usage APIs (OpenAI `/v1/usage`, Anthropic org reports, Gemini billing, MiniMax, OpenRouter, DeepSeek, Groq, Together) using user-stored keys. New `provider_keys` table in ato-cloud, encrypted at rest. New `services/usage-poller/` on port 3008 (introduces `node-cron` to ato-cloud). Daily 03:00 UTC poll; results in a new `provider_usage` table aggregated by `(user, provider, period)`. New analytics endpoints `/api/analytics/provider-usage[/timeline]`. Desktop merges local-watched + cloud-polled data into the same Usage tab, deduped by `(provider, period)`.
 - **Tier 4 — out of scope** (phone apps, claude.ai web on consumer plans). Surfaced honestly in the Usage tab as a "blind spot" line. The candor is the differentiator vs competitors that silently undercount.
