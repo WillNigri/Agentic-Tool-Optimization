@@ -1347,7 +1347,9 @@ fn execute_step(
     match node.node_type.as_str() {
         "dispatch" => handle_dispatch(&params, loop_run_id, node_id, db_path, opts),
         "methodology_run" => handle_methodology_run(&params, db_path, opts),
-        "diagnose" | "apply" | "review" | "war_room" | "score" | "input" | "output" => {
+        "input" => handle_input(&params, db_path),
+        "output" => handle_output(&params, loop_run_id, db_path),
+        "diagnose" | "apply" | "review" | "war_room" | "score" => {
             Err(StepError::Skipped(format!(
                 "kind '{}' is not wired yet in v2.14.0 — Task #14 follow-up",
                 node.node_type
@@ -1511,6 +1513,152 @@ fn handle_methodology_run(
         "run_id": summary.run_id,
         "status": summary.status,
     }))
+}
+
+fn handle_input(
+    params: &serde_json::Map<String, serde_json::Value>,
+    db_path: &PathBuf,
+) -> std::result::Result<serde_json::Value, StepError> {
+    let slug = param_str(params, "slug")
+        .ok_or_else(|| StepError::Failed("input: 'slug' is required".into()))?;
+    let conn = crate::db::open_readonly(db_path).map_err(StepError::from)?;
+    let sql = format!(
+        "SELECT slug, name, content, kind FROM inputs WHERE {} = ?1",
+        id_or_slug_column(slug)
+    );
+    let row: (String, String, String, String) = conn
+        .query_row(&sql, params![slug], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|_| StepError::Failed(format!("input not found: {}", slug)))?;
+    Ok(serde_json::json!({
+        "input_slug": row.0,
+        "name": row.1,
+        "kind": row.3,
+        "content": row.2,
+    }))
+}
+
+fn handle_output(
+    params: &serde_json::Map<String, serde_json::Value>,
+    loop_run_id: &str,
+    db_path: &PathBuf,
+) -> std::result::Result<serde_json::Value, StepError> {
+    let conn = crate::db::open_readwrite(db_path).map_err(StepError::from)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn
+        .prepare(
+            "SELECT node_id, node_type, status, started_at, finished_at,
+                    input, output, error, execution_log_id
+               FROM loop_run_steps
+              WHERE loop_run_id = ?1
+              ORDER BY started_at ASC, id ASC",
+        )
+        .map_err(|e| StepError::Failed(format!("{:#}", anyhow::Error::from(e))))?;
+    let rows = stmt
+        .query_map(params![loop_run_id], |r| {
+            Ok(serde_json::json!({
+                "node_id": r.get::<_, String>(0)?,
+                "node_type": r.get::<_, String>(1)?,
+                "status": r.get::<_, String>(2)?,
+                "started_at": r.get::<_, Option<String>>(3)?,
+                "finished_at": r.get::<_, Option<String>>(4)?,
+                "input": r.get::<_, Option<String>>(5)?,
+                "output": r.get::<_, Option<String>>(6)?,
+                "error": r.get::<_, Option<String>>(7)?,
+                "execution_log_id": r.get::<_, Option<String>>(8)?,
+            }))
+        })
+        .map_err(|e| StepError::Failed(format!("{:#}", anyhow::Error::from(e))))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StepError::Failed(format!("{:#}", anyhow::Error::from(e))))?;
+
+    let dispatches: Vec<String> = rows
+        .iter()
+        .filter_map(|step| {
+            step.get("execution_log_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
+
+    let source_summary = conn
+        .query_row(
+            "SELECT id, loop_id, status, started_at, finished_at
+               FROM loop_runs
+              WHERE id = ?1",
+            params![loop_run_id],
+            |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, Option<String>>(0).ok().flatten(),
+                    "loop_id": r.get::<_, Option<String>>(1).ok().flatten(),
+                    "status": r.get::<_, Option<String>>(2).ok().flatten(),
+                    "started_at": r.get::<_, Option<String>>(3).ok().flatten(),
+                    "finished_at": r.get::<_, Option<String>>(4).ok().flatten(),
+                }))
+            },
+        )
+        .ok()
+        .unwrap_or(serde_json::Value::Null);
+
+    let manifest = serde_json::json!({
+        "source": {
+            "kind": "loop_run",
+            "id": loop_run_id,
+            "summary": source_summary,
+        },
+        "dispatches": dispatches,
+        "steps": rows,
+        "artifact_paths": [],
+        "captured_at": now,
+    });
+
+    let name = param_str(params, "name")
+        .map(|s| s.trim().chars().take(200).collect::<String>())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("Loop run {}", loop_run_id));
+    let description = param_str(params, "description").map(String::from);
+    let id = Uuid::new_v4().to_string();
+    let base_slug = slugify(&name);
+    let slug = unique_output_bundle_slug(&conn, &base_slug).map_err(StepError::from)?;
+    let manifest_str = serde_json::to_string(&manifest)
+        .map_err(|e| StepError::Failed(format!("{:#}", e)))?;
+
+    conn.execute(
+        "INSERT INTO output_bundles (
+            id, slug, name, description, source_kind, source_id,
+            manifest, export_path, signed_url, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, 'loop_run', ?5, ?6, NULL, NULL, ?7, ?7)",
+        params![id, slug, name, description, loop_run_id, manifest_str, now],
+    )
+    .map_err(|e| StepError::Failed(format!("{:#}", anyhow::Error::from(e))))?;
+
+    Ok(serde_json::json!({
+        "bundle_id": id,
+        "bundle_slug": slug,
+    }))
+}
+
+fn unique_output_bundle_slug(conn: &rusqlite::Connection, base: &str) -> Result<String> {
+    let mut candidate = base.to_string();
+    let mut suffix = 2;
+    loop {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM output_bundles WHERE slug = ?1",
+                params![candidate],
+                |r| r.get(0),
+            )
+            .context("query output_bundle slug collision")?;
+        if exists == 0 {
+            return Ok(candidate);
+        }
+        candidate = format!("{}-{}", base, suffix);
+        suffix += 1;
+        if suffix > 1000 {
+            anyhow::bail!("slug-exhaustion");
+        }
+    }
 }
 
 // ── Resume (v2.15.4 — pause-and-wake) ─────────────────────────────────
@@ -2358,7 +2506,7 @@ mod tests {
     fn make_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute(
+        conn.execute_batch(
             "CREATE TABLE loops (
                 id              TEXT PRIMARY KEY,
                 slug            TEXT NOT NULL UNIQUE,
@@ -2373,11 +2521,45 @@ mod tests {
                 source_ref      TEXT,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
-            )",
-            [],
+            );
+            CREATE TABLE inputs (
+                id            TEXT PRIMARY KEY,
+                slug          TEXT NOT NULL UNIQUE,
+                name          TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                tags          TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );",
         )
         .unwrap();
         conn
+    }
+
+    fn make_file_db_with_input() -> tempfile::NamedTempFile {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE inputs (
+                id            TEXT PRIMARY KEY,
+                slug          TEXT NOT NULL UNIQUE,
+                name          TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                tags          TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO inputs (id, slug, name, content, kind, tags, created_at, updated_at)
+             VALUES ('in-1', 'brief', 'Brief', '# heading', 'markdown', '[]', '2026-06-20T00:00:00Z', '2026-06-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        f
     }
 
     #[test]
@@ -2718,5 +2900,29 @@ mod tests {
         assert!(outcome.error.is_none());
         assert!(outcome.paused_dispatch_id.is_none());
         assert_eq!(outcome.loop_slug, "empty-loop");
+    }
+
+    #[test]
+    fn handle_input_returns_input_content_for_downstream_steps() {
+        let file = make_file_db_with_input();
+        let db_path = file.path().to_path_buf();
+        let params = serde_json::json!({ "slug": "brief" })
+            .as_object()
+            .cloned()
+            .unwrap();
+
+        let out = match handle_input(&params, &db_path) {
+            Ok(v) => v,
+            Err(StepError::Failed(msg)) => panic!("handle_input failed: {}", msg),
+            Err(StepError::Skipped(msg)) => panic!("handle_input skipped: {}", msg),
+            Err(StepError::Paused { paused_dispatch_id, .. }) => {
+                panic!("handle_input paused unexpectedly: {}", paused_dispatch_id)
+            }
+        };
+
+        assert_eq!(out["input_slug"], "brief");
+        assert_eq!(out["name"], "Brief");
+        assert_eq!(out["kind"], "markdown");
+        assert_eq!(out["content"], "# heading");
     }
 }
