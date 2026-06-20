@@ -1356,7 +1356,8 @@ fn execute_step(
         "methodology_run" => handle_methodology_run(&params, db_path, opts),
         "input" => handle_input(&params, db_path),
         "output" => handle_output(&params, loop_run_id, node_id, db_path),
-        "diagnose" | "apply" | "review" | "war_room" | "score" => {
+        "score" => handle_score(&params, db_path),
+        "diagnose" | "apply" | "review" | "war_room" => {
             Err(StepError::Skipped(format!(
                 "kind '{}' is not wired yet in v2.14.0 — Task #14 follow-up",
                 node.node_type
@@ -1724,6 +1725,26 @@ fn handle_output(
     Ok(serde_json::json!({
         "bundle_id": id,
         "bundle_slug": slug,
+    }))
+}
+
+fn handle_score(
+    params: &serde_json::Map<String, serde_json::Value>,
+    db_path: &PathBuf,
+) -> std::result::Result<serde_json::Value, StepError> {
+    let rubric_value = params
+        .get("rubric")
+        .ok_or_else(|| StepError::Failed("score: 'rubric' is required".into()))?;
+    let rubric = crate::methodology::rubric::Rubric::parse(rubric_value).map_err(StepError::from)?;
+    let response = param_str(params, "response")
+        .ok_or_else(|| StepError::Failed("score: 'response' is required".into()))?;
+    let prompt = param_str(params, "prompt").unwrap_or("");
+    let s = rubric.score(prompt, response, db_path).map_err(StepError::from)?;
+    Ok(serde_json::json!({
+        "score": s.score,
+        "reason": s.reason,
+        "sub_scores": s.sub_scores,
+        "judge_cost_usd": s.judge_cost_usd,
     }))
 }
 
@@ -3012,6 +3033,46 @@ mod tests {
         assert_eq!(out["name"], "Brief");
         assert_eq!(out["kind"], "markdown");
         assert_eq!(out["content"], "# heading");
+    }
+
+    #[test]
+    fn handle_score_scores_regex_rubric_matches_and_non_matches() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let db_path = file.path().to_path_buf();
+
+        let matching = serde_json::json!({
+            "rubric": { "kind": "regex", "pattern": "(?i)haiku" },
+            "response": "Here is a haiku"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let matching_out = match handle_score(&matching, &db_path) {
+            Ok(v) => v,
+            Err(StepError::Failed(msg)) => panic!("handle_score failed: {}", msg),
+            Err(StepError::Skipped(msg)) => panic!("handle_score skipped: {}", msg),
+            Err(StepError::Paused { paused_dispatch_id, .. }) => {
+                panic!("handle_score paused unexpectedly: {}", paused_dispatch_id)
+            }
+        };
+        assert_eq!(matching_out["score"], 1.0);
+
+        let non_matching = serde_json::json!({
+            "rubric": { "kind": "regex", "pattern": "(?i)haiku" },
+            "response": "This is prose"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let non_matching_out = match handle_score(&non_matching, &db_path) {
+            Ok(v) => v,
+            Err(StepError::Failed(msg)) => panic!("handle_score failed: {}", msg),
+            Err(StepError::Skipped(msg)) => panic!("handle_score skipped: {}", msg),
+            Err(StepError::Paused { paused_dispatch_id, .. }) => {
+                panic!("handle_score paused unexpectedly: {}", paused_dispatch_id)
+            }
+        };
+        assert_eq!(non_matching_out["score"], 0.0);
     }
 
     // ── R2 (war-room WR 2A2A9623, claude #2 / codex #4) — end-to-end ──
