@@ -1371,6 +1371,19 @@ fn execute_step(
     }
 }
 
+/// A CLI runtime that lacks its native CLI falls back to its API provider,
+/// and the execution_logs row is persisted under the PROVIDER slug. Return
+/// that alias so the dispatch read-back matches either slug. Mirrors the
+/// runtime→provider map in `byok.rs::runtime_byok_env`. (gemini → google.)
+fn runtime_provider_alias(runtime: &str) -> &str {
+    match runtime {
+        "gemini" => "google",
+        "claude" => "anthropic",
+        "codex" => "openai",
+        other => other,
+    }
+}
+
 fn handle_dispatch(
     params: &serde_json::Map<String, serde_json::Value>,
     loop_run_id: &str,
@@ -1476,11 +1489,18 @@ fn handle_dispatch(
     // MITIGATION shipped here: detect the ambiguous case (>1 new same-runtime
     // row in the window) and WARN loudly instead of silently attaching a guess
     // — converting codex's "silent wrong association" into a visible signal.
+    // LIVE-TEST FINDING (loop run, 2026-06-20): a CLI runtime can fall back
+    // to its API provider (gemini → google when the gemini CLI isn't
+    // installed), and the execution_logs row is then persisted under the
+    // PROVIDER slug, not the requested runtime. Match either, or the read-back
+    // misses a row that genuinely succeeded and the step falsely errors.
+    let alias = runtime_provider_alias(runtime);
     let conn = crate::db::open_readonly(db_path).map_err(StepError::from)?;
     let new_rows_in_window: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM execution_logs WHERE runtime = ?1 AND created_at >= ?2",
-            params![runtime, wake_started_at],
+            "SELECT COUNT(*) FROM execution_logs
+              WHERE runtime IN (?1, ?2) AND created_at >= ?3",
+            params![runtime, alias, wake_started_at],
             |r| r.get(0),
         )
         .unwrap_or(1);
@@ -1496,11 +1516,11 @@ fn handle_dispatch(
         .query_row(
             "SELECT id, response, model, status, cost_usd_estimated
                FROM execution_logs
-              WHERE runtime = ?1
-                AND created_at >= ?2
+              WHERE runtime IN (?1, ?2)
+                AND created_at >= ?3
               ORDER BY created_at DESC
               LIMIT 1",
-            params![runtime, wake_started_at],
+            params![runtime, alias, wake_started_at],
             |r| Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -3087,6 +3107,17 @@ mod tests {
             steps[0]["output"].is_object(),
             "step output should be parsed JSON, not an escaped string"
         );
+    }
+
+    #[test]
+    fn runtime_provider_alias_maps_cli_runtimes_to_providers() {
+        // Live-test finding: gemini dispatch persists as runtime='google'.
+        assert_eq!(runtime_provider_alias("gemini"), "google");
+        assert_eq!(runtime_provider_alias("claude"), "anthropic");
+        assert_eq!(runtime_provider_alias("codex"), "openai");
+        // API providers + unknowns map to themselves.
+        assert_eq!(runtime_provider_alias("google"), "google");
+        assert_eq!(runtime_provider_alias("minimax"), "minimax");
     }
 
     #[test]
