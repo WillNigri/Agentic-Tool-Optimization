@@ -44,6 +44,18 @@ If you're about to commit a Pro / Team / Enterprise feature, the destination is 
 
 ## Latest (May 2026 — current sprint)
 
+### 🔴 NEXT — Web dashboard parity (flagged by Will 2026-06-20)
+
+The hosted dashboard at **app.agentictool.ai** is badly behind the desktop app. Today it only ships **Cost Dashboard** + **API Keys** — Will (signed in as will@nigri.io) **cannot see team online sessions / real-time team participation** there, even though that shipped end-to-end on desktop in v2.18.4–.11 (real-time team participation, shared cards, shared transcript view; ato-cloud #35/#36/#37, prod E2E green 2026-06-19).
+
+**Scheduled to start right after #68 Loop Runner Completeness.** Scope to lock in a war-room, but the obvious gaps to close in the web dashboard:
+- **Team online sessions / presence** — surface the live war-rooms + sessions feed (the desktop "Team" filter) in the web dashboard. This is the headline miss.
+- **Shared conversation cards + transcript view** — the Google-Drive-style unified shared cards already exist on desktop; mirror them on web (read-only first, per the v2.16 web-tier plan).
+- **Sessions / war-rooms / missions browse** — at minimum read-only parity with what the desktop Sessions feed shows.
+- Tier note: hosted dashboard + team state are Pro/Team — implementation lives in **ato-cloud** (web app + gateway), not this OSS repo. Open-core boundary applies.
+
+> Tracking: this is a milestone-sized effort (ato-cloud web + gateway). Decompose into PRs once #68 lands.
+
 ### v2.10.0 — Methodology runner (Released 2026-05-25)
 
 The Pro-tier headline ATO sells: a methodology = a reusable test recipe (N prompts × M models × R reps, scored with a rubric). Run it, get per-cell mean / SD / 95% CI / pairwise Welch t with p-values, dual-cost ledger (your LLM bill vs our delivery cost). Real-data validated against the n=150 corpus from Part 5 of the v2.9 build log; blog Part 6 published with the receipts.
