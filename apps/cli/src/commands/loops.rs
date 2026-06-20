@@ -833,8 +833,10 @@ fn parse_vars(raw: &[String]) -> Result<serde_json::Value> {
 //     array, number stay typed). Embedded tokens render as text.
 struct SubstitutionContext {
     vars: serde_json::Map<String, serde_json::Value>,
-    /// node_id → `{ "output": <step output JSON> }`. Wrapping under
-    /// `output` lets `{{steps.<id>.output.<field>}}` navigate uniformly.
+    /// node_id → the step's output JSON, stored unwrapped. Both
+    /// `{{steps.<id>}}` and `{{steps.<id>.output}}` resolve to it (the
+    /// optional `output` segment is consumed for readability), and
+    /// `{{steps.<id>.output.<field>}}` navigates into it.
     step_outputs: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -847,43 +849,48 @@ impl SubstitutionContext {
     }
 
     fn record_step(&mut self, node_id: &str, output: serde_json::Value) {
-        self.step_outputs
-            .insert(node_id.to_string(), serde_json::json!({ "output": output }));
+        self.step_outputs.insert(node_id.to_string(), output);
     }
 
     /// Resolve a dotted path (`vars.topic`, `steps.gen.output.response`) to
     /// a JSON value, or Err with a human-readable reason.
     fn resolve_path(&self, path: &str) -> std::result::Result<serde_json::Value, String> {
-        let segs: Vec<&str> = path
-            .split('.')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let segs: Vec<&str> = path.split('.').map(|s| s.trim()).collect();
+        if segs.iter().any(|s| s.is_empty()) {
+            return Err(format!(
+                "malformed template path `{}` — empty segment (check for `..` or trailing `.`)",
+                path
+            ));
+        }
         let root = segs
             .first()
             .ok_or_else(|| "empty template `{{}}`".to_string())?;
 
-        // Resolve the root value. Both roots consume 2 segments
-        // (`vars.<key>` / `steps.<node>`); navigation starts at index 2.
-        let mut current: serde_json::Value = match *root {
+        // Resolve the root value + the index where field navigation begins.
+        let (mut current, nav_start): (serde_json::Value, usize) = match *root {
             "vars" => {
                 let key = segs.get(1).ok_or_else(|| {
                     "`vars` needs a key, e.g. {{vars.topic}}".to_string()
                 })?;
-                self.vars.get(*key).cloned().ok_or_else(|| {
+                let v = self.vars.get(*key).cloned().ok_or_else(|| {
                     format!("unknown variable `{}` — pass it with `--var {}=…`", key, key)
-                })?
+                })?;
+                (v, 2)
             }
             "steps" => {
                 let node = segs.get(1).ok_or_else(|| {
                     "`steps` needs a node id, e.g. {{steps.gen.output}}".to_string()
                 })?;
-                self.step_outputs.get(*node).cloned().ok_or_else(|| {
+                let v = self.step_outputs.get(*node).cloned().ok_or_else(|| {
                     format!(
                         "step `{}` has no output yet — is it upstream of this node (connected by an edge)?",
                         node
                     )
-                })?
+                })?;
+                // Output is stored unwrapped; an explicit `.output` segment is
+                // optional sugar, so consume it if present.
+                let start = if segs.get(2) == Some(&"output") { 3 } else { 2 };
+                (v, start)
             }
             other => {
                 return Err(format!(
@@ -894,7 +901,7 @@ impl SubstitutionContext {
         };
 
         // Navigate remaining segments into objects / arrays.
-        for seg in &segs[2.min(segs.len())..] {
+        for seg in &segs[nav_start.min(segs.len())..] {
             current = match &current {
                 serde_json::Value::Object(map) => map.get(*seg).cloned().ok_or_else(|| {
                     format!("`{}` has no field `{}`", path, seg)
@@ -1348,7 +1355,7 @@ fn execute_step(
         "dispatch" => handle_dispatch(&params, loop_run_id, node_id, db_path, opts),
         "methodology_run" => handle_methodology_run(&params, db_path, opts),
         "input" => handle_input(&params, db_path),
-        "output" => handle_output(&params, loop_run_id, db_path),
+        "output" => handle_output(&params, loop_run_id, node_id, db_path),
         "diagnose" | "apply" | "review" | "war_room" | "score" => {
             Err(StepError::Skipped(format!(
                 "kind '{}' is not wired yet in v2.14.0 — Task #14 follow-up",
@@ -1458,6 +1465,14 @@ fn handle_dispatch(
     // Read back the freshly-written row using the correct prod-schema
     // column names: response (not response_text), cost_usd_estimated
     // (not cost_usd). Match by runtime + created_at >= wake_started_at.
+    //
+    // DEFERRED (war-room WR 2A2A9623, codex #1 / claude #7): this read-back
+    // is a timestamp heuristic — under PARALLEL steps a concurrent dispatch
+    // of the same runtime could attach the wrong execution_log_id. Safe today
+    // because loop steps run strictly sequentially. The real fix (have
+    // dispatch::run RETURN the execution_log_id, or thread a correlation
+    // token) lands with PR-6 (parallel/retry control flow), where it becomes
+    // load-bearing.
     let conn = crate::db::open_readonly(db_path).map_err(StepError::from)?;
     let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<f64>)> = conn
         .query_row(
@@ -1478,21 +1493,41 @@ fn handle_dispatch(
         )
         .ok();
 
-    Ok(match row {
-        Some((log_id, response, used_model, status, cost)) => serde_json::json!({
-            "runtime": runtime,
-            "execution_log_id": log_id,
-            "response": response,
-            "model": used_model,
-            "status": status,
-            "cost_usd": cost,  // key kept as cost_usd to preserve {{steps.x.output.cost_usd}} templates
-        }),
-        None => serde_json::json!({
-            "runtime": runtime,
-            "execution_log_id": null,
-            "warning": "dispatch ran but no execution_logs row found after-the-fact",
-        }),
-    })
+    match row {
+        Some((log_id, response, used_model, status, cost)) => {
+            // R2 (war-room WR 2A2A9623, claude BLOCKER): `dispatch::run`
+            // returns Ok(()) even when the runtime errored — it records the
+            // failure to execution_logs and returns. If we don't branch on
+            // the read-back status, a rate-limited / non-zero-exit / network-
+            // failed dispatch is logged as a SUCCESS step, the loop keeps
+            // going, and a downstream `{{steps.x.output.response}}` resolves
+            // to null. Fail the step instead so the loop's fail-fast (and the
+            // audit trail) reflect reality.
+            if status.as_deref() != Some("success") {
+                let detail = response
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        format!("dispatch status={}", status.as_deref().unwrap_or("unknown"))
+                    });
+                return Err(StepError::Failed(format!(
+                    "dispatch to {} did not succeed (execution_log {}): {}",
+                    runtime, log_id, detail
+                )));
+            }
+            Ok(serde_json::json!({
+                "runtime": runtime,
+                "execution_log_id": log_id,
+                "response": response,
+                "model": used_model,
+                "status": status,
+                "cost_usd": cost,  // key kept as cost_usd to preserve {{steps.x.output.cost_usd}} templates
+            }))
+        }
+        None => Err(StepError::Failed(format!(
+            "dispatch to {} ran but no execution_logs row was found afterward — cannot confirm success",
+            runtime
+        ))),
+    }
 }
 
 fn handle_methodology_run(
@@ -1539,32 +1574,47 @@ fn handle_input(
     }))
 }
 
+/// Parse a stored JSON-text column back into a JSON value, falling back to
+/// the raw string if it isn't valid JSON. Prevents the manifest from
+/// double-encoding `loop_run_steps.input/output` (war-room consensus:
+/// claude #3 / codex #4 / gemini #2).
+fn json_or_string(raw: Option<String>) -> serde_json::Value {
+    match raw {
+        Some(s) => serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s)),
+        None => serde_json::Value::Null,
+    }
+}
+
 fn handle_output(
     params: &serde_json::Map<String, serde_json::Value>,
     loop_run_id: &str,
+    current_step_id: &str,
     db_path: &PathBuf,
 ) -> std::result::Result<serde_json::Value, StepError> {
     let conn = crate::db::open_readwrite(db_path).map_err(StepError::from)?;
     let now = chrono::Utc::now().to_rfc3339();
+    // Exclude THIS output node's own step row — it's still `running` when we
+    // snapshot, so including it would put a half-finished, log-less step in
+    // the bundle (war-room consensus: claude #4 / codex #4 / gemini #3).
     let mut stmt = conn
         .prepare(
             "SELECT node_id, node_type, status, started_at, finished_at,
                     input, output, error, execution_log_id
                FROM loop_run_steps
-              WHERE loop_run_id = ?1
+              WHERE loop_run_id = ?1 AND id != ?2
               ORDER BY started_at ASC, id ASC",
         )
         .map_err(|e| StepError::Failed(format!("{:#}", anyhow::Error::from(e))))?;
     let rows = stmt
-        .query_map(params![loop_run_id], |r| {
+        .query_map(params![loop_run_id, current_step_id], |r| {
             Ok(serde_json::json!({
                 "node_id": r.get::<_, String>(0)?,
                 "node_type": r.get::<_, String>(1)?,
                 "status": r.get::<_, String>(2)?,
                 "started_at": r.get::<_, Option<String>>(3)?,
                 "finished_at": r.get::<_, Option<String>>(4)?,
-                "input": r.get::<_, Option<String>>(5)?,
-                "output": r.get::<_, Option<String>>(6)?,
+                "input": json_or_string(r.get::<_, Option<String>>(5)?),
+                "output": json_or_string(r.get::<_, Option<String>>(6)?),
                 "error": r.get::<_, Option<String>>(7)?,
                 "execution_log_id": r.get::<_, Option<String>>(8)?,
             }))
@@ -2924,5 +2974,124 @@ mod tests {
         assert_eq!(out["name"], "Brief");
         assert_eq!(out["kind"], "markdown");
         assert_eq!(out["content"], "# heading");
+    }
+
+    // ── R2 (war-room WR 2A2A9623, claude #2 / codex #4) — end-to-end ──
+    // execute_loop coverage of the new completeness work: an input→output
+    // loop that substitutes a prior step's output into a downstream param,
+    // writes a real output_bundles row, and a substitution-failure halt.
+
+    /// Build a loop DB with an arbitrary graph + an `inputs` table (so input
+    /// nodes resolve). loop_runs/loop_run_steps gain their initiator + paused
+    /// columns from `db::open_readwrite` at execute time.
+    fn make_file_db_with_graph(slug: &str, graph_json: &str) -> tempfile::NamedTempFile {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE loops (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                description TEXT, enabled INTEGER NOT NULL DEFAULT 1, graph TEXT NOT NULL,
+                variables TEXT, trigger_kind TEXT NOT NULL DEFAULT 'manual',
+                trigger_config TEXT, source TEXT NOT NULL DEFAULT 'manual',
+                source_ref TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE loop_runs (
+                id TEXT PRIMARY KEY, loop_id TEXT NOT NULL, status TEXT NOT NULL,
+                started_at TEXT NOT NULL, finished_at TEXT, error TEXT,
+                triggered_by TEXT, variables TEXT
+            );
+            CREATE TABLE loop_run_steps (
+                id TEXT PRIMARY KEY, loop_run_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                node_type TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT,
+                finished_at TEXT, input TEXT, output TEXT, error TEXT, execution_log_id TEXT
+            );
+            CREATE TABLE inputs (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                content TEXT NOT NULL, kind TEXT NOT NULL, tags TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO loops (id, slug, name, graph, created_at, updated_at)
+             VALUES (?1, ?2, 'Test Loop', ?3, '2026-06-20T00:00:00Z', '2026-06-20T00:00:00Z')",
+            rusqlite::params![id, slug, graph_json],
+        )
+        .unwrap();
+        f
+    }
+
+    #[test]
+    fn execute_loop_input_to_output_substitutes_and_writes_a_bundle() {
+        let graph = r#"{"nodes":[
+            {"id":"in1","type":"input","config":{"params":{"slug":"brief"}}},
+            {"id":"out1","type":"output","config":{"params":{"name":"{{steps.in1.output.name}} bundle"}}}
+        ],"edges":[{"source":"in1","target":"out1"}]}"#;
+        let file = make_file_db_with_graph("io-loop", graph);
+        let db_path = file.path().to_path_buf();
+        {
+            let c = Connection::open(&db_path).unwrap();
+            c.execute(
+                "INSERT INTO inputs (id, slug, name, content, kind, tags, created_at, updated_at)
+                 VALUES ('in-1','brief','Brief','# heading','markdown','[]','2026-06-20T00:00:00Z','2026-06-20T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        let opts = Opts { human: false, quiet: false };
+        let outcome = execute_loop("io-loop", vec![], &db_path, &opts)
+            .expect("input→output loop must run");
+
+        assert_eq!(outcome.status, "success", "both steps should succeed");
+        assert_eq!(outcome.steps_executed, 2);
+        assert_eq!(outcome.steps_succeeded, 2);
+
+        // The output node wrote one bundle, with the input step's `name`
+        // substituted into the bundle name (proves cross-step data flow).
+        let c = Connection::open(&db_path).unwrap();
+        let (bundle_name, manifest): (String, String) = c
+            .query_row(
+                "SELECT name, manifest FROM output_bundles WHERE source_kind='loop_run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("an output_bundles row must exist");
+        assert_eq!(bundle_name, "Brief bundle");
+
+        // Manifest excludes the still-running output node and stores step
+        // input/output as real JSON (not double-encoded strings).
+        let m: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        let steps = m["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1, "output node excludes its own step row");
+        assert_eq!(steps[0]["node_id"], "in1");
+        assert!(
+            steps[0]["output"].is_object(),
+            "step output should be parsed JSON, not an escaped string"
+        );
+    }
+
+    #[test]
+    fn execute_loop_missing_var_reference_halts_with_error() {
+        let graph = r#"{"nodes":[
+            {"id":"bad","type":"input","config":{"params":{"slug":"{{vars.missing}}"}}}
+        ],"edges":[]}"#;
+        let file = make_file_db_with_graph("bad-loop", graph);
+        let db_path = file.path().to_path_buf();
+        let opts = Opts { human: false, quiet: false };
+        let outcome = execute_loop("bad-loop", vec![], &db_path, &opts)
+            .expect("execute_loop returns Ok even when a step fails");
+
+        assert_eq!(outcome.status, "error", "unresolved var must fail the run");
+        assert_eq!(outcome.steps_succeeded, 0);
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("template substitution failed"),
+            "error should name the substitution failure, got: {:?}",
+            outcome.error
+        );
     }
 }
