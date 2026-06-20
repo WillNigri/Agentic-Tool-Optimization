@@ -1327,6 +1327,7 @@ fn run_execute(
 /// persisted to `paused_dispatches` for later resume — the loop run
 /// updates its `paused_until` mirror and returns; the resumer (CLI or
 /// startup scanner) picks it up at reset_at.
+#[derive(Debug)]
 enum StepError {
     Skipped(String),
     Failed(String),
@@ -1728,6 +1729,24 @@ fn handle_output(
     }))
 }
 
+/// True if a rubric runs an LLM judge anywhere (directly or nested in a
+/// composite). Judge rubrics dispatch a real LLM call, which inside a loop
+/// step needs three things this milestone doesn't yet provide and which the
+/// PR-3 war-room (WR 154A6755) flagged: (1) infra-failure must fail the step,
+/// not silently score 0.0 [rubric.rs returns Ok(0.0) on a failed judge];
+/// (2) judge cost + execution_log_id must roll up into loop accounting;
+/// (3) the judge dispatch must honor the pause-and-wake quota gate. Until
+/// those land, loop score steps accept regex/structural/composite-of-those
+/// only — judge rubrics belong in `ato evaluations methodology score`.
+fn rubric_uses_judge(r: &crate::methodology::rubric::Rubric) -> bool {
+    use crate::methodology::rubric::Rubric::*;
+    match r {
+        LlmJudge { .. } => true,
+        Composite { rubrics, .. } => rubrics.iter().any(rubric_uses_judge),
+        _ => false,
+    }
+}
+
 fn handle_score(
     params: &serde_json::Map<String, serde_json::Value>,
     db_path: &PathBuf,
@@ -1736,6 +1755,14 @@ fn handle_score(
         .get("rubric")
         .ok_or_else(|| StepError::Failed("score: 'rubric' is required".into()))?;
     let rubric = crate::methodology::rubric::Rubric::parse(rubric_value).map_err(StepError::from)?;
+    if rubric_uses_judge(&rubric) {
+        return Err(StepError::Failed(
+            "score: llm_judge rubrics aren't supported in loop steps yet (need cost roll-up + \
+             quota gating + fail-on-judge-error — tracked follow-up). Use a regex/structural \
+             rubric here, or `ato evaluations methodology score` for judge rubrics."
+                .into(),
+        ));
+    }
     let response = param_str(params, "response")
         .ok_or_else(|| StepError::Failed("score: 'response' is required".into()))?;
     let prompt = param_str(params, "prompt").unwrap_or("");
@@ -3073,6 +3100,69 @@ mod tests {
             }
         };
         assert_eq!(non_matching_out["score"], 0.0);
+    }
+
+    // PR-3 R2 (war-room WR 154A6755) — error paths + structural + judge gate.
+    #[test]
+    fn handle_score_structural_and_error_paths() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let db = file.path().to_path_buf();
+        let obj = |v: serde_json::Value| v.as_object().cloned().unwrap();
+
+        // structural happy-path (must_contain) — deterministic, no LLM.
+        let structural = obj(serde_json::json!({
+            "rubric": { "kind": "structural", "must_contain": ["haiku"] },
+            "response": "this is a haiku"
+        }));
+        assert_eq!(
+            handle_score(&structural, &db).unwrap()["score"], 1.0,
+            "structural must_contain hit should score 1.0"
+        );
+
+        // missing rubric → Failed
+        assert!(matches!(
+            handle_score(&obj(serde_json::json!({ "response": "x" })), &db),
+            Err(StepError::Failed(_))
+        ));
+        // missing response → Failed
+        assert!(matches!(
+            handle_score(
+                &obj(serde_json::json!({ "rubric": { "kind": "regex", "pattern": "x" } })),
+                &db
+            ),
+            Err(StepError::Failed(_))
+        ));
+        // malformed rubric → Failed (parse error)
+        assert!(matches!(
+            handle_score(
+                &obj(serde_json::json!({ "rubric": { "kind": "nonsense" }, "response": "x" })),
+                &db
+            ),
+            Err(StepError::Failed(_))
+        ));
+        // llm_judge gated out of loop steps → Failed (not a silent 0.0)
+        let judge = obj(serde_json::json!({
+            "rubric": { "kind": "llm_judge", "judge_model": "claude-haiku-4-5" },
+            "response": "x"
+        }));
+        match handle_score(&judge, &db) {
+            Err(StepError::Failed(msg)) => assert!(
+                msg.contains("llm_judge"),
+                "judge gate message should name llm_judge, got: {msg}"
+            ),
+            other => panic!("expected Failed for llm_judge in loop, got {other:?}"),
+        }
+        // composite nesting a judge is also gated
+        let composite_judge = obj(serde_json::json!({
+            "rubric": { "kind": "composite", "combiner": "all",
+                "rubrics": [ { "kind": "regex", "pattern": "x" },
+                             { "kind": "llm_judge", "judge_model": "claude-haiku-4-5" } ] },
+            "response": "x"
+        }));
+        assert!(matches!(
+            handle_score(&composite_judge, &db),
+            Err(StepError::Failed(_))
+        ));
     }
 
     // ── R2 (war-room WR 2A2A9623, claude #2 / codex #4) — end-to-end ──
