@@ -814,6 +814,196 @@ fn parse_vars(raw: &[String]) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Object(map))
 }
 
+// ── v2.14.1 — template substitution ───────────────────────────────────
+//
+// Loops pass data between steps. Any string in a node's `config` may carry
+// `{{vars.<key>}}` (run-level --var inputs) or
+// `{{steps.<node_id>.output[.<field>...]}}` (a prior step's output JSON).
+// Substitution runs against each node's config *just before that node
+// executes*, so it sees every upstream step's output. The substituted
+// config is what gets recorded to `loop_run_steps.input` — the audit trail
+// shows what actually ran, not the template.
+//
+// Resolution rules:
+//   - root segment must be `vars` or `steps`.
+//   - a referenced-but-missing var/step/field is a HARD error (fail-fast)
+//     rather than silently leaving the literal `{{…}}` in an LLM prompt.
+//   - if a string is EXACTLY one token (e.g. `"{{steps.gen.output}}"`),
+//     the resolved JSON value is substituted *type-preserving* (object,
+//     array, number stay typed). Embedded tokens render as text.
+struct SubstitutionContext {
+    vars: serde_json::Map<String, serde_json::Value>,
+    /// node_id → `{ "output": <step output JSON> }`. Wrapping under
+    /// `output` lets `{{steps.<id>.output.<field>}}` navigate uniformly.
+    step_outputs: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl SubstitutionContext {
+    fn new(variables: &serde_json::Value) -> Self {
+        Self {
+            vars: variables.as_object().cloned().unwrap_or_default(),
+            step_outputs: std::collections::HashMap::new(),
+        }
+    }
+
+    fn record_step(&mut self, node_id: &str, output: serde_json::Value) {
+        self.step_outputs
+            .insert(node_id.to_string(), serde_json::json!({ "output": output }));
+    }
+
+    /// Resolve a dotted path (`vars.topic`, `steps.gen.output.response`) to
+    /// a JSON value, or Err with a human-readable reason.
+    fn resolve_path(&self, path: &str) -> std::result::Result<serde_json::Value, String> {
+        let segs: Vec<&str> = path
+            .split('.')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let root = segs
+            .first()
+            .ok_or_else(|| "empty template `{{}}`".to_string())?;
+
+        // Resolve the root value. Both roots consume 2 segments
+        // (`vars.<key>` / `steps.<node>`); navigation starts at index 2.
+        let mut current: serde_json::Value = match *root {
+            "vars" => {
+                let key = segs.get(1).ok_or_else(|| {
+                    "`vars` needs a key, e.g. {{vars.topic}}".to_string()
+                })?;
+                self.vars.get(*key).cloned().ok_or_else(|| {
+                    format!("unknown variable `{}` — pass it with `--var {}=…`", key, key)
+                })?
+            }
+            "steps" => {
+                let node = segs.get(1).ok_or_else(|| {
+                    "`steps` needs a node id, e.g. {{steps.gen.output}}".to_string()
+                })?;
+                self.step_outputs.get(*node).cloned().ok_or_else(|| {
+                    format!(
+                        "step `{}` has no output yet — is it upstream of this node (connected by an edge)?",
+                        node
+                    )
+                })?
+            }
+            other => {
+                return Err(format!(
+                    "template root must be `vars` or `steps`, got `{}`",
+                    other
+                ))
+            }
+        };
+
+        // Navigate remaining segments into objects / arrays.
+        for seg in &segs[2.min(segs.len())..] {
+            current = match &current {
+                serde_json::Value::Object(map) => map.get(*seg).cloned().ok_or_else(|| {
+                    format!("`{}` has no field `{}`", path, seg)
+                })?,
+                serde_json::Value::Array(arr) => {
+                    let idx: usize = seg.parse().map_err(|_| {
+                        format!("cannot index array with non-numeric `{}` in `{}`", seg, path)
+                    })?;
+                    arr.get(idx).cloned().ok_or_else(|| {
+                        format!("index {} out of bounds in `{}`", idx, path)
+                    })?
+                }
+                _ => {
+                    return Err(format!(
+                        "cannot navigate into a scalar with `{}` in `{}`",
+                        seg, path
+                    ))
+                }
+            };
+        }
+        Ok(current)
+    }
+
+    /// Substitute every `{{…}}` token in a string. A whole-token string
+    /// returns the typed JSON value; otherwise tokens render inline as text.
+    fn substitute_str(&self, input: &str) -> std::result::Result<serde_json::Value, String> {
+        let trimmed = input.trim();
+        if let Some(inner) = whole_token(trimmed) {
+            return self.resolve_path(inner);
+        }
+        let mut out = String::new();
+        let mut rest = input;
+        while let Some(start) = rest.find("{{") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            let end = after
+                .find("}}")
+                .ok_or_else(|| "unterminated `{{` in template".to_string())?;
+            let path = after[..end].trim();
+            out.push_str(&render_scalar(&self.resolve_path(path)?));
+            rest = &after[end + 2..];
+        }
+        out.push_str(rest);
+        Ok(serde_json::Value::String(out))
+    }
+
+    /// Recursively substitute through a JSON value (config tree).
+    fn substitute_value(
+        &self,
+        v: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
+        match v {
+            serde_json::Value::String(s) => self.substitute_str(s),
+            serde_json::Value::Array(a) => Ok(serde_json::Value::Array(
+                a.iter()
+                    .map(|x| self.substitute_value(x))
+                    .collect::<std::result::Result<_, _>>()?,
+            )),
+            serde_json::Value::Object(o) => {
+                let mut m = serde_json::Map::new();
+                for (k, val) in o {
+                    m.insert(k.clone(), self.substitute_value(val)?);
+                }
+                Ok(serde_json::Value::Object(m))
+            }
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// Return a clone of `node` with all `{{…}}` in its config resolved.
+    fn substitute_node(
+        &self,
+        node: &LoopGraphNode,
+    ) -> std::result::Result<LoopGraphNode, String> {
+        let config = match &node.config {
+            Some(c) => Some(self.substitute_value(c)?),
+            None => None,
+        };
+        Ok(LoopGraphNode {
+            id: node.id.clone(),
+            node_type: node.node_type.clone(),
+            config,
+        })
+    }
+}
+
+/// If `s` is exactly one `{{ … }}` token (no surrounding text, no second
+/// token), return the inner path; else None.
+fn whole_token(s: &str) -> Option<&str> {
+    let inner = s.strip_prefix("{{")?.strip_suffix("}}")?;
+    if inner.contains("{{") || inner.contains("}}") {
+        return None;
+    }
+    Some(inner.trim())
+}
+
+/// Render a resolved JSON value as inline text. Strings pass through raw;
+/// objects/arrays serialize compactly so an embedded token never injects a
+/// rust-debug blob into a prompt.
+fn render_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
 /// Validate a loop invocation without executing: vars parse as K=V and
 /// the loop exists. Used by missions dispatch to fail fast BEFORE it
 /// writes mission state.
@@ -887,6 +1077,11 @@ pub fn execute_loop(
     // success/error) and to emit a resume-hint summary.
     let mut paused_signal: Option<(String, String, String)> = None;
 
+    // v2.14.1 — substitution context: holds the run vars + every prior
+    // step's output so `{{vars.x}}` / `{{steps.<id>.output.<field>}}`
+    // resolve against live data as the loop advances.
+    let mut ctx = SubstitutionContext::new(&variables);
+
     // Walk nodes in topological order so edge dependencies are honored.
     // Falls back to declaration order if the graph is edgeless or cyclic
     // (with a stderr warning) — see `topological_order` above.
@@ -895,7 +1090,18 @@ pub fn execute_loop(
         steps_executed += 1;
         let step_id = Uuid::new_v4().to_string();
         let step_started = chrono::Utc::now().to_rfc3339();
-        let input_json = serde_json::to_string(&node.config.clone().unwrap_or_default()).ok();
+
+        // Resolve templates against vars + upstream outputs BEFORE the step
+        // runs. The substituted config is what we record + execute, so the
+        // audit trail shows the real prompt, not the `{{…}}` template. A
+        // missing var/step ref is a fail-fast error (StepError::Failed).
+        let substituted = ctx.substitute_node(node);
+        let exec_node = match &substituted {
+            Ok(n) => n.clone(),
+            Err(_) => node.clone(),
+        };
+        let input_json =
+            serde_json::to_string(&exec_node.config.clone().unwrap_or_default()).ok();
 
         conn.execute(
             "INSERT INTO loop_run_steps (
@@ -910,12 +1116,21 @@ pub fn execute_loop(
             emit_human(&format!("→ step {} ({}) running …", node.id, node.node_type));
         }
 
-        let result = execute_step(node, &run_id, &step_id, db_path, opts);
+        let result = match substituted {
+            Ok(n) => execute_step(&n, &run_id, &step_id, db_path, opts),
+            Err(e) => Err(StepError::Failed(format!(
+                "template substitution failed: {}",
+                e
+            ))),
+        };
         let step_finished = chrono::Utc::now().to_rfc3339();
 
         match result {
             Ok(output_value) => {
                 steps_succeeded += 1;
+                // Record this step's output so downstream nodes can
+                // reference `{{steps.<this node_id>.output.<field>}}`.
+                ctx.record_step(&node.id, output_value.clone());
                 let output_str = serde_json::to_string(&output_value).ok();
                 // Capture the execution_log_id when the step's output
                 // carries one (e.g. dispatch via execution_logs). This
@@ -2044,6 +2259,98 @@ fn run_runs_show(run_id: String, db_path: &PathBuf, opts: &Opts) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    // ── v2.14.1 template substitution ─────────────────────────────────
+    fn ctx_with(vars: serde_json::Value) -> SubstitutionContext {
+        SubstitutionContext::new(&vars)
+    }
+
+    #[test]
+    fn substitutes_vars_inline_and_whole_token() {
+        let ctx = ctx_with(serde_json::json!({ "topic": "rust", "n": 3 }));
+        // inline within a larger string → text render
+        assert_eq!(
+            ctx.substitute_str("Write about {{vars.topic}} in {{vars.n}} lines")
+                .unwrap(),
+            serde_json::json!("Write about rust in 3 lines")
+        );
+        // whole-token of a number → type preserved
+        assert_eq!(
+            ctx.substitute_str("{{ vars.n }}").unwrap(),
+            serde_json::json!(3)
+        );
+    }
+
+    #[test]
+    fn substitutes_step_output_fields_and_preserves_types() {
+        let mut ctx = ctx_with(serde_json::json!({}));
+        ctx.record_step(
+            "gen",
+            serde_json::json!({ "response": "hello", "cost_usd": 0.01, "tags": ["a", "b"] }),
+        );
+        // nested string field, inline
+        assert_eq!(
+            ctx.substitute_str("prev said: {{steps.gen.output.response}}")
+                .unwrap(),
+            serde_json::json!("prev said: hello")
+        );
+        // whole-token number field → typed
+        assert_eq!(
+            ctx.substitute_str("{{steps.gen.output.cost_usd}}").unwrap(),
+            serde_json::json!(0.01)
+        );
+        // whole-token whole-output object → typed passthrough
+        assert_eq!(
+            ctx.substitute_str("{{steps.gen.output}}").unwrap(),
+            serde_json::json!({ "response": "hello", "cost_usd": 0.01, "tags": ["a", "b"] })
+        );
+        // array index navigation
+        assert_eq!(
+            ctx.substitute_str("{{steps.gen.output.tags.1}}").unwrap(),
+            serde_json::json!("b")
+        );
+    }
+
+    #[test]
+    fn missing_references_are_hard_errors() {
+        let ctx = ctx_with(serde_json::json!({ "topic": "x" }));
+        assert!(ctx.substitute_str("{{vars.nope}}").is_err());
+        assert!(ctx.substitute_str("{{steps.ghost.output}}").is_err());
+        assert!(ctx
+            .substitute_str("{{vars.topic.missingfield}}")
+            .is_err());
+        assert!(ctx.substitute_str("{{bogus.root}}").is_err());
+        assert!(ctx.substitute_str("unterminated {{vars.topic").is_err());
+    }
+
+    #[test]
+    fn non_template_strings_pass_through_unchanged() {
+        let ctx = ctx_with(serde_json::json!({}));
+        assert_eq!(
+            ctx.substitute_str("just a plain prompt, no braces").unwrap(),
+            serde_json::json!("just a plain prompt, no braces")
+        );
+    }
+
+    #[test]
+    fn substitute_node_resolves_nested_config() {
+        let mut ctx = ctx_with(serde_json::json!({ "who": "claude" }));
+        ctx.record_step("a", serde_json::json!({ "response": "from-a" }));
+        let node = LoopGraphNode {
+            id: "b".into(),
+            node_type: "dispatch".into(),
+            config: Some(serde_json::json!({
+                "params": {
+                    "runtime": "{{vars.who}}",
+                    "prompt": "improve: {{steps.a.output.response}}"
+                }
+            })),
+        };
+        let out = ctx.substitute_node(&node).unwrap();
+        let p = graph_params(&out);
+        assert_eq!(param_str(&p, "runtime"), Some("claude"));
+        assert_eq!(param_str(&p, "prompt"), Some("improve: from-a"));
+    }
 
     /// Mirrors the production schema (only the parts the loops CLI touches)
     /// so we can exercise the SQL helpers against an in-memory DB without
