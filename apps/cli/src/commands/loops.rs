@@ -1466,14 +1466,32 @@ fn handle_dispatch(
     // column names: response (not response_text), cost_usd_estimated
     // (not cost_usd). Match by runtime + created_at >= wake_started_at.
     //
-    // DEFERRED (war-room WR 2A2A9623, codex #1 / claude #7): this read-back
-    // is a timestamp heuristic — under PARALLEL steps a concurrent dispatch
-    // of the same runtime could attach the wrong execution_log_id. Safe today
-    // because loop steps run strictly sequentially. The real fix (have
-    // dispatch::run RETURN the execution_log_id, or thread a correlation
-    // token) lands with PR-6 (parallel/retry control flow), where it becomes
-    // load-bearing.
+    // KNOWN GAP (war-room WR 2A2A9623 R2, codex BLOCKER): this read-back is a
+    // timestamp heuristic — if ANOTHER same-runtime dispatch (desktop app,
+    // another CLI invocation) lands in this window, `ORDER BY created_at DESC`
+    // could attach the wrong execution_log_id. The complete fix is to have
+    // dispatch::run RETURN the id it minted (tracked as the first task of the
+    // PR-6 control-flow PR — dispatch.rs has 13 return points + several INSERT
+    // paths, too invasive to fold into this node-kinds sweep safely).
+    // MITIGATION shipped here: detect the ambiguous case (>1 new same-runtime
+    // row in the window) and WARN loudly instead of silently attaching a guess
+    // — converting codex's "silent wrong association" into a visible signal.
     let conn = crate::db::open_readonly(db_path).map_err(StepError::from)?;
+    let new_rows_in_window: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM execution_logs WHERE runtime = ?1 AND created_at >= ?2",
+            params![runtime, wake_started_at],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
+    if new_rows_in_window > 1 {
+        eprintln!(
+            "[loop-executor] warning: {} concurrent '{}' dispatches landed during this step — \
+             execution_log association is ambiguous; attaching the newest. \
+             (see KNOWN GAP in handle_dispatch; deterministic id return tracked for PR-6)",
+            new_rows_in_window, runtime
+        );
+    }
     let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<f64>)> = conn
         .query_row(
             "SELECT id, response, model, status, cost_usd_estimated
