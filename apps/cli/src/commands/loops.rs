@@ -1442,12 +1442,8 @@ fn execute_step(
         "score" => handle_score(&params, db_path),
         "war_room" => handle_war_room(&params, loop_run_id, node_id, db_path, opts),
         "review" => handle_review(&params, loop_run_id, node_id, db_path, opts),
-        "diagnose" | "apply" => {
-            Err(StepError::Skipped(format!(
-                "kind '{}' is not wired yet in v2.14.0 — Task #14 follow-up",
-                node.node_type
-            )))
-        }
+        "diagnose" => handle_diagnose(&params, db_path, false),
+        "apply" => handle_diagnose(&params, db_path, true),
         // Legacy IFTTT-style kinds (migrated workflows). Same skip-with-note
         // until the legacy adapters land.
         other => Err(StepError::Skipped(format!(
@@ -1955,6 +1951,50 @@ fn handle_methodology_run(
         "run_id": summary.run_id,
         "status": summary.status,
     }))
+}
+
+fn build_diagnose_args(
+    params: &serde_json::Map<String, serde_json::Value>,
+    force_apply: bool,
+) -> std::result::Result<Vec<String>, String> {
+    let run_id = param_str(params, "run_id")
+        .ok_or_else(|| "diagnose: 'run_id' is required".to_string())?;
+    let mut args = vec!["--run-id".to_string(), run_id.to_string()];
+
+    if let Some(model) = param_str(params, "diagnose_model") {
+        args.push("--diagnose-model".to_string());
+        args.push(model.to_string());
+    }
+
+    for (param, flag) in [
+        ("worst_k", "--worst-k"),
+        ("best_k", "--best-k"),
+        ("max_dispatches", "--max-dispatches"),
+    ] {
+        if let Some(value) = params.get(param).and_then(|v| v.as_u64()) {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+
+    if force_apply || matches!(params.get("apply"), Some(serde_json::Value::Bool(true))) {
+        args.push("--apply".to_string());
+        args.push("--yes".to_string());
+    }
+
+    Ok(args)
+}
+
+fn handle_diagnose(
+    params: &serde_json::Map<String, serde_json::Value>,
+    db_path: &PathBuf,
+    force_apply: bool,
+) -> std::result::Result<serde_json::Value, StepError> {
+    let args = build_diagnose_args(params, force_apply).map_err(StepError::Failed)?;
+    let out =
+        crate::pro_client::delegate_capture("diagnose", &args, db_path).map_err(StepError::from)?;
+    Ok(serde_json::from_str::<serde_json::Value>(&out)
+        .unwrap_or_else(|_| serde_json::json!({ "raw_output": out })))
 }
 
 fn handle_input(
@@ -3004,6 +3044,54 @@ mod tests {
     }
 
     #[test]
+    fn build_diagnose_args_requires_run_id() {
+        let params = serde_json::Map::new();
+        let err = build_diagnose_args(&params, false).unwrap_err();
+        assert_eq!(err, "diagnose: 'run_id' is required");
+    }
+
+    #[test]
+    fn build_diagnose_args_minimal_shape() {
+        let params = serde_json::json!({ "run_id": "r1" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let args = build_diagnose_args(&params, false).unwrap();
+        assert_eq!(args, vec!["--run-id", "r1"]);
+    }
+
+    #[test]
+    fn build_diagnose_args_includes_model_integer_flags_and_force_apply() {
+        let params = serde_json::json!({
+            "run_id": "r1",
+            "diagnose_model": "gpt-5",
+            "worst_k": 3
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let args = build_diagnose_args(&params, true).unwrap();
+        assert!(args.windows(2).any(|w| w == ["--diagnose-model", "gpt-5"]));
+        assert!(args.windows(2).any(|w| w == ["--worst-k", "3"]));
+        assert!(args.iter().any(|a| a == "--apply"));
+        assert!(args.iter().any(|a| a == "--yes"));
+    }
+
+    #[test]
+    fn build_diagnose_args_respects_apply_param() {
+        let params = serde_json::json!({
+            "run_id": "r1",
+            "apply": true
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let args = build_diagnose_args(&params, false).unwrap();
+        assert!(args.iter().any(|a| a == "--apply"));
+        assert!(args.iter().any(|a| a == "--yes"));
+    }
+
+    #[test]
     fn parse_retry_defaults_to_single_attempt_no_backoff() {
         let node = LoopGraphNode {
             id: "n1".into(),
@@ -3839,9 +3927,9 @@ mod tests {
 
     #[test]
     fn retry_does_not_fire_on_skipped_or_substitution_failure() {
-        // Skipped (unimplemented kind) must NOT retry even with max_attempts>1.
+        // Skipped (legacy/unwired kind) must NOT retry even with max_attempts>1.
         let skip_graph = r#"{"nodes":[
-            {"id":"d","type":"diagnose","config":{"retry":{"max_attempts":3},"params":{}}}
+            {"id":"d","type":"legacy_kind","config":{"retry":{"max_attempts":3},"params":{}}}
         ],"edges":[]}"#;
         let f1 = make_file_db_with_graph("skip-retry", skip_graph);
         let o1 = execute_loop("skip-retry", vec![], &f1.path().to_path_buf(),

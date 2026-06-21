@@ -89,3 +89,30 @@ pub fn delegate(subcommand: &str, args: &[String], db_path: &std::path::Path, hu
     }
     Ok(())
 }
+
+pub fn delegate_capture(
+    subcommand: &str,
+    args: &[String],
+    db_path: &std::path::Path,
+) -> Result<String> {
+    let bin = require_pro_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.arg(subcommand);
+    for a in args {
+        cmd.arg(a);
+    }
+    cmd.arg("--db").arg(db_path);
+    let output = cmd
+        .output()
+        .map_err(|e| anyhow!("spawn ato-pro at {}: {}", bin.display(), e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "ato-pro {} failed with exit code {:?}: {}",
+            subcommand,
+            output.status.code(),
+            stderr
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
