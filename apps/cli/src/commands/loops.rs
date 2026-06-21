@@ -1358,7 +1358,9 @@ fn execute_step(
         "input" => handle_input(&params, db_path),
         "output" => handle_output(&params, loop_run_id, node_id, db_path),
         "score" => handle_score(&params, db_path),
-        "diagnose" | "apply" | "review" | "war_room" => {
+        "war_room" => handle_war_room(&params, loop_run_id, node_id, db_path, opts),
+        "review" => handle_review(&params, loop_run_id, node_id, db_path, opts),
+        "diagnose" | "apply" => {
             Err(StepError::Skipped(format!(
                 "kind '{}' is not wired yet in v2.14.0 — Task #14 follow-up",
                 node.node_type
@@ -1384,6 +1386,141 @@ fn runtime_provider_alias(runtime: &str) -> &str {
         "codex" => "openai",
         other => other,
     }
+}
+
+fn read_back_dispatch(
+    db_path: &PathBuf,
+    runtime: &str,
+    since: &str,
+) -> Option<(String, Option<String>, Option<String>, Option<String>, Option<f64>)> {
+    let alias = runtime_provider_alias(runtime);
+    let conn = crate::db::open_readonly(db_path).ok()?;
+    conn.query_row(
+        "SELECT id, response, model, status, cost_usd_estimated
+           FROM execution_logs
+          WHERE runtime IN (?1, ?2)
+            AND created_at >= ?3
+          ORDER BY created_at DESC
+          LIMIT 1",
+        params![runtime, alias, since],
+        |r| Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get::<_, Option<f64>>(4)?,
+        )),
+    )
+    .ok()
+}
+
+fn parse_runtimes_param(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<Vec<String>, String> {
+    match params.get("runtimes") {
+        None => Ok(vec!["claude".into(), "codex".into(), "gemini".into()]),
+        Some(serde_json::Value::Array(items)) => {
+            let runtimes: Vec<String> = items
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .ok_or_else(|| {
+                            "runtimes must be a non-empty array of non-empty strings".to_string()
+                        })
+                })
+                .collect::<std::result::Result<_, _>>()?;
+            if runtimes.is_empty() {
+                Err("runtimes must be a non-empty array of non-empty strings".into())
+            } else {
+                Ok(runtimes)
+            }
+        }
+        Some(_) => Err("runtimes must be a JSON array of strings".into()),
+    }
+}
+
+fn parse_rounds_param(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<u32, String> {
+    match params.get("rounds") {
+        None => Ok(1),
+        Some(v) => {
+            let rounds = v
+                .as_u64()
+                .ok_or_else(|| "rounds must be an integer".to_string())?;
+            Ok((rounds.clamp(1, 3)) as u32)
+        }
+    }
+}
+
+fn parse_panel_config(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(Vec<String>, u32), String> {
+    Ok((parse_runtimes_param(params)?, parse_rounds_param(params)?))
+}
+
+fn parse_consensus_param(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<bool, String> {
+    match params.get("consensus") {
+        None => Ok(false),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "consensus must be a boolean".to_string()),
+    }
+}
+
+fn run_panel_seats(
+    runtimes: &[String],
+    round_prompts: &[(u32, String)],
+    war_room_id: &str,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> Vec<serde_json::Value> {
+    let mut seats = Vec::new();
+    for (round, prompt) in round_prompts {
+        for runtime in runtimes {
+            let since = chrono::Utc::now().to_rfc3339();
+            let dispatch_result = crate::commands::dispatch::run(
+                runtime,
+                prompt,
+                None,
+                None,
+                None,
+                Some(war_room_id.to_string()),
+                Some((*round).into()),
+                false,
+                false,
+                false,
+                vec![],
+                None,
+                db_path,
+                opts,
+            );
+            match read_back_dispatch(db_path, runtime, &since) {
+                Some((execution_log_id, response, _model, status, _cost)) => seats.push(serde_json::json!({
+                    "runtime": runtime,
+                    "round": round,
+                    "execution_log_id": execution_log_id,
+                    "response": response,
+                    "status": status.unwrap_or_else(|| {
+                        if dispatch_result.is_ok() { "unknown".into() } else { "error".into() }
+                    }),
+                })),
+                None => seats.push(serde_json::json!({
+                    "runtime": runtime,
+                    "round": round,
+                    "execution_log_id": serde_json::Value::Null,
+                    "response": dispatch_result.err().map(|e| format!("{:#}", e)),
+                    "status": "error",
+                })),
+            }
+        }
+    }
+    seats
 }
 
 fn handle_dispatch(
@@ -1514,24 +1651,7 @@ fn handle_dispatch(
             new_rows_in_window, runtime
         );
     }
-    let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<f64>)> = conn
-        .query_row(
-            "SELECT id, response, model, status, cost_usd_estimated
-               FROM execution_logs
-              WHERE runtime IN (?1, ?2)
-                AND created_at >= ?3
-              ORDER BY created_at DESC
-              LIMIT 1",
-            params![runtime, alias, wake_started_at],
-            |r| Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get::<_, Option<f64>>(4)?,
-            )),
-        )
-        .ok();
+    let row = read_back_dispatch(db_path, runtime, &wake_started_at);
 
     match row {
         Some((log_id, response, used_model, status, cost)) => {
@@ -1568,6 +1688,68 @@ fn handle_dispatch(
             runtime
         ))),
     }
+}
+
+fn handle_war_room(
+    params: &serde_json::Map<String, serde_json::Value>,
+    _loop_run_id: &str,
+    _node_id: &str,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> std::result::Result<serde_json::Value, StepError> {
+    let prompt = param_str(params, "prompt")
+        .ok_or_else(|| StepError::Failed("war_room: 'prompt' is required".into()))?;
+    let (runtimes, rounds) = parse_panel_config(params).map_err(StepError::Failed)?;
+    let war_room_id = Uuid::new_v4().to_string();
+    let round_prompts: Vec<(u32, String)> = (1..=rounds)
+        .map(|round| (round, prompt.to_string()))
+        .collect();
+    let seats = run_panel_seats(&runtimes, &round_prompts, &war_room_id, db_path, opts);
+
+    Ok(serde_json::json!({
+        "war_room_id": war_room_id,
+        "seats": seats,
+    }))
+}
+
+fn handle_review(
+    params: &serde_json::Map<String, serde_json::Value>,
+    _loop_run_id: &str,
+    _node_id: &str,
+    db_path: &PathBuf,
+    opts: &Opts,
+) -> std::result::Result<serde_json::Value, StepError> {
+    let content = param_str(params, "content")
+        .ok_or_else(|| StepError::Failed("review: 'content' is required".into()))?;
+    let runtimes = parse_runtimes_param(params).map_err(StepError::Failed)?;
+    let consensus = parse_consensus_param(params).map_err(StepError::Failed)?;
+    let criteria = param_str(params, "criteria").unwrap_or("general correctness, quality, and risks");
+    let war_room_id = Uuid::new_v4().to_string();
+    let mut round_prompts = vec![(
+        1,
+        format!(
+            "Review the following content against these criteria: {criteria}\n\n\
+             Return a short verdict line starting with ACCEPT or REWORK, then concise findings.\n\n\
+             Content:\n{content}"
+        ),
+    )];
+    if consensus {
+        round_prompts.push((
+            2,
+            format!(
+                "Reconcile the panel's round-1 reviews of the following content against these criteria: {criteria}\n\n\
+                 Return a short verdict line starting with ACCEPT or REWORK, then concise findings and any disagreements you resolved.\n\n\
+                 Content:\n{content}"
+            ),
+        ));
+    }
+    let reviews = run_panel_seats(&runtimes, &round_prompts, &war_room_id, db_path, opts);
+
+    Ok(serde_json::json!({
+        "war_room_id": war_room_id,
+        "reviews": reviews,
+        "consensus": consensus,
+    }))
 }
 
 fn handle_methodology_run(
@@ -3060,6 +3242,76 @@ mod tests {
         assert_eq!(out["name"], "Brief");
         assert_eq!(out["kind"], "markdown");
         assert_eq!(out["content"], "# heading");
+    }
+
+    #[test]
+    fn handle_war_room_fails_on_missing_prompt_and_bad_runtimes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let db_path = file.path().to_path_buf();
+        let opts = Opts { human: false, quiet: false };
+
+        let missing_prompt = serde_json::json!({})
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert!(matches!(
+            handle_war_room(&missing_prompt, "run-1", "node-1", &db_path, &opts),
+            Err(StepError::Failed(_))
+        ));
+
+        let empty_runtimes = serde_json::json!({
+            "prompt": "review this",
+            "runtimes": []
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert!(matches!(
+            handle_war_room(&empty_runtimes, "run-1", "node-1", &db_path, &opts),
+            Err(StepError::Failed(_))
+        ));
+
+        let invalid_runtimes = serde_json::json!({
+            "prompt": "review this",
+            "runtimes": ["claude", 123]
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert!(matches!(
+            handle_war_room(&invalid_runtimes, "run-1", "node-1", &db_path, &opts),
+            Err(StepError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn panel_config_defaults_runtimes_and_clamps_rounds() {
+        let defaults = serde_json::json!({})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let (runtimes, rounds) = parse_panel_config(&defaults).unwrap();
+        assert_eq!(runtimes, vec!["claude", "codex", "gemini"]);
+        assert_eq!(rounds, 1);
+
+        let clamped_high = serde_json::json!({
+            "runtimes": ["claude", "codex"],
+            "rounds": 99
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let (runtimes, rounds) = parse_panel_config(&clamped_high).unwrap();
+        assert_eq!(runtimes, vec!["claude", "codex"]);
+        assert_eq!(rounds, 3);
+
+        let clamped_low = serde_json::json!({
+            "rounds": 0
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert_eq!(parse_panel_config(&clamped_low).unwrap().1, 1);
     }
 
     #[test]
