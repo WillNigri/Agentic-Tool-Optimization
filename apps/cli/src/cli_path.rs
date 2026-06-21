@@ -1,8 +1,7 @@
 // v2.11 PR-12.6 — Shared `ato` binary discovery.
 //
-// Both `methodology::runner::dispatch_cell` and
-// `methodology::diagnose::diagnose_run` shell out to spawn `ato
-// dispatch …`. Until this PR they hard-coded `std::env::current_exe()`,
+// `methodology::runner::dispatch_cell` shells out to spawn `ato
+// dispatch …`. Until this PR it hard-coded `std::env::current_exe()`,
 // which meant a developer running ATO from a fresh `cargo build` could
 // never reach API providers — the dev binary's keychain ACL on macOS
 // is different from the prod-app-bundle's, so decryption of stored
