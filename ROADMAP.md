@@ -54,10 +54,11 @@ Finish wiring the loop execution engine so the visual composer's nodes all run:
 
 - ✅ **Variable substitution** — `{{vars.x}}` and `{{steps.<node>.output.<field>}}` resolve against run inputs + prior step outputs.
 - ✅ **`input` / `output` node kinds** — reference an inputs bundle; emit an output bundle.
-- 🟡 **`score` node kind** — run a rubric over a prior step.
-- 🟡 **`diagnose` / `apply` node kinds** — propose and apply an agent-definition change.
-- 🟡 **`review` / `war_room` node kinds** — consensus / multi-seat review as a step.
-- 🟡 **Control flow** — parallel independent steps, per-step retry, and decision branching.
+- ✅ **`score` node kind** — run a rubric (regex / structural / composite) over a prior step.
+- ✅ **`review` / `war_room` node kinds** — multi-seat panel / review-with-consensus as a step.
+- ✅ **`diagnose` / `apply` node kinds** — propose/apply an agent-definition change (Pro: delegates to `ato-pro`).
+- ✅ **Per-step retry** — `config.retry = { max_attempts, backoff_ms }`, with retry only on real failures.
+- 🟡 **Control flow** — parallel independent steps + decision branching (deferred: most loops are sequential and the `war_room` node already covers fan-out; revisit on demand).
 
 ### Other Free primitives
 
