@@ -1183,6 +1183,9 @@ pub fn execute_loop(
                             )));
                             break;
                         }
+                        // FailedNoRetry / Skipped / Paused are all terminal for
+                        // the retry loop (FailedNoRetry must never re-run; the
+                        // others aren't failures). The outer match records them.
                         Err(other) => {
                             final_result = Err(other);
                             break;
@@ -1247,7 +1250,9 @@ pub fn execute_loop(
                     ));
                 }
             }
-            Err(StepError::Failed(msg)) => {
+            // FailedNoRetry behaves identically here — it's a real error step;
+            // it differs only in that the retry loop above never retries it.
+            Err(StepError::Failed(msg)) | Err(StepError::FailedNoRetry(msg)) => {
                 conn.execute(
                     "UPDATE loop_run_steps
                         SET status = ?1, finished_at = ?2, error = ?3
@@ -1397,6 +1402,12 @@ fn run_execute(
 enum StepError {
     Skipped(String),
     Failed(String),
+    /// A failure that must NOT be retried because the operation may have
+    /// already succeeded (re-running would duplicate paid work / side
+    /// effects). Used when a dispatch ran but we couldn't confirm its
+    /// execution_logs row afterward (war-room PR-6a, codex HIGH). Recorded
+    /// as an error step exactly like Failed; the retry loop just won't retry.
+    FailedNoRetry(String),
     Paused {
         paused_dispatch_id: String,
         runtime: String,
@@ -1419,6 +1430,11 @@ fn execute_step(
 ) -> std::result::Result<serde_json::Value, StepError> {
     let params = graph_params(node);
     match node.node_type.as_str() {
+        // Test-only flaky node: fails the first `TEST_FLAKY_FAILS` times then
+        // succeeds, so the retry-then-succeed path is unit-testable without a
+        // real runtime. Never reachable in a release build.
+        #[cfg(test)]
+        "test_flaky" => tests::run_test_flaky(),
         "dispatch" => handle_dispatch(&params, loop_run_id, node_id, db_path, opts),
         "methodology_run" => handle_methodology_run(&params, db_path, opts),
         "input" => handle_input(&params, db_path),
@@ -1815,8 +1831,13 @@ fn handle_dispatch(
                 "cost_usd": cost,  // key kept as cost_usd to preserve {{steps.x.output.cost_usd}} templates
             }))
         }
-        None => Err(StepError::Failed(format!(
-            "dispatch to {} ran but no execution_logs row was found afterward — cannot confirm success",
+        // FailedNoRetry: the dispatch ran (real tokens may have been spent and
+        // it may have SUCCEEDED) but we couldn't find its row to confirm.
+        // Retrying would risk duplicate paid work, so this failure is terminal
+        // (war-room PR-6a, codex HIGH). The deterministic fix — dispatch::run
+        // returning its minted id — lands in PR-6b and removes this path.
+        None => Err(StepError::FailedNoRetry(format!(
+            "dispatch to {} ran but no execution_logs row was found afterward — cannot confirm success (not retried: may have already run)",
             runtime
         ))),
     }
@@ -3450,6 +3471,7 @@ mod tests {
         let out = match handle_input(&params, &db_path) {
             Ok(v) => v,
             Err(StepError::Failed(msg)) => panic!("handle_input failed: {}", msg),
+            Err(StepError::FailedNoRetry(msg)) => panic!("handle_input no-retry: {}", msg),
             Err(StepError::Skipped(msg)) => panic!("handle_input skipped: {}", msg),
             Err(StepError::Paused { paused_dispatch_id, .. }) => {
                 panic!("handle_input paused unexpectedly: {}", paused_dispatch_id)
@@ -3578,6 +3600,7 @@ mod tests {
         let matching_out = match handle_score(&matching, &db_path) {
             Ok(v) => v,
             Err(StepError::Failed(msg)) => panic!("handle_score failed: {}", msg),
+            Err(StepError::FailedNoRetry(msg)) => panic!("handle_score no-retry: {}", msg),
             Err(StepError::Skipped(msg)) => panic!("handle_score skipped: {}", msg),
             Err(StepError::Paused { paused_dispatch_id, .. }) => {
                 panic!("handle_score paused unexpectedly: {}", paused_dispatch_id)
@@ -3595,6 +3618,7 @@ mod tests {
         let non_matching_out = match handle_score(&non_matching, &db_path) {
             Ok(v) => v,
             Err(StepError::Failed(msg)) => panic!("handle_score failed: {}", msg),
+            Err(StepError::FailedNoRetry(msg)) => panic!("handle_score no-retry: {}", msg),
             Err(StepError::Skipped(msg)) => panic!("handle_score skipped: {}", msg),
             Err(StepError::Paused { paused_dispatch_id, .. }) => {
                 panic!("handle_score paused unexpectedly: {}", paused_dispatch_id)
@@ -3794,6 +3818,72 @@ mod tests {
             "error should name the substitution failure, got: {:?}",
             outcome.error
         );
+    }
+
+    // Test-only flaky step backing the `test_flaky` node kind. Fails the
+    // first N calls (N = thread-local TEST_FLAKY_FAILS), then succeeds.
+    thread_local! {
+        static TEST_FLAKY_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    pub(super) fn run_test_flaky() -> std::result::Result<serde_json::Value, StepError> {
+        TEST_FLAKY_FAILS.with(|c| {
+            let left = c.get();
+            if left > 0 {
+                c.set(left - 1);
+                Err(StepError::Failed(format!("flaky: {} failure(s) left", left)))
+            } else {
+                Ok(serde_json::json!({ "ok": true }))
+            }
+        })
+    }
+
+    #[test]
+    fn retry_does_not_fire_on_skipped_or_substitution_failure() {
+        // Skipped (unimplemented kind) must NOT retry even with max_attempts>1.
+        let skip_graph = r#"{"nodes":[
+            {"id":"d","type":"diagnose","config":{"retry":{"max_attempts":3},"params":{}}}
+        ],"edges":[]}"#;
+        let f1 = make_file_db_with_graph("skip-retry", skip_graph);
+        let o1 = execute_loop("skip-retry", vec![], &f1.path().to_path_buf(),
+            &Opts { human: false, quiet: false }).unwrap();
+        assert_eq!(o1.status, "skipped", "skipped kind must not become error via retry");
+
+        // Substitution failure happens before the retry loop → not retried, so
+        // the error must NOT carry an "after N attempts" suffix.
+        let sub_graph = r#"{"nodes":[
+            {"id":"b","type":"input","config":{"retry":{"max_attempts":3},"params":{"slug":"{{vars.missing}}"}}}
+        ],"edges":[]}"#;
+        let f2 = make_file_db_with_graph("sub-retry", sub_graph);
+        let o2 = execute_loop("sub-retry", vec![], &f2.path().to_path_buf(),
+            &Opts { human: false, quiet: false }).unwrap();
+        assert_eq!(o2.status, "error");
+        let err = o2.error.unwrap_or_default();
+        assert!(err.contains("template substitution failed"), "got: {err}");
+        assert!(!err.contains("after"), "substitution failure must not be retried: {err}");
+    }
+
+    #[test]
+    fn retry_succeeds_after_transient_failures_and_records_attempts() {
+        TEST_FLAKY_FAILS.with(|c| c.set(1)); // fail once, succeed on attempt 2
+        let graph = r#"{"nodes":[
+            {"id":"f","type":"test_flaky","config":{"retry":{"max_attempts":3}}}
+        ],"edges":[]}"#;
+        let file = make_file_db_with_graph("flaky-loop", graph);
+        let db_path = file.path().to_path_buf();
+        let outcome = execute_loop("flaky-loop", vec![], &db_path,
+            &Opts { human: false, quiet: false }).unwrap();
+        assert_eq!(outcome.status, "success", "should succeed on the 2nd attempt");
+        assert_eq!(outcome.steps_succeeded, 1);
+
+        // Single step row reused across attempts, output carries _attempts=2.
+        let c = Connection::open(&db_path).unwrap();
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM loop_run_steps WHERE node_id='f'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "retries must reuse one step row, not insert new ones");
+        let out: String = c.query_row(
+            "SELECT output FROM loop_run_steps WHERE node_id='f'", [], |r| r.get(0)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["_attempts"], 2);
     }
 
     #[test]
