@@ -102,6 +102,10 @@ pub fn delegate_capture(
         cmd.arg(a);
     }
     cmd.arg("--db").arg(db_path);
+    // --quiet (and never --human): keep stdout pure machine-JSON so the caller
+    // can parse it; progress/log lines on stdout would otherwise corrupt the
+    // JSON (war-room PR-4, claude/gemini).
+    cmd.arg("--quiet");
     let output = cmd
         .output()
         .map_err(|e| anyhow!("spawn ato-pro at {}: {}", bin.display(), e))?;

@@ -1961,17 +1961,30 @@ fn build_diagnose_args(
         .ok_or_else(|| "diagnose: 'run_id' is required".to_string())?;
     let mut args = vec!["--run-id".to_string(), run_id.to_string()];
 
-    if let Some(model) = param_str(params, "diagnose_model") {
-        args.push("--diagnose-model".to_string());
-        args.push(model.to_string());
+    // String passthroughs mirroring `ato evaluations methodology diagnose`.
+    for (param, flag) in [
+        ("diagnose_model", "--diagnose-model"),
+        ("diagnose_runtime", "--diagnose-runtime"),
+    ] {
+        if let Some(v) = param_str(params, param) {
+            args.push(flag.to_string());
+            args.push(v.to_string());
+        }
     }
 
+    // Integer passthroughs. Accept JSON numbers OR numeric strings (loop
+    // graphs stored as JSON can stringify these) — war-room PR-4, codex/gemini.
     for (param, flag) in [
         ("worst_k", "--worst-k"),
         ("best_k", "--best-k"),
         ("max_dispatches", "--max-dispatches"),
+        ("max_chars_per_dispatch", "--max-chars-per-dispatch"),
     ] {
-        if let Some(value) = params.get(param).and_then(|v| v.as_u64()) {
+        let n = params.get(param).and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        });
+        if let Some(value) = n {
             args.push(flag.to_string());
             args.push(value.to_string());
         }
@@ -1991,8 +2004,17 @@ fn handle_diagnose(
     force_apply: bool,
 ) -> std::result::Result<serde_json::Value, StepError> {
     let args = build_diagnose_args(params, force_apply).map_err(StepError::Failed)?;
-    let out =
-        crate::pro_client::delegate_capture("diagnose", &args, db_path).map_err(StepError::from)?;
+    let out = crate::pro_client::delegate_capture("diagnose", &args, db_path).map_err(|e| {
+        // `apply` MUTATES agent files. If ato-pro wrote the variant then died
+        // before exit-0, retrying would re-apply/clobber. So an apply failure
+        // is non-retryable (war-room PR-4, claude). Read-only diagnose stays
+        // retryable.
+        if force_apply {
+            StepError::FailedNoRetry(format!("{:#}", e))
+        } else {
+            StepError::from(e)
+        }
+    })?;
     Ok(serde_json::from_str::<serde_json::Value>(&out)
         .unwrap_or_else(|_| serde_json::json!({ "raw_output": out })))
 }
@@ -3075,6 +3097,23 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--worst-k", "3"]));
         assert!(args.iter().any(|a| a == "--apply"));
         assert!(args.iter().any(|a| a == "--yes"));
+    }
+
+    #[test]
+    fn build_diagnose_args_forwards_runtime_and_coerces_string_ints() {
+        let params = serde_json::json!({
+            "run_id": "r1",
+            "diagnose_runtime": "gemini",
+            "worst_k": "4",            // numeric string (loop graphs stringify)
+            "max_chars_per_dispatch": 8000
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let args = build_diagnose_args(&params, false).unwrap();
+        assert!(args.windows(2).any(|w| w == ["--diagnose-runtime", "gemini"]));
+        assert!(args.windows(2).any(|w| w == ["--worst-k", "4"]), "string int coerced");
+        assert!(args.windows(2).any(|w| w == ["--max-chars-per-dispatch", "8000"]));
     }
 
     #[test]
