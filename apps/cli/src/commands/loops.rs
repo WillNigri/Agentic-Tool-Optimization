@@ -796,6 +796,27 @@ fn graph_params(node: &LoopGraphNode) -> serde_json::Map<String, serde_json::Val
         .unwrap_or_default()
 }
 
+fn parse_retry(node: &LoopGraphNode) -> (u32, u64) {
+    let retry = node
+        .config
+        .as_ref()
+        .and_then(|c| c.get("retry"))
+        .and_then(|r| r.as_object());
+
+    let max_attempts = retry
+        .and_then(|r| r.get("max_attempts"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n.clamp(1, 5) as u32)
+        .unwrap_or(1);
+    let backoff_ms = retry
+        .and_then(|r| r.get("backoff_ms"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n.clamp(0, 60_000))
+        .unwrap_or(0);
+
+    (max_attempts, backoff_ms)
+}
+
 fn param_str<'a>(
     params: &'a serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -1097,6 +1118,7 @@ pub fn execute_loop(
         steps_executed += 1;
         let step_id = Uuid::new_v4().to_string();
         let step_started = chrono::Utc::now().to_rfc3339();
+        let (max_attempts, backoff_ms) = parse_retry(node);
 
         // Resolve templates against vars + upstream outputs BEFORE the step
         // runs. The substituted config is what we record + execute, so the
@@ -1124,7 +1146,51 @@ pub fn execute_loop(
         }
 
         let result = match substituted {
-            Ok(n) => execute_step(&n, &run_id, &step_id, db_path, opts),
+            Ok(n) => {
+                let mut final_result = Err(StepError::Failed(format!(
+                    "step {} ({}) exhausted retry loop unexpectedly",
+                    node.id, node.node_type
+                )));
+                for attempt in 1..=max_attempts {
+                    match execute_step(&n, &run_id, &step_id, db_path, opts) {
+                        Ok(mut output_value) => {
+                            if attempt > 1 {
+                                if let Some(obj) = output_value.as_object_mut() {
+                                    obj.insert(
+                                        "_attempts".into(),
+                                        serde_json::Value::from(attempt),
+                                    );
+                                }
+                            }
+                            final_result = Ok(output_value);
+                            break;
+                        }
+                        Err(StepError::Failed(_msg)) if attempt < max_attempts => {
+                            if opts.human {
+                                emit_human(&format!(
+                                    "  ↻ step {} ({}) attempt {}/{} failed, retrying…",
+                                    node.id, node.node_type, attempt, max_attempts
+                                ));
+                            }
+                            if backoff_ms > 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                            }
+                        }
+                        Err(StepError::Failed(msg)) => {
+                            final_result = Err(StepError::Failed(format!(
+                                "{} (after {} attempts)",
+                                msg, attempt
+                            )));
+                            break;
+                        }
+                        Err(other) => {
+                            final_result = Err(other);
+                            break;
+                        }
+                    }
+                }
+                final_result
+            }
             Err(e) => Err(StepError::Failed(format!(
                 "template substitution failed: {}",
                 e
@@ -2916,6 +2982,60 @@ mod tests {
         assert_eq!(param_str(&p, "prompt"), Some("improve: from-a"));
     }
 
+    #[test]
+    fn parse_retry_defaults_to_single_attempt_no_backoff() {
+        let node = LoopGraphNode {
+            id: "n1".into(),
+            node_type: "input".into(),
+            config: Some(serde_json::json!({
+                "params": { "slug": "brief" }
+            })),
+        };
+        assert_eq!(parse_retry(&node), (1, 0));
+    }
+
+    #[test]
+    fn parse_retry_clamps_fields_into_supported_range() {
+        let node = LoopGraphNode {
+            id: "n1".into(),
+            node_type: "input".into(),
+            config: Some(serde_json::json!({
+                "retry": {
+                    "max_attempts": 99,
+                    "backoff_ms": 999999
+                }
+            })),
+        };
+        assert_eq!(parse_retry(&node), (5, 60_000));
+
+        let low = LoopGraphNode {
+            id: "n2".into(),
+            node_type: "input".into(),
+            config: Some(serde_json::json!({
+                "retry": {
+                    "max_attempts": 0,
+                    "backoff_ms": 0
+                }
+            })),
+        };
+        assert_eq!(parse_retry(&low), (1, 0));
+    }
+
+    #[test]
+    fn parse_retry_falls_back_on_garbage_fields() {
+        let node = LoopGraphNode {
+            id: "n1".into(),
+            node_type: "input".into(),
+            config: Some(serde_json::json!({
+                "retry": {
+                    "max_attempts": "many",
+                    "backoff_ms": { "slow": true }
+                }
+            })),
+        };
+        assert_eq!(parse_retry(&node), (1, 0));
+    }
+
     /// Mirrors the production schema (only the parts the loops CLI touches)
     /// so we can exercise the SQL helpers against an in-memory DB without
     /// pulling in the desktop's schema crate.
@@ -3673,6 +3793,47 @@ mod tests {
                 .contains("template substitution failed"),
             "error should name the substitution failure, got: {:?}",
             outcome.error
+        );
+    }
+
+    #[test]
+    fn execute_loop_retries_failed_steps_and_records_final_attempt_count() {
+        let graph = r#"{"nodes":[
+            {"id":"missing-input","type":"input","config":{
+                "retry":{"max_attempts":3},
+                "params":{"slug":"does-not-exist"}
+            }}
+        ],"edges":[]}"#;
+        let file = make_file_db_with_graph("retry-loop", graph);
+        let db_path = file.path().to_path_buf();
+        let opts = Opts { human: false, quiet: false };
+        let outcome = execute_loop("retry-loop", vec![], &db_path, &opts)
+            .expect("execute_loop returns Ok even when a retried step fails");
+
+        assert_eq!(outcome.status, "error");
+        assert_eq!(outcome.steps_executed, 1);
+        assert_eq!(outcome.steps_succeeded, 0);
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("after 3 attempts"),
+            "run error should mention final attempts, got: {:?}",
+            outcome.error
+        );
+
+        let c = Connection::open(&db_path).unwrap();
+        let step_error: String = c
+            .query_row(
+                "SELECT error FROM loop_run_steps WHERE node_id='missing-input'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("step row must exist");
+        assert!(
+            step_error.contains("after 3 attempts"),
+            "step error should mention retries, got: {step_error}"
         );
     }
 }
