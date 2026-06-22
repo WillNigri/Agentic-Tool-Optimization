@@ -83,6 +83,13 @@ pub enum TeamsSub {
         #[arg(long, default_value = "member")]
         role: String,
     },
+    /// Accept a team invitation. Use the token from `ato teams invite`
+    /// (printed on invite) or the invitation email link.
+    Accept {
+        /// Invitation token.
+        #[arg(long)]
+        token: String,
+    },
     /// List members of a team.
     Members {
         #[arg(long)]
@@ -194,6 +201,7 @@ pub fn run(args: TeamsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
         TeamsSub::List => run_list(opts),
         TeamsSub::Delete { team } => run_delete(team, opts),
         TeamsSub::Invite { team, email, role } => run_invite(team, email, role, opts),
+        TeamsSub::Accept { token } => run_accept(token, opts),
         TeamsSub::Members { team } => run_members(team, opts),
         TeamsSub::RemoveMember { team, user_id } => run_remove_member(team, user_id, opts),
         TeamsSub::Agents { sub } => run_agents(sub, opts),
@@ -212,6 +220,11 @@ struct CreateTeamBody<'a> {
 struct InviteBody<'a> {
     email: &'a str,
     role: &'a str,
+}
+
+#[derive(Serialize)]
+struct AcceptBody<'a> {
+    token: &'a str,
 }
 
 fn run_create(name: String, description: Option<String>, opts: &Opts) -> Result<()> {
@@ -264,7 +277,54 @@ fn run_invite(team: String, email: String, role: String, opts: &Opts) -> Result<
         .json(&InviteBody { email: &email, role: &role })
         .send()
         .context("Failed to call POST /api/teams/.../members")?;
-    handle_response(resp, opts, &format!("Invited {} as {}", email, role))
+    handle_invite_response(resp, opts, &email, &role)
+}
+
+/// Like handle_response, but surfaces the invitation token so a CLI-only
+/// invitee can accept with `ato teams accept --token <token>` (acceptance was
+/// previously web/email-only — there was no CLI accept path). JSON mode already
+/// emits the token via the unwrapped `data`; this adds it to the human view.
+fn handle_invite_response(
+    resp: reqwest::blocking::Response,
+    opts: &Opts,
+    email: &str,
+    role: &str,
+) -> Result<()> {
+    let status = resp.status();
+    let body: Value = resp.json().unwrap_or(serde_json::json!({}));
+    if !is_success(status, &body) {
+        return handle_response_error(status, &body, opts);
+    }
+    if opts.human {
+        let tok = body
+            .get("data")
+            .and_then(|d| d.get("token"))
+            .and_then(|v| v.as_str());
+        match tok {
+            Some(t) => emit_human(&format!(
+                "Invited {} as {}.\n  invite token: {}\n  They accept with: ato teams accept --token {}",
+                email, role, t, t
+            )),
+            None => emit_human(&format!("Invited {} as {}", email, role)),
+        }
+    } else {
+        let payload = body.get("data").cloned().unwrap_or(body);
+        emit_json(&payload)?;
+    }
+    Ok(())
+}
+
+fn run_accept(invite_token: String, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams/invitations/accept", api_base());
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&AcceptBody { token: &invite_token })
+        .send()
+        .context("Failed to call POST /api/teams/invitations/accept")?;
+    handle_response(resp, opts, "Joined team — invitation accepted")
 }
 
 fn run_members(team: String, opts: &Opts) -> Result<()> {
@@ -350,6 +410,7 @@ fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
 
     match sub {
         AgentsSub::Share { agent_id, team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/agents/share", api_base(), team);
             let resp = client
                 .post(&url)
@@ -360,6 +421,7 @@ fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
             handle_response(resp, opts, "Shared agent into team")
         }
         AgentsSub::List { team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/agents", api_base(), team);
             let resp = client
                 .get(&url)
@@ -369,6 +431,7 @@ fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
             handle_list_response(resp, opts, "agent")
         }
         AgentsSub::Unshare { agent_id, team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/agents/{}/share", api_base(), team, agent_id);
             let resp = client
                 .delete(&url)
@@ -386,6 +449,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
 
     match sub {
         MethodologiesSub::Share { slug, team, name } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let row = load_local_methodology(&slug, db_path)?;
             let variant_matrix: Value = serde_json::from_str(&row.variant_matrix_json)
                 .with_context(|| format!("Bad variant_matrix JSON for slug={}", slug))?;
@@ -416,6 +480,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
             handle_response(resp, opts, "Shared methodology into team")
         }
         MethodologiesSub::List { team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/methodologies", api_base(), team);
             let resp = client
                 .get(&url)
@@ -425,6 +490,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
             handle_list_response(resp, opts, "methodology")
         }
         MethodologiesSub::Unshare { methodology_id, team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!(
                 "{}/teams/{}/methodologies/{}/share",
                 api_base(),
