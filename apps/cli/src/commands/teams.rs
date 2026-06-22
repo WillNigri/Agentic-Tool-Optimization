@@ -600,12 +600,19 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
         return Ok(());
     }
 
+    // Pluralize correctly: "methodology" → "methodologies", not "methodologys".
+    let plural = if kind.ends_with('y') {
+        format!("{}ies", &kind[..kind.len() - 1])
+    } else {
+        format!("{}s", kind)
+    };
+
     if arr.is_empty() {
-        emit_human(&format!("No shared {}s in this team yet.", kind));
+        emit_human(&format!("No shared {} in this team yet.", plural));
         return Ok(());
     }
 
-    emit_human(&format!("Shared {}s ({}):", kind, arr.len()));
+    emit_human(&format!("Shared {} ({}):", plural, arr.len()));
     for row in arr {
         let slug = row.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
         let name = row
