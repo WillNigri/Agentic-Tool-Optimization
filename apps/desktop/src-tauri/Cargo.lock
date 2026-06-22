@@ -313,7 +313,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ato-desktop"
-version = "2.18.10"
+version = "2.18.11"
 dependencies = [
  "aes-gcm",
  "ato-agent-permissions",
@@ -335,7 +335,7 @@ dependencies = [
  "hkdf",
  "keyring",
  "lettre",
- "nix 0.27.1",
+ "nix 0.31.2",
  "notify",
  "portable-pty",
  "rand 0.8.5",
@@ -3080,12 +3080,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
 dependencies = [
  "bitflags 2.11.0",
  "cfg-if",
+ "cfg_aliases",
  "libc",
 ]
 
