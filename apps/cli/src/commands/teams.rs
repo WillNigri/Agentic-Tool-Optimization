@@ -249,7 +249,67 @@ fn run_list(opts: &Opts) -> Result<()> {
         .bearer_auth(&token)
         .send()
         .context("Failed to call GET /api/teams")?;
-    handle_list_response(resp, opts, "team")
+    handle_team_list_response(resp, opts)
+}
+
+/// Render the caller's teams. Distinct from `handle_list_response` (SHARED
+/// RESOURCES: slug / display_name / shared_by_email / shared_at) — a team
+/// row from GET /teams is `{ id, name, slug, role, member_count, created_at }`
+/// and has none of the shared-resource fields, so the shared renderer
+/// printed every team as "? (?) — by ? at ?". JSON output is unchanged.
+fn handle_team_list_response(resp: reqwest::blocking::Response, opts: &Opts) -> Result<()> {
+    let status = resp.status();
+    let body: Value = resp.json().unwrap_or(serde_json::json!({}));
+    if !is_success(status, &body) {
+        return handle_response_error(status, &body, opts);
+    }
+    let payload = body.get("data").cloned().unwrap_or_else(|| body.clone());
+    let arr = match payload.as_array() {
+        Some(a) => a,
+        None => {
+            let preview: String = payload.to_string().chars().take(256).collect();
+            eprintln!("[malformed-response] expected an array under `data`; body: {}", preview);
+            std::process::exit(1);
+        }
+    };
+    if !opts.human {
+        emit_json(&payload)?;
+        return Ok(());
+    }
+    if arr.is_empty() {
+        emit_human("You're not a member of any teams yet.");
+        return Ok(());
+    }
+    emit_human(&format!("Teams ({}):", arr.len()));
+    for row in arr {
+        emit_human(&format_team_row(row));
+    }
+    Ok(())
+}
+
+/// Format one `teams list` row from GET /teams `{ id, name, slug, role,
+/// member_count, created_at }`. Pure (no I/O) so the rendering — which used
+/// to print "? (?) — by ? at ?" — is unit-testable against the cloud shape.
+fn format_team_row(row: &Value) -> String {
+    let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let slug = row.get("slug").and_then(|v| v.as_str());
+    let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("member");
+    // member_count may arrive as a JSON number or a stringified count
+    // (node-postgres serializes COUNT(*) as a string).
+    let members = row
+        .get("member_count")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+    let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let mut line = format!("  • {}", name);
+    if let Some(s) = slug {
+        line.push_str(&format!(" ({})", s));
+    }
+    line.push_str(&format!(" — {}", role));
+    if let Some(n) = members {
+        line.push_str(&format!(" · {} member{}", n, if n == 1 { "" } else { "s" }));
+    }
+    line.push_str(&format!(" · id {}", id));
+    line
 }
 
 fn run_delete(team: String, opts: &Opts) -> Result<()> {
@@ -652,4 +712,51 @@ fn handle_response_error(
         emit_json(body)?;
     }
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod team_list_render_tests {
+    use super::format_team_row;
+    use serde_json::json;
+
+    // The cloud shape: GET /teams returns t.* + role + member_count.
+    #[test]
+    fn renders_full_team_row() {
+        let row = json!({
+            "id": "36bf9a83-cc4c-4e36-b875-69e87537774f",
+            "name": "Backend",
+            "slug": "backend",
+            "role": "owner",
+            "member_count": 3,
+            "created_at": "2026-06-20T00:00:00Z"
+        });
+        let out = format_team_row(&row);
+        // The regression: never "by ? at ?" again.
+        assert!(!out.contains('?'), "unexpected ? in: {out}");
+        assert!(out.contains("Backend (backend)"));
+        assert!(out.contains("owner"));
+        assert!(out.contains("3 members"));
+        assert!(out.contains("id 36bf9a83-cc4c-4e36-b875-69e87537774f"));
+    }
+
+    // node-postgres serializes COUNT(*) as a string — must still parse.
+    #[test]
+    fn member_count_as_string_parses() {
+        let row = json!({ "name": "Solo", "slug": "solo", "role": "owner", "member_count": "1", "id": "x" });
+        let out = format_team_row(&row);
+        assert!(out.contains("1 member"));      // singular
+        assert!(!out.contains("1 members"));    // not pluralized
+    }
+
+    // Missing optional fields degrade gracefully (no slug / count) without
+    // reintroducing the bogus shared-resource "by ? at ?" tail.
+    #[test]
+    fn missing_optionals_degrade_cleanly() {
+        let row = json!({ "name": "NoSlug", "role": "member", "id": "y" });
+        let out = format_team_row(&row);
+        assert!(out.contains("NoSlug — member"));
+        assert!(!out.contains("by "));
+        assert!(!out.contains(" at "));
+        assert!(!out.contains("()"));
+    }
 }
