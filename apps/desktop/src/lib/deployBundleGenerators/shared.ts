@@ -8,6 +8,9 @@
 // concerns (Worker env, Edge runtime, Express, plain HTTP).
 
 import type { Agent } from "@/lib/agents";
+// Single source of truth (generated from packages/ato-pricing). Stringified
+// into each bundle below, so the output stays self-contained.
+import { PRICING_PER_M_TOKENS } from "../pricing-table.generated";
 
 export type DeployProvider =
   | "anthropic"
@@ -219,29 +222,11 @@ export function serializeInlineChunks(chunks: InlineKnowledgeChunk[]): string {
  *  the row as "subscription" in the dashboard, which is the right
  *  UX for an unknown.
  *
- *  These prices need to drift with the real ones; bake-in is fine
- *  for now (Anthropic + OpenAI publish stable list prices), the
- *  shared.ts file is regenerated on each release. */
-const PRICING_PER_M_TOKENS: Record<string, { in: number; out: number }> = {
-  // Anthropic
-  "claude-opus-4-7": { in: 15, out: 75 },
-  "claude-opus-4-6": { in: 15, out: 75 },
-  "claude-sonnet-4-6": { in: 3, out: 15 },
-  "claude-sonnet-4-5": { in: 3, out: 15 },
-  "claude-haiku-4-5-20251001": { in: 1, out: 5 },
-  // OpenAI
-  "gpt-4.1": { in: 2.5, out: 10 },
-  "gpt-4o": { in: 2.5, out: 10 },
-  "gpt-4o-mini": { in: 0.15, out: 0.6 },
-  // Google
-  "gemini-2.0-flash": { in: 0.1, out: 0.4 },
-  "gemini-1.5-pro": { in: 1.25, out: 5 },
-  "gemini-1.5-flash": { in: 0.075, out: 0.3 },
-  // Other OpenAI-compat providers — leave 0 by default; user can
-  // override at deploy time via env var if they want costs.
-};
-
-/** JS literal of the price table for embedding in generated bundles. */
+ *  Sourced from the single generated table (packages/ato-pricing →
+ *  pricing-table.generated.ts) so bundle cost traces can't drift from the
+ *  Rust source. The literal is stringified INTO each bundle at generation
+ *  time, so the output bundle stays self-contained. (Was a stale hand-kept
+ *  third copy: gpt-4.1 at the old 2.5/10, missing current models.) */
 const PRICING_LITERAL = JSON.stringify(PRICING_PER_M_TOKENS);
 
 /** Shared helper emitted into every bundle: given a model + prompt /
