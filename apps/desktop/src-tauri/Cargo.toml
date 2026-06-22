@@ -52,7 +52,7 @@ which = "6"
 # Pre-2.4.8 the column was plain base64 (no cipher); a master key
 # stored in the OS keychain now wraps the stored values.
 aes-gcm = "0.10"
-portable-pty = "0.8"
+portable-pty = "0.9"
 ato-recipes = { path = "../../../packages/ato-recipes" }
 ato-posts = { path = "../../../packages/ato-posts" }
 ato-api-providers = { path = "../../../packages/ato-api-providers" }
