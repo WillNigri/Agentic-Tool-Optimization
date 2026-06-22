@@ -11,7 +11,7 @@
   "dependencies": {
     "@stablelib/hkdf": "^1.0.1",
     "@stablelib/sha256": "^1.0.1",
-    "@stablelib/x25519": "^1.0.3",
+    "@stablelib/x25519": "^2.0.1",
     "@stablelib/xchacha20poly1305": "^1.0.1",
     "@tanstack/react-query": "^5.0.0",
     "lucide-react": "^0.300.0",
