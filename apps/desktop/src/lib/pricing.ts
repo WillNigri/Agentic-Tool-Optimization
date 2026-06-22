@@ -15,49 +15,20 @@
 
 // Pricing per million tokens (input, output) in USD.
 //
-// SOURCE OF TRUTH: `packages/ato-pricing/src/lib.rs::pricing_for_model`
-// (extracted 2026-05-17). This TS file is a hand-kept mirror — replace
-// with codegen from the Rust crate in a follow-up so the JS frontend
-// can never drift again. Until then, when you update the Rust table,
-// update this table in the same commit.
+// SINGLE SOURCE OF TRUTH: `packages/ato-pricing/src/lib.rs::MODEL_PRICES`.
+// The table below is GENERATED from it into `pricing-table.generated.ts` and
+// re-exported here, so the JS frontend can never drift from the Rust crate
+// again (the old hand-kept mirror went stale — missing gemini-3.x, opus-4-8,
+// and entire providers — silently under-reporting cost). To change a rate,
+// edit the Rust table and regenerate:
+//   cargo test -p ato-pricing write_generated_pricing_ts -- --ignored
+// (a drift-guard test fails CI if the committed file is out of date.)
 //
-// Bug report 2026-05-15 (Will): Settings → Runtimes → Dispatch Cost showed
-// $0.00 for 22 google API-key dispatches that AI Studio billed for ~R$8.57.
-// Root cause: pricing_for_model returned None for the actual model (Gemini
-// 2.5 family wasn't in the table), so estimate_cost_usd returned None,
-// stored cost_usd_estimated=NULL, COALESCE'd to $0 at sum time. Fix: cover
-// the current model lineup.
-export const PRICING_PER_M_TOKENS: Record<string, { in: number; out: number }> = {
-  // ── Anthropic ─────────────────────────────────────────────────────
-  "claude-opus-4-7": { in: 15, out: 75 },
-  "claude-opus-4-6": { in: 15, out: 75 },
-  "claude-sonnet-4-6": { in: 3, out: 15 },
-  "claude-sonnet-4-5": { in: 3, out: 15 },
-  "claude-haiku-4-5": { in: 1, out: 5 },
-  "claude-haiku-4-5-20251001": { in: 1, out: 5 },
-  // ── OpenAI ────────────────────────────────────────────────────────
-  "gpt-5": { in: 1.25, out: 10 },
-  "gpt-4.1": { in: 2, out: 8 },
-  "gpt-4.1-mini": { in: 0.4, out: 1.6 },
-  "gpt-4.1-nano": { in: 0.1, out: 0.4 },
-  "gpt-4o": { in: 2.5, out: 10 },
-  "gpt-4o-mini": { in: 0.15, out: 0.6 },
-  "o3": { in: 2, out: 8 },
-  "o3-mini": { in: 1.1, out: 4.4 },
-  // ── Google Gemini ─────────────────────────────────────────────────
-  // 2.5 family — published rates use the ≤200K-context tier; long-context
-  // overage isn't surfaced here since we don't measure context size.
-  "gemini-2.5-pro": { in: 1.25, out: 10 },
-  "gemini-2.5-flash": { in: 0.3, out: 2.5 },
-  "gemini-2.5-flash-lite": { in: 0.1, out: 0.4 },
-  // 2.0 family
-  "gemini-2.0-flash": { in: 0.1, out: 0.4 },
-  "gemini-2.0-flash-lite": { in: 0.075, out: 0.3 },
-  "gemini-2.0-flash-exp": { in: 0.1, out: 0.4 },
-  // 1.5 legacy
-  "gemini-1.5-pro": { in: 1.25, out: 5 },
-  "gemini-1.5-flash": { in: 0.075, out: 0.3 },
-};
+// Original bug (2026-05-15): Settings → Dispatch Cost showed $0.00 for google
+// dispatches AI Studio billed for ~R$8.57 — the model wasn't in the table, so
+// cost stored NULL and COALESCE'd to $0. The single source prevents recurrence.
+export { PRICING_PER_M_TOKENS } from "./pricing-table.generated";
+import { PRICING_PER_M_TOKENS } from "./pricing-table.generated";
 
 /** Default model per runtime — used when the dispatch didn't specify a
  *  model override. Aligns with what the runtime CLIs default to. */
