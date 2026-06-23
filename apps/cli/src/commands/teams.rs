@@ -83,6 +83,13 @@ pub enum TeamsSub {
         #[arg(long, default_value = "member")]
         role: String,
     },
+    /// Accept a team invitation. Use the token from `ato teams invite`
+    /// (printed on invite) or the invitation email link.
+    Accept {
+        /// Invitation token.
+        #[arg(long)]
+        token: String,
+    },
     /// List members of a team.
     Members {
         #[arg(long)]
@@ -194,6 +201,7 @@ pub fn run(args: TeamsArgs, db_path: &PathBuf, opts: &Opts) -> Result<()> {
         TeamsSub::List => run_list(opts),
         TeamsSub::Delete { team } => run_delete(team, opts),
         TeamsSub::Invite { team, email, role } => run_invite(team, email, role, opts),
+        TeamsSub::Accept { token } => run_accept(token, opts),
         TeamsSub::Members { team } => run_members(team, opts),
         TeamsSub::RemoveMember { team, user_id } => run_remove_member(team, user_id, opts),
         TeamsSub::Agents { sub } => run_agents(sub, opts),
@@ -212,6 +220,11 @@ struct CreateTeamBody<'a> {
 struct InviteBody<'a> {
     email: &'a str,
     role: &'a str,
+}
+
+#[derive(Serialize)]
+struct AcceptBody<'a> {
+    token: &'a str,
 }
 
 fn run_create(name: String, description: Option<String>, opts: &Opts) -> Result<()> {
@@ -236,7 +249,67 @@ fn run_list(opts: &Opts) -> Result<()> {
         .bearer_auth(&token)
         .send()
         .context("Failed to call GET /api/teams")?;
-    handle_list_response(resp, opts, "team")
+    handle_team_list_response(resp, opts)
+}
+
+/// Render the caller's teams. Distinct from `handle_list_response` (SHARED
+/// RESOURCES: slug / display_name / shared_by_email / shared_at) — a team
+/// row from GET /teams is `{ id, name, slug, role, member_count, created_at }`
+/// and has none of the shared-resource fields, so the shared renderer
+/// printed every team as "? (?) — by ? at ?". JSON output is unchanged.
+fn handle_team_list_response(resp: reqwest::blocking::Response, opts: &Opts) -> Result<()> {
+    let status = resp.status();
+    let body: Value = resp.json().unwrap_or(serde_json::json!({}));
+    if !is_success(status, &body) {
+        return handle_response_error(status, &body, opts);
+    }
+    let payload = body.get("data").cloned().unwrap_or_else(|| body.clone());
+    let arr = match payload.as_array() {
+        Some(a) => a,
+        None => {
+            let preview: String = payload.to_string().chars().take(256).collect();
+            eprintln!("[malformed-response] expected an array under `data`; body: {}", preview);
+            std::process::exit(1);
+        }
+    };
+    if !opts.human {
+        emit_json(&payload)?;
+        return Ok(());
+    }
+    if arr.is_empty() {
+        emit_human("You're not a member of any teams yet.");
+        return Ok(());
+    }
+    emit_human(&format!("Teams ({}):", arr.len()));
+    for row in arr {
+        emit_human(&format_team_row(row));
+    }
+    Ok(())
+}
+
+/// Format one `teams list` row from GET /teams `{ id, name, slug, role,
+/// member_count, created_at }`. Pure (no I/O) so the rendering — which used
+/// to print "? (?) — by ? at ?" — is unit-testable against the cloud shape.
+fn format_team_row(row: &Value) -> String {
+    let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let slug = row.get("slug").and_then(|v| v.as_str());
+    let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("member");
+    // member_count may arrive as a JSON number or a stringified count
+    // (node-postgres serializes COUNT(*) as a string).
+    let members = row
+        .get("member_count")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+    let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let mut line = format!("  • {}", name);
+    if let Some(s) = slug {
+        line.push_str(&format!(" ({})", s));
+    }
+    line.push_str(&format!(" — {}", role));
+    if let Some(n) = members {
+        line.push_str(&format!(" · {} member{}", n, if n == 1 { "" } else { "s" }));
+    }
+    line.push_str(&format!(" · id {}", id));
+    line
 }
 
 fn run_delete(team: String, opts: &Opts) -> Result<()> {
@@ -264,7 +337,54 @@ fn run_invite(team: String, email: String, role: String, opts: &Opts) -> Result<
         .json(&InviteBody { email: &email, role: &role })
         .send()
         .context("Failed to call POST /api/teams/.../members")?;
-    handle_response(resp, opts, &format!("Invited {} as {}", email, role))
+    handle_invite_response(resp, opts, &email, &role)
+}
+
+/// Like handle_response, but surfaces the invitation token so a CLI-only
+/// invitee can accept with `ato teams accept --token <token>` (acceptance was
+/// previously web/email-only — there was no CLI accept path). JSON mode already
+/// emits the token via the unwrapped `data`; this adds it to the human view.
+fn handle_invite_response(
+    resp: reqwest::blocking::Response,
+    opts: &Opts,
+    email: &str,
+    role: &str,
+) -> Result<()> {
+    let status = resp.status();
+    let body: Value = resp.json().unwrap_or(serde_json::json!({}));
+    if !is_success(status, &body) {
+        return handle_response_error(status, &body, opts);
+    }
+    if opts.human {
+        let tok = body
+            .get("data")
+            .and_then(|d| d.get("token"))
+            .and_then(|v| v.as_str());
+        match tok {
+            Some(t) => emit_human(&format!(
+                "Invited {} as {}.\n  invite token: {}\n  They accept with: ato teams accept --token {}",
+                email, role, t, t
+            )),
+            None => emit_human(&format!("Invited {} as {}", email, role)),
+        }
+    } else {
+        let payload = body.get("data").cloned().unwrap_or(body);
+        emit_json(&payload)?;
+    }
+    Ok(())
+}
+
+fn run_accept(invite_token: String, opts: &Opts) -> Result<()> {
+    let token = read_token()?;
+    let client = http_client()?;
+    let url = format!("{}/teams/invitations/accept", api_base());
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&AcceptBody { token: &invite_token })
+        .send()
+        .context("Failed to call POST /api/teams/invitations/accept")?;
+    handle_response(resp, opts, "Joined team — invitation accepted")
 }
 
 fn run_members(team: String, opts: &Opts) -> Result<()> {
@@ -350,6 +470,7 @@ fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
 
     match sub {
         AgentsSub::Share { agent_id, team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/agents/share", api_base(), team);
             let resp = client
                 .post(&url)
@@ -360,6 +481,7 @@ fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
             handle_response(resp, opts, "Shared agent into team")
         }
         AgentsSub::List { team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/agents", api_base(), team);
             let resp = client
                 .get(&url)
@@ -369,6 +491,7 @@ fn run_agents(sub: AgentsSub, opts: &Opts) -> Result<()> {
             handle_list_response(resp, opts, "agent")
         }
         AgentsSub::Unshare { agent_id, team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/agents/{}/share", api_base(), team, agent_id);
             let resp = client
                 .delete(&url)
@@ -386,6 +509,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
 
     match sub {
         MethodologiesSub::Share { slug, team, name } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let row = load_local_methodology(&slug, db_path)?;
             let variant_matrix: Value = serde_json::from_str(&row.variant_matrix_json)
                 .with_context(|| format!("Bad variant_matrix JSON for slug={}", slug))?;
@@ -416,6 +540,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
             handle_response(resp, opts, "Shared methodology into team")
         }
         MethodologiesSub::List { team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!("{}/teams/{}/methodologies", api_base(), team);
             let resp = client
                 .get(&url)
@@ -425,6 +550,7 @@ fn run_methodologies(sub: MethodologiesSub, db_path: &PathBuf, opts: &Opts) -> R
             handle_list_response(resp, opts, "methodology")
         }
         MethodologiesSub::Unshare { methodology_id, team } => {
+            let team = crate::commands::team_shared::resolve_team_id(&team, &token)?;
             let url = format!(
                 "{}/teams/{}/methodologies/{}/share",
                 api_base(),
@@ -534,12 +660,19 @@ fn handle_list_response(resp: reqwest::blocking::Response, opts: &Opts, kind: &s
         return Ok(());
     }
 
+    // Pluralize correctly: "methodology" → "methodologies", not "methodologys".
+    let plural = if kind.ends_with('y') {
+        format!("{}ies", &kind[..kind.len() - 1])
+    } else {
+        format!("{}s", kind)
+    };
+
     if arr.is_empty() {
-        emit_human(&format!("No shared {}s in this team yet.", kind));
+        emit_human(&format!("No shared {} in this team yet.", plural));
         return Ok(());
     }
 
-    emit_human(&format!("Shared {}s ({}):", kind, arr.len()));
+    emit_human(&format!("Shared {} ({}):", plural, arr.len()));
     for row in arr {
         let slug = row.get("slug").and_then(|v| v.as_str()).unwrap_or("?");
         let name = row
@@ -579,4 +712,51 @@ fn handle_response_error(
         emit_json(body)?;
     }
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod team_list_render_tests {
+    use super::format_team_row;
+    use serde_json::json;
+
+    // The cloud shape: GET /teams returns t.* + role + member_count.
+    #[test]
+    fn renders_full_team_row() {
+        let row = json!({
+            "id": "36bf9a83-cc4c-4e36-b875-69e87537774f",
+            "name": "Backend",
+            "slug": "backend",
+            "role": "owner",
+            "member_count": 3,
+            "created_at": "2026-06-20T00:00:00Z"
+        });
+        let out = format_team_row(&row);
+        // The regression: never "by ? at ?" again.
+        assert!(!out.contains('?'), "unexpected ? in: {out}");
+        assert!(out.contains("Backend (backend)"));
+        assert!(out.contains("owner"));
+        assert!(out.contains("3 members"));
+        assert!(out.contains("id 36bf9a83-cc4c-4e36-b875-69e87537774f"));
+    }
+
+    // node-postgres serializes COUNT(*) as a string — must still parse.
+    #[test]
+    fn member_count_as_string_parses() {
+        let row = json!({ "name": "Solo", "slug": "solo", "role": "owner", "member_count": "1", "id": "x" });
+        let out = format_team_row(&row);
+        assert!(out.contains("1 member"));      // singular
+        assert!(!out.contains("1 members"));    // not pluralized
+    }
+
+    // Missing optional fields degrade gracefully (no slug / count) without
+    // reintroducing the bogus shared-resource "by ? at ?" tail.
+    #[test]
+    fn missing_optionals_degrade_cleanly() {
+        let row = json!({ "name": "NoSlug", "role": "member", "id": "y" });
+        let out = format_team_row(&row);
+        assert!(out.contains("NoSlug — member"));
+        assert!(!out.contains("by "));
+        assert!(!out.contains(" at "));
+        assert!(!out.contains("()"));
+    }
 }
