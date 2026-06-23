@@ -189,6 +189,14 @@ export function WarRoomCard({ session: s, onOpen, teamShare }: Props) {
           {s.totalCostUsd !== null && s.totalCostUsd > 0 && (
             <span className="font-mono">${s.totalCostUsd.toFixed(4)}</span>
           )}
+          {s.unpricedCount > 0 && (
+            <span
+              className="font-mono text-amber-400"
+              title={`${s.unpricedCount} dispatch(es) have no cost estimate (model missing from the pricing table). The cost shown counts only priced dispatches.`}
+            >
+              {s.unpricedCount} unpriced
+            </span>
+          )}
           <span>{formatTime(s.lastUsedAt)}</span>
         </div>
       </div>

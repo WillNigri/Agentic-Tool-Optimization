@@ -78,6 +78,11 @@ export interface SessionListRow {
   runtimesUsed: string[];
   agentsUsed: string[];
   totalCostUsd: number | null;
+  // 2026-06-22 — dispatches in this row whose cost is UNPRICED (NULL
+  // cost_usd_estimated). totalCostUsd sums only the priced rows, so a
+  // non-zero count means the pill undercounts; the card renders
+  // "· N unpriced" so the total is never shown as falsely complete.
+  unpricedCount: number;
   lastAssistantPreview: string | null;
   status: string;
   closedAt: string | null;

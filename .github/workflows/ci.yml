@@ -71,6 +71,13 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib
 
+      # Shared crate — runs the per-model pricing drift guard
+      # (generated_pricing_ts_matches_committed). Without this the guard is
+      # decorative: the desktop `cargo test --lib` above never reaches it.
+      - name: Run shared-crate (ato-pricing) tests
+        working-directory: packages/ato-pricing
+        run: cargo test
+
   build-frontend:
     runs-on: ubuntu-latest
     steps:

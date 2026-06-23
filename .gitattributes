@@ -1,0 +1,3 @@
+
+# Generated from packages/ato-pricing — pinned LF so the Rust drift-guard test is stable cross-platform
+apps/desktop/src/lib/pricing-table.generated.ts text eol=lf

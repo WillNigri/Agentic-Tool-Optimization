@@ -34,88 +34,103 @@ use serde::Serialize;
 /// pro-preview, pro, 3.1-pro-preview, 3.1-pro) — root cause of 7x
 /// undercount bug where unknown models returned None → NULL cost.
 pub fn pricing_for_model(model: &str) -> Option<(f64, f64)> {
-    match model {
-        // ---- Anthropic ----
-        // opus-4-8 priced at the established Opus tier (same as 4-7/4-6) so the
-        // refreshed CLI model picker (#82) stays cost-tracked. Adjust if
-        // Anthropic publishes different opus-4-8 rates.
-        "claude-opus-4-8" => Some((15.0, 75.0)),
-        "claude-opus-4-7" => Some((15.0, 75.0)),
-        "claude-opus-4-6" => Some((15.0, 75.0)),
-        "claude-sonnet-4-6" => Some((3.0, 15.0)),
-        "claude-sonnet-4-5" => Some((3.0, 15.0)),
-        "claude-haiku-4-5" | "claude-haiku-4-5-20251001" => Some((1.0, 5.0)),
+    MODEL_PRICES
+        .iter()
+        .find(|(m, _, _)| *m == model)
+        .map(|(_, input, output)| (*input, *output))
+}
 
-        // ---- OpenAI ----
-        // 2026-05-17 merge: desktop had gpt-4.1 at (2.0, 8.0) and o3 at
-        // (2.0, 8.0); CLI had gpt-4.1 at (2.5, 10.0) and o3 at (1.10,
-        // 4.40). Resolved to OpenAI's current published rates (gpt-4.1 =
-        // $2/$8, o3 = $2/$8 per million as of 2025-Q4).
-        "gpt-5" | "gpt-5-2025" => Some((1.25, 10.0)),
-        "gpt-4.1" => Some((2.0, 8.0)),
-        "gpt-4.1-mini" => Some((0.4, 1.6)),
-        "gpt-4.1-nano" => Some((0.1, 0.4)),
-        "gpt-4o" => Some((2.5, 10.0)),
-        "gpt-4o-mini" => Some((0.15, 0.6)),
-        "o3" => Some((2.0, 8.0)),
-        "o3-mini" => Some((1.1, 4.4)),
+/// THE single source of truth for per-model (input, output) USD/M-token
+/// pricing. `pricing_for_model` looks up here; the desktop frontend's
+/// `apps/desktop/src/lib/pricing-table.generated.ts` is GENERATED from this
+/// table by `gen_pricing_ts()` (drift-guarded by the `generated_pricing_ts_*`
+/// test). When you change a rate, edit ONLY this table, then regenerate:
+///   `cargo test -p ato-pricing write_generated_pricing_ts -- --ignored` (writes the file).
+/// Aliases (e.g. dated model ids) get their own row with the same rates.
+pub const MODEL_PRICES: &[(&str, f64, f64)] = &[
+    // ---- Anthropic ---- (opus-4-8 at the established Opus tier; adjust if Anthropic publishes new rates)
+    ("claude-opus-4-8", 15.0, 75.0),
+    ("claude-opus-4-7", 15.0, 75.0),
+    ("claude-opus-4-6", 15.0, 75.0),
+    ("claude-sonnet-4-6", 3.0, 15.0),
+    ("claude-sonnet-4-5", 3.0, 15.0),
+    ("claude-haiku-4-5", 1.0, 5.0),
+    ("claude-haiku-4-5-20251001", 1.0, 5.0),
+    // ---- OpenAI ----
+    ("gpt-5", 1.25, 10.0),
+    ("gpt-5-2025", 1.25, 10.0),
+    ("gpt-4.1", 2.0, 8.0),
+    ("gpt-4.1-mini", 0.4, 1.6),
+    ("gpt-4.1-nano", 0.1, 0.4),
+    ("gpt-4o", 2.5, 10.0),
+    ("gpt-4o-mini", 0.15, 0.6),
+    ("o3", 2.0, 8.0),
+    ("o3-mini", 1.1, 4.4),
+    // ---- Google (Gemini API on AI Studio) ---- Pro rows at the base ≤200K tier
+    ("gemini-3.5-flash", 1.50, 9.00),
+    ("gemini-3.1-pro-preview", 2.00, 12.00),
+    ("gemini-3.1-pro", 2.00, 12.00),
+    ("gemini-3-flash-preview", 0.50, 3.00),
+    ("gemini-3-flash", 0.50, 3.00),
+    ("gemini-3-pro-preview", 2.00, 12.00),
+    ("gemini-3-pro", 2.00, 12.00),
+    ("gemini-2.5-pro", 1.25, 10.0),
+    ("gemini-2.5-flash", 0.30, 2.50),
+    ("gemini-2.5-flash-lite", 0.1, 0.4),
+    ("gemini-2.0-flash", 0.1, 0.4),
+    ("gemini-2.0-flash-lite", 0.075, 0.3),
+    ("gemini-2.0-flash-exp", 0.1, 0.4),
+    ("gemini-1.5-pro", 1.25, 5.0),
+    ("gemini-1.5-flash", 0.075, 0.3),
+    // ---- xAI Grok ----
+    ("grok-2-latest", 2.0, 10.0),
+    ("grok-2-1212", 2.0, 10.0),
+    ("grok-3", 3.0, 15.0),
+    // ---- DeepSeek ----
+    ("deepseek-chat", 0.27, 1.10),
+    ("deepseek-coder", 0.27, 1.10),
+    ("deepseek-reasoner", 0.55, 2.19),
+    ("deepseek-r1", 0.55, 2.19),
+    // ---- Z.AI (Zhipu GLM) ---- verified 2026-06-17; glm-4.x-flash promo-free today
+    ("glm-5.2", 1.40, 4.40),
+    ("glm-4.6", 0.60, 2.20),
+    ("glm-4.5", 0.60, 2.20),
+    ("glm-4.5-air", 0.20, 1.10),
+    ("glm-4.7-flash", 0.0, 0.0),
+    ("glm-4.5-flash", 0.0, 0.0),
+    // ---- Alibaba Qwen (DashScope-Intl) ----
+    ("qwen-plus", 0.40, 1.20),
+    ("qwen-max", 1.40, 5.60),
+    ("qwen-turbo", 0.05, 0.20),
+    // ---- MiniMax ---- (metered-tier rates; subscription users have no per-token cost)
+    ("MiniMax-M2.7-highspeed", 1.0, 3.0),
+    ("MiniMax-M2", 1.0, 3.0),
+    ("MiniMax-Text-01", 0.5, 1.5),
+];
 
-        // ---- Google (Gemini API on AI Studio) ----
-        // gemini-3 family — added 2026-06-12 (web-verified). Longer/more-specific
-        // names listed first so any future prefix-based matching won't short-circuit.
-        // Pro rows priced at the base tier (≤200K context); the >200K tier is
-        // $4.00/$18.00 — callers needing that tier must handle it upstream.
-        "gemini-3.5-flash"           => Some((1.50,  9.00)),  // launched 2026-05-19
-        "gemini-3.1-pro-preview"     => Some((2.00, 12.00)),
-        "gemini-3.1-pro"             => Some((2.00, 12.00)),
-        "gemini-3-flash-preview"     => Some((0.50,  3.00)),
-        "gemini-3-flash"             => Some((0.50,  3.00)),
-        "gemini-3-pro-preview"       => Some((2.00, 12.00)),
-        "gemini-3-pro"               => Some((2.00, 12.00)),
-        // gemini-2.x and older
-        "gemini-2.5-pro" => Some((1.25, 10.0)),
-        "gemini-2.5-flash" => Some((0.30, 2.50)),
-        "gemini-2.5-flash-lite" => Some((0.1, 0.4)),
-        "gemini-2.0-flash" => Some((0.1, 0.4)),
-        "gemini-2.0-flash-lite" => Some((0.075, 0.3)),
-        "gemini-2.0-flash-exp" => Some((0.1, 0.4)),
-        "gemini-1.5-pro" => Some((1.25, 5.0)),
-        "gemini-1.5-flash" => Some((0.075, 0.3)),
+/// Generate the desktop frontend's price table (TypeScript) from MODEL_PRICES,
+/// so the JS mirror can never drift from the Rust source again. Emits a
+/// `pricing-table.generated.ts` that `pricing.ts` imports.
+pub fn gen_pricing_ts() -> String {
+    let mut out = String::new();
+    out.push_str("// @generated by `cargo test -p ato-pricing write_generated_pricing_ts -- --ignored`\n");
+    out.push_str("// SOURCE OF TRUTH: packages/ato-pricing/src/lib.rs::MODEL_PRICES — DO NOT EDIT BY HAND.\n");
+    out.push_str("// Per-million-token (input, output) USD pricing.\n");
+    out.push_str("export const PRICING_PER_M_TOKENS: Record<string, { in: number; out: number }> = {\n");
+    for (model, input, output) in MODEL_PRICES {
+        out.push_str(&format!("  {:?}: {{ in: {}, out: {} }},\n", model, fmt_num(*input), fmt_num(*output)));
+    }
+    out.push_str("};\n");
+    out
+}
 
-        // ---- xAI Grok ----
-        "grok-2-latest" | "grok-2-1212" => Some((2.0, 10.0)),
-        "grok-3" => Some((3.0, 15.0)),
-
-        // ---- DeepSeek ----
-        "deepseek-chat" => Some((0.27, 1.10)),
-        "deepseek-coder" => Some((0.27, 1.10)),
-        "deepseek-reasoner" | "deepseek-r1" => Some((0.55, 2.19)),
-
-        // ---- Z.AI (Zhipu GLM) ----
-        // Verified 2026-06-17 against docs.z.ai/guides/overview/pricing.
-        "glm-5.2" => Some((1.40, 4.40)),
-        "glm-4.6" => Some((0.60, 2.20)),
-        "glm-4.5" => Some((0.60, 2.20)),
-        "glm-4.5-air" => Some((0.20, 1.10)),
-        // Currently "limited-time free" per z.ai; (0,0) is accurate today —
-        // revisit when the promo ends.
-        "glm-4.7-flash" | "glm-4.5-flash" => Some((0.0, 0.0)),
-
-        // ---- Alibaba Qwen (DashScope-Intl) ----
-        "qwen-plus" => Some((0.40, 1.20)),
-        "qwen-max" => Some((1.40, 5.60)),
-        "qwen-turbo" => Some((0.05, 0.20)),
-
-        // ---- MiniMax ----
-        // Note: most users hit MiniMax via the Token Plan subscription, in
-        // which case there's no metered per-token cost — the dispatch
-        // auth mode flags that case. These are the published API rates
-        // when on the metered tier.
-        "MiniMax-M2.7-highspeed" => Some((1.0, 3.0)),
-        "MiniMax-M2" => Some((1.0, 3.0)),
-        "MiniMax-Text-01" => Some((0.5, 1.5)),
-
-        _ => None,
+/// Format a price without a trailing `.0` (so 15.0 → "15", 0.3 → "0.3") to
+/// match idiomatic TS numeric literals.
+fn fmt_num(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{}", n as i64)
+    } else {
+        format!("{}", n)
     }
 }
 
@@ -361,6 +376,47 @@ mod tests {
         // 1,000,000 input tokens @ $3/M = $3.00; 1,000,000 output @ $15/M = $15.00 → $18.00
         let cost = cost_from_tokens("claude-sonnet-4-6", 1_000_000, 1_000_000).unwrap();
         assert!((cost - 18.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fmt_num_emits_idiomatic_ts_literals() {
+        assert_eq!(fmt_num(15.0), "15");
+        assert_eq!(fmt_num(0.0), "0");
+        assert_eq!(fmt_num(0.075), "0.075");
+        assert_eq!(fmt_num(1.6), "1.6");
+        assert_eq!(fmt_num(2.19), "2.19");
+    }
+
+    #[test]
+    fn model_prices_has_no_duplicate_keys() {
+        let mut seen = std::collections::HashSet::new();
+        for (m, _, _) in MODEL_PRICES {
+            assert!(seen.insert(*m), "duplicate model in MODEL_PRICES: {m}");
+        }
+    }
+
+    const GENERATED_TS_PATH: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/desktop/src/lib/pricing-table.generated.ts");
+
+    #[test]
+    fn generated_pricing_ts_matches_committed() {
+        let committed = std::fs::read_to_string(GENERATED_TS_PATH)
+            .expect("pricing-table.generated.ts missing — run the writer test (see below)");
+        assert_eq!(
+            committed,
+            gen_pricing_ts(),
+            "\napps/desktop/src/lib/pricing-table.generated.ts is OUT OF DATE with MODEL_PRICES.\n\
+             Regenerate: cargo test -p ato-pricing write_generated_pricing_ts -- --ignored\n"
+        );
+    }
+
+    /// Writer (run on demand): regenerates the committed TS table from MODEL_PRICES.
+    /// `cargo test -p ato-pricing write_generated_pricing_ts -- --ignored`
+    #[test]
+    #[ignore]
+    fn write_generated_pricing_ts() {
+        std::fs::write(GENERATED_TS_PATH, gen_pricing_ts()).expect("write pricing-table.generated.ts");
+        eprintln!("wrote {GENERATED_TS_PATH}");
     }
 
     #[test]
