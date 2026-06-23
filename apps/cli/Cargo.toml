@@ -47,7 +47,7 @@ ato-review-tools = { path = "../../packages/ato-review-tools" }
 ato-passive-observer = { path = "../../packages/ato-passive-observer" }
 # v2.13 — `notify` already pulled in transitively, but we depend on
 # `dirs` directly for ~/.ato/observe.pid resolution in the CLI.
-dirs = "5"
+dirs = "6"
 # v2.3.21 Phase 6.x — API-key dispatch for non-CLI providers
 # (MiniMax, Grok, Qwen, DeepSeek, OpenRouter). Blocking client keeps
 # dispatch.rs synchronous like the existing shell-out path.
