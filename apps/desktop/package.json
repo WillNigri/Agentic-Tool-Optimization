@@ -39,7 +39,7 @@
     "codemirror": "^6.0.2",
     "highlight.js": "^11.11.1",
     "i18next": "^24.2.0",
-    "libsodium-wrappers": "^0.7.15",
+    "libsodium-wrappers": "^0.8.4",
     "lucide-react": "^0.468.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
@@ -54,7 +54,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.2.0",
-    "@types/libsodium-wrappers": "^0.7.14",
+    "@types/libsodium-wrappers": "^0.8.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18.3.0",
