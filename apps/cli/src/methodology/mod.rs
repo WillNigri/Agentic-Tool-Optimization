@@ -21,10 +21,7 @@
 pub mod archetypes;
 pub mod compose;
 pub mod cost;
-// v2.11 PR-12.1 — methodology diagnose pipeline (reads a completed run,
 // builds the tiered prompt, dispatches the diagnose LLM, parses the
-// structured JSON proposal). PRO-gated via methodology.diagnose.
-pub mod diagnose;
 pub mod runner;
 pub mod rubric;
 pub mod types;

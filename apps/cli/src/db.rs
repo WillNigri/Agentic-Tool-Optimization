@@ -388,6 +388,51 @@ pub fn open_readwrite(path: &Path) -> Result<Connection> {
         [],
     );
 
+    // v2.15.4 pause-and-wake — mirror the desktop schema.rs paused_dispatches
+    // table + indexes + loop_runs paused mirror columns into the CLI bootstrap.
+    // War-room WR 2A2A9623 (codex HIGH): without this, a CLI-only user (no
+    // desktop ever launched) who hits subscription exhaustion under the
+    // pause-and-wake policy could not persist the paused dispatch — the loop's
+    // pause path silently falls through. Authoritative state lives here.
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS paused_dispatches (
+            id              TEXT PRIMARY KEY,
+            runtime         TEXT NOT NULL,
+            reset_at        TEXT NOT NULL,
+            loop_run_id     TEXT,
+            step_id         TEXT,
+            prompt          TEXT NOT NULL,
+            model           TEXT,
+            agent_slug      TEXT,
+            workspace_root  TEXT,
+            pause_count     INTEGER NOT NULL DEFAULT 1,
+            max_pause_count INTEGER NOT NULL DEFAULT 3,
+            status          TEXT NOT NULL DEFAULT 'paused',
+            paused_at       TEXT NOT NULL,
+            resumed_at      TEXT,
+            abandoned_at    TEXT,
+            audit_json      TEXT,
+            created_at      TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paused_dispatches_status_reset
+            ON paused_dispatches(status, reset_at)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paused_dispatches_loop_run
+            ON paused_dispatches(loop_run_id)
+            WHERE loop_run_id IS NOT NULL",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE loop_runs ADD COLUMN paused_until TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE loop_runs ADD COLUMN paused_dispatch_id TEXT",
+        [],
+    );
+
     // SECURITY (#49 fix) — `origin` provenance column, FAIL-CLOSED on write.
     // R2 (codex): a column DEFAULT of 'manual' would be fail-OPEN — any future
     // importer / older writer / partial insert that omits `origin` would
