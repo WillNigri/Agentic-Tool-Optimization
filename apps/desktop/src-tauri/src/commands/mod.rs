@@ -432,6 +432,12 @@ use std::sync::OnceLock;
 /// the cost and the visual noise.
 static USER_PATH_CACHE: OnceLock<String> = OnceLock::new();
 
+/// Resolved path to the `ato` CLI, cached for the desktop's lifetime.
+/// `which_cli("ato")` is on the per-dispatch hot path and the version-aware
+/// resolution shells `ato --version` on each candidate, so we compute once.
+/// (App updates require a restart anyway, same assumption as USER_PATH_CACHE.)
+static ATO_CLI_PATH_CACHE: OnceLock<Option<String>> = OnceLock::new();
+
 #[cfg(target_os = "windows")]
 fn no_window_flag() -> u32 {
     // CREATE_NO_WINDOW — keeps the PowerShell child invisible to the user.
@@ -647,8 +653,59 @@ pub fn wrapper_command_tokio(spec: &str) -> tokio::process::Command {
     cmd
 }
 
-/// Search for a CLI binary by name, checking common install paths + user shell + npx cache.
+/// Parse `<path> --version` into a comparable (major, minor, patch). Returns
+/// None when the binary won't run or its output isn't the expected
+/// `ato X.Y.Z[-suffix]` shape. Used to pick the NEWEST `ato` among
+/// candidates so a stale dev sidecar can never win over the real install.
+fn ato_binary_version(path: &str) -> Option<(u32, u32, u32)> {
+    // Bounded probe (3s). The candidates include workspace-writable dev
+    // paths (apps/cli/target/{debug,release}/ato) that are only
+    // existence-checked, so a stale/broken/hung binary there must NOT be
+    // able to block which_cli("ato") — which is cached and on the
+    // per-dispatch hot path (review REWORK, 2026-06-22). Run output() on a
+    // worker thread (it drains the pipes, so no buffer-fill deadlock) and
+    // bound the wait with recv_timeout. On timeout we abandon the probe
+    // (treat as "version unknown"); the orphaned child is a trivial
+    // --version that will exit on its own — the point is to never wedge.
+    let path = path.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::process::Command::new(&path).arg("--version").output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(out)) if out.status.success() => {
+            parse_ato_version(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => None, // timeout, spawn error, or non-zero exit
+    }
+}
+
+/// Parse `ato --version` stdout ("ato 2.18.3" / "ato 2.3.0-dev") into a
+/// comparable (major, minor, patch). Pre-release suffixes are stripped so
+/// 2.3.0-dev and 2.3.0 compare equal on the numeric core.
+fn parse_ato_version(text: &str) -> Option<(u32, u32, u32)> {
+    let ver = text.split_whitespace().nth(1)?;
+    let core = ver.split('-').next().unwrap_or(ver);
+    let mut it = core.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next().unwrap_or("0").parse().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Search for a CLI binary by name. The `ato` lookup is version-aware and
+/// cached (see `which_cli_uncached`); everything else resolves live.
 pub fn which_cli(name: &str) -> Option<String> {
+    if name == "ato" {
+        return ATO_CLI_PATH_CACHE
+            .get_or_init(|| which_cli_uncached("ato"))
+            .clone();
+    }
+    which_cli_uncached(name)
+}
+
+/// Search for a CLI binary by name, checking common install paths + user shell + npx cache.
+fn which_cli_uncached(name: &str) -> Option<String> {
     // HOME isn't set on Windows by default — USERPROFILE is. Falling back
     // to USERPROFILE keeps the candidate-path expansion working
     // cross-platform without forcing every caller to set HOME first.
@@ -694,26 +751,33 @@ pub fn which_cli(name: &str) -> Option<String> {
     // never hits the "spawn ato: No such file or directory" error
     // before falling through to brew / npm / cargo paths.
     if name == "ato" {
-        // Sibling of the running desktop binary (works for prod .app
-        // bundles where Tauri copies the sidecar next to the main
-        // binary). std::env::current_exe gives the path to the
-        // currently-running ato-desktop; the sidecar `ato` is in the
-        // same directory.
+        // Collect the ato-specific candidates, then pick the BEST among
+        // those that exist — instead of returning the first one found.
+        //
+        // Bug 2026-06-22 (orphaned API keys + "unrecognized subcommand
+        // 'sessions'"): the first candidate is the current_exe sibling,
+        // which is correct for the prod .app (Tauri copies the sidecar
+        // next to the desktop binary) but for a DEV desktop build is a
+        // possibly-stale `target/debug/ato` (a 2.3.0-dev left over from
+        // months ago). Returning that stale, adhoc-signed dev binary both
+        // broke new subcommands AND orphaned the keychain (the dev build
+        // has a different code-signing identity → different keychain ACL →
+        // it rotates/re-saves the master key under another account,
+        // orphaning every stored API key). Fix: choose the candidate with
+        // the NEWEST `ato --version`, and on a version tie prefer the prod
+        // .app binary (keychain-safe identity).
+        let mut ato_specific: Vec<String> = vec![];
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                let sibling = dir.join("ato");
-                if let Some(s) = sibling.to_str() {
-                    candidates.push(s.to_string());
+                if let Some(s) = dir.join("ato").to_str() {
+                    ato_specific.push(s.to_string());
                 }
             }
         }
-        // Prod app's canonical bundled location on macOS.
-        candidates.push("/Applications/ATO.app/Contents/MacOS/ato".to_string());
-        // Dev-build cargo target — searched relative to current_exe
-        // so it works regardless of where the cargo workspace lives.
+        ato_specific.push("/Applications/ATO.app/Contents/MacOS/ato".to_string());
         if let Ok(exe) = std::env::current_exe() {
             // exe path on dev: <repo>/apps/desktop/src-tauri/target/{debug|release}/ato-desktop
-            // ato dev binary:  <repo>/apps/cli/target/release/ato
+            // ato dev binary:  <repo>/apps/cli/target/{release|debug}/ato
             if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
                 if let Some(src_tauri) = target_dir.parent() {
                     if let Some(desktop) = src_tauri.parent() {
@@ -721,16 +785,38 @@ pub fn which_cli(name: &str) -> Option<String> {
                             let cli_target_release = apps.join("cli").join("target").join("release").join("ato");
                             let cli_target_debug = apps.join("cli").join("target").join("debug").join("ato");
                             if let Some(s) = cli_target_release.to_str() {
-                                candidates.push(s.to_string());
+                                ato_specific.push(s.to_string());
                             }
                             if let Some(s) = cli_target_debug.to_str() {
-                                candidates.push(s.to_string());
+                                ato_specific.push(s.to_string());
                             }
                         }
                     }
                 }
             }
         }
+        // Sort key per existing candidate: (version, prod-app-bonus). The
+        // newest version wins; ties go to the prod .app binary.
+        let mut best: Option<(String, (u32, u32, u32), u8)> = None;
+        for p in &ato_specific {
+            if !std::path::Path::new(p).exists() {
+                continue;
+            }
+            let ver = ato_binary_version(p).unwrap_or((0, 0, 0));
+            let prod_bonus = u8::from(p.contains("/Applications/ATO.app/"));
+            let better = match &best {
+                None => true,
+                Some((_, bver, bbonus)) => (ver, prod_bonus) > (*bver, *bbonus),
+            };
+            if better {
+                best = Some((p.clone(), ver, prod_bonus));
+            }
+        }
+        if let Some((path, _, _)) = best {
+            return Some(path);
+        }
+        // None of the ato-specific paths exist — fall through to the
+        // generic install-location candidates below.
     }
     candidates.extend([
         format!("/usr/local/bin/{}", name),
@@ -10980,5 +11066,47 @@ mod prompt_substitution_order_tests {
             rendered_before_swap
         };
         assert_eq!(final_prompt, "Review the PR at {project_path}");
+    }
+}
+
+#[cfg(test)]
+mod ato_version_parse_tests {
+    use super::parse_ato_version;
+
+    #[test]
+    fn parses_release_version() {
+        assert_eq!(parse_ato_version("ato 2.18.3"), Some((2, 18, 3)));
+    }
+
+    #[test]
+    fn strips_prerelease_suffix() {
+        // The stale dev sidecar that caused the bug reported "ato 2.3.0-dev".
+        assert_eq!(parse_ato_version("ato 2.3.0-dev"), Some((2, 3, 0)));
+    }
+
+    #[test]
+    fn trailing_newline_ok() {
+        assert_eq!(parse_ato_version("ato 2.18.3\n"), Some((2, 18, 3)));
+    }
+
+    #[test]
+    fn missing_patch_defaults_zero() {
+        assert_eq!(parse_ato_version("ato 2.18"), Some((2, 18, 0)));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_ato_version("not a version line"), None);
+        assert_eq!(parse_ato_version(""), None);
+        assert_eq!(parse_ato_version("ato"), None);
+    }
+
+    // The whole point of the fix: a current release must outrank the stale
+    // dev sidecar in a tuple comparison, so version-aware selection picks it.
+    #[test]
+    fn newer_version_outranks_stale_dev_sidecar() {
+        let prod = parse_ato_version("ato 2.18.3").unwrap();
+        let stale = parse_ato_version("ato 2.3.0-dev").unwrap();
+        assert!(prod > stale);
     }
 }

@@ -877,6 +877,37 @@ pub(crate) fn stamp_git_head(
     }
 }
 
+/// Decide whether a session dispatch must inject the synthesized
+/// transcript prefix instead of relying on a runtime's native resume.
+///
+/// Native resume exists ONLY for claude (the codex/gemini dispatch
+/// branches never pass `--continue`), and only once a prior turn captured
+/// a `runtime_session_id`. So the no-prefix fast path holds for exactly
+/// one shape: a single-runtime claude session with a captured id. Every
+/// other case that has prior turns MUST receive the transcript or the
+/// seat goes blind to its own history:
+///   - cross-runtime sessions — the anchor's `--resume` can only restore
+///     that runtime's own turns, never the other runtimes' turns (the
+///     v2.18 bug: a claude seat answering "I have no context on what
+///     Gemini/Codex said" after they'd already spoken);
+///   - any codex/gemini-anchored session — no native resume at all.
+fn session_needs_transcript_prefix(
+    responder_runtime: &str,
+    anchor_runtime: &str,
+    has_captured_session_id: bool,
+    turn_runtimes: &[&str],
+) -> bool {
+    if turn_runtimes.is_empty() {
+        return false; // first turn — nothing to carry yet
+    }
+    let has_cross_runtime = turn_runtimes.iter().any(|r| *r != responder_runtime);
+    let native_resume_covers = responder_runtime == "claude"
+        && anchor_runtime == "claude"
+        && !has_cross_runtime
+        && has_captured_session_id;
+    !native_resume_covers
+}
+
 pub fn run(
     runtime_name: &str,
     prompt: &str,
@@ -1256,30 +1287,44 @@ pub fn run(
     // cross-runtime session (session anchored to a different runtime),
     // claude --resume / codex --continue aren't usable. Build a
     // text-transcript prefix from session_turns and prepend it so the
-    // runtime sees the conversation so far. For claude-on-claude
-    // sessions, native --resume still owns continuity — we skip the
-    // prefix to avoid duplicating context.
+    // runtime sees the conversation so far.
+    //
+    // v2.18 fix (cross-runtime context loss) — the anchor seat used to
+    // skip the prefix entirely (`s.runtime == runtime_name`) and lean on
+    // native --resume. But native resume only restores THAT runtime's own
+    // turns; it never contains turns answered by OTHER runtimes in the
+    // same session. So the anchor seat went blind to cross-runtime context
+    // (Will's repro: a claude turn answering "I have no context on what
+    // Gemini/Codex said" after they'd already spoken). Fix: inject the
+    // full transcript whenever the session holds a turn from ANY other
+    // runtime — anchor seat included — and signal the caller to suppress
+    // --resume so the anchor's own turns aren't duplicated. The native
+    // fast path (no prefix) survives only for a pure single-runtime
+    // session, where --resume/--continue is sufficient and cheaper.
+    let mut injected_session_transcript = false;
     let effective_prompt: String = if let Some(s) = &session {
-        if s.runtime == runtime_name {
+        let turns = db::open_readonly(db_path)
+            .and_then(|c| crate::commands::sessions::fetch_turns(&c, &s.id))
+            .unwrap_or_default();
+        let turn_runtimes: Vec<&str> = turns.iter().map(|t| t.runtime.as_str()).collect();
+        if !session_needs_transcript_prefix(
+            runtime_name,
+            &s.runtime,
+            s.runtime_session_id.is_some(),
+            &turn_runtimes,
+        ) {
+            // First turn, or a single-runtime claude session that native
+            // --resume will carry — no prefix needed.
             prompt.to_string()
         } else {
-            match db::open_readonly(db_path)
-                .and_then(|c| crate::commands::sessions::fetch_turns(&c, &s.id))
-            {
-                Ok(turns) if !turns.is_empty() => {
-                    let mut buf = String::from("=== Previous conversation ===\n");
-                    for t in turns {
-                        buf.push_str(&format!(
-                            "[{} @{}] {}\n\n",
-                            t.role, t.runtime, t.text
-                        ));
-                    }
-                    buf.push_str("=== End previous conversation ===\n\n");
-                    buf.push_str(prompt);
-                    buf
-                }
-                _ => prompt.to_string(),
+            injected_session_transcript = true;
+            let mut buf = String::from("=== Previous conversation ===\n");
+            for t in &turns {
+                buf.push_str(&format!("[{} @{}] {}\n\n", t.role, t.runtime, t.text));
             }
+            buf.push_str("=== End previous conversation ===\n\n");
+            buf.push_str(prompt);
+            buf
         }
     } else {
         prompt.to_string()
@@ -1381,7 +1426,13 @@ pub fn run(
                     .arg("stream-json");
             } else if let Some(s) = &session {
                 cmd.arg("--output-format").arg("json");
-                if s.runtime == "claude" {
+                // Only resume native claude continuity when we did NOT inject
+                // the synthesized transcript — otherwise claude's own prior
+                // turns would appear twice (once via --resume, once in the
+                // prefix). For cross-runtime sessions the prefix is the single
+                // source of conversation history. See the effective_prompt
+                // block above (v2.18 cross-runtime context fix).
+                if s.runtime == "claude" && !injected_session_transcript {
                     if let Some(rsid) = &s.runtime_session_id {
                         cmd.arg("--resume").arg(rsid);
                     }
@@ -4072,5 +4123,73 @@ mod tests {
         // a model parameter the test would fail to compile.
         let slug = super::cli_slug_to_api_slug("gemini");
         assert_eq!(slug, "google");
+    }
+}
+
+#[cfg(test)]
+mod session_transcript_decision_tests {
+    use super::session_needs_transcript_prefix;
+
+    // First turn (no prior turns) — never inject; the prompt stands alone
+    // regardless of runtime.
+    #[test]
+    fn first_turn_no_prefix() {
+        assert!(!session_needs_transcript_prefix("claude", "claude", false, &[]));
+        assert!(!session_needs_transcript_prefix("codex", "codex", false, &[]));
+        assert!(!session_needs_transcript_prefix("gemini", "gemini", false, &[]));
+    }
+
+    // Single-runtime claude session WITH a captured id — native --resume
+    // carries continuity, so no prefix.
+    #[test]
+    fn single_runtime_claude_with_id_uses_native_resume() {
+        assert!(!session_needs_transcript_prefix(
+            "claude", "claude", true, &["claude", "claude"]
+        ));
+    }
+
+    // Single-runtime claude session but no captured id yet — native resume
+    // has nothing to resume, so we MUST inject.
+    #[test]
+    fn single_runtime_claude_without_id_needs_prefix() {
+        assert!(session_needs_transcript_prefix(
+            "claude", "claude", false, &["claude", "claude"]
+        ));
+    }
+
+    // THE v2.18 bug: cross-runtime session, claude answering after codex
+    // and gemini have spoken. --resume can't see their turns → inject.
+    #[test]
+    fn cross_runtime_claude_anchor_needs_prefix() {
+        assert!(session_needs_transcript_prefix(
+            "claude",
+            "claude",
+            true, // even with a captured claude id
+            &["claude", "codex", "google"],
+        ));
+    }
+
+    // Codex/gemini-anchored single-runtime sessions have NO native resume —
+    // they must always get the prefix once turns exist.
+    #[test]
+    fn codex_single_runtime_needs_prefix() {
+        assert!(session_needs_transcript_prefix(
+            "codex", "codex", false, &["codex", "codex"]
+        ));
+    }
+
+    #[test]
+    fn gemini_single_runtime_needs_prefix() {
+        assert!(session_needs_transcript_prefix(
+            "gemini", "gemini", false, &["gemini", "gemini"]
+        ));
+    }
+
+    // Cross-runtime where a non-claude runtime answers — always inject.
+    #[test]
+    fn cross_runtime_codex_responder_needs_prefix() {
+        assert!(session_needs_transcript_prefix(
+            "codex", "claude", false, &["claude", "codex"]
+        ));
     }
 }
