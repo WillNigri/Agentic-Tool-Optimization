@@ -282,6 +282,7 @@ function teamSharedRow(args: {
     runtimesUsed,
     agentsUsed: [],
     totalCostUsd: null,
+    unpricedCount: 0,
     lastAssistantPreview: null,
     // Part C — shared snapshots are closed conversations.
     status: "closed",

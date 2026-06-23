@@ -93,6 +93,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 runtimes_used: Vec::new(),
                 agents_used: Vec::new(),
                 total_cost_usd: None,
+                unpriced_count: 0, // set below alongside total_cost_usd
                 last_assistant_preview: None,
                 status: r.get(7)?,
                 closed_at: r.get(8)?,
@@ -164,14 +165,19 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
         // session pre-dates session-id-on-execution-logs and can hide
         // the pill instead of rendering a misleading "$0.00".
         let mut cost_stmt = conn.prepare_cached(
-            "SELECT SUM(COALESCE(cost_usd_estimated, 0)), COUNT(*)
+            "SELECT SUM(cost_usd_estimated), COUNT(*),
+                    SUM(CASE WHEN cost_usd_estimated IS NULL THEN 1 ELSE 0 END)
                FROM execution_logs
               WHERE session_id = ?1",
         )?;
-        let (sum_cost, n): (Option<f64>, i64) = cost_stmt
-            .query_row([&row.id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap_or((None, 0));
+        let (sum_cost, n, unpriced): (Option<f64>, i64, i64) = cost_stmt
+            .query_row([&row.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap_or((None, 0, 0));
+        // SUM(cost) skips NULLs natively, so it's the sum of the PRICED
+        // rows. Keep the pill at 0.0 (not NULL) when there are rows but
+        // all are unpriced — `unpriced_count` then explains the $0.00.
         row.total_cost_usd = if n > 0 { sum_cost.or(Some(0.0)) } else { None };
+        row.unpriced_count = unpriced;
 
         // Last assistant turn → preview. Order by turn_index DESC so we
         // get the chronologically last assistant message, not whichever
@@ -296,6 +302,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 runtimes_used: vec![runtime],
                 agents_used,
                 total_cost_usd: cost,
+                unpriced_count: i64::from(cost.is_none()),
                 last_assistant_preview: preview,
                 status,
                 closed_at: None,
@@ -375,13 +382,14 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
 
         // Sum cost + count participants.
         let mut sum_stmt = conn.prepare_cached(
-            "SELECT SUM(COALESCE(cost_usd_estimated, 0)), COUNT(*)
+            "SELECT SUM(cost_usd_estimated), COUNT(*),
+                    SUM(CASE WHEN cost_usd_estimated IS NULL THEN 1 ELSE 0 END)
                FROM execution_logs
               WHERE war_room_id = ?1",
         )?;
-        let (sum_cost, n_participants): (Option<f64>, i64) = sum_stmt
-            .query_row([&wr_id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap_or((None, 0));
+        let (sum_cost, n_participants, unpriced): (Option<f64>, i64, i64) = sum_stmt
+            .query_row([&wr_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap_or((None, 0, 0));
 
         // First prompt of the war-room as a preview — the user's
         // question that kicked it off. Title falls back to a short
@@ -523,6 +531,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
             } else {
                 None
             },
+            unpriced_count: unpriced,
             last_assistant_preview: None,
             status: wr_status,
             closed_at: wr_closed_at,
@@ -704,6 +713,7 @@ fn list_sessions_inner(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Se
                 runtimes_used: vec![runtime],
                 agents_used: Vec::new(),
                 total_cost_usd: None,
+                unpriced_count: 0, // chats don't track per-dispatch cost
                 last_assistant_preview: preview,
                 // v2.7.13 — lifecycle now real: pulled from the
                 // chat_threads row via the SELECT above. Defaults
@@ -799,6 +809,7 @@ fn list_sessions_narrow_chat_fallback(
             runtimes_used: vec!["chat".to_string()],
             agents_used: Vec::new(),
             total_cost_usd: None,
+            unpriced_count: 0, // chats don't track per-dispatch cost
             last_assistant_preview: None,
             status: "open".to_string(),
             closed_at: None,

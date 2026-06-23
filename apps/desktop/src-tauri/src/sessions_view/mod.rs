@@ -82,6 +82,14 @@ pub struct SessionListRow {
     /// no execution_logs rows reference the session (older sessions
     /// pre-session_id-on-execution-logs).
     pub total_cost_usd: Option<f64>,
+    /// 2026-06-22 — number of dispatches in this session/war-room whose
+    /// cost is UNPRICED (cost_usd_estimated IS NULL — unknown model, no
+    /// usage JSON, etc.). `total_cost_usd` is the sum of the *priced*
+    /// rows only, so a non-zero count here means the pill undercounts.
+    /// The list card renders "· N unpriced" next to the cost pill so the
+    /// total is never presented as falsely complete. Mirrors the detail
+    /// view's `SessionCostRow.cost_null_turns`.
+    pub unpriced_count: i64,
     /// Last (assistant) turn's text, truncated. Gives the user a
     /// "what was this conversation about" preview without expanding.
     pub last_assistant_preview: Option<String>,
