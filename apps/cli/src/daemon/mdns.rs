@@ -169,7 +169,7 @@ pub fn start_mdns(
 fn upsert_discovered(
     db_path: &PathBuf,
     our_peer_id: &str,
-    info: &mdns_sd::ServiceInfo,
+    info: &mdns_sd::ResolvedService,
 ) -> Result<()> {
     let props = info.get_properties();
     let peer_id = match props.get_property_val_str("peer_id") {
@@ -186,11 +186,13 @@ fn upsert_discovered(
         .unwrap_or("(unknown)")
         .to_string();
     let version = props.get_property_val_str("version").map(|s| s.to_string());
-    // Pick the first address mdns-sd resolved. They're IpAddr.
+    // Pick the first address mdns-sd resolved. In 0.20 these are
+    // `ScopedIp`; `to_ip_addr()` strips the interface scope so the
+    // stored `addr` stays a plain `IpAddr` like before.
     let addrs = info.get_addresses();
     let first = addrs.iter().next();
     let addr_str = match first {
-        Some(ip) => format!("{}:{}", ip, info.get_port()),
+        Some(ip) => format!("{}:{}", ip.to_ip_addr(), info.get_port()),
         None => return Ok(()), // not yet resolved; wait for the next event
     };
     let now = chrono::Utc::now().to_rfc3339();
