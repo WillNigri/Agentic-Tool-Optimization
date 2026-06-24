@@ -40,7 +40,7 @@ interface Props {
   RuntimeIcon: ComponentType<LucideProps>;
   /** Scroll target so new turns auto-scroll into view. Owned by
    *  the orchestrator (it's also the auto-scroll effect's anchor). */
-  messagesEndRef: RefObject<HTMLDivElement>;
+  messagesEndRef: RefObject<HTMLDivElement | null>;
   /** When false, the history is collapsed and this component renders
    *  nothing for the list. The summary banner is independent — it
    *  renders whenever there's a selected agent + non-empty messages,

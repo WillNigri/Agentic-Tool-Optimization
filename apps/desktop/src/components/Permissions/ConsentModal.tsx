@@ -13,7 +13,7 @@
  * user is forced to interact with the modal — the click is the
  * consent.
  */
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { ShieldAlert, FileText, Database, Code, X, AlertTriangle } from "lucide-react";
 import type { ConsentScope, VariableKind } from "@/lib/agentVariables";
 
