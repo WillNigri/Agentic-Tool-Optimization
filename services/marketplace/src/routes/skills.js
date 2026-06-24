@@ -21,8 +21,8 @@ const SubmitSkillSchema = z.object({
   category: z.string().default('general'),
   tags: z.array(z.string()).default([]),
   license: z.string().default('MIT'),
-  repositoryUrl: z.string().url().optional(),
-  homepageUrl: z.string().url().optional(),
+  repositoryUrl: z.url().optional(),
+  homepageUrl: z.url().optional(),
   runtime: z.enum(['claude', 'codex', 'hermes', 'openclaw', 'universal']).default('claude'),
   content: z.string().min(1).max(100000), // The SKILL.md content
   version: z.string().default('1.0.0'),
@@ -290,7 +290,7 @@ router.post('/', requireAuth, async (req, res, next) => {
     res.status(201).json({ data: skill });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      return res.status(400).json({ error: { message: 'Validation error', details: err.errors } });
+      return res.status(400).json({ error: { message: 'Validation error', details: err.issues } });
     }
     next(err);
   }
