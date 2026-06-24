@@ -44,19 +44,20 @@ export function parseJsonSafe<T>(json: string, fallback: T): T {
 // Zod Validation Schemas
 // ============================================================
 
-export const claudeConfigSchema = z.record(z.unknown());
+export const claudeConfigSchema = z.record(z.string(), z.unknown());
 
 export const claudeSettingsSchema = z.object({
-  permissions: z.record(z.unknown()).optional(),
-  env: z.record(z.string()).optional(),
+  permissions: z.record(z.string(), z.unknown()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 }).passthrough();
 
 export const mcpConfigSchema = z.object({
   mcpServers: z.record(
+    z.string(),
     z.object({
       command: z.string().optional(),
       args: z.array(z.string()).optional(),
-      env: z.record(z.string()).optional(),
+      env: z.record(z.string(), z.string()).optional(),
       url: z.string().optional(),
       transport: z.enum(['stdio', 'http', 'streamable-http']).optional(),
     }),

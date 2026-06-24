@@ -183,7 +183,7 @@ router.post('/', requireAuth, async (req, res, next) => {
     res.status(201).json({ data: newRating });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      return res.status(400).json({ error: { message: 'Validation error', details: err.errors } });
+      return res.status(400).json({ error: { message: 'Validation error', details: err.issues } });
     }
     next(err);
   }
@@ -241,7 +241,7 @@ router.put('/:id', requireAuth, async (req, res, next) => {
     res.json({ data: updated });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      return res.status(400).json({ error: { message: 'Validation error', details: err.errors } });
+      return res.status(400).json({ error: { message: 'Validation error', details: err.issues } });
     }
     next(err);
   }
