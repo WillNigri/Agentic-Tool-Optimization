@@ -47,7 +47,7 @@ ato-review-tools = { path = "../../packages/ato-review-tools" }
 ato-passive-observer = { path = "../../packages/ato-passive-observer" }
 # v2.13 — `notify` already pulled in transitively, but we depend on
 # `dirs` directly for ~/.ato/observe.pid resolution in the CLI.
-dirs = "5"
+dirs = "6"
 # v2.3.21 Phase 6.x — API-key dispatch for non-CLI providers
 # (MiniMax, Grok, Qwen, DeepSeek, OpenRouter). Blocking client keeps
 # dispatch.rs synchronous like the existing shell-out path.
@@ -84,7 +84,7 @@ hostname = "0.4"
 # signal() syscall for the `ato observe` SIGTERM/SIGINT handlers.
 # Already transitively pulled in by notify; promoting to a direct
 # dep so the API is stable. Unix-only by feature.
-nix = { version = "0.27", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 # v2.16 PR-2 — Mission dispatch tests use temp files for prompt-from-file
