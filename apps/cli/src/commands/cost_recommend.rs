@@ -638,6 +638,7 @@ fn cloud_base() -> String {
 }
 
 fn read_token() -> Option<String> {
+    crate::commands::auth::ensure_fresh_token();
     let path = crate::db::home_dir().join(".ato").join("auth.json");
     let contents = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&contents).ok()?;

@@ -96,6 +96,7 @@ fn auth_file_path() -> PathBuf {
 /// Read the JWT token from ~/.ato/auth.json.
 /// Returns a clear error message if the user is not signed in.
 pub fn read_token() -> Result<String> {
+    crate::commands::auth::ensure_fresh_token();
     let contents = fs::read_to_string(auth_file_path())
         .context("Not signed in. Run `ato login` first.")?;
     let json: Value =

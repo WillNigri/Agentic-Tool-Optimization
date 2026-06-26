@@ -69,6 +69,108 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("HTTP client error: {}", e))
 }
 
+fn read_email() -> Option<String> {
+    let mut file = fs::File::open(auth_file_path()).ok()?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    json.get("email")?.as_str().map(String::from)
+}
+
+/// Decode the `exp` (unix seconds) claim from a JWT access token without
+/// verifying the signature — we only need to know when it lapses so we can
+/// refresh ahead of time. Returns None for non-JWT / undecodable tokens,
+/// in which case callers treat the token as "can't tell, leave it alone."
+fn jwt_exp(token: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("exp")?.as_i64()
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Exchange the stored 30-day refresh token for a fresh access+refresh
+/// pair via POST /auth/refresh and persist BOTH to ~/.ato/auth.json.
+///
+/// The cloud ROTATES on refresh: it revokes the presented refresh token
+/// and returns a brand-new pair. If we saved only the access token (or
+/// reused the old refresh token), the very next refresh would present a
+/// revoked token and the session would die ~one access-TTL later — which
+/// is exactly the "CLI logs out every few minutes" symptom this fixes.
+/// Returns the new access token on success.
+pub fn refresh_access_token() -> Result<String, String> {
+    let refresh = read_refresh_token()
+        .ok_or_else(|| "Not signed in (no refresh token). Run: ato login".to_string())?;
+    let email = read_email().unwrap_or_default();
+    let client = http_client()?;
+
+    let resp = client
+        .post(format!("{}/refresh", api_base()))
+        .json(&serde_json::json!({ "refreshToken": refresh }))
+        .send()
+        .map_err(|e| format!("Token refresh request failed: {}", e))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|_| "Invalid response from /auth/refresh".to_string())?;
+
+    if !status.is_success() {
+        let msg = body
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Token refresh failed — run: ato login");
+        return Err(msg.to_string());
+    }
+
+    let new_token = body
+        .pointer("/data/tokens/accessToken")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new_refresh = body
+        .pointer("/data/tokens/refreshToken")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if new_token.is_empty() || new_refresh.is_empty() {
+        return Err("Token refresh response missing tokens".to_string());
+    }
+
+    save_auth(new_token, new_refresh, &email)?;
+    Ok(new_token.to_string())
+}
+
+/// Refresh the access token in place if it's expired (or within a 60s skew
+/// window). Best-effort and idempotent: on any failure (offline, no refresh
+/// token, non-JWT token) it leaves ~/.ato/auth.json untouched so the caller
+/// behaves exactly as before — a 401 followed by "run: ato login". Only
+/// touches the network when the token is actually stale, so it's cheap to
+/// call before every authed request.
+pub fn ensure_fresh_token() {
+    let token = match read_token() {
+        Some(t) => t,
+        None => return,
+    };
+    match jwt_exp(&token) {
+        // Still comfortably valid — nothing to do.
+        Some(exp) if exp > now_unix() + 60 => {}
+        // Expired/near-expiry — refresh (best-effort).
+        Some(_) => {
+            let _ = refresh_access_token();
+        }
+        // Not a decodable JWT — can't reason about expiry, leave it alone.
+        None => {}
+    }
+}
+
 /// Prompt for a value (visible input). Used for email/name.
 fn prompt(label: &str) -> String {
     eprint!("{}: ", label);
@@ -262,6 +364,7 @@ fn handle_logout() {
 }
 
 fn handle_whoami() {
+    ensure_fresh_token();
     let token = match read_token() {
         Some(t) => t,
         None => {
@@ -759,5 +862,43 @@ mod embed_key_tests {
             }
             _ => panic!("expected EmbedKey variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::{jwt_exp, now_unix};
+    use base64::Engine as _;
+
+    /// Build a `header.payload.signature` JWT whose payload carries the
+    /// given claims JSON (signature is irrelevant — we never verify it).
+    fn jwt_with(payload: &str) -> String {
+        let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+        format!("{}.{}.{}", b64(r#"{"alg":"HS256"}"#), b64(payload), "sig")
+    }
+
+    #[test]
+    fn decodes_exp_claim() {
+        let token = jwt_with(r#"{"userId":"u1","exp":1782488013}"#);
+        assert_eq!(jwt_exp(&token), Some(1782488013));
+    }
+
+    #[test]
+    fn none_for_non_jwt() {
+        assert_eq!(jwt_exp("not-a-jwt"), None);
+        assert_eq!(jwt_exp(""), None);
+        // valid base64 but no `exp` claim
+        assert_eq!(jwt_exp(&jwt_with(r#"{"userId":"u1"}"#)), None);
+    }
+
+    #[test]
+    fn expiry_window_logic() {
+        // Mirrors ensure_fresh_token's decision: refresh when exp is within
+        // the 60s skew window, skip when comfortably ahead.
+        let now = now_unix();
+        let fresh = jwt_with(&format!(r#"{{"exp":{}}}"#, now + 3600));
+        let stale = jwt_with(&format!(r#"{{"exp":{}}}"#, now + 30));
+        assert!(jwt_exp(&fresh).unwrap() > now + 60, "fresh token should skip refresh");
+        assert!(jwt_exp(&stale).unwrap() <= now + 60, "near-expiry token should trigger refresh");
     }
 }
