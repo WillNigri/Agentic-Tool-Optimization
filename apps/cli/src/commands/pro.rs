@@ -23,6 +23,7 @@ fn auth_file_path() -> PathBuf {
 }
 
 fn read_token() -> Option<String> {
+    crate::commands::auth::ensure_fresh_token();
     let mut file = fs::File::open(auth_file_path()).ok()?;
     let mut contents = String::new();
     file.read_to_string(&mut contents).ok()?;

@@ -30,6 +30,7 @@ fn auth_file_path() -> PathBuf {
 }
 
 fn read_token() -> Result<String> {
+    crate::commands::auth::ensure_fresh_token();
     let contents = fs::read_to_string(auth_file_path())
         .context("Not signed in. Run `ato login` first.")?;
     let json: Value = serde_json::from_str(&contents)
