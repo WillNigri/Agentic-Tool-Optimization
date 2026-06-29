@@ -11,7 +11,7 @@
   "dependencies": {
     "express": "^5.2.1",
     "pg": "^8.11.3",
-    "nanoid": "^5.0.4",
+    "nanoid": "^5.1.16",
     "zod": "^4.4.3"
   },
   "engines": {
