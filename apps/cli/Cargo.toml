@@ -58,7 +58,7 @@ base64 = "0.22"
 # rows the GUI wrote (and re-encrypt legacy plain-base64 rows on
 # first access). Master key lives in the OS keychain; both binaries
 # look at the same service+account name.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 keyring = "4"
 # v2.4.4 Phase 7.0 — daemon for LAN mesh.
 # tokio = async runtime for the WS server + peer connections.
