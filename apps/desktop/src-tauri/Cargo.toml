@@ -45,7 +45,7 @@ rand = "0.8"
 # v2.17 Wave 2 — tether-host: end-to-end browser↔desktop crypto.
 x25519-dalek = { version = "2", features = ["getrandom", "static_secrets"] }
 hkdf = "0.12"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 whoami = "1"
 which = "8"
 # v2.4.8 security — AES-256-GCM for llm_api_keys.encrypted_key.
