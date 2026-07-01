@@ -169,6 +169,10 @@ enum Commands {
     /// Cost optimization — compare runtimes on YOUR data and get switch recommendations.
     #[command(name = "optimize")]
     Optimize(commands::cost_recommend::CostRecommendArgs),
+    /// Open-box benchmark — run a pinned public suite (e.g. LiveCodeBench) across
+    /// YOUR key-available models with a verifiable code-exec grader + reproducible
+    /// scorecard. FREE (run your own tests).
+    Bench(commands::bench::BenchArgs),
     /// Cloud trace management — backfill local traces to cloud.
     Traces(commands::traces::TracesArgs),
     /// Inspect recent dispatches (executions of an agent / runtime)
@@ -1547,6 +1551,10 @@ fn main() -> Result<()> {
         }
         Commands::Optimize(args) => {
             commands::cost_recommend::run(args, cli.human, &cli.db.as_ref().map(|p| p.to_string_lossy().to_string()));
+            return Ok(());
+        }
+        Commands::Bench(args) => {
+            commands::bench::run(args, &db_path.to_string_lossy())?;
             return Ok(());
         }
         Commands::Dispatches { sub } => match sub {
