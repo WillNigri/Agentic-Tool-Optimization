@@ -1,0 +1,14 @@
+[package]
+name = "ato-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Open-box benchmark harness for ATO: verifiable code-execution grader, sandboxed run backends, reproducible execution-receipt contract, and Wilson-CI pass-rate statistics. The trust anchor for 'your keys → your models → verifiable grader → reproducible receipt'."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+anyhow = "1"
+regex = "1"
