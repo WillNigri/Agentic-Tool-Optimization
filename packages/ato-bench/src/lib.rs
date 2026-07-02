@@ -22,6 +22,7 @@
 // product. Curated premium suites and continuous auto-routing live in the paid
 // ato-cloud backend, never here.
 
+pub mod cutoffs;
 pub mod grader;
 pub mod lcb;
 pub mod problem;
@@ -30,15 +31,16 @@ pub mod sandbox;
 pub mod scorecard;
 pub mod stats;
 
+pub use cutoffs::{all_cutoffs, cutoff_for_model, CutoffEntry, CutoffKind};
 pub use grader::{extract_code, grade_problem, GraderConfig, DEFAULT_EXTRACTION_REGEX};
 pub use lcb::{import_lcb_jsonl, ImportError, LcbImportOptions, LcbImportResult, LcbRecord};
 pub use problem::{ComparisonMode, Language, Problem, TestCase};
 pub use receipt::{
-    classify_contamination, stable_hash, ContaminationFlag, DatasetSnapshot, ExecEnv, FailureKind,
-    HarnessConfig, RunContext, Sampling, TaskReceipt,
+    classify_contamination, is_parseable_cutoff, stable_hash, ContaminationFlag, DatasetSnapshot,
+    ExecEnv, FailureKind, HarnessConfig, RunContext, Sampling, TaskReceipt,
 };
 pub use sandbox::{
     select_sandbox, ExecLimits, ExecOutcome, Sandbox, SandboxError, SandboxOptions, SandboxReport,
 };
-pub use scorecard::{ContaminationSummary, Scorecard};
+pub use scorecard::{ContaminationSummary, CutoffOrigin, ModelCutoffInfo, Scorecard};
 pub use stats::{wilson_interval, WilsonInterval, Z_90, Z_95, Z_99};

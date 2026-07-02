@@ -18,9 +18,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use ato_bench::{
-    grade_problem, import_lcb_jsonl, select_sandbox, DatasetSnapshot, ExecEnv, ExecLimits,
-    GraderConfig, HarnessConfig, LcbImportOptions, RunContext, Sampling, SandboxOptions, Scorecard,
-    Z_95,
+    all_cutoffs, cutoff_for_model, grade_problem, import_lcb_jsonl, is_parseable_cutoff,
+    select_sandbox, CutoffOrigin, DatasetSnapshot, ExecEnv, ExecLimits, GraderConfig,
+    HarnessConfig, LcbImportOptions, ModelCutoffInfo, RunContext, Sampling, SandboxOptions,
+    Scorecard, Z_95,
 };
 use clap::Args;
 use serde::Deserialize;
@@ -43,6 +44,9 @@ pub struct BenchArgs {
 pub enum BenchCmd {
     /// Run a benchmark over a pinned dataset across the given models.
     Run(RunArgs),
+    /// List the vendor-stated training-cutoff registry (with sources) used to
+    /// classify contamination.
+    Cutoffs,
 }
 
 #[derive(Args, Debug)]
@@ -90,6 +94,13 @@ pub struct RunArgs {
     /// available (unsafe; only for code you trust).
     #[arg(long, default_value_t = false)]
     allow_unsandboxed: bool,
+
+    /// Override or supply a model's training cutoff for contamination
+    /// classification, as MODEL=DATE (date: YYYY, YYYY-MM, or YYYY-MM-DD).
+    /// Repeatable. Beats the built-in vendor-stated registry (`ato bench
+    /// cutoffs` lists it).
+    #[arg(long = "model-cutoff", value_name = "MODEL=DATE")]
+    model_cutoffs: Vec<String>,
 }
 
 /// The JSON receipt `ato dispatch` prints to stdout.
@@ -126,10 +137,85 @@ struct DispatchTotals {
 pub fn run(args: BenchArgs, db_path: &str) -> Result<()> {
     match args.cmd {
         BenchCmd::Run(a) => run_bench(a, db_path),
+        BenchCmd::Cutoffs => list_cutoffs(),
     }
 }
 
+/// `ato bench cutoffs` — print the registry so the contamination gate is
+/// auditable without reading source. Data, not judgment: every row is a
+/// vendor-stated date with its source URL.
+fn list_cutoffs() -> Result<()> {
+    let entries = all_cutoffs();
+    println!("Vendor-stated training cutoffs used for contamination classification.");
+    println!("Models not listed classify as 'unknown' (pass --model-cutoff to supply one).\n");
+    for e in entries {
+        println!(
+            "{:<28} {:<10} {:<13} verified {}  {}",
+            e.model,
+            e.cutoff,
+            format!("({})", e.kind.as_str()),
+            e.verified,
+            e.source
+        );
+    }
+    println!("\n{} models in registry.", entries.len());
+    Ok(())
+}
+
+/// Parse repeated `--model-cutoff MODEL=DATE` flags. Duplicate models or
+/// unparseable dates are hard errors — a silent fallback to Unknown would
+/// defeat the point of supplying a cutoff.
+fn parse_cutoff_overrides(
+    pairs: &[String],
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for pair in pairs {
+        let (model, date) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--model-cutoff '{pair}' is not MODEL=DATE"))?;
+        let (model, date) = (model.trim(), date.trim());
+        if model.is_empty() {
+            bail!("--model-cutoff '{pair}' has an empty model id");
+        }
+        if !is_parseable_cutoff(date) {
+            bail!(
+                "--model-cutoff '{pair}': date '{date}' is not YYYY, YYYY-MM, or YYYY-MM-DD"
+            );
+        }
+        if map.insert(model.to_string(), date.to_string()).is_some() {
+            bail!("--model-cutoff given twice for model '{model}'");
+        }
+    }
+    Ok(map)
+}
+
+/// Resolve the cutoff for one model: an explicit user override beats the
+/// built-in registry; neither → None (classifies Unknown, honestly).
+fn resolve_cutoff(
+    model: &str,
+    overrides: &std::collections::HashMap<String, String>,
+) -> Option<ModelCutoffInfo> {
+    if let Some(date) = overrides.get(model) {
+        return Some(ModelCutoffInfo {
+            cutoff: date.clone(),
+            kind: String::new(),
+            source: String::new(),
+            origin: CutoffOrigin::User,
+        });
+    }
+    cutoff_for_model(model).map(|e| ModelCutoffInfo {
+        cutoff: e.cutoff.to_string(),
+        kind: e.kind.as_str().to_string(),
+        source: e.source.to_string(),
+        origin: CutoffOrigin::Registry,
+    })
+}
+
 fn run_bench(args: RunArgs, db_path: &str) -> Result<()> {
+    // 0. Validate cutoff overrides up front — a typo'd date must fail before
+    // any network or model spend.
+    let cutoff_overrides = parse_cutoff_overrides(&args.model_cutoffs)?;
+
     // 1. Fetch-and-pin (optional) then load the dataset bytes.
     if !args.dataset_file.exists() {
         if let Some(url) = &args.fetch_url {
@@ -226,11 +312,26 @@ fn run_bench(args: RunArgs, db_path: &str) -> Result<()> {
                 anyhow!("unknown provider for model '{model}' — is it in the pricing registry?")
             })?
             .to_string();
+        let cutoff_info = resolve_cutoff(model, &cutoff_overrides);
         eprintln!(
             "\n=== Benchmarking {model} ({provider}) over {} problems at temperature {} ===",
             problems.len(),
             args.temperature
         );
+        match &cutoff_info {
+            Some(c) => eprintln!(
+                "Training cutoff: {} ({})",
+                c.cutoff,
+                match c.origin {
+                    CutoffOrigin::User => "user-supplied".to_string(),
+                    CutoffOrigin::Registry => format!("vendor-stated {}", c.kind),
+                }
+            ),
+            None => eprintln!(
+                "Training cutoff: unknown — not in the registry (`ato bench cutoffs`); \
+                 contamination will classify 'unknown'. Pass --model-cutoff {model}=<date> to supply one."
+            ),
+        }
 
         let mut receipts = Vec::with_capacity(problems.len());
         let mut totals = DispatchTotals::default();
@@ -266,7 +367,7 @@ fn run_bench(args: RunArgs, db_path: &str) -> Result<()> {
                 model: model.clone(),
                 provider: provider.clone(),
                 model_revision: revision,
-                model_cutoff: None, // no cutoff registry yet → contamination Unknown (honest)
+                model_cutoff: cutoff_info.as_ref().map(|c| c.cutoff.clone()),
                 sampling: harness.sampling.clone(),
             };
             let receipt =
@@ -297,6 +398,7 @@ fn run_bench(args: RunArgs, db_path: &str) -> Result<()> {
             dataset,
             harness: harness.clone(),
             env: env.clone(),
+            model_cutoff: cutoff_info.clone(),
             receipts,
         };
         print_scorecard(&sc, &totals);
@@ -362,6 +464,19 @@ fn print_scorecard(sc: &Scorecard, totals: &DispatchTotals) {
     let n = sc.receipts.len();
     println!("\n──────── OPEN-BOX SCORECARD ────────");
     println!("model:     {} ({})", sc.model, sc.provider);
+    match &sc.model_cutoff {
+        Some(c) => match c.origin {
+            CutoffOrigin::User => println!("cutoff:    {} (user-supplied)", c.cutoff),
+            CutoffOrigin::Registry => println!(
+                "cutoff:    {} (vendor-stated {})  source: {}",
+                c.cutoff, c.kind, c.source
+            ),
+        },
+        None => println!(
+            "cutoff:    unknown — not in registry; contamination classifies 'unknown' \
+             (`ato bench cutoffs`, or --model-cutoff to supply)"
+        ),
+    }
     println!("problems:  {n}");
     if clean.n == 0 {
         // Don't render a bare "0.0%" a skimmer could misread as a 0% score —
@@ -399,7 +514,11 @@ fn print_scorecard(sc: &Scorecard, totals: &DispatchTotals) {
         }
     );
     if cs.clean == 0 {
-        println!("  note: no model-cutoff registry yet → all tasks 'unknown'; headline falls back to [0,1].");
+        if sc.model_cutoff.is_none() {
+            println!("  note: no cutoff known for this model → all tasks 'unknown'; headline is n/a.");
+        } else {
+            println!("  note: zero tasks post-date the cutoff → nothing is contamination-clean; headline is n/a.");
+        }
     }
     println!(
         "cost: ${:.4}   latency: {} ms total ({} ms/task avg)   tokens: {} in / {} out   dispatch_errors: {}",
