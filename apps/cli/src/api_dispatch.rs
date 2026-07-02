@@ -189,6 +189,19 @@ pub fn dispatch_with_history(
     // `generationConfig.maxOutputTokens` instead of `max_tokens`.
     // Branch here rather than at parse-time so a single request
     // builder doesn't have to satisfy two unrelated schemas.
+    // v2.18.x — optional sampling temperature for reproducible benchmarking.
+    // Honored via the ATO_DISPATCH_TEMPERATURE env var so no dispatch signature
+    // changes ripple through the CLI's four dispatch entry points. `ato bench`
+    // sets it ONLY on the child `ato dispatch` process it spawns; unset = the
+    // provider default (behaviour unchanged). Caveat: if a user `export`s it in
+    // their shell it applies to every subsequent dispatch in that shell — that
+    // is an explicit operator choice, not a default. Injected per provider
+    // schema below (top-level `temperature`, or gemini's generationConfig).
+    let sampling_temperature: Option<f64> = std::env::var("ATO_DISPATCH_TEMPERATURE")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|t| t.is_finite());
+
     let (url, body, use_bearer_auth, use_x_api_key) = if provider.flavor == "gemini" {
         let path = provider.path.replace("{model}", &model);
         let url = format!("{}{}?key={}", provider.base_url, path, urlencode(&key));
@@ -197,7 +210,11 @@ pub fn dispatch_with_history(
         let mut contents: Vec<serde_json::Value> = history
             .iter()
             .map(|m| {
-                let role = if m.role == "assistant" { "model" } else { &m.role };
+                let role = if m.role == "assistant" {
+                    "model"
+                } else {
+                    &m.role
+                };
                 serde_json::json!({
                     "role": role,
                     "parts": [{"text": m.content}],
@@ -208,13 +225,16 @@ pub fn dispatch_with_history(
             "role": "user",
             "parts": [{"text": prompt}],
         }));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "contents": contents,
             // v2.x — raised from 8192 to 16384: gemini-3 thinking models
             // consume the output budget with hidden thought tokens, leaving
             // zero space for visible text. 16384 gives enough headroom.
             "generationConfig": { "maxOutputTokens": 16384 },
         });
+        if let Some(t) = sampling_temperature {
+            body["generationConfig"]["temperature"] = serde_json::json!(t);
+        }
         (url, body, false, false)
     } else if provider.flavor == "anthropic" {
         // Anthropic Messages API. Same {role, content} shape as
@@ -227,11 +247,14 @@ pub fn dispatch_with_history(
             .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
             .collect();
         messages.push(serde_json::json!({"role": "user", "content": prompt}));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "max_tokens": 8192,
             "messages": messages,
         });
+        if let Some(t) = sampling_temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
         (url, body, false, true)
     } else {
         let url = format!("{}{}", provider.base_url, provider.path);
@@ -240,7 +263,7 @@ pub fn dispatch_with_history(
             .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
             .collect();
         messages.push(serde_json::json!({"role": "user", "content": prompt}));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             // 4k cap is generous for a review reply; users can extend by
@@ -252,6 +275,9 @@ pub fn dispatch_with_history(
             // providers' free-tier cost cliffs.
             "max_tokens": 8192,
         });
+        if let Some(t) = sampling_temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
         (url, body, true, false)
     };
 
@@ -540,7 +566,10 @@ where
         if line.is_empty() {
             continue;
         }
-        let data = match line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+        let data = match line
+            .strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+        {
             Some(d) => d.trim(),
             None => continue, // ignore event:/id:/retry: lines
         };
@@ -562,16 +591,16 @@ where
                         .as_str()
                         .unwrap_or("(no status_msg)")
                         .to_string();
-                    stream_error =
-                        Some(format!("MiniMax base_resp.status_code={}: {}", code, msg));
+                    stream_error = Some(format!("MiniMax base_resp.status_code={}: {}", code, msg));
                     break;
                 }
             }
         }
 
         // Standard OpenAI shape: choices[0].delta.content per chunk.
-        if let Some(delta) =
-            payload["choices"][0]["delta"]["content"].as_str().filter(|s| !s.is_empty())
+        if let Some(delta) = payload["choices"][0]["delta"]["content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
         {
             full_response.push_str(delta);
             on_chunk(delta);
@@ -716,8 +745,7 @@ pub(crate) fn parse_response(
                 let finish_reason = payload["candidates"][0]["finishReason"]
                     .as_str()
                     .unwrap_or("?");
-                let thoughts_tokens = payload["usageMetadata"]["thoughtsTokenCount"]
-                    .as_i64();
+                let thoughts_tokens = payload["usageMetadata"]["thoughtsTokenCount"].as_i64();
                 let has_thought_parts = payload["candidates"][0]["content"]["parts"]
                     .as_array()
                     .map(|parts| parts.iter().any(|p| p.get("thoughtSignature").is_some()))
@@ -727,7 +755,11 @@ pub(crate) fn parse_response(
                     Some(n) => n.to_string(),
                     None => "?".to_string(),
                 };
-                let thought_parts_str = if has_thought_parts { "present" } else { "absent" };
+                let thought_parts_str = if has_thought_parts {
+                    "present"
+                } else {
+                    "absent"
+                };
 
                 let mut hint = String::new();
                 if finish_reason == "MAX_TOKENS" || has_thought_parts {
@@ -1071,13 +1103,11 @@ fn truncate_for_audit(s: &str, max_chars: usize) -> String {
 /// `promptTokenCount` per Google's docs (the cached portion is
 /// counted within prompt, just billed at a discount). We don't
 /// add it again here — that would double-count.
-pub(crate) fn parse_gemini_usage(
-    usage: &serde_json::Value,
-) -> (Option<i64>, Option<i64>) {
+pub(crate) fn parse_gemini_usage(usage: &serde_json::Value) -> (Option<i64>, Option<i64>) {
     let tokens_in = usage["promptTokenCount"].as_i64();
-    let tokens_out = usage["candidatesTokenCount"].as_i64().map(|cand| {
-        cand + usage["thoughtsTokenCount"].as_i64().unwrap_or(0)
-    });
+    let tokens_out = usage["candidatesTokenCount"]
+        .as_i64()
+        .map(|cand| cand + usage["thoughtsTokenCount"].as_i64().unwrap_or(0));
     (tokens_in, tokens_out)
 }
 
@@ -1149,7 +1179,11 @@ mod gemini_usage_tests {
             "totalTokenCount": 1050,
         });
         let (tin, _) = parse_gemini_usage(&usage);
-        assert_eq!(tin, Some(1000), "tokens_in is the full prompt — cache breakdown stays out");
+        assert_eq!(
+            tin,
+            Some(1000),
+            "tokens_in is the full prompt — cache breakdown stays out"
+        );
     }
 }
 
