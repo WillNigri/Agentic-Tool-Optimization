@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod auth;
+pub mod bench;
 pub mod bridge;
 pub mod evaluators;
 pub mod inputs;
