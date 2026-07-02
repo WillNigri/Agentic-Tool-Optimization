@@ -1,0 +1,36 @@
+[
+  {
+    "id": "synthetic/sum-two",
+    "source": "synthetic",
+    "language": "python",
+    "prompt": "Read two space-separated integers a and b from one line of standard input and print their sum.",
+    "release_date": null,
+    "tests": [
+      { "input": "2 3\n", "expected": "5" },
+      { "input": "10 -4\n", "expected": "6" },
+      { "input": "0 0\n", "expected": "0" }
+    ]
+  },
+  {
+    "id": "synthetic/reverse-string",
+    "source": "synthetic",
+    "language": "python",
+    "prompt": "Read a single line of text from standard input and print it reversed.",
+    "release_date": null,
+    "tests": [
+      { "input": "hello\n", "expected": "olleh" },
+      { "input": "abc\n", "expected": "cba" }
+    ]
+  },
+  {
+    "id": "synthetic/max-of-list",
+    "source": "synthetic",
+    "language": "python",
+    "prompt": "The first line of standard input contains an integer n. The second line contains n space-separated integers. Print the maximum.",
+    "release_date": null,
+    "tests": [
+      { "input": "3\n1 5 2\n", "expected": "5" },
+      { "input": "4\n-1 -5 -2 -9\n", "expected": "-1" }
+    ]
+  }
+]
