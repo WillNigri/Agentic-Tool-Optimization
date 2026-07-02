@@ -278,6 +278,18 @@ fn run_bench(args: RunArgs, db_path: &str) -> Result<()> {
     if models.is_empty() {
         bail!("no models given (--models)");
     }
+    // Every override must name a model in this run. A typo'd key would
+    // otherwise be silently ignored while the registry (or nothing) decides
+    // contamination — the operator would believe their stricter cutoff was in
+    // force when it wasn't.
+    for key in cutoff_overrides.keys() {
+        if !models.iter().any(|m| m == key) {
+            bail!(
+                "--model-cutoff given for '{key}', which is not in --models ({})",
+                models.join(",")
+            );
+        }
+    }
 
     let harness = HarnessConfig {
         system_prompt: None,
@@ -480,9 +492,11 @@ fn print_scorecard(sc: &Scorecard, totals: &DispatchTotals) {
     println!("problems:  {n}");
     if clean.n == 0 {
         // Don't render a bare "0.0%" a skimmer could misread as a 0% score —
-        // there are simply no contamination-clean tasks to score.
+        // there are simply no contamination-clean SCORABLE tasks. (Clean tasks
+        // can exist yet be unscorable — malformed problems are dataset defects
+        // excluded from every denominator — so say "scorable", precisely.)
         println!(
-            "pass-rate (contamination-clean, headline): n/a  (no contamination-clean tasks — see all-scorable below)"
+            "pass-rate (contamination-clean, headline): n/a  (no contamination-clean scorable tasks — see all-scorable below)"
         );
     } else {
         println!(
@@ -519,6 +533,14 @@ fn print_scorecard(sc: &Scorecard, totals: &DispatchTotals) {
         } else {
             println!("  note: zero tasks post-date the cutoff → nothing is contamination-clean; headline is n/a.");
         }
+    } else if clean.n == 0 {
+        // Post-cutoff tasks exist but every one is unscorable (malformed /
+        // no-oracle problems) — a dataset defect, not a model outcome. Say so
+        // instead of letting "n/a" read as a contamination problem.
+        println!(
+            "  note: {} contamination-clean task(s) exist but none are scorable (malformed problems — dataset defect); headline is n/a.",
+            cs.clean
+        );
     }
     println!(
         "cost: ${:.4}   latency: {} ms total ({} ms/task avg)   tokens: {} in / {} out   dispatch_errors: {}",
