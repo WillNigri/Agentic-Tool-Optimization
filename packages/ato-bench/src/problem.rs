@@ -12,6 +12,7 @@
 // synthetic problems.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Languages the grader can execute. Python only for now; the enum keeps the
 /// interpreter invocation in one place so more can be added without touching
@@ -70,6 +71,11 @@ pub struct Problem {
     /// filtering. `None` for synthetic problems (no real-world release).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
+    /// Faithful passthrough of extra upstream fields (e.g. `difficulty`,
+    /// `platform`). This is DATA, not curation — carried so later analysis can
+    /// stratify without a re-fetch. Empty by default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// How generated stdout is compared to the expected output.
@@ -148,6 +154,7 @@ mod tests {
                 expected: "5".into(),
             }],
             release_date: None,
+            metadata: BTreeMap::new(),
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: Problem = serde_json::from_str(&json).unwrap();

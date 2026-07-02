@@ -23,6 +23,7 @@
 // ato-cloud backend, never here.
 
 pub mod grader;
+pub mod lcb;
 pub mod problem;
 pub mod receipt;
 pub mod sandbox;
@@ -30,6 +31,7 @@ pub mod scorecard;
 pub mod stats;
 
 pub use grader::{extract_code, grade_problem, GraderConfig, DEFAULT_EXTRACTION_REGEX};
+pub use lcb::{import_lcb_jsonl, ImportError, LcbImportOptions, LcbImportResult, LcbRecord};
 pub use problem::{ComparisonMode, Language, Problem, TestCase};
 pub use receipt::{
     classify_contamination, stable_hash, ContaminationFlag, DatasetSnapshot, ExecEnv, FailureKind,
