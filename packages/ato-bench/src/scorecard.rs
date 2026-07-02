@@ -23,7 +23,42 @@ pub struct Scorecard {
     pub dataset: DatasetSnapshot,
     pub harness: HarnessConfig,
     pub env: ExecEnv,
+    /// The training cutoff used to classify contamination for this run, with
+    /// its provenance — the headline (contamination-clean) number is only
+    /// auditable if the reader can see which cutoff gated the denominator and
+    /// where that date came from. `None` = no cutoff known → every task
+    /// classifies `Unknown` (and the headline honestly reads n/a).
+    ///
+    /// Deliberately OUTSIDE the dataset/harness/env hashes: the cutoff changes
+    /// which tasks *count*, not how any task was measured. Two runs with equal
+    /// hashes and different cutoffs share raw receipts but headline different
+    /// subsets — the field makes that visible instead of hash-breaking it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_cutoff: Option<ModelCutoffInfo>,
     pub receipts: Vec<TaskReceipt>,
+}
+
+/// Where a model-cutoff date came from. `Registry` = ato-bench's cited,
+/// vendor-stated table; `User` = supplied on the command line (trusted as an
+/// explicit operator claim and labelled as such on the scorecard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutoffOrigin {
+    Registry,
+    User,
+}
+
+/// The cutoff actually applied to a run, carried on the scorecard for audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCutoffInfo {
+    /// The date, vendor granularity kept (e.g. "2026-01" or "2024-09-30").
+    pub cutoff: String,
+    /// "training_data" or "knowledge" — as the vendor states it. Empty-string
+    /// only for user-supplied dates with no stated kind.
+    pub kind: String,
+    /// Vendor URL that states the date (registry) or "" (user-supplied).
+    pub source: String,
+    pub origin: CutoffOrigin,
 }
 
 /// How the task set breaks down by contamination status.
@@ -160,6 +195,7 @@ mod tests {
                 sandbox_backend: "seatbelt".into(),
                 runtime_version: "Python 3.14.2".into(),
             },
+            model_cutoff: None,
             receipts,
         }
     }
@@ -202,5 +238,29 @@ mod tests {
         let sc = scorecard(vec![receipt("a", true, ContaminationFlag::Clean)]);
         assert_eq!(sc.dataset_hash(), sc.dataset.hash());
         assert_eq!(sc.harness_hash().len(), 64);
+    }
+
+    #[test]
+    fn scorecard_without_cutoff_field_still_deserializes() {
+        // Receipts written by pre-cutoff-registry binaries lack `model_cutoff`;
+        // they must keep loading (as None) — receipts are durable artifacts.
+        let sc = scorecard(vec![receipt("a", true, ContaminationFlag::Clean)]);
+        let mut json = serde_json::to_value(&sc).unwrap();
+        json.as_object_mut().unwrap().remove("model_cutoff");
+        let back: Scorecard = serde_json::from_value(json).unwrap();
+        assert!(back.model_cutoff.is_none());
+
+        let with = Scorecard {
+            model_cutoff: Some(ModelCutoffInfo {
+                cutoff: "2025-01".into(),
+                kind: "knowledge".into(),
+                source: "https://example.test/models".into(),
+                origin: CutoffOrigin::Registry,
+            }),
+            ..sc
+        };
+        let round: Scorecard =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(round.model_cutoff, with.model_cutoff);
     }
 }

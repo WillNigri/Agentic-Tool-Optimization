@@ -269,6 +269,14 @@ fn parse_date_bound(s: &str, bound: Bound) -> Option<DateBound> {
     Some(DateBound(year, month, day))
 }
 
+/// Is `s` a date the contamination classifier can interpret (`YYYY`, `YYYY-MM`,
+/// `YYYY-MM-DD`, or an RFC3339 timestamp with such a prefix)? Callers accepting
+/// user-supplied cutoffs validate with this so a typo'd date fails loudly at
+/// the flag instead of silently classifying every task `Unknown`.
+pub fn is_parseable_cutoff(s: &str) -> bool {
+    parse_date_bound(s, Bound::Start).is_some()
+}
+
 /// Classify a task's contamination status.
 ///
 /// A task counts as **Clean** only when its release date is strictly after the
